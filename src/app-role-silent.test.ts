@@ -140,7 +140,7 @@ test("#790 tick: a ledger that does not exist is no call, one that cannot be rea
   const record = (() => { throw new Error("nothing was seen, so nothing is filed"); }) as never;
   const said: string[] = [];
   assert.deepEqual(tickAppRoleSilent({ host, now: NOW, record, err: (l) => said.push(l) }), [], "no file: a role that made no call");
-  assert.deepEqual(said, []);
+  assert.equal(said.length, 0);
   const denied = (() => { throw Object.assign(new Error("EACCES: permission denied"), { code: "EACCES" }); }) as never;
   assert.deepEqual(tickAppRoleSilent({ host, now: NOW, read: denied, record, err: (l) => said.push(l) }), []);
   assert.match(said.join(""), /could not read .*workers\/gh\/gh-calls\.tsv: EACCES/);
