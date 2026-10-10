@@ -5,8 +5,16 @@
 // `host/gh` WRITES the ledger (one TAB-separated line per call, shell, so a call pays no node start-up and the wrapper has
 // no dependency on where this checkout lives); this file only READS it and answers the question #3448 could not: WHICH
 // caller spends a pool. `gh api rate_limit` shows how much is left and is a broken gauge (#1967); it never says who spent it.
+//
+// (#4898) IT ALSO OWNS THE QUEUE BESIDE THE LEDGER: a WRITE that GitHub refused for a rate limit is held by `host/gh` in
+// `<config dir>/refused-queue` and made by the gate after the reset (`ghQueueTick`, below), and a pool that passes 70% of its
+// hour leaves a ledger incident naming the callers that spent it (`poolAlarms`). The wrapper writes the files and this file
+// reads, retries and clears them, the same split the ledger has.
 
-import { existsSync, readFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, readdirSync, renameSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { homedir } from "node:os";
+import { dirname, join } from "node:path";
 
 /**
  * `sessionId` is the 9th field, the id of the session that made the call (`host/gh`, #3589); a line from before it has 8 fields and NO `sessionId` key, so it reads to the same entry it always did
@@ -192,6 +200,286 @@ export function spenderPhrase(ledgerPath: string, account: string, now: number =
   const top = topSpender(entries, { account, now });
   if (top === null) return `no graphql point is recorded for ${account} in the last hour`;
   return `${account}'s last hour (${top.total} floor points): top caller ${top.caller} [${top.command}], ${top.points} points (${Math.round(top.share * PERCENT)}%)`;
+}
+
+// --- #4898: A RATE LIMIT NEVER STOPS A SESSION -- THE REFUSED-CALL QUEUE -------------------------------------------------
+//
+// 2026-10-10: `pr:open` was refused with `GraphQL: API rate limit already exceeded` after every check had passed, and the worker
+// stopped and asked a human to rerun it. A refused WRITE has changed nothing on GitHub, so it is safe to make again later; this is
+// the reader, retrier and clearer of the files `host/gh` leaves for it. Per entry, in `<config dir>/refused-queue/`:
+//   `<id>.argv`      the call's arguments, NUL-separated (a body holds newlines, so no line format can carry it)
+//   `<id>.stdin`     what the call read on stdin, when it read any
+//   `<id>.fileN`     a copy of each `--body-file`/`--input` the arguments named: the caller's scratch file is gone by the retry
+//   `<id>.then.N`    a follow-up call, NUL-separated, made only when this one succeeded (`pr:open`'s arm and label)
+//   `<id>.meta`      `key<TAB>value` lines, written LAST and renamed into place, so an entry without one is a torn write and is skipped
+// A READ is never queued: its answer is wanted now, and a refused read passes through as it always did.
+
+/** The exit status `host/gh` returns for a call it has queued: "held, not sent", which is neither success nor failure (EX_TEMPFAIL). */
+export const QUEUED_EXIT = 75;
+export const QUEUE_DIR = "refused-queue";
+const RETRY_BASE_SECONDS = 120;
+const RETRY_CAP_SECONDS = 3600;
+const MAX_QUEUED_AGE_MS = 6 * HOUR_MS;
+const MAX_RETRIES_PER_TICK = 10;
+const RETRY_TIMEOUT_MS = 60_000;
+/** A user's primary pool, GraphQL and REST each, per hour. A GitHub App's is larger (a floor of 5,000 that scales with the installation), so for an `app:<role>` this under-states the limit and the alarm fires EARLY, never late. */
+export const POOL_POINTS = 5000;
+export const ALARM_FRACTION = 0.7;
+const ALARM_COMMAND = "pool-70pct";
+const TOP_IN_ALARM = 3;
+
+export type RefusalKind = "primary" | "secondary";
+
+/** `host/gh` greps the same two phrases lists (`rate_limit_kind`); `gh-ledger.test.ts` feeds both the same fixtures so they cannot drift apart unseen. */
+const SECONDARY_REFUSAL = /secondary rate limit|abuse detection|submitted too quickly/i;
+const PRIMARY_REFUSAL = /api rate limit (?:already )?exceeded|rate limit exceeded|HTTP 429/i;
+
+/** @returns {"primary" | "secondary" | null} what kind of rate limit `gh`'s stderr reports, or null: any other failure is NOT retried */
+export function refusalKind(stderr: string): RefusalKind | null {
+  if (SECONDARY_REFUSAL.test(stderr)) return "secondary";
+  return PRIMARY_REFUSAL.test(stderr) ? "primary" : null;
+}
+
+export type QueuedCall = {
+  id: string; dir: string; argv: string[]; then: string[][]; queuedAtS: number; resetAtS: number; attempts: number;
+  kind: RefusalKind; resource: string; cwd: string; workspace: string; session: string;
+};
+
+const NONE = "-";
+
+/** @param {string} text @returns {Record<string, string>} the `key<TAB>value` lines of a `.meta` file */
+function metaOf(text: string): Record<string, string> {
+  const fields: Record<string, string> = {};
+  for (const line of text.split("\n")) {
+    const tab = line.indexOf("\t");
+    if (tab > 0) fields[line.slice(0, tab)] = line.slice(tab + 1);
+  }
+  return fields;
+}
+
+/** @param {string} text @returns {string[]} NUL-separated arguments; the last NUL ends the final argument and starts none */
+const argvOf = (text: string): string[] => (text === "" ? [] : text.replace(/\0$/, "").split("\0"));
+
+/** The `then` files of one entry, in the order they were attached. */
+function followUpsOf(dir: string, id: string): string[][] {
+  const prefix = `${id}.then.`;
+  return readdirSync(dir).filter((name) => name.startsWith(prefix))
+    .sort((a, b) => Number(a.slice(prefix.length)) - Number(b.slice(prefix.length)))
+    .map((name) => argvOf(readFileSync(join(dir, name), "utf8")));
+}
+
+/** @returns {QueuedCall | null} null for an entry that is not whole (no argv, or a number that is not one): skipped, never guessed at */
+function readEntry(dir: string, id: string): QueuedCall | null {
+  const argvPath = join(dir, `${id}.argv`);
+  if (!existsSync(argvPath)) return null;
+  const meta = metaOf(readFileSync(join(dir, `${id}.meta`), "utf8"));
+  const [queuedAtS, resetAtS, attempts] = [Number(meta.queuedAt), Number(meta.resetAt), Number(meta.attempts ?? 0)];
+  if (![queuedAtS, resetAtS, attempts].every(Number.isFinite)) return null;
+  const argv = argvOf(readFileSync(argvPath, "utf8"));
+  if (argv.length === 0) return null;
+  return { id, dir, argv, then: followUpsOf(dir, id), queuedAtS, resetAtS, attempts,
+    kind: meta.kind === "secondary" ? "secondary" : "primary", resource: meta.resource ?? NONE, cwd: meta.cwd ?? "",
+    workspace: meta.workspace ?? NONE, session: meta.session ?? NONE };
+}
+
+/** @returns {QueuedCall[]} every whole entry of a queue directory, oldest first; an absent directory is an empty queue */
+export function readQueue(dir: string): QueuedCall[] {
+  if (!existsSync(dir)) return [];
+  const calls: QueuedCall[] = [];
+  for (const name of readdirSync(dir).filter((n) => n.endsWith(".meta"))) {
+    const call = readEntry(dir, name.slice(0, -".meta".length));
+    if (call !== null) calls.push(call);
+  }
+  return calls.sort((a, b) => a.queuedAtS - b.queuedAtS || a.id.localeCompare(b.id));
+}
+
+/** @returns {QueuedCall[]} the entries whose reset has passed at `nowMs`: the gate asks nothing of GitHub to find them */
+export const dueCalls = (calls: QueuedCall[], nowMs: number): QueuedCall[] => calls.filter((c) => c.resetAtS * 1000 <= nowMs);
+
+/**
+ * Attach follow-up calls to a queued one: they run after it succeeds, in order, and never when it did not (`pr:open`'s arm and label
+ * of a PR that does not exist yet). A follow-up that fails is reported and does not stop the ones after it.
+ * @param {{ dir: string, id: string }} entry @param {string[][]} steps
+ */
+export function attachFollowUps({ dir, id }: { dir: string; id: string; }, steps: string[][]) {
+  steps.forEach((step, n) => writeFileSync(join(dir, `${id}.then.${n + 1}`), step.map((a) => `${a}\0`).join("")));
+}
+
+const filesOf = (dir: string, id: string) => readdirSync(dir).filter((name) => name.startsWith(`${id}.`));
+
+/** An entry leaves the queue by name, whole: every file of it goes, the `.meta` first so a half-removed one is never read as an entry. */
+function removeEntry(dir: string, id: string) {
+  rmSync(join(dir, `${id}.meta`), { force: true });
+  for (const name of filesOf(dir, id)) rmSync(join(dir, name), { force: true });
+}
+
+/** A call that will not be made is KEPT, in `failed/` with the reason beside it: a write a person may still want to read, and never one made on a guess. */
+function failEntry(call: QueuedCall, reason: string) {
+  const failed = join(call.dir, "failed");
+  mkdirSync(failed, { recursive: true });
+  writeFileSync(join(failed, `${call.id}.why`), `${reason}\n`);
+  for (const name of filesOf(call.dir, call.id).filter((n) => !n.endsWith(".meta"))) renameSync(join(call.dir, name), join(failed, name));
+  removeEntry(call.dir, call.id);
+}
+
+/** Rewrites the meta of a call that was refused again: a later reset and one more attempt; the temp file is renamed into place. */
+function requeue(call: QueuedCall, resetAtS: number) {
+  const meta = { queuedAt: call.queuedAtS, resetAt: resetAtS, attempts: call.attempts + 1, kind: call.kind, resource: call.resource, cwd: call.cwd, workspace: call.workspace, session: call.session };
+  const text = Object.entries(meta).map(([k, v]) => `${k}\t${String(v).replace(/[\t\n]/g, " ")}\n`).join("");
+  writeFileSync(join(call.dir, `${call.id}.meta.tmp`), text);
+  renameSync(join(call.dir, `${call.id}.meta.tmp`), join(call.dir, `${call.id}.meta`));
+}
+
+export type RunResult = { status: number | null; stderr: string };
+export type RunQueued = (call: QueuedCall, argv: string[]) => RunResult;
+export type RetryEvent = "completed" | "requeued" | "failed";
+export type RetryOutcome = { id: string; command: string; event: RetryEvent; detail: string };
+
+const firstLine = (text: string) => (text.split("\n").find((l) => l.trim() !== "") ?? "").trim().slice(0, 160);
+const commandOf = (argv: string[]) => argv.slice(0, 2).join(" ");
+
+/** Runs the follow-ups of a call that succeeded; each failure is named and the rest still run. @returns {string[]} the failures */
+function runFollowUps(call: QueuedCall, run: RunQueued): string[] {
+  const failures: string[] = [];
+  for (const step of call.then) {
+    const r = run(call, step);
+    if (r.status !== 0) failures.push(`${commandOf(step)} (exit ${r.status ?? "none"}: ${firstLine(r.stderr)})`);
+  }
+  return failures;
+}
+
+/** One due call, made once. A refusal for a rate limit is waited out again; any OTHER failure ends it, since the same call would fail the same way. */
+function attemptCall(call: QueuedCall, { nowMs, run }: { nowMs: number; run: RunQueued; }): RetryOutcome {
+  const command = commandOf(call.argv);
+  if (nowMs - call.queuedAtS * 1000 > MAX_QUEUED_AGE_MS) {
+    failEntry(call, `queued ${new Date(call.queuedAtS * 1000).toISOString()}, more than ${MAX_QUEUED_AGE_MS / HOUR_MS} hours before this retry: a write that old is not made on a guess`);
+    return { id: call.id, command, event: "failed", detail: "too old to make" };
+  }
+  const r = run(call, call.argv);
+  if (r.status === 0) {
+    const failures = runFollowUps(call, run);
+    removeEntry(call.dir, call.id);
+    return { id: call.id, command, event: "completed", detail: failures.length === 0 ? `after ${call.attempts + 1} attempt(s)` : `after ${call.attempts + 1} attempt(s); follow-up(s) FAILED: ${failures.join("; ")}` };
+  }
+  if (r.status !== null && refusalKind(r.stderr) !== null) {
+    const wait = Math.min(RETRY_CAP_SECONDS, RETRY_BASE_SECONDS * 2 ** (call.attempts + 1));
+    requeue(call, Math.floor(nowMs / 1000) + wait);
+    return { id: call.id, command, event: "requeued", detail: `refused again (${firstLine(r.stderr)}); next attempt in ${wait}s` };
+  }
+  const why = r.status === null ? `no exit status (${firstLine(r.stderr) || "timed out or was killed"}): it may have been sent, so it is not made again` : `exit ${r.status}: ${firstLine(r.stderr)}`;
+  failEntry(call, why);
+  return { id: call.id, command, event: "failed", detail: why };
+}
+
+/**
+ * THE GATE'S RETRY: every call whose reset has passed, oldest first, at most `limit` per tick. Nothing here asks GitHub whether the limit
+ * is over; the call itself is the question, and a refusal costs nothing.
+ * @param {string} dir a queue directory @param {{ nowMs: number, run: RunQueued, limit?: number }} deps
+ */
+export function retryDue(dir: string, { nowMs, run, limit = MAX_RETRIES_PER_TICK }: { nowMs: number; run: RunQueued; limit?: number; }): RetryOutcome[] {
+  return dueCalls(readQueue(dir), nowMs).slice(0, limit).map((call) => attemptCall(call, { nowMs, run }));
+}
+
+/** The real run: `gh` as the account whose queue this is, from the directory it was asked in, with its stdin, as its session and workspace (so a comment carries the role that wrote it). */
+const spawnQueued: RunQueued = (call, argv) => {
+  if (call.cwd !== "" && !existsSync(call.cwd)) return { status: 1, stderr: `the directory the call was made from is gone: ${call.cwd}` };
+  const stdinPath = join(call.dir, `${call.id}.stdin`);
+  const env: NodeJS.ProcessEnv = { ...process.env, GH_CONFIG_DIR: dirname(call.dir), A11Y_GH_QUEUE_RETRY: "1" };
+  if (call.workspace !== NONE) env.HERDR_WORKSPACE_ID = call.workspace;
+  if (call.session !== NONE) env.CLAUDE_CODE_SESSION_ID = call.session;
+  if (call.argv[0] === "pr" && call.argv[1] === "create") env.A11Y_PR_OPEN = "1"; // only `pr:open` queues a create
+  const r = spawnSync("gh", argv, { cwd: call.cwd === "" ? undefined : call.cwd, env, encoding: "utf8", timeout: RETRY_TIMEOUT_MS, input: existsSync(stdinPath) ? readFileSync(stdinPath) : "" });
+  return { status: r.status, stderr: `${r.stderr ?? ""}${r.error ? String(r.error.message) : ""}` };
+};
+
+// --- #4898: THE 70% BUDGET ALARM -- which pool is nearly spent, and by whom, BEFORE it refuses -------------------------------
+
+/** @returns {"graphql" | "core" | null} the pool a ledger line spent: `graphql?` is a graphql call inferred from its command family; a cache hit, an incident and a queue event spend none */
+function poolOf(e: LedgerEntry): "graphql" | "core" | null {
+  const resource = e.resource.replace(/\?$/, "");
+  return resource === "graphql" || resource === "core" ? resource : null;
+}
+
+/** A call's points against its pool: the cost the response carried, else ONE (a REST call is one; a GraphQL call with no `rateLimit` is its floor). A conditional request that answered 304 costs none and is counted as one, so a REST reading is an upper bound. */
+const spend = (e: LedgerEntry) => (poolOf(e) === null ? 0 : e.cost ?? 1);
+
+export type PoolAlarm = { account: string; resource: "graphql" | "core"; used: number; limit: number; fraction: number; top: { caller: string; command: string; points: number }[] };
+
+/**
+ * THE POOLS THAT PASSED `fraction` OF THEIR LIMIT in the hour ending at `now`, one per account and resource, each with its top callers.
+ * The window is the last 60 minutes, not the pool's own (GitHub starts a user's hour at that user's first call and the ledger cannot
+ * see it), so a reading can include points from before the reset: the alarm errs early, which is the side an alarm should err on.
+ * @param {LedgerEntry[]} entries @param {{ nowMs?: number, limit?: number, fraction?: number }} [where]
+ */
+export function poolAlarms(entries: LedgerEntry[], { nowMs = Date.now(), limit = POOL_POINTS, fraction = ALARM_FRACTION }: { nowMs?: number; limit?: number; fraction?: number; } = {}): PoolAlarm[] {
+  const pools = new Map<string, { account: string; resource: "graphql" | "core"; used: number; byCaller: Map<string, { caller: string; command: string; points: number }> }>();
+  for (const e of entries) {
+    const at = Date.parse(e.time);
+    const resource = poolOf(e);
+    if (resource === null || !(at > nowMs - HOUR_MS && at <= nowMs)) continue;
+    const pool = pools.get(`${e.account}\t${resource}`) ?? { account: e.account, resource, used: 0, byCaller: new Map() };
+    const caller = callerScript(e.caller);
+    const row = pool.byCaller.get(`${caller}\t${e.command}`) ?? { caller, command: e.command, points: 0 };
+    row.points += spend(e);
+    pool.used += spend(e);
+    pool.byCaller.set(`${caller}\t${e.command}`, row);
+    pools.set(`${e.account}\t${resource}`, pool);
+  }
+  return [...pools.values()].filter((p) => p.used >= limit * fraction)
+    .map((p) => ({ account: p.account, resource: p.resource, used: p.used, limit, fraction: p.used / limit,
+      top: [...p.byCaller.values()].sort((a, b) => b.points - a.points).slice(0, TOP_IN_ALARM) }))
+    .sort((a, b) => `${a.account}/${a.resource}`.localeCompare(`${b.account}/${b.resource}`));
+}
+
+const isoOf = (ms: number) => new Date(ms).toISOString().replace(/\.\d{3}Z$/, "Z");
+const alarmCommand = (resource: string) => `${ALARM_COMMAND} ${resource}`;
+
+/** The incident as ONE ledger line: resource `incident` (it spends no point), the pool in the command, and the callers in the caller field. */
+export function alarmLine(alarm: PoolAlarm, nowMs: number): string {
+  const callers = alarm.top.map((t) => `${t.caller} [${t.command}] ${t.points}`).join("; ");
+  const said = `${alarm.used}/${alarm.limit} ${alarm.resource} points (${Math.round(alarm.fraction * PERCENT)}%) in the last hour; top callers: ${callers}`;
+  return [isoOf(nowMs), alarm.account, "incident", "", "0", alarmCommand(alarm.resource), NONE, said.replace(/[\t\n]/g, " "), NONE].join("\t");
+}
+
+/**
+ * Appends one incident line per pool past the line, at most once an hour per pool: the ledger already holds the last one, so the check
+ * reads the ledger and no state file is kept. A ledger that is not there is nothing to alarm on.
+ * @param {string} ledgerPath @param {number} nowMs @returns {string[]} the lines written
+ */
+export function recordPoolAlarms(ledgerPath: string, nowMs: number): string[] {
+  if (!existsSync(ledgerPath)) return [];
+  const entries = parseLedger(readFileSync(ledgerPath, "utf8"));
+  const recently = (a: PoolAlarm) => entries.some((e) => e.resource === "incident" && e.account === a.account && e.command === alarmCommand(a.resource) && Date.parse(e.time) > nowMs - HOUR_MS);
+  const lines = poolAlarms(entries, { nowMs }).filter((a) => !recently(a)).map((a) => alarmLine(a, nowMs));
+  if (lines.length > 0) appendFileSync(ledgerPath, `${lines.join("\n")}\n`);
+  return lines;
+}
+
+// --- #4898: THE GATE'S TICK -- retry what is due, then read the budget ---------------------------------------------------------
+
+/** The account config directories whose ledgers and queues the gate reads. NEVER the person's `~/.config/gh`: the gate does not act as the human, so it retries no call there. */
+export const accountDirs = (home: string = homedir()) => [join(home, "workers", "gh"), join(home, "leads", "gh")];
+
+/**
+ * ONCE PER TICK: make every queued call whose reset has passed, write the 70% incident for any pool past it. Returns the lines for the tick log, none when nothing
+ * was queued and nothing alarmed. A queue that cannot be read is said, never skipped silently, and the ledger and the other account are still read.
+ * @param {{ home?: string, nowMs?: number, run?: RunQueued }} [deps]
+ */
+export function ghQueueTick({ home = process.env.A11Y_GH_QUEUE_HOME ?? homedir(), nowMs = Date.now(), run = spawnQueued }: { home?: string; nowMs?: number; run?: RunQueued; } = {}): string[] {
+  if (process.env.A11Y_GH_QUEUE === "off") return [];
+  const said: string[] = [];
+  for (const dir of [...accountDirs(home), join(home, ".config", "gh")]) {
+    const isAccount = accountDirs(home).includes(dir);
+    try {
+      if (isAccount) {
+        for (const o of retryDue(join(dir, QUEUE_DIR), { nowMs, run })) said.push(`gh-queue: ${o.event} ${o.id} [${o.command}] in ${dir}: ${o.detail}`);
+      }
+      for (const line of recordPoolAlarms(join(dir, "gh-calls.tsv"), nowMs)) said.push(`gh-queue: pool alarm in ${dir}: ${line.split("\t")[7]}`);
+    } catch (error) {
+      said.push(`gh-queue: could not read ${dir}: ${String((error as Error)?.message ?? error).split("\n")[0]}`);
+    }
+  }
+  return said;
 }
 
 /** @param {string[]} argv */

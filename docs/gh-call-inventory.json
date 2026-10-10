@@ -1,9 +1,9 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 94,
-    "spawns": 134,
-    "calls": 390,
+    "files": 95,
+    "spawns": 135,
+    "calls": 391,
     "shapes": {
       "api rest": 137,
       "issue list": 42,
@@ -13,7 +13,7 @@
       "issue comment": 26,
       "pr view": 17,
       "issue edit": 13,
-      "label create": 10,
+      "label create": 11,
       "pr merge": 6,
       "project item-edit": 6,
       "issue create": 4,
@@ -361,6 +361,12 @@
       "labels": [],
       "parsesCloses": false
     },
+    "src/gh-ledger.ts": {
+      "spawns": 1,
+      "calls": {},
+      "labels": [],
+      "parsesCloses": false
+    },
     "src/hand-fix-ledger.ts": {
       "spawns": 1,
       "calls": {
@@ -553,7 +559,7 @@
       "spawns": 7,
       "calls": {
         "api rest": 6,
-        "label create": 1,
+        "label create": 2,
         "pr edit": 1,
         "pr merge": 1
       },
