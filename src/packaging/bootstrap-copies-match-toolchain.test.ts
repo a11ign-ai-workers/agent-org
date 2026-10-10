@@ -103,6 +103,22 @@ function satisfies(version: string, range: string): boolean {
 const INSTALLED = installedToolchain();
 const VERSION = INSTALLED?.version ?? "NOT INSTALLED";
 
+/**
+ * The toolchain's own `GIT_*` scrub, for the one place this file spawns git (the throwaway repository `makeContext` builds): the reference side
+ * rather than the copy under test, so the fixture does not rest on the file it checks, and `git-spawn-classification.test.ts` classifies the spawn.
+ * Imported only once the install satisfies the declared range, because an older toolchain has no `lib/git-env` and a static import would end the
+ * file at load instead of letting the version test say why.
+ */
+const GIT_ENV = INSTALLED !== null && (() => {
+  try {
+    return satisfies(INSTALLED.version, declaredRange());
+  } catch {
+    return false; // an undeclared or unreadable range is the version test's to report, with its own message
+  }
+})()
+  ? await import("@a11ign/toolchain/lib/git-env")
+  : null;
+
 function outcomeOf(run: () => unknown): Outcome {
   try {
     return { value: run() };
@@ -204,9 +220,10 @@ function makeContext() {
   kinds.bare = own("bare");
 
   const repo = join(dir, "repo");
+  assert.ok(GIT_ENV !== null, `the fixture repository needs ${TOOLCHAIN}/lib/git-env, and the installed ${TOOLCHAIN}@${VERSION} does not satisfy the declared range`);
   const git = (...args: string[]) => execFileSync("git", ["-c", "user.name=Bootstrap Copies Test", "-c", "user.email=bootstrap-copies@example.invalid", ...args], {
     cwd: repo,
-    env: { ...Object.fromEntries(Object.entries(process.env).filter(([key]) => !key.startsWith("GIT_"))), GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" },
+    env: GIT_ENV.sandboxGitEnv({ GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1" }),
     encoding: "utf8",
   });
   mkdirSync(repo);
