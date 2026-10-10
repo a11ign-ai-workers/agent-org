@@ -1149,3 +1149,13 @@ test("#4904 a Haiku pick the switch refuses is the fallback it would have had --
   assert.equal(acceptPick({ ...answer, probabilities: undefined }, "sonnet/medium", CHOICE).because, "low-confidence", "a pick with no distribution moves nothing");
   assert.equal(acceptPick({ ...answer, confidence: undefined }, "sonnet/medium", CHOICE).because, "invalid-option");
 });
+
+test("#4904 with #756: another tracker's row is asked and logged under its OWN id in `choice` mode -- the route question's request line and the outcome line both read row-<key>-<n>", async () => {
+  const keyed = await choose(rowOf({ key: "agent-org" }), routeReply(at("haiku/high", 0.8)));
+  const ids = [...new Set(keyed.r.log().filter((line: { use?: string }) => line.use === "model-routing").map((line: { id: string }) => line.id))];
+  assert.deepEqual(ids, ["row-agent-org-4999"], "no line was filed under the first tracker's row-4999");
+  assert.equal(keyed.routed.route, "haiku/high");
+  // The control: the first tracker's own row keeps row-<n>.
+  const own = await choose(rowOf(), routeReply(at("haiku/high", 0.8)));
+  assert.deepEqual([...new Set(own.r.log().filter((line: { use?: string }) => line.use === "model-routing").map((line: { id: string }) => line.id))], ["row-4999"]);
+});
