@@ -106,6 +106,32 @@ test("#4898: POSITIVE CONTROLS -- the same write that succeeds, a refused READ, 
   }
 });
 
+test("#4898 (review): a GraphQL MUTATION in an input file is a write and is queued; a QUERY in one, beside it, is not", () => {
+  const MUTATION = '{"query":"mutation($id:ID!){ resolveReviewThread(input:{threadId:$id}){ thread{ id } } }"}';
+  const QUERY = '{"query":"query { viewer { login } }"}';
+  const attempt = (args: string[], files: Record<string, string>, stdin = "") => {
+    const h = host({ reply: GRAPHQL_REFUSAL, status: 1, headers: `X-Ratelimit-Reset: ${inOneHour()}\n` });
+    for (const [name, text] of Object.entries(files)) writeFileSync(join(h.root, name), text);
+    const r = h.run({}, stdin, "api", "graphql", ...args);
+    return { status: r.status, held: readQueue(h.queue) };
+  };
+  const input = attempt(["--input", "mutation.json"], { "mutation.json": MUTATION });
+  assert.equal(input.status, QUEUED_EXIT, "`--input mutation.json` is a write, which the argument list alone does not show");
+  assert.notEqual(input.held[0].argv[3], "mutation.json", "and the file travels with the call, since the caller's copy may be gone");
+  assert.equal(readFileSync(input.held[0].argv[3], "utf8"), MUTATION);
+  assert.equal(attempt(["--input=mutation.json"], { "mutation.json": MUTATION }).status, QUEUED_EXIT);
+  assert.equal(attempt(["-F", "query=@m.graphql"], { "m.graphql": "mutation { x }" }).status, QUEUED_EXIT, "a field read from a file");
+  assert.equal(attempt(["--field=query=@m.graphql"], { "m.graphql": "mutation { x }" }).status, QUEUED_EXIT);
+  assert.equal(attempt(["--input", "-"], {}, MUTATION).status, QUEUED_EXIT, "a body on stdin cannot be read first, so it is not shown to be a query");
+  assert.equal(attempt(["--input", "absent.json"], {}).status, QUEUED_EXIT, "nor can one that is not there");
+  assert.equal(attempt(["-f", "query=mutation { x }"], {}).status, QUEUED_EXIT, "CONTROL: the word in the arguments was always enough");
+
+  const query = attempt(["--input", "query.json"], { "query.json": QUERY });
+  assert.equal(query.status, 1, "CONTROL: a query in an input file is a read, passed through and not held");
+  assert.equal(query.held.length, 0);
+  assert.equal(attempt(["-F", "query=@q.graphql"], { "q.graphql": "query { viewer { login } }" }).status, 1);
+});
+
 test("#4898: the wrapper and `refusalKind` agree on every fixture -- one list of phrases in two languages cannot drift unseen", () => {
   const fixtures = [GRAPHQL_REFUSAL, REST_REFUSAL, SECONDARY_REFUSAL, "gh: HTTP 429: Too Many Requests", "You have triggered an abuse detection mechanism",
     "was submitted too quickly", ...NOT_A_RATE_LIMIT];

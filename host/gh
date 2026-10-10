@@ -169,6 +169,25 @@ rollup_dropped() { # ledger-file dropped-bytes
 # account, or a person, is not seen here: that is what the 20 s and the tick's generation bound.
 # `A11Y_GH_READ_CACHE=off` skips all of it. A hit is recorded in the ledger as resource `cache`: it spends no point, and the ledger can show the hit rate.
 
+# Succeeds when a `gh api graphql` call's BODY is a mutation the arguments do not spell out: `--input FILE`, or `-F`/`--field name=@FILE`, is read, and a
+# file that cannot be (standard input `-`, a missing one) counts as one, since a body we cannot read is not shown to be a query (#4898, the review).
+graphql_body_mutates() {
+  prev=
+  for a; do
+    f=
+    case "$prev" in --input) f=$a ;; -F|--field) case "$a" in *=@*) f=${a#*=@} ;; esac ;; esac
+    case "$a" in
+      --input=*) f=${a#--input=} ;;
+      -F?*=@*|--field=*=@*) f=${a#*=@} ;;
+    esac
+    prev=$a
+    [ -n "$f" ] || continue
+    [ "$f" != - ] && [ -r "$f" ] || return 0
+    grep -q mutation "$f" 2>/dev/null && return 0
+  done
+  return 1
+}
+
 # Sets `class` to read | write | neutral for the arguments given.
 call_class() {
   class=read
@@ -183,6 +202,7 @@ call_class() {
     if [ "$2" = graphql ]; then
       class=neutral
       for a; do case "$a" in *mutation*) class=write ;; esac; done
+      if graphql_body_mutates "$@"; then class=write; fi
       return 0
     fi
     api_method=; api_body=0; api_input=0; api_neutral=0; prev=

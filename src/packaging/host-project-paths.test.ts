@@ -129,8 +129,8 @@ const TODAYS_TEXT = {
 // a11ign/a11ign#4148 part 6 MOVED IT AGAIN, deliberately: `auth git-credential` and an `api` call naming GET no longer drop the read cache, and a write drops only its own repository's entries. Same staleness, same remedy.
 // agent-org#486 MOVED IT AGAIN, deliberately: `issue comment`, `pr comment` and `pr review` get a trailing `<!-- decided-by: <role> run: <id> -->` line. Same staleness, same remedy.
 // a11ign/a11ign#4900 MOVED IT AGAIN, deliberately: a role `host.json` declares as `github-apps` calls as that app (`GH_TOKEN` from `app-token.ts`'s cache); for the recorded host, which declares none, the block is inert. Same staleness, same remedy.
-// a11ign/a11ign#4898 MOVED IT AGAIN, deliberately: a WRITE that GitHub refuses for a rate limit is queued under `<GH_CONFIG_DIR>/refused-queue` and the wrapper exits 75 ("held, not failed"); the gate's `ghQueueTick` makes it after the reset. Same staleness, same remedy.
-const TODAYS_GH_WRAPPER = "dd2eb67d69fab9960f4f3adaa2c7d21aafd5353e4ee64c055c59303d4bac459e";
+// a11ign/a11ign#4898 MOVED IT AGAIN, deliberately: a WRITE that GitHub refuses for a rate limit is queued under `<GH_CONFIG_DIR>/refused-queue` and the wrapper exits 75 ("held, not failed"); the gate's `ghQueueTick` makes it after the reset. Same staleness, same remedy. The review of #779 moved it once more: a `gh api graphql` whose BODY is a mutation in `--input FILE` or `-F name=@FILE` is a write too.
+const TODAYS_GH_WRAPPER = "4320270dd59d18173e56057e276f566023ca7469aac53c11328b33fe1ad8799c";
 // #2896 MOVED THIS ONE, deliberately: the recorded host's header says `pnpm run host:install` / `pnpm run host:check` where it said `npm run`.
 const TODAYS_LEADS_LIST = "dbca070c4bb7934ff1e9cdc9505f9edee638d98fcff10963b18d5d3a743770a2";
 
