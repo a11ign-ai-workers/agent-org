@@ -4,11 +4,13 @@
 // `scripts/rstest/rstest.config.ts`, so `npx rstest run <file>` there prints "No test suites found" and the row can never pass; a11ign#4900,
 // #4902 and #4904 carried it inside an hour, and a worker cannot amend a row under its own claim.
 //
-// EVERY CASE GOES THROUGH `fileRefusalReason` (what `createIssue` calls), never `bareRstestRunReason` alone, so a predicate that is right
-// and not wired into `row-file` is red here (case 6 breaks if the call is removed).
+// CASES 1 AND 2 GO THROUGH `fileRefusalReason` (what `createIssue` calls), so a predicate that is right and not wired into `row-file` is red
+// here (case 6 breaks if the call is removed); cases 3 to 5 ask the rule directly, being a pure function of the body.
 //
 // THE THREE SPELLINGS of an agent-org path are `cd ~/repos/agent-org`, `cd /home/agent/repos/agent-org` and the `agent-org:` Region prefix,
-// and each has its control. THE CONTROLS ARE THE REASON THE RULE CAN BE TRUSTED: case 1's refusals cannot be "every rstest run is refused"
+// and each has its control. NEGATIVES ARE ASKED THROUGH `bare` (the rule's own refusal), never `=== null`: `acceptancePathsReason` stats the checkout it runs
+// in, and CI's is the project root with the tool at packages/agent-org, so a whole-result `null` is true on a workstation and false there (#778's first run).
+// THE CONTROLS ARE THE REASON THE RULE CAN BE TRUSTED: case 1's refusals cannot be "every rstest run is refused"
 // because cases 2 and 3 accept the same command with a config and in another repository; case 4 is `node --test`, the form the row's own
 // Acceptance uses.
 import { test } from "node:test";
@@ -20,13 +22,16 @@ import { fileRefusalReason, promoteRefusalReason } from "../row-file.ts";
 import { bareRstestRunReason } from "../row-claim/template-fields-rule.ts";
 
 const CONFIG = "--config scripts/rstest/rstest.config.ts";
-/** A test file that exists in this tree, so `acceptancePathsReason` has nothing to say and every refusal below is this rule's. */
+/** A test file of this tree. Every Region below declares it and the config, because `acceptancePathsReason` stats the checkout it runs in, and CI's is not this one's layout. */
 const FILE = "src/packaging/row-file.test.ts";
 
 const row = (region: string, acceptance: string) => `## Region\n\n\`\`\`\n${region}\n\`\`\`\n\n## Acceptance\n\n\`\`\`bash\n${acceptance}\n\`\`\`\n\n`
   + "## Open-check\n\n```\ngit grep -c \"bareRstest\" origin/main -- src | wc -l\n```\n";
-const KEYED = `agent-org:src/row-claim/template-fields-rule.ts\nagent-org:${FILE}`;
-const BARE_REGION = `packages/lab/src/packaging/x.ts\n${"packages/lab/src/packaging/x.test.ts"}`;
+const KEYED = `agent-org:src/row-claim/template-fields-rule.ts\nagent-org:${FILE}\nagent-org:scripts/rstest/rstest.config.ts`;
+const BARE_REGION = `packages/lab/src/packaging/x.ts\npackages/lab/src/packaging/x.test.ts\n${FILE}\nscripts/rstest/rstest.config.ts`;
+
+/** Is this the rule's own refusal? Asked of the whole `fileRefusalReason`, so a refusal of another rule is not mistaken for it, nor for its absence. */
+const bare = (reason: string | null) => /runs `rstest run` against agent-org without/.test(String(reason));
 
 const AGENT_ORG_COMMANDS = {
   "cd ~/repos/agent-org": [BARE_REGION, `cd ~/repos/agent-org && npx rstest run ${FILE}`],
@@ -36,15 +41,18 @@ const AGENT_ORG_COMMANDS = {
   "inside a bash -c": [BARE_REGION, `bash -c 'cd /home/agent/repos/agent-org && npx rstest run ${FILE}'`],
 } as const;
 
-test("0. CONTROL: the bodies below are fileable but for the rule, so each refusal is that rule's and nothing else's", () => {
-  assert.equal(fileRefusalReason(row(KEYED, `npx rstest run ${CONFIG} ${FILE}`)), null);
-  assert.equal(fileRefusalReason(row(KEYED, `node --import tsx --test ${FILE}`)), null);
+test("0. CONTROL FOR THE MATCHER: another rule's refusal, and no refusal, are not read as this rule's, so cases 1 and 2 cannot pass on them", () => {
+  assert.equal(bare(null), false);
+  const wholeSuite = String(fileRefusalReason(row(KEYED, "pnpm test")));
+  assert.match(wholeSuite, /REFUSING/, "the control body is refused, by the whole-suite rule");
+  assert.equal(bare(wholeSuite), false);
+  assert.equal(bare(bareRstestRunReason(row(KEYED, `npx rstest run ${FILE}`), "row-file")), true, "and the rule's own message is what it matches");
 });
 
 test("1. THE FAILING CASE: the bare form against an agent-org path is refused in each of the three spellings, with the corrected command", () => {
   for (const [spelling, [region, command]] of Object.entries(AGENT_ORG_COMMANDS)) {
     const reason = String(fileRefusalReason(row(region, command)));
-    assert.match(reason, /^row-file: REFUSING -- /, spelling);
+    assert.ok(bare(reason), `${spelling}: ${reason}`);
     assert.ok(reason.includes(`--config scripts/rstest/rstest.config.ts`), `${spelling}: names the missing flag: ${reason}`);
     assert.ok(reason.includes(`rstest run ${CONFIG} ${FILE}`), `${spelling}: carries the corrected command: ${reason}`);
     assert.ok(reason.includes(`\`${command}\``), `${spelling}: quotes the command it refused: ${reason}`);
@@ -56,12 +64,12 @@ test("1. THE FAILING CASE: the bare form against an agent-org path is refused in
 test("2. NEGATIVE CONTROL: the same command with the config is accepted, in each spelling and in each way of passing the flag", () => {
   for (const [spelling, [region, command]] of Object.entries(AGENT_ORG_COMMANDS)) {
     const fixed = command.replace("rstest run", `rstest run ${CONFIG}`);
-    assert.equal(fileRefusalReason(row(region, fixed)), null, spelling);
+    assert.equal(bare(fileRefusalReason(row(region, fixed))), false, spelling);
   }
   for (const flag of [`--config=scripts/rstest/rstest.config.ts`, `-c scripts/rstest/rstest.config.ts`, `--config ./scripts/rstest/rstest.config.ts`]) {
-    assert.equal(fileRefusalReason(row(KEYED, `npx rstest run ${flag} ${FILE}`)), null, flag);
+    assert.equal(bare(fileRefusalReason(row(KEYED, `npx rstest run ${flag} ${FILE}`))), false, flag);
   }
-  assert.equal(fileRefusalReason(row(KEYED, `npx rstest run ${FILE} --config scripts/rstest/rstest.config.ts`)), null, "a flag after the file");
+  assert.equal(bare(fileRefusalReason(row(KEYED, `npx rstest run ${FILE} --config scripts/rstest/rstest.config.ts`))), false, "a flag after the file");
 });
 
 test("3. NEGATIVE CONTROL: `rstest run` in another repository, or a Region that is not agent-org's, is not refused", () => {

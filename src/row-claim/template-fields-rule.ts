@@ -88,7 +88,7 @@ export function wholeSuiteAcceptanceReason(body: string, tool: string): string |
 const AGENT_ORG_RSTEST_CONFIG = "scripts/rstest/rstest.config.ts";
 /** The repository key a Region entry carries for agent-org (`agent-org:src/x.ts`), and the last segment of its checkout's path. */
 const AGENT_ORG_KEY = "agent-org";
-/** `rstest run`, whichever launcher precedes it (`npx`, `pnpm exec`, a bare `rstest`). */
+/** `rstest run`, whichever launcher precedes it (`pnpm exec`, the package runner, a bare `rstest`). */
 const RSTEST_RUN = /\brstest\s+run\b/g;
 /** A `cd <dir>`, the dir bare or quoted; what a command's working directory is, for as far as a string can say. */
 const CD_TARGET = /\bcd\s+("[^"]+"|'[^']+'|[^\s;&|'"]+)/g;
