@@ -49,11 +49,13 @@ import { codexClientDaemonDrift } from "./codex-drift.ts";
 import { HOME_CHECKOUT, PROJECT_DECLARATION_PATH, ProjectDeclarationRefusal } from "./project-config.ts";
 import { CLAUDE_EFFORTS, DECLARED_CLAUDE_MODELS, HAIKU_MODEL_ID, HAIKU_TIER_LABEL } from "./worker-profile.ts";
 import { REPO } from "./project-identity.ts";
+import { appRoleSilent, appRoleSilentEvents, type LedgerSource, type SilentRole } from "./app-role-silent.ts";
+import { FAILURE_LEDGER_FILE, recordFailures } from "./failure-ledger.ts";
 import { readAgents, absentSeats } from "./herdr-agents.ts";
 import { persistentEntries, persistentRoles, roleBriefPath } from "./project-roles.ts";
 import { kernelFindings, kernelNotes } from "./host-kernel.ts";
-import { HostConfigRefusal, LONG_RUNNING_TEMPLATES, TEMPLATE_SUFFIX, homeHostConfig, leadsWorkspacesText, readBeforeTick, readUnitsDeclaration,
-  renderTemplate, renderedName, stateEntryPath, templateValues } from "./host-config.ts";
+import { GITHUB_ROLES, type GithubRole, HostConfigRefusal, LONG_RUNNING_TEMPLATES, TEMPLATE_SUFFIX, homeHostConfig, leadsWorkspacesText, readBeforeTick, readUnitsDeclaration,
+  renderTemplate, renderedName, roleIdentity, stateEntryPath, templateValues } from "./host-config.ts";
 
 /**
  * Where the TOOL keeps the units and scripts it ships: four unit templates (each a service and a timer; the fourth, the shadow window's, is #2867), the
@@ -1735,6 +1737,12 @@ function seatWrapperFiles(deps: ShippedDeps & { scriptDir?: string; seatDir?: st
   return [{ label: "claude seat wrapper", target: join(dir, "claude"), mode: 0o755, expected: shippedScriptText("claude", deps) }];
 }
 
+/** The routing wrapper as an owned file: where it is installed and the text it must hold. `expected` is `null` when the shipped copy cannot be read. @param {Parameters<typeof ownedIdentityFiles>[0]} [deps] */
+function ghWrapperFile(deps: Parameters<typeof ownedIdentityFiles>[0] = {}): { label: string; target: string; mode: number; expected: string | null; } {
+  const { scriptDir = binDirectory(deps) } = deps;
+  return { label: "gh", target: join(scriptDir, "gh"), mode: 0o755, expected: shippedScriptText("gh", deps) };
+}
+
 /**
  * The files this repository owns on the host for the identity policy, each with the text it must hold.
  * `expected` is `null` when the shipped source cannot be read, which is NOT the empty string.
@@ -1748,7 +1756,7 @@ export function ownedIdentityFiles(deps: ShippedDeps & {
 } = {}): { label: string; target: string; mode: number; expected: string | null; }[] {
   const { scriptDir = binDirectory(deps), workersDir = workersDirectory(deps), leadsDir = leadsDirectory(deps) } = deps;
   return [
-    { label: "gh", target: join(scriptDir, "gh"), mode: 0o755, expected: shippedScriptText("gh", deps) },
+    ghWrapperFile(deps),
     ...agentOrgLauncher(scriptDir, deps),
     ...seatWrapperFiles(deps),
     { label: "gh-leads-workspaces.txt", target: join(leadsDir, "workspaces.txt"),
@@ -1991,14 +1999,125 @@ export function hostIdentityInstall({ mkdir = mkdirSync, write = writeFileSync, 
     } = {}): string[] {
   return ownedIdentityFiles(where).map(({ label, target, mode, expected }) => {
     if (expected === null) throw new Error(`cannot install ${label}: the shipped copy could not be read`);
-    mkdir(dirname(target), { recursive: true });
-    const temp = `${target}.installing`;
-    write(temp, expected);
-    chmod(temp, mode);
-    rename(temp, target);
+    writeOwnedFile({ target, mode, text: expected, mkdir, write, chmod, rename });
     out(`installed ${target}\n`);
     return target;
   });
+}
+
+/** One file, ATOMICALLY: a temp file in the same directory, then a rename. `hostIdentityInstall` and `rerenderGhWrapper` write through this one, so there is one definition of "installed". */
+function writeOwnedFile({ target, mode, text, mkdir, write, chmod, rename }: { target: string; mode: number; text: string;
+    mkdir: typeof mkdirSync; write: typeof writeFileSync; chmod: typeof chmodSync; rename: typeof renameSync; }): void {
+  mkdir(dirname(target), { recursive: true });
+  const temp = `${target}.installing`;
+  write(temp, text);
+  chmod(temp, mode);
+  rename(temp, target);
+}
+
+// --- agent-org#790: A MERGED `github.identity` SWITCH TAKES EFFECT ON THE NEXT TICK, NOT WHEN SOMEBODY REMEMBERS `host:install` ---------------
+//
+// MEASURED 2026-10-10 (a11ign#4906): the switch merged at 22:18:30Z; the installed wrapper had been rendered at 22:05Z, so `app_declared()` was empty and every call kept
+// going to the shared account until a session re-ran `host:install` at 22:20Z. `host:check` said `gh: DIVERGED` the whole time and nothing reads it after a merge. A declared
+// app role that is not in effect is the one drift whose cost is silent and immediate (the workers' gate sees through the app's pool or it does not), so it is the one
+// drift the tick mends itself, and ONLY that file: the unit files, the other owned files and every service are left alone, so a tick never restarts anything for this.
+
+/** The two places the wrapper carries `github.identity`: the roles line and the `app_declared()` body (`host/gh`, rendered from `appRoles` and `appDeclared`). */
+const WRAPPER_APP_ROLES = /^APP_ROLES=.*$/m;
+const WRAPPER_APP_DECLARED = /^app_declared\(\) \{\n[\s\S]*?\n\}$/m;
+
+/**
+ * The identity a rendered wrapper carries, as the text of those two places, or `null` for a wrapper that has neither (a copy from before #4900). Compared as TEXT so the comparison and the
+ * render cannot disagree: both are the one template filled by `appTokenValues`.
+ * @param {string} text @returns {string | null}
+ */
+export function wrapperIdentity(text: string): string | null {
+  const roles = WRAPPER_APP_ROLES.exec(text)?.[0];
+  const declared = WRAPPER_APP_DECLARED.exec(text)?.[0];
+  return roles === undefined || declared === undefined ? null : `${roles}\n${declared}`;
+}
+
+/**
+ * Re-render `~/.local/bin/gh` when its identity block is not the one `host.json` declares, and say whether it did. The WHOLE wrapper is written, as `host:install` writes it (a half-patched
+ * file is a wrapper nobody reviewed), but only when the identity block differs: any other divergence is still `host:check`'s to report and `host:install`'s to fix, so a release
+ * that changed an unrelated line of the template does not have every tick racing to write it.
+ *
+ * NOT WRITTEN, each for its own reason: no wrapper installed (that is `NOT INSTALLED`, and a tick has no business creating the file every agent's PATH resolves); a shipped copy or a
+ * template that cannot be rendered (`hostIdentityDrift` says `SHIPPED COPY UNREADABLE`, and an empty `gh` on every PATH is worse than a stale one); a wrapper with no identity block
+ * on a host that declares no app (the two behave the same, so there is nothing to take effect).
+ * @param {Parameters<typeof ownedIdentityFiles>[0] & { mkdir?: typeof mkdirSync, write?: typeof writeFileSync, chmod?: typeof chmodSync, rename?: typeof renameSync }} [deps]
+ * @returns {string | null} the path it wrote, or `null` when it wrote nothing
+ */
+export function rerenderGhWrapper({ mkdir = mkdirSync, write = writeFileSync, chmod = chmodSync, rename = renameSync, ...where }:
+    Parameters<typeof ownedIdentityFiles>[0] & { mkdir?: typeof mkdirSync; write?: typeof writeFileSync; chmod?: typeof chmodSync; rename?: typeof renameSync; } = {}): string | null {
+  const { read = readFileSync } = where;
+  const { target, mode, expected } = ghWrapperFile(where);
+  if (expected === null) return null;
+  const installed = textOf(target, read);
+  if (installed === null) return null;
+  const wanted = wrapperIdentity(expected);
+  if (wanted === null) return null;
+  const has = wrapperIdentity(installed);
+  const declaresApp = GITHUB_ROLES.some((role) => roleIdentity(where.host ?? homeHostConfig(), role).mode === "github-apps");
+  if (has === wanted || (has === null && !declaresApp)) return null;
+  writeOwnedFile({ target, mode, text: expected, mkdir, write, chmod, rename });
+  return target;
+}
+
+/**
+ * THE TICK'S TURN AT IT, as `host:check --json` notes: `[]` when nothing was written. A render that REFUSES (a `host.json` the tool cannot read, a template with a placeholder no value
+ * fills) is said as a note and never thrown, because the gate reads this process and an exception here would make every tick report the host as unaskable.
+ * @param {Parameters<typeof rerenderGhWrapper>[0] & { err?: (line: string) => void }} [deps] @returns {Finding[]}
+ */
+export function tickRerenderGhWrapper({ err = (l) => process.stderr.write(l), ...deps }: Parameters<typeof rerenderGhWrapper>[0] & { err?: (line: string) => void; } = {}): Finding[] {
+  try {
+    const target = rerenderGhWrapper(deps);
+    if (target === null) return [];
+    err(`re-rendered ${target}: its identity block was not the one host.json declares (agent-org#790)\n`);
+    return [{ unit: target, problem: "RE-RENDERED -- ITS IDENTITY DID NOT MATCH host.json",
+      detail: "the installed `gh` carried a `github.identity` block other than the declared one, so this tick wrote it again from the shipped template (the same render `host:install` does "
+        + "for this file) and touched no other file. Not a failure: it is what lets a merged switch take effect without anybody re-running `host:install`." }];
+  } catch (cause) {
+    err(`could not re-render the gh wrapper: ${String((cause as Error)?.message ?? cause).split("\n")[0]}\n`);
+    return [];
+  }
+}
+
+/**
+ * THE DETECTOR FOR THE CASE WHERE THE RE-RENDER DID NOT TAKE EFFECT (agent-org#790): a role `host.json` declares `github-apps` whose calls, for ten minutes, were none of them as its app
+ * (a mint that fails falls back to the shared account by design, so the wrapper works and the app is silently not in use). Reads each account's call ledger, asks `appRoleSilent`, and
+ * files each role through `recordFailures`, which skips an episode it already holds: a standing one is one line however many ticks see it. A host that declares no app reads nothing at all.
+ *
+ * AN UNREADABLE LEDGER IS SAID AND NOT COUNTED: no file is a role that made no call (`appRoleSilent` returns nothing for it), and a file that fails to read is reported on `err`, never a
+ * silent role. Never throws: a recorder can only ever be missing an event, never stop the tick that called it.
+ * @param {{ host?: HostConfig, now?: number, read?: typeof readFileSync, logPath?: string, record?: typeof recordFailures, err?: (line: string) => void }} [deps]
+ * @returns {SilentRole[]} the roles it found silent, recorded or not
+ */
+export function tickAppRoleSilent({ host = homeHostConfig(), now = Date.now(), read = readFileSync, logPath, record = recordFailures,
+  err = (line) => process.stderr.write(line) }: { host?: HostConfig; now?: number; read?: typeof readFileSync; logPath?: string;
+    record?: typeof recordFailures; err?: (line: string) => void; } = {}): SilentRole[] {
+  try {
+    const declared = GITHUB_ROLES.filter((role: GithubRole) => roleIdentity(host, role).mode === "github-apps");
+    if (declared.length === 0) return [];
+    const sources: LedgerSource[] = ([["workers", host.gh.workers], ["managers", host.gh.leads]] as const).flatMap(([role, dir]) => {
+      const path = join(dir, "gh", "gh-calls.tsv");
+      try {
+        return [{ role, lines: String(read(path, "utf8")).split("\n") }];
+      } catch (cause) {
+        if ((cause as { code?: string }).code !== "ENOENT") err(`app-role-silent: could not read ${path}: ${String((cause as Error)?.message ?? cause).split("\n")[0]}\n`);
+        return [];
+      }
+    });
+    const silent = appRoleSilent(sources, declared, now);
+    for (const { role, calls, lastApp } of silent) {
+      err(`app-role-silent: ${role} is declared github-apps and made ${calls} call(s) in 10 minutes, none as app:${role} (its last app line: ${lastApp ?? "none in the ledger"})\n`);
+    }
+    if (silent.length > 0) record({ logPath: logPath ?? stateEntryPath(FAILURE_LEDGER_FILE, { host }), events: appRoleSilentEvents(silent), now });
+    return silent;
+  } catch (cause) {
+    err(`app-role-silent: could not read the declaration: ${String((cause as Error)?.message ?? cause).split("\n")[0]}\n`);
+    return [];
+  }
 }
 
 // --- #3316: THE REVIEWERS' DOOR IS A COPY ON THE HOST, SO IT IS COMPARED AND INSTALLED LIKE THE WRAPPER ------
@@ -3164,10 +3283,14 @@ function remedy(drift: Finding[]): string {
  */
 function jsonReport() {
   const asked = systemdUserAvailable();
+  // THE TICK'S TWO TURNS AT agent-org#790, in this order and BEFORE the findings are read: the wrapper is re-rendered first, so a switch that merged this minute is not reported
+  // DIVERGED by the process that just fixed it, and the detector asks about what the re-render could not mend. Both only on a host with a user systemd, which is an agent host.
+  const rerendered = asked ? tickRerenderGhWrapper() : [];
+  if (asked) tickAppRoleSilent();
   // `notes` ARE NOT `findings`: the gate wakes a session on any finding, and a global `user.name` is not
   // something to wake anybody for (#2332).
   return `${JSON.stringify({ asked, findings: asked ? hostFindings() : [],
-    notes: asked ? hostNotes() : [] })}\n`;
+    notes: asked ? [...rerendered, ...hostNotes()] : [] })}\n`;
 }
 
 /**
