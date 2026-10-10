@@ -178,7 +178,7 @@ const ESCAPE_REFUSAL = "the response contains terminal escape sequences; pass --
  */
 function logGh(log: string) {
   const asked: string[][] = [];
-  const gh = (args: string[]): string => {
+  const read = (args: string[]): string => {
     asked.push(args);
     const path = args[1];
     if (path.endsWith("/pulls/77")) return JSON.stringify({ head: { sha: SHA, ref: "agent/x-77" } });
@@ -193,7 +193,7 @@ function logGh(log: string) {
     if (path.includes("/actions/runs?")) return JSON.stringify({ workflow_runs: [] });
     throw new Error(`unexpected gh ${args.join(" ")}`);
   };
-  return { gh, asked };
+  return { read, asked };
 }
 const PR = { repo: "o/r", number: 77, head8: "abcdef12" };
 
@@ -205,26 +205,26 @@ test("a coloured job log is read, and its coloured `##[error]` line matches as t
     `${ESC}[31mAssertionError${ESC}[0m [ERR_ASSERTION]: expected 3, got 4`,
     "",
   ].join("\n");
-  const { gh, asked } = logGh(log);
-  const out = readCiFailure(PR, gh, NOW);
+  const { read, asked } = logGh(log);
+  const out = readCiFailure(PR, read, NOW);
   assert.ok(out !== null);
   assert.deepEqual(out.errorLines, ["Error: cursor-hidden line", "##[error]Process completed with exit code 1.", "AssertionError [ERR_ASSERTION]: expected 3, got 4"]);
   assert.ok(out.errorLines.every((line) => !line.includes(ESC)));
   assert.ok(asked.some((args) => args[1].endsWith("/actions/jobs/666/logs") && args.includes("--allow-escape-sequences")));
   // the stub is the real refusal: the same coloured log without the flag throws, so the read above passing is the flag's doing
-  assert.throws(() => logGh(log).gh(["api", "repos/o/r/actions/jobs/666/logs"]), /--allow-escape-sequences/);
+  assert.throws(() => logGh(log).read(["api", "repos/o/r/actions/jobs/666/logs"]), /--allow-escape-sequences/);
 });
 
 test("escape bytes inside a phrase do not hide it from the fact that reads the whole log", () => {
-  const out = readCiFailure(PR, logGh(`API rate ${ESC}[1mlimit${ESC}[0m exceeded for user\n`).gh, NOW);
+  const out = readCiFailure(PR, logGh(`API rate ${ESC}[1mlimit${ESC}[0m exceeded for user\n`).read, NOW);
   assert.ok(out !== null);
   assert.equal(out.rateLimitOrRunnerLost, true);
   // negative control: the same log with nothing in it that is a rate limit says so
-  assert.equal(readCiFailure(PR, logGh(`${ESC}[1mAssertionError${ESC}[0m: nope\n`).gh, NOW)!.rateLimitOrRunnerLost, false);
+  assert.equal(readCiFailure(PR, logGh(`${ESC}[1mAssertionError${ESC}[0m: nope\n`).read, NOW)!.rateLimitOrRunnerLost, false);
 });
 
 test("a log with no escape bytes is read as before: the same lines, nothing stripped or lost", () => {
-  const out = readCiFailure(PR, logGh("setup\nAssertionError: expected 1 to equal 2\nnot ok 1 - the thing\n").gh, NOW);
+  const out = readCiFailure(PR, logGh("setup\nAssertionError: expected 1 to equal 2\nnot ok 1 - the thing\n").read, NOW);
   assert.ok(out !== null);
   assert.deepEqual(out.errorLines, ["AssertionError: expected 1 to equal 2", "not ok 1 - the thing"]);
   assert.equal(out.rateLimitOrRunnerLost, false);
