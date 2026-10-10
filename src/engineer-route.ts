@@ -45,7 +45,11 @@ import { AUTOCOMPACT_WINDOW_TOKENS, clampWindow, haikuTierProfile, HAIKU_TIER_LA
 export type Route = RouteName;
 /** `override` is a `tier:haiku` label deciding; `refused` is a row nothing may lower; `jev` is a provider's answers composed; `fallback` is the file-count rule. */
 export type Via = "override" | "refused" | "jev" | "fallback";
-export type RouteRow = { number: number; title: string; labels: readonly string[]; body: string };
+export type RouteRow = {
+  number: number;
+  /** The tracker key of another tracker's row (`agent-org`); absent for the first tracker's. It spells the ledger id, so `agent-org#7` and a11ign's `#7` are two rows (a11ign/agent-org#756). */
+  key?: string;
+  title: string; labels: readonly string[]; body: string };
 export type Routed = { route: Route; via: Via;
   /** THE REASON THE ROUTE WAS TAKEN, one text: the work tick's `routed ...` journal line and the decision log's outcome line (`route <route> via <via> (<why>)`) both print it. */ why: string;
   /** `null` is the ordinary Sonnet/high profile at the ordinary window, byte-identical to before. */ profile: TierProfile | null;
@@ -101,6 +105,8 @@ const ACCEPTANCE_CHARS = 600;
 const DONE_WHEN_ITEMS = 8;
 const DONE_WHEN_CHARS = 200;
 const ID_PREFIX = "row-";
+/** The decision log's id for a row: `row-<n>` for the first tracker's, `row-<key>-<n>` for another's -- the spelling its worker is named by. */
+const idOf = ({ key, number }: Pick<RouteRow, "key" | "number">): string => `${ID_PREFIX}${key === undefined || key === "" ? "" : `${key}-`}${number}`;
 
 // --- the criteria: what each answer means, with rows whose outcome is known (#4764 change 3 and #4752, the method of #4627's 07:45Z direction) ---
 //
@@ -507,7 +513,7 @@ export async function routeEngineer(row: RouteRow, deps: RouteDeps): Promise<Rou
   const wouldBe = routed.via === "jev" ? ` [fallback would be ${fallbackRoute(row)}]` : "";
   // `[fallback would be X]` stays LAST: `routeCostReading` anchors on it.
   const picked = routed.picked === undefined ? "" : ` ${pickedText(routed.route, routed.picked)}`;
-  recordOutcome("model-routing", `${ID_PREFIX}${row.number}`, `route ${routed.route} window ${window} via ${routed.via} (${routed.why})${picked}${wouldBe}`, deps, routed.reason);
+  recordOutcome("model-routing", idOf(row), `route ${routed.route} window ${window} via ${routed.via} (${routed.why})${picked}${wouldBe}`, deps, routed.reason);
   if (routed.via === "jev") guardRouteCost(deps);
   return routed;
 }
@@ -580,7 +586,7 @@ const atLeast = (route: Route, routes: readonly Route[]): Route => ROUTES.find((
 
 /** The `traits` composition, as it was before #4904 and byte for byte. */
 async function routeByTraits(row: RouteRow, routing: RoutingDeclaration, deps: RouteDeps): Promise<Chosen> {
-  const decision = await decide("model-routing", routeState(row), QUESTIONS, { ...deps, id: `${ID_PREFIX}${row.number}` });
+  const decision = await decide("model-routing", routeState(row), QUESTIONS, { ...deps, id: idOf(row) });
   if (decision.via === "none") return alone(withReason(profiled(fallbackRoute(row), "fallback", row, deps.haikuSwitchPath), decision.reason ?? "the provider gave no answer and no reason"));
   const composed = atLeast(composeRoute(readingsOf(decision.answers), { regionFiles: regionFileCount(row.body) }), routing.routes);
   const routed = profiled(composed, "jev", row, deps.haikuSwitchPath);
@@ -632,7 +638,7 @@ async function routeByChoice(row: RouteRow, routing: RoutingDeclaration, deps: R
   const clock = deps.now ?? Date.now;
   const started = clock();
   const questions = { ...QUESTIONS, route: routeQuestion(routing, fallback) };
-  const decision = await decide("model-routing", routeState(row), questions, { ...deps, id: `${ID_PREFIX}${row.number}` });
+  const decision = await decide("model-routing", routeState(row), questions, { ...deps, id: idOf(row) });
   const ms = Math.max(0, clock() - started);
   if (decision.via === "none") {
     const routed = withReason(profiled(fallback, "fallback", row, deps.haikuSwitchPath), decision.reason ?? "the provider gave no answer and no reason");

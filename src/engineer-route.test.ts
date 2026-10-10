@@ -565,6 +565,55 @@ test("routesForStarts: resolves the first ROUTE_AHEAD start orders by row, skips
   assert.equal(routes.get(4)?.route, "sonnet/medium");
 });
 
+/** The ids and outcomes `routeEngineer` appended to the decision log beside this ledger, in order. */
+const routedIdsOf = (dir: string): string[] => {
+  const logPath = decisionLogPathFrom(join(dir, "wake-ledger"));
+  return readFileSync(logPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)).filter((l) => l.use === "model-routing" && isOutcomeLine(l)).map((l) => `${l.id} ${String(l.outcome).split(" ").slice(0, 2).join(" ")}`);
+};
+/** A row whose Region is five files, which the fallback routes Sonnet/high, and one whose Region is two, which it routes Sonnet/medium. */
+const WIDE_BODY = bodyOf({ region: ["src/a.ts", "src/b.ts", "src/c.ts", "src/d.ts", "src/e.ts"] });
+
+test("a11ign/agent-org#756: another tracker's start order is routed too -- read from THAT tracker, filed under its keyed ref, logged as row-<key>-<n>", async () => {
+  const dir = tmpDir("engineer-route-keyed-");
+  const reads: [number, string | undefined][] = [];
+  const readRow = (row: number, key?: string) => { reads.push([row, key]); return { labels: ["ready"], body: bodyOf(), title: `row ${row}` }; };
+  const routes = await routesForStarts([{ causeKey: "engineers/ready-row-unclaimed/agent-org#756" }], { host: withTriage(), ledgerPath: join(dir, "wake-ledger"), readRow, projectDir: dir });
+  assert.deepEqual(reads, [[756, "agent-org"]]);
+  assert.deepEqual([...routes.keys()], ["agent-org#756"]);
+  assert.equal(routes.get("agent-org#756")?.route, "sonnet/medium");
+  assert.deepEqual(routedIdsOf(dir), ["row-agent-org-756 route sonnet/medium"]);
+});
+
+test("a11ign/agent-org#756: an a11ign row and an agent-org row of the SAME number are two routes and two ledger ids, and neither takes the other's", async () => {
+  const dir = tmpDir("engineer-route-collision-");
+  const readRow = (row: number, key?: string) => ({ labels: ["ready"], body: key === "agent-org" ? WIDE_BODY : bodyOf(), title: `${key ?? "a11ign"} row ${row}` });
+  const orders = [{ causeKey: "engineers/ready-row-unclaimed/659" }, { causeKey: "engineers/ready-row-unclaimed/agent-org#659" }];
+  const routes = await routesForStarts(orders, { host: withTriage(), ledgerPath: join(dir, "wake-ledger"), readRow, projectDir: dir });
+  assert.deepEqual([...routes.keys()], [659, "agent-org#659"]);
+  assert.equal(routes.get(659)?.route, "sonnet/medium", "the first tracker's row keeps its own route");
+  assert.equal(routes.get("agent-org#659")?.route, "sonnet/high", "the keyed row took ITS body's route, not the first tracker's");
+  assert.deepEqual(routedIdsOf(dir).sort(), ["row-659 route sonnet/medium", "row-agent-org-659 route sonnet/high"]);
+
+  const claimed = (key?: string) => ({ row: 659, ...(key === undefined ? {} : { key }), branch: "b", worktree: "w", launchDir: "l" });
+  const claimer = spawnClaimer({ routes, readRow: () => assert.fail("a routed row is not read again") });
+  assert.equal(claimer.tier?.(claimed("agent-org")), null, "Sonnet/high is the ordinary profile, and it is not the first tracker's Sonnet/medium");
+  assert.equal(claimer.tier?.(claimed())?.effort, "medium");
+});
+
+test("a11ign/agent-org#756: a keyed row that cannot be read is absent and takes the ordinary profile; one with no route is not read for the first tracker's label", async () => {
+  const dir = tmpDir("engineer-route-keyed-absent-");
+  const readRow = (row: number, key?: string) => { if (key === "agent-org") throw new Error("gh down"); return { labels: ["ready"], body: bodyOf(), title: `row ${row}` }; };
+  const orders = [{ causeKey: "engineers/ready-row-unclaimed/agent-org#756" }, { causeKey: "engineers/ready-row-unclaimed/8" }];
+  const routes = await routesForStarts(orders, { host: withTriage(), ledgerPath: join(dir, "wake-ledger"), readRow, projectDir: dir });
+  assert.deepEqual([...routes.keys()], [8], "the keyed row is absent, the other is routed");
+
+  const switchPath = join(dir, "on.json");
+  writeFileSync(switchPath, '{ "enabled": true }');
+  const claimer = spawnClaimer({ routes, switchPath, readRow: () => ({ labels: ["ready", "tier:haiku"], body: bodyOf() }) });
+  assert.equal(claimer.tier?.({ row: 756, key: "agent-org", branch: "b", worktree: "w", launchDir: "l" }), null);
+  assert.equal(claimer.tier?.({ row: 756, branch: "b", worktree: "w", launchDir: "l" })?.model, HAIKU_MODEL_ID, "the control: the first tracker's row 756 still reads its own label");
+});
+
 test("spawnClaimer.tier: a routed row gets its route's profile; a row with no route takes the label-only path it always did", () => {
   const dir = tmpDir("engineer-route-claimer-");
   const switchPath = join(dir, "on.json");
