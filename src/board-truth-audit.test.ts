@@ -261,6 +261,29 @@ test("class-repeat titles of different failure classes are not near-duplicates (
   assert.deepEqual(found({ openRows: [notOfTheForm(4836, plain), notOfTheForm(4837, `${plain} again`)] }, QUESTIONS.DUPLICATE), [4837], "neither title carries an id: words decide");
 });
 
+/** The pair as it stood on 2026-10-10: the build a11ign#4488 and the verify row the pipeline filed for it (`verify-row.ts`), #4901. @param {string} title */
+const verifyRowOf = (title: string) => `## Done-when\n\n1. The reading holds.\n\nNot-before: 2026-10-11T00:00:00Z\nVerifies: #4488\n\n<!-- verify-row: build #4488 -->\n`;
+
+test("a verify row is not a near-duplicate of the build it verifies, and an unrelated twin still is (agent-org#765)", () => {
+  const buildTitle = "Make the board truth audit stop calling a pipeline row a twin of its source row";
+  const build = { ...row(4488, ["ready"], { title: buildTitle }), state: "CLOSED", stateReason: "COMPLETED" };
+  const verify = row(4901, ["ready"], { title: `Verify ${buildTitle}`, body: verifyRowOf(buildTitle) });
+  // POSITIVE CONTROL for the lines below: the pair clears the word threshold on its own, so the empty result is the verify-row rule and not a short title.
+  assert.ok(similarity(wordsOf(verify.title), wordsOf(build.title)) >= DUPLICATE_SIMILARITY, "the verify row's title is the build's plus one word");
+  assert.deepEqual(found({ openRows: [verify], closedRows: [build] }, QUESTIONS.DUPLICATE), [], "a verify row against its closed build");
+  assert.deepEqual(found({ openRows: [verify, { ...build, state: "OPEN", stateReason: undefined }] }, QUESTIONS.DUPLICATE), [], "against its build still open: either row may be the one that names the other");
+  const refiledBuild = row(4950, ["ready"], { title: buildTitle });
+  assert.deepEqual(found({ openRows: [{ ...verify, body: verifyRowOf(buildTitle).replaceAll("4488", "4950") }, refiledBuild] }, QUESTIONS.DUPLICATE), [], "the older row is the verifier: the later row is paired with it in neither direction");
+  assert.deepEqual(found({ openRows: [{ ...verify, body: "<!-- verify-row: build #4488 -->" }], closedRows: [build] }, QUESTIONS.DUPLICATE), [], "the marker alone names the build");
+  assert.deepEqual(found({ openRows: [{ ...verify, body: "Verifies: #4488" }], closedRows: [build] }, QUESTIONS.DUPLICATE), [], "the `Verifies:` line alone names the build");
+  // CONTROL: the same two titles with the verify row naming no build are a twin, and one naming a DIFFERENT build is a twin of this one
+  assert.deepEqual(found({ openRows: [{ ...verify, body: "" }], closedRows: [build] }, QUESTIONS.DUPLICATE), [4901], "no build named: words decide");
+  assert.deepEqual(found({ openRows: [{ ...verify, body: verifyRowOf(buildTitle).replaceAll("4488", "4499") }], closedRows: [build] }, QUESTIONS.DUPLICATE), [4901], "a verify row of another build is not exempt from this one");
+  // the exemption is the named build's alone: an unrelated row with the same title as the verify row is still its twin
+  const unrelated = row(4902, ["ready"], { title: `Verify ${buildTitle}` });
+  assert.deepEqual(found({ openRows: [verify, unrelated] }, QUESTIONS.DUPLICATE), [4902], "two unrelated rows with similar titles still pair");
+});
+
 test("a fact that could not be read is UNREAD and never counted as agreeing", () => {
   const audit = boardTruthAudit(facts({ closedRows: null, mergedPrs: null, liveSessions: null, waitFacts: null }));
   assert.deepEqual(audit.unread.sort(), [QUESTIONS.CLOSER_MERGED, QUESTIONS.DUPLICATE, QUESTIONS.NO_CLAIMANT, QUESTIONS.WAIT_TRUE].sort());
