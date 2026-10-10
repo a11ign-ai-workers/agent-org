@@ -14,7 +14,11 @@ Acceptance: `bash -c 'cd ~/repos/agent-org-wt-4899 && AGENT_ORG_HOST=/home/agent
 
 Mutation: the fold never fires -> 4 red (1a, 1b, 1c, 1d); the fold ignores the fields a label read asks for -> 1 red (1c); a full 500-row page is trusted as complete -> 1 red (1b); the wrapper never sends the tag -> 3 red (2a, 2b, 2c); a 304 is not replayed -> 3 red; a 200 is never stored -> 3 red; an entry is never fresh inside the 20 s -> 1 red (2a); `--paginate` is eligible -> 1 red (2d); every call is eligible -> 1 red (2d). Each was applied with `sed` to `src/work-gate.ts` or `host/gh` from a copy kept in the scratchpad, and both files were restored from it and diffed byte-identical. One mutation (a `PATCH` is eligible) stays green, and is equivalent: only a `read`-class call reaches the conditional path (`cache_on`), so the method check in `etag_eligible` is a second guard on a call the first already refuses.
 
-Outside-Region: `src/packaging/host-project-paths.test.ts` (`TODAYS_GH_WRAPPER` moved to the new wrapper's sha256, with its dated comment, as #4898 and #779 did); `src/packaging/host-units.test.ts` (one assertion: a plain `api user` now reaches gh-real as `api -i user`); `.changeset/the-gate-asks-github-once-per-tick.md` (the package's release note). `docs/gh-call-inventory.json` needed no change: the new parser spells its head as a string so the inventory does not count a call that is never made.
+Outside-Region: src/packaging/host-project-paths.test.ts — `TODAYS_GH_WRAPPER` moved to the new wrapper's sha256 with its dated comment, as #4898 and #779 did
+Outside-Region: src/packaging/host-units.test.ts — one assertion: a plain `api user` now reaches gh-real as `api -i user`
+Outside-Region: .changeset/the-gate-asks-github-once-per-tick.md — the package's release note
+
+`docs/gh-call-inventory.json` needed no change: the new parser spells its head as a string so the inventory does not count a call that is never made.
 
 Closes a11ign/a11ign#4899
 
