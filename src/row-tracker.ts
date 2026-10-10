@@ -9,6 +9,7 @@
 //
 // PURE: nothing here reads a file or runs a command. The declaration is an argument, so a test states its own trackers.
 import { productRegionsOf, rowKind } from "./work-gate.ts";
+import { splitRegionEntry } from "./region-paths.ts";
 
 /**
  * The tracker an ORG row is filed in. `work-gate.ts` keeps the same fact as an unexported `TOOL_REPO` (that file is not this row's
@@ -24,6 +25,12 @@ export type Tracker = import("./project-config.ts").Tracker;
  * The FIRST declared tracker is the project's own (`project-config.ts`), so a product row goes there. An org row goes to the tracker of
  * `ORG_TRACKER_REPO` when one is declared, else to the first: a project that has not declared the second tracker files everything where
  * it always did, which is why this row can merge before that declaration exists. With ONE tracker the Region cannot matter.
+ * A row is ALSO the home tracker's when it is not product by `rowKind` but EVERY Region entry carries the key of a declared `code` repository
+ * other than the tool's (`control:ansible/...`, the lab): `rowKind` calls it org because those repositories are `adopterFacing: false`, which is
+ * the share's question and stays `ceo`'s (#3820, #4399), but the work is not the tool's and its pull request opens in that repository, so the
+ * org tracker is the wrong place for it (agent-org#771 and #772 were filed there and refiled). A bare entry is not counted: it belongs to the
+ * project's first repository by position, and a row written from inside the tool's own tree carries bare paths, so reading them as the home
+ * repository's would send the tool's own rows away. An entry under the tool's key, an unknown key, an empty Region and a mix all file as above.
  * `unreadable` is `rowKind`'s own word for a Region it found no entries in, said back so the caller can SAY the row went to the org
  * tracker by default rather than by reading.
  * @param {string[] | null} entries
@@ -35,8 +42,15 @@ export function rowTracker(entries: string[] | null, dora: Parameters<typeof pro
   const [home] = trackers;
   if (home === undefined) throw new Error("rowTracker: the declaration names no tracker, so there is nowhere to file a row.");
   const { kind, unreadable } = rowKind(entries, productRegionsOf(dora));
-  const org = kind === "org" ? trackers.find((tracker) => tracker.repo === ORG_TRACKER_REPO) : undefined;
+  const elsewhere = kind === "org" && entries !== null && entries.length > 0 && entries.every((entry) => namesOtherCodeRepository(entry, dora.code));
+  const org = kind === "org" && !elsewhere ? trackers.find((tracker) => tracker.repo === ORG_TRACKER_REPO) : undefined;
   return { tracker: org ?? home, unreadable };
+}
+
+/** Whether a Region entry is prefixed with the key of a declared `code` repository that is not the tool's. @param {string} entry @param {{ key: string; repo: string; }[]} code */
+function namesOtherCodeRepository(entry: string, code: { key: string; repo: string; }[]): boolean {
+  const { key } = splitRegionEntry(entry);
+  return key !== "" && code.some((repository) => repository.key === key && repository.repo !== ORG_TRACKER_REPO);
 }
 
 /**
