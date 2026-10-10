@@ -1,9 +1,9 @@
 // #4632: a red check's failure class and route. A fake `fetch`, a fake `readKey`, a fake diagnostic and a state fixture only: no network, no real key, no corpus.
-// no-token: gh -- nothing here calls `gh`; every dependency is injected
+// no-token: gh -- nothing here calls `gh`; every dependency is injected (the log read's `gh` is a stub that refuses as the real one does)
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
-  CI_FAILURE_CLASSES, MAX_ERROR_LINES, classLine, classifyCiFailure, fallbackClass, routeFor, trimErrorLines,
+  CI_FAILURE_CLASSES, MAX_ERROR_LINES, classLine, classifyCiFailure, fallbackClass, readCiFailure, routeFor, trimErrorLines,
   type CiFailure, type CiFailureClass,
 } from "./ci-failure-class.ts";
 import { MAX_STATE_BYTES, type DecisionDeps } from "./decision-provider.ts";
@@ -163,4 +163,69 @@ test("the line the order and the log carry names the class, the route and who ch
 test("the four classes are the four the row names", () => {
   const names: CiFailureClass[] = ["own-defect", "flaky", "another-repository-changed", "infrastructure"];
   assert.deepEqual([...CI_FAILURE_CLASSES], names);
+});
+
+// ---- the job log (#767) -------------------------------------------------------------------------------------
+
+const SHA = "abcdef12".padEnd(40, "0");
+const NOW = Date.parse("2026-10-10T12:00:00Z");
+const ESC = "\u001b";
+const ESCAPE_REFUSAL = "the response contains terminal escape sequences; pass --allow-escape-sequences to output it anyway";
+
+/**
+ * A `gh` that answers the reads `readCiFailure` makes, and refuses a job log as the real `gh` 2.100.0 does: exit 1 on a body holding an escape byte unless `--allow-escape-sequences`
+ * is among the arguments. The refusal is by CONTENT, so a log with no escape bytes is read with or without the flag, exactly as the real one.
+ */
+function logGh(log: string) {
+  const asked: string[][] = [];
+  const read = (args: string[]): string => {
+    asked.push(args);
+    const path = args[1];
+    if (path.endsWith("/pulls/77")) return JSON.stringify({ head: { sha: SHA, ref: "agent/x-77" } });
+    if (path.includes(`/commits/${SHA}/check-runs`)) {
+      return JSON.stringify({ check_runs: [{ name: "ts", conclusion: "failure", details_url: "https://github.com/o/r/actions/runs/555/job/666" }] });
+    }
+    if (path.endsWith("/actions/runs/555")) return JSON.stringify({ name: "CI", run_attempt: 1 });
+    if (path.endsWith("/actions/jobs/666/logs")) {
+      if (log.includes(ESC) && !args.includes("--allow-escape-sequences")) throw new Error(`Command failed: gh ${args.join(" ")}\n${ESCAPE_REFUSAL}`);
+      return log;
+    }
+    if (path.includes("/actions/runs?")) return JSON.stringify({ workflow_runs: [] });
+    throw new Error(`unexpected gh ${args.join(" ")}`);
+  };
+  return { read, asked };
+}
+const PR = { repo: "o/r", number: 77, head8: "abcdef12" };
+
+test("a coloured job log is read, and its coloured `##[error]` line matches as the plain line it is", () => {
+  const log = [
+    `${ESC}[36;1m##[group]Run pnpm test${ESC}[0m`,
+    `${ESC}[?25lError: cursor-hidden line${ESC}[?25h`,
+    `${ESC}[31;1m##[error]${ESC}[0mProcess completed with exit code 1.`,
+    `${ESC}[31mAssertionError${ESC}[0m [ERR_ASSERTION]: expected 3, got 4`,
+    "",
+  ].join("\n");
+  const { read, asked } = logGh(log);
+  const out = readCiFailure(PR, read, NOW);
+  assert.ok(out !== null);
+  assert.deepEqual(out.errorLines, ["Error: cursor-hidden line", "##[error]Process completed with exit code 1.", "AssertionError [ERR_ASSERTION]: expected 3, got 4"]);
+  assert.ok(out.errorLines.every((line) => !line.includes(ESC)));
+  assert.ok(asked.some((args) => args[1].endsWith("/actions/jobs/666/logs") && args.includes("--allow-escape-sequences")));
+  // the stub is the real refusal: the same coloured log without the flag throws, so the read above passing is the flag's doing
+  assert.throws(() => logGh(log).read(["api", "repos/o/r/actions/jobs/666/logs"]), /--allow-escape-sequences/);
+});
+
+test("escape bytes inside a phrase do not hide it from the fact that reads the whole log", () => {
+  const out = readCiFailure(PR, logGh(`API rate ${ESC}[1mlimit${ESC}[0m exceeded for user\n`).read, NOW);
+  assert.ok(out !== null);
+  assert.equal(out.rateLimitOrRunnerLost, true);
+  // negative control: the same log with nothing in it that is a rate limit says so
+  assert.equal(readCiFailure(PR, logGh(`${ESC}[1mAssertionError${ESC}[0m: nope\n`).read, NOW)!.rateLimitOrRunnerLost, false);
+});
+
+test("a log with no escape bytes is read as before: the same lines, nothing stripped or lost", () => {
+  const out = readCiFailure(PR, logGh("setup\nAssertionError: expected 1 to equal 2\nnot ok 1 - the thing\n").read, NOW);
+  assert.ok(out !== null);
+  assert.deepEqual(out.errorLines, ["AssertionError: expected 1 to equal 2", "not ok 1 - the thing"]);
+  assert.equal(out.rateLimitOrRunnerLost, false);
 });
