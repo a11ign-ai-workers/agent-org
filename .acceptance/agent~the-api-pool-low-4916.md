@@ -1,6 +1,6 @@
 `api-pool-low`'s Spender sentence names an App's calls: a `[bot]` pool is read from the `app:<role>` ledger lines, in every ledger the role writes to (a11ign#4916).
 
-Closes a11ign#4916
+Closes a11ign/a11ign#4916
 
 ## What changes, and why
 
