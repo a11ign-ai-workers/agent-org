@@ -6,7 +6,7 @@
 // fake answers any argv and a flag git rejects (exit 129) would pass a suite that never ran it. The unit-template cases (5) and (6) are in
 // `packaging/host-units.test.ts`, which is where the rendered units are already compared byte for byte.
 //
-// a11ign/agent-org#714: THE MOVE INSTALLS THE `dependencies` A RELEASE ADDS BEFORE IT ADVANCES. Cases (D1)-(D5) run REAL git in a tool checkout cloned before the tags; only `npm` is
+// a11ign/agent-org#714: THE MOVE INSTALLS THE `dependencies` A RELEASE ADDS BEFORE IT ADVANCES. Cases (D1)-(D5) run REAL git in a tool checkout cloned before the tags; only `pnpm` is
 // injected (a test may not reach the registry), and what the stand-in sees -- the cwd it is run in, where the checkout and the fresh tree are at that instant -- is the evidence.
 import { PROJECT_ROOT } from "./packaging/host-units-project.ts"; // FIRST: makes the tool a project, which `update-tool.ts` resolves at import.
 import { test } from "node:test";
@@ -14,7 +14,7 @@ import assert from "node:assert/strict";
 import { execFileSync, spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, realpathSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { dirname, join } from "node:path";
+import { delimiter, dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { dependencyDrift, installCommand, installDependencies, installPendingFindings, restartLongRunning, satisfies, updateTool } from "./update-tool.ts";
 import { liveToolVersion, toolVersionLine } from "./lib/tool-version.ts";
@@ -236,28 +236,30 @@ const addsDependencies = ({ dir }: GitSandbox) => writePackage(dir, NEW_TOOLCHAI
 /** v1.0.1 as an ordinary release is: code changes, `dependencies` do not. */
 const changesCodeOnly = ({ dir }: GitSandbox) => writeFile(join(dir, "src", "tick.ts"), "// v1.0.1\n");
 
-type NpmCall = { file: string; args: string[]; cwd: string; toolHead: string; freshHead: string };
+type PnpmCall = { file: string; args: string[]; cwd: string; path: string; toolHead: string; freshHead: string };
 
 /**
- * `npm` as the move runs it, replaced: it records WHERE the checkout and the fresh tree are the moment it is called, and what a real install leaves (a `node_modules` in the cwd holding each
+ * `pnpm` as the move runs it, replaced: it records WHERE the checkout and the fresh tree are the moment it is called, and what a real install leaves (a `node_modules` in the cwd holding each
  * declared dependency at the version its range names), or fails as an unreachable registry does.
  */
-function stubbedNpm(host: DependencyHost, { fails = false }: { fails?: boolean } = {}) {
-  const calls: NpmCall[] = [];
+function stubbedPnpm(host: DependencyHost, { fails = false }: { fails?: boolean } = {}) {
+  const calls: PnpmCall[] = [];
   const exec = (file: string, args: string[], options: any) => {
-    calls.push({ file, args, cwd: options.cwd, toolHead: host.git(["rev-parse", "HEAD"]).trim(), freshHead: gitAt(options.cwd)(["rev-parse", "HEAD"]).trim() });
-    if (fails) throw Object.assign(new Error("Command failed: npm install"), { stderr: "npm error code ENOTFOUND\nnpm error network request to https://registry.npmjs.org/@a11ign%2ftoolchain failed\n" });
+    calls.push({ file, args, cwd: options.cwd, path: String(options.env?.PATH ?? ""), toolHead: host.git(["rev-parse", "HEAD"]).trim(), freshHead: gitAt(options.cwd)(["rev-parse", "HEAD"]).trim() });
+    if (fails) throw Object.assign(new Error("Command failed: pnpm install"), { stderr: " ERR_PNPM_META_FETCH_FAIL  GET https://registry.npmjs.org/@a11ign%2ftoolchain: ENOTFOUND\n" });
     const { dependencies } = JSON.parse(readFileSync(join(options.cwd, "package.json"), "utf8"));
     for (const [name, range] of Object.entries(dependencies as Record<string, string>)) {
       writeFile(join(options.cwd, "node_modules", name, "package.json"), JSON.stringify({ name, version: range.replace(/^\D+/, "") }));
     }
   };
-  return { exec, calls };
+  /** `pnpmCliInvocation`, replaced: whichever pnpm this machine has is not the test's business. */
+  const pnpm = (args: string[]) => ({ command: "pnpm", args });
+  return { exec, pnpm, calls };
 }
 
-/** `updateTool` as `main` calls it, the install being `installDependencies` with the stand-in for npm. */
-const moveWith = (host: DependencyHost, npm: ReturnType<typeof stubbedNpm>, toolVersion = "latest") =>
-  updateTool(host.tool, host.git, toolVersion, () => [], (tag) => installDependencies({ root: host.tool, tag, run: host.git, exec: npm.exec }));
+/** `updateTool` as `main` calls it, the install being `installDependencies` with the stand-in for pnpm. */
+const moveWith = (host: DependencyHost, pnpm: ReturnType<typeof stubbedPnpm>, toolVersion = "latest") =>
+  updateTool(host.tool, host.git, toolVersion, () => [], (tag) => installDependencies({ root: host.tool, tag, run: host.git, exec: pnpm.exec, pnpm: pnpm.pnpm }));
 
 const installedVersionIn = (host: DependencyHost, name: string) => {
   const file = join(host.tool, "node_modules", name, "package.json");
@@ -268,15 +270,16 @@ const worktrees = (host: DependencyHost) => host.git(["worktree", "list", "--por
 
 test("#714 (D1): a release that adds a dependency is installed in a fresh tree BEFORE the checkout advances, then node_modules is swapped in and the checkout moves", () => {
   withDependencyHost(addsDependencies, (host) => {
-    const npm = stubbedNpm(host);
+    const pnpm = stubbedPnpm(host);
     assert.deepEqual(dependencyDrift({ root: host.tool, tag: "v1.0.1", run: host.git }).map(({ name, wanted, installed }) => [name, wanted, installed]),
       [["@a11ign/toolchain", "^0.7.0", "0.1.2"], ["added-dep", "^1.0.0", null]], "THE PREMISE: the installed toolchain is OLDER than the one named, and the other is absent");
 
-    assert.equal(moveWith(host, npm), `agent-org v1.0.1 (${host.v101})`);
+    assert.equal(moveWith(host, pnpm), `agent-org v1.0.1 (${host.v101})`);
 
-    assert.equal(npm.calls.length, 1, "exactly one install");
-    const [call] = npm.calls;
-    assert.deepEqual([call.file, ...call.args], ["npm", "install", "--omit=dev", "--no-save", "--ignore-scripts"], "no lockfile to key `npm ci` on, and `--no-save` writes none");
+    assert.equal(pnpm.calls.length, 1, "exactly one install");
+    const [call] = pnpm.calls;
+    assert.deepEqual([call.file, ...call.args], ["pnpm", "install", "--prod", "--no-frozen-lockfile", "--ignore-scripts", "--ignore-workspace"], "no lockfile to freeze on, production dependencies only, no scripts");
+    assert.equal(call.path.split(delimiter)[0], dirname(process.execPath), "the node this process runs on comes first on the PATH, so pnpm's `env node` shim finds one under systemd");
     assert.equal(call.toolHead, host.v100, "THE CHECKOUT HAD NOT ADVANCED when the install ran: that order is the whole fix");
     assert.equal(call.freshHead, host.v101, "the install ran in a tree AT the release");
     assert.equal(dirname(call.cwd), dirname(host.tool), "which is BESIDE the checkout, so the swap is a rename on one filesystem");
@@ -290,7 +293,7 @@ test("#714 (D1): a release that adds a dependency is installed in a fresh tree B
     assert.ok(!existsSync(join(host.tool, "node_modules.superseded")), "and the superseded node_modules is not kept");
     assert.deepEqual(dependencyDrift({ root: host.tool, tag: "v1.0.1", run: host.git }), [], "so the same question now answers none");
 
-    const again = stubbedNpm(host);
+    const again = stubbedPnpm(host);
     moveWith(host, again);
     assert.equal(again.calls.length, 0, "a second run with nothing missing installs nothing");
   });
@@ -298,14 +301,14 @@ test("#714 (D1): a release that adds a dependency is installed in a fresh tree B
 
 test("#714 (D2): a FAILING install leaves the checkout and node_modules where they were, says so naming the command, and host:check reports host-install-pending with it", () => {
   withDependencyHost(addsDependencies, (host) => {
-    const npm = stubbedNpm(host, { fails: true });
-    const said = moveWith(host, npm);
+    const pnpm = stubbedPnpm(host, { fails: true });
+    const said = moveWith(host, pnpm);
 
-    assert.equal(npm.calls.length, 1, "the install was tried");
+    assert.equal(pnpm.calls.length, 1, "the install was tried");
     assert.match(said, new RegExp(`^agent-org HELD at ${host.v100}, NOT moved to v1\\.0\\.1 \\(host-install-pending\\)`));
     assert.match(said, /@a11ign\/toolchain, added-dep/, "naming what is missing");
-    assert.match(said, /ENOTFOUND/, "and why npm said it failed");
-    assert.ok(said.includes("npm install --omit=dev --no-save --ignore-scripts"), `naming the command: ${said}`);
+    assert.match(said, /ENOTFOUND/, "and why pnpm said it failed");
+    assert.ok(said.includes("pnpm install --prod --no-frozen-lockfile --ignore-scripts --ignore-workspace"), `naming the command: ${said}`);
     assert.equal(host.git(["rev-parse", "HEAD"]).trim(), host.v100, "THE CHECKOUT DID NOT ADVANCE");
     assert.equal(installedVersionIn(host, "@a11ign/toolchain"), "0.1.2", "node_modules is untouched");
     assert.equal(installedVersionIn(host, "added-dep"), null);
@@ -323,9 +326,9 @@ test("#714 (D2): a FAILING install leaves the checkout and node_modules where th
 
 test("#714 (D3) negative control: a release whose dependencies are unchanged advances with NO install and raises no finding", () => {
   withDependencyHost(changesCodeOnly, (host) => {
-    const npm = stubbedNpm(host, { fails: true });
-    assert.equal(moveWith(host, npm), `agent-org v1.0.1 (${host.v101})`, "advanced although an install would have failed: none was asked for");
-    assert.equal(npm.calls.length, 0, "npm was never run");
+    const pnpm = stubbedPnpm(host, { fails: true });
+    assert.equal(moveWith(host, pnpm), `agent-org v1.0.1 (${host.v101})`, "advanced although an install would have failed: none was asked for");
+    assert.equal(pnpm.calls.length, 0, "pnpm was never run");
     assert.equal(host.git(["rev-parse", "HEAD"]).trim(), host.v101);
     assert.deepEqual(worktrees(host), [`worktree ${host.tool}`], "and no fresh tree was made");
     assert.deepEqual(installPendingFindings({ tool: host.tool, toolVersion: "latest", binDir: join(host.units, "bin"), prefix: "a11ign-", installedDir: host.units, run: host.git }), []);
@@ -335,10 +338,10 @@ test("#714 (D3) negative control: a release whose dependencies are unchanged adv
 test("#714 (D4): a checkout ALREADY at a release whose dependencies it lacks (an older mover advanced it without installing) is mended by the next run, which installs and stays put", () => {
   withDependencyHost(addsDependencies, (host) => {
     host.git(["checkout", "--detach", "refs/tags/v1.0.1", "--quiet"]);
-    const npm = stubbedNpm(host);
-    assert.equal(moveWith(host, npm), `agent-org v1.0.1 (${host.v101})`);
-    assert.equal(npm.calls.length, 1, "it installed although there was no move to make");
-    assert.equal(npm.calls[0].toolHead, host.v101);
+    const pnpm = stubbedPnpm(host);
+    assert.equal(moveWith(host, pnpm), `agent-org v1.0.1 (${host.v101})`);
+    assert.equal(pnpm.calls.length, 1, "it installed although there was no move to make");
+    assert.equal(pnpm.calls[0].toolHead, host.v101);
     assert.equal(installedVersionIn(host, "@a11ign/toolchain"), "0.7.0");
     assert.equal(installedVersionIn(host, "added-dep"), "1.0.0");
   });

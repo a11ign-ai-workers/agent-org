@@ -47,16 +47,17 @@
 // programs of the tick, the gate and the launcher, while the host's checkout held toolchain 0.1.2: advancing onto a `node_modules` that lacks it is the tick crash of 2026-10-09
 // again, with the one session that mends it asleep. So the dependencies of the release's `package.json` are read BEFORE the move, and when `node_modules` does not hold them they are
 // installed first, IN A FRESH TREE BESIDE THE CHECKOUT (a worktree at the release, as the remedy of `host-install-pending` is): the live `node_modules` is never half-written under a
-// running tick, and there is no lockfile, so it is `npm install --omit=dev --no-save`, never `npm ci`. Only when that install has succeeded is the finished `node_modules` renamed into
+// running tick, and there is no lockfile, so it is `pnpm install --prod --no-frozen-lockfile`, never a frozen install. Only when that install has succeeded is the finished `node_modules` renamed into
 // the checkout, and only then does the checkout move. An install that fails HOLDS the move (nothing advances, the tick runs the last good version) and `host:check` reports it as
 // `host-install-pending` with the command, through the same `dependencyDrift` the move asks. THIS FILE'S OWN IMPORTS MUST STAY `node:*` AND LOCAL: it has to run on the host that lacks the
 // dependency, which is the only host it is needed on. It checks on EVERY run, the checkout already being at the release included: an older mover that advanced without installing leaves
 // exactly that host, and an update that only looked when it moved would never mend it.
 import { execFileSync } from "node:child_process";
 import { existsSync, readdirSync, readFileSync, realpathSync, renameSync, rmSync } from "node:fs";
-import { basename, dirname, isAbsolute, join, relative, resolve } from "node:path";
+import { basename, delimiter, dirname, isAbsolute, join, relative, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { refuseUnknownFlags } from "./lib/cli-flags.ts";
+import { pnpmCliInvocation } from "./lib/npm-cli-executable.ts";
 import { LATEST, chooseReleaseTag, compareReleaseTags, isReleaseTag } from "./lib/release-tag.ts";
 import { gitIn } from "./lib/tool-version.ts";
 import { isPrimaryWorktree } from "./prune-worktrees.ts";
@@ -247,8 +248,12 @@ export type DependencyInstall =
   | { state: "installed"; names: string[] }
   | { state: "failed"; names: string[]; command: string; reason: string };
 
-/** There is no lockfile for `npm ci` to key on, so `install`; `--no-save` keeps it from writing one into the release's tree. Nothing installed has a lifecycle script, and none runs unattended on the host. */
-const NPM_INSTALL = ["install", "--omit=dev", "--no-save", "--ignore-scripts"];
+/**
+ * The package manager is pnpm (this repository's `no-npm-spawn` guard: a spawn of `npm` from `src/` is refused), reached through `pnpmCliInvocation`. The release carries no lockfile, so
+ * `--no-frozen-lockfile` (a frozen install is pnpm's default under CI and would refuse); `--prod` is the production `dependencies` only; `--ignore-workspace` keeps a
+ * `pnpm-workspace.yaml` in a parent directory of the host's checkout from turning this into a workspace install. Nothing installed has a lifecycle script, and none runs unattended on the host.
+ */
+const PNPM_INSTALL = ["install", "--prod", "--no-frozen-lockfile", "--ignore-scripts", "--ignore-workspace"];
 
 /** Inside the tick unit's `TimeoutStartSec=600`, which this runs in the `ExecStartPre` of. */
 const INSTALL_TIMEOUT_MS = 240_000;
@@ -256,19 +261,20 @@ const INSTALL_TIMEOUT_MS = 240_000;
 /** The fresh tree: BESIDE the checkout, so the finished `node_modules` is renamed into it on one filesystem and never copied. */
 const freshTreeFor = (root: string, tag: string): string => join(dirname(root), `${basename(root)}-deps-${tag}`);
 
-/** The command the install runs, as one line a person can run to read npm's own error. */
+/** The command the install runs, as one line a person can run to read pnpm's own error. */
 export const installCommand = (root: string, tag: string): string =>
-  `git -C ${root} worktree add --detach ${freshTreeFor(root, tag)} refs/tags/${tag} && (cd ${freshTreeFor(root, tag)} && npm ${NPM_INSTALL.join(" ")})`;
+  `git -C ${root} worktree add --detach ${freshTreeFor(root, tag)} refs/tags/${tag} && (cd ${freshTreeFor(root, tag)} && pnpm ${PNPM_INSTALL.join(" ")})`;
 
 /**
  * INSTALL THE RELEASE'S DEPENDENCIES BEFORE THE CHECKOUT MOVES, in a fresh tree, and swap the finished `node_modules` in. The live `node_modules` is touched only by two renames after an install
  * that succeeded, so a failed or killed install leaves the host exactly as it was (the fresh tree is removed at the start of the next run). The superseded `node_modules` is removed, not kept:
- * the long-running units are restarted by the caller. A failed install is the returned `failed`, with npm's last lines as the reason; only a git that cannot be read throws, as it does
+ * the long-running units are restarted by the caller. A failed install is the returned `failed`, with pnpm's last lines as the reason; only a git that cannot be read throws, as it does
  * for every other step of the move.
- * @param {{ root: string, tag: string, run: (args: string[]) => string, exec?: (file: string, args: string[], options: object) => unknown, read?: typeof readFileSync }} where @returns {DependencyInstall}
+ * @param {{ root: string, tag: string, run: (args: string[]) => string, exec?: (file: string, args: string[], options: object) => unknown, pnpm?: (args: string[]) => { command: string, args: string[] }, read?: typeof readFileSync }} where @returns {DependencyInstall}
  */
-export function installDependencies({ root, tag, run, exec = execFileSync, read }: {
-  root: string; tag: string; run: (args: string[]) => string; exec?: (file: string, args: string[], options: object) => unknown; read?: typeof readFileSync;
+export function installDependencies({ root, tag, run, exec = execFileSync, pnpm = pnpmCliInvocation, read }: {
+  root: string; tag: string; run: (args: string[]) => string; exec?: (file: string, args: string[], options: object) => unknown;
+  pnpm?: (args: string[]) => { command: string; args: string[] }; read?: typeof readFileSync;
 }): DependencyInstall {
   const drift = dependencyDrift({ root, tag, run, read });
   if (drift.length === 0) return { state: "current" };
@@ -281,9 +287,12 @@ export function installDependencies({ root, tag, run, exec = execFileSync, read 
   try {
     discard();
     run(["worktree", "add", "--detach", fresh, `refs/tags/${tag}`]);
-    exec("npm", NPM_INSTALL, { cwd: fresh, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: INSTALL_TIMEOUT_MS });
+    // pnpm's shim is `#!/usr/bin/env node`, and a systemd unit's PATH need not hold the node this process runs on: put its directory first.
+    const env = { ...process.env, PATH: [dirname(process.execPath), process.env.PATH ?? ""].filter((dir) => dir !== "").join(delimiter) };
+    const invocation = pnpm(PNPM_INSTALL);
+    exec(invocation.command, invocation.args, { cwd: fresh, env, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: INSTALL_TIMEOUT_MS });
     const [finished, live] = [join(fresh, "node_modules"), join(root, "node_modules")];
-    if (!existsSync(finished)) throw new Error(`\`npm ${NPM_INSTALL.join(" ")}\` finished and left no node_modules in ${fresh}`);
+    if (!existsSync(finished)) throw new Error(`\`pnpm ${PNPM_INSTALL.join(" ")}\` finished and left no node_modules in ${fresh}`);
     const superseded = `${live}.superseded`;
     rmSync(superseded, { recursive: true, force: true });
     if (existsSync(live)) renameSync(live, superseded);
@@ -311,7 +320,7 @@ function dependenciesPendingFinding(drift: DependencyDrift[], { tag, tool }: { t
   return { unit: "package.json", problem: "host-install-pending",
     detail: `release ${tag} declares dependencies the tool's \`node_modules\` (${tool}) does not hold: ${describeDrift(drift)}, so \`update-tool\` HOLDS the checkout where it is and the tick runs the last good version. `
       + "THE CHECKOUT MAY NOT BE ADVANCED FIRST: that is the tick crash of 2026-10-09. \`update-tool\` installs into a fresh tree and advances on every run, so this stands because that install failed. "
-      + `Run \`${installCommand(tool, tag)}\` to read npm's own error, fix its cause (network, registry, disk), then \`git -C ${tool} worktree remove --force ${freshTreeFor(tool, tag)}\` and \`cd ${tool} && node src/update-tool.ts\`, `
+      + `Run \`${installCommand(tool, tag)}\` to read pnpm's own error, fix its cause (network, registry, disk), then \`git -C ${tool} worktree remove --force ${freshTreeFor(tool, tag)}\` and \`cd ${tool} && node src/update-tool.ts\`, `
       + "which repeats the install, renames the finished node_modules in and advances. This finding clears when node_modules holds what the release declares." };
 }
 
