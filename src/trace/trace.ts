@@ -19,6 +19,7 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { DEFERRAL_LOG_FILE, parseDeferralLog } from "../deferral-log.ts";
+import { parseLedger as parseGhLedger, parseRollup, rollupPathOf } from "../gh-ledger.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
 import { measure, mergedRows, parseLedger, readInstances, readTranscripts, rowsClosedBy } from "../wakes-per-row.ts";
 import { aggregate, claimsOf, MOVES, renderAggregate, weekStart } from "./aggregate.ts";
@@ -34,17 +35,18 @@ import { freshnessLine, sessionsWorking, STALE_AFTER_MS, storeFreshness, transcr
 import { fingerprint, HEAD_BYTES, loadState, planRead, saveState, stateFileFor } from "./ingest-state.ts";
 import type { Carry, FileState, IngestState } from "./ingest-state.ts";
 import type { GhCallsReport } from "./gh-calls.ts";
-import { appendToStore, CLIENT_CACHE_READ_RATE, compactStore, COST_BY, costBy, DEFINITIONS, duplicateIds, eventsForRow, eventsOfDeferrals, eventsOfTranscript, openStore, readStore, repriceEvents, subjectOf, subjectsOf as subjectsOfKey, withCompactionUsage } from "./store.ts";
+import { appendToStore, CLIENT_CACHE_READ_RATE, compactStore, COST_BY, costBy, DEFINITIONS, duplicateIds, eventsForRow, eventsOfDeferrals, eventsOfTranscript, hourOf, openStore, readStore, repriceEvents, subjectOf, sendsOfLogs, subjectsOf as subjectsOfKey, wakeOutcomes, countedHours, withCompactionUsage, outcomeSplit } from "./store.ts";
 import { DEFINITIONS as WATERFALL_DEFINITIONS, renderWaterfall, waterfall } from "./waterfall.ts";
 import type { Stats } from "node:fs";
 import type { LedgerEntry, PullRequest } from "../wakes-per-row.ts";
-import type { CostBy, CostRow, Duplicates, Tokens, TraceEvent } from "./store.ts";
+import type { CostBy, CostRow, Duplicates, OutcomeRow, Tokens, TraceEvent } from "./store.ts";
 import type { Move } from "./aggregate.ts";
 
 const DEFAULT_SINCE_DAYS = 3;
 const MS_PER_DAY = 24 * 60 * 60 * 1000;
 const WEEK_DAYS = 7;
 const MS_PER_SECOND = 1000;
+const MS_PER_HOUR = 60 * 60 * MS_PER_SECOND;
 const SECONDS_PER_MINUTE = 60;
 const GH_MAX_BUFFER = 64 * 1024 * 1024;
 const LIST_PAGE = 100;
@@ -59,6 +61,7 @@ const MAP_FLAG = "--map";
 const HTML_FLAG = "--html";
 const USAGE = "usage: trace -- <row-or-pr number> [--since <ISO>] [--store <path>] [--json 1] [--html --out <path>]";
 const WAKE_CACHE_FLAG = "--wake-cache";
+const WAKE_OUTCOMES_FLAG = "--wake-outcomes";
 const INGEST_FLAG = "--ingest";
 const FRESHNESS_FLAG = "--freshness";
 const COMPACT_STORE_WORD = "compact-store";
@@ -115,6 +118,8 @@ export const isAggregate = (argv: string[]) => argv.includes(AGGREGATE_FLAG);
 export const isMap = (argv: string[]) => argv.includes(MAP_FLAG);
 
 export const isWakeCache = (argv: string[]) => argv.includes(WAKE_CACHE_FLAG);
+
+export const isWakeOutcomes = (argv: string[]) => argv.includes(WAKE_OUTCOMES_FLAG);
 
 export const isIngest = (argv: string[]) => argv.includes(INGEST_FLAG);
 
@@ -235,6 +240,38 @@ export function parseWakeCacheArgs(argv: string[], now: number = Date.now()) {
 }
 
 /**
+ * `trace -- --wake-outcomes [--since <ISO>] [--until <ISO>] [--store <path>] [--json 1]`: what the wakes of a window did, per cause (agent-org#487). `--since` is NOT rounded to a Monday; without it the
+ * window is the last seven days, and `--until` (default: now) ends it.
+ */
+export function parseWakeOutcomesArgs(argv: string[], now: number = Date.now()) {
+  const { since, until, store, json } = parseWakeCacheArgs(argv.filter((word) => word !== WAKE_OUTCOMES_FLAG), now);
+  return { since, until, store, json };
+}
+
+const percent = (part: number, whole: number) => (whole === 0 ? "-" : `${((100 * part) / whole).toFixed(1)}%`);
+
+/** The split as a reader prints it: one row per cause, then each outcome as its own line, `null` included, so an outcome nobody could tell is never folded into `no-op`. */
+export function renderOutcomeSplit(report: ReturnType<typeof outcomeSplit>, extra: { footer?: string[]; } = {}) {
+  const { total, byCause, window } = report;
+  const cell = (value: number | string, width: number) => String(value).padStart(width);
+  const line = (row: OutcomeRow) => `${row.cause.padEnd(46)}${cell(row.wakes, 7)}${cell(row.wrote, 7)}${cell(row.noOp, 7)}${cell(row.escalated, 10)}${cell(row.null, 7)}`;
+  return [
+    "TRACE --WAKE-OUTCOMES (a reading at a moment: re-run it, do not quote it)", "",
+    "DEFINITION", `- ${DEFINITIONS.find((definition) => definition.startsWith("WAKE OUTCOME"))}`, "",
+    `window ${new Date(window.from).toISOString()} to ${new Date(window.to).toISOString()}: ${total.wakes} wakes`, "",
+    `${"cause".padEnd(46)}${cell("wakes", 7)}${cell("wrote", 7)}${cell("no-op", 7)}${cell("escalated", 10)}${cell("null", 7)}`,
+    ...byCause.map(line), line(total), "",
+    ...(["wrote", "no-op", "escalated", "null"] as const).map((outcome) => {
+      const count = total[outcome === "no-op" ? "noOp" : outcome];
+      return `${outcome.padEnd(10)}${cell(count, 7)}  ${percent(count, total.wakes)}`;
+    }),
+    `${"  of which not yet settled".padEnd(10)}${cell(total.unsettled, 5)}  (a window still open, or a batch not yet written)`,
+    "", "null counts a wake whose outcome the store could not tell and one not yet settled: it is never a `no-op`.",
+    ...(extra.footer ?? []),
+  ].join("\n");
+}
+
+/**
  * `--week` names one Monday-first UTC week: `2026-W40`, any day or time in it (`2026-09-30`), or a bare ISO week number `40` of this year. Returns its Monday 00:00 UTC.
  */
 export function parseWeek(text: string, now: number) {
@@ -272,8 +309,15 @@ const ghLedgerFiles = (home: string = homedir()) => [join(home, "workers", "gh")
 
 const defaultStore = () => join(homedir(), ".cache", "a11ign", "trace", "events.ndjson");
 
+/**
+ * The two logs of `prompt:session` sends, beside the wake ledger: a delivery to an idle seat (`prompt-session.ts`, `DIRECT_RECORD_FILE`) and one queued for a busy seat (`wake.ts`,
+ * `HANDOFF_QUEUE_FILE`). The names are written out here because both modules are the gate's and heavy to load; `trace-wake-outcome.test.ts` fails when either moves.
+ */
+export const PROMPT_LOG_FILES = ["prompt-session-direct", "prompt-session-handoffs"];
+const promptLogFiles = (cache: string) => PROMPT_LOG_FILES.map((file) => join(cache, file));
+
 export type IngestReport = { read: number; codexRead: number; unchanged: number; bytesRead: number; unreadableLines: number; failed: string[]; reread: string[]; heldBack: number; added: number;
-  coldStart: string | null; firstRunAt: number; firstRunSince: number; ghCalls?: GhCallsReport; deferrals?: DeferralsReport; };
+  coldStart: string | null; firstRunAt: number; firstRunSince: number; ghCalls?: GhCallsReport; deferrals?: DeferralsReport; outcomes?: OutcomesReport; };
 
 /** Read `[start, end)` of a file, counting what was read: the report says how many bytes a run touched, so "only what changed" is a measurement. */
 function readRange(file: string, start: number, end: number, meter: { bytes: number; }) {
@@ -394,15 +438,80 @@ export function ingest({ root, codexRoot = null, since, ledger, rowRepo, store, 
  * state once the events are in. The state is saved even when a file failed, because the files that did not fail were read.
  * `readEvents` is a parameter so a test can count the reads of the store.
  */
-export function ingestTranscripts({ root, codexRoot = null, since, ledger, rowRepo, storePath, ghLedgers = [], deferralLogs = [], now = Date.now() }: { root: string; codexRoot?: string | null; since: number; ledger: LedgerEntry[]; rowRepo: string; storePath: string; ghLedgers?: string[]; deferralLogs?: string[]; now?: number; }, readEvents: (path: string) => TraceEvent[] = readStore) {
+export function ingestTranscripts({ root, codexRoot = null, since, ledger, rowRepo, storePath, ghLedgers = [], deferralLogs = [], promptLogs = [], now = Date.now() }: { root: string; codexRoot?: string | null; since: number; ledger: LedgerEntry[]; rowRepo: string; storePath: string; ghLedgers?: string[]; deferralLogs?: string[]; promptLogs?: string[]; now?: number; }, readEvents: (path: string) => TraceEvent[] = readStore) {
   const store = openStore(storePath, readEvents);
   const statePath = stateFileFor(storePath);
   const { state, coldStart } = loadState({ statePath, storePath, now, since });
   const { state: afterTranscripts, ...report } = ingest({ root, codexRoot, since, ledger, rowRepo, store, state, coldStart, now });
   const calls = ghLedgers.length > 0 ? ingestGhCalls({ ledgers: ghLedgers, store, state: afterTranscripts, now }) : null;
   const deferrals = deferralLogs.length > 0 ? ingestDeferrals({ logs: deferralLogs, rowRepo, store, state: calls?.state ?? afterTranscripts, now }) : null;
+  // After the ledgers, because a wake's outcome is read from the calls just keyed; before the state is saved, so the one rewrite of the store is stamped with it.
+  const outcomes = ghLedgers.length > 0 ? settleWakeOutcomes({ store, ghLedgers, promptLogs, now }) : null;
   saveState(statePath, { ...(deferrals?.state ?? calls?.state ?? afterTranscripts), storeBytes: existsSync(storePath) ? statSync(storePath).size : 0 });
-  return { store, report: { ...report, ...(calls ? { ghCalls: calls.report } : {}), ...(deferrals ? { deferrals: deferrals.report } : {}) } };
+  return { store, report: { ...report, ...(calls ? { ghCalls: calls.report } : {}), ...(deferrals ? { deferrals: deferrals.report } : {}), ...(outcomes ? { outcomes } : {}) } };
+}
+
+export type OutcomesReport = { settled: number; wrote: number; noOp: number; escalated: number; unknown: number; countedHours: number; pending: number; failed: string[]; };
+
+/**
+ * A batch of outcomes is written when the oldest wake that can be settled is this old. A supersede rewrites the whole store (`rewriteStore`, 400+ MB), so settling each wake as its window
+ * closes would rewrite it on nearly every five-minute run; once per batch, and every wake that can be settled goes in it.
+ */
+export const SETTLE_AFTER_MS = 3 * MS_PER_HOUR;
+
+/**
+ * The calls per UTC hour and account that the ledger files and their `.hourly` rollups say were made (the lines still in a file and the rows of what a trim dropped never overlap, so they
+ * are added). A file that is absent has none; one that cannot be read throws, so the caller can say the hours are unknown rather than count them from the files that did read.
+ */
+function ledgerCallsPerHour(ledgers: string[]): Map<string, number> {
+  const calls: Map<string, number> = new Map();
+  const add = (hour: string, account: string, made: number) => calls.set(`${hour}\t${account}`, (calls.get(`${hour}\t${account}`) ?? 0) + made);
+  for (const file of ledgers) {
+    if (!existsSync(file)) continue;
+    const rollup = rollupPathOf(file);
+    for (const entry of parseGhLedger(readFileSync(file, "utf8"))) add(hourOf(Date.parse(entry.time)), entry.account, 1);
+    for (const row of parseRollup(existsSync(rollup) ? readFileSync(rollup, "utf8") : "")) add(row.hour, row.account, row.calls);
+  }
+  return calls;
+}
+
+/**
+ * Put `outcome` and `runId` on the wake events the store has settled (agent-org#487), as ONE write per batch (`appendToStore` supersedes each wake it changes, and a supersede rewrites the
+ * store: see {@link SETTLE_AFTER_MS}). A source that cannot be read leaves every wake as it was: a wake is never told from the sources that did read. An unreadable `gh` ledger is the
+ * `ghCalls` report's failure and is not counted twice; an unreadable `prompt:session` log is this report's. A host with no ledger file at all writes nothing.
+ */
+export function settleWakeOutcomes({ store, ghLedgers, promptLogs, now }: { store: ReturnType<typeof openStore>; ghLedgers: string[]; promptLogs: string[]; now: number; }): OutcomesReport {
+  const report: OutcomesReport = { settled: 0, wrote: 0, noOp: 0, escalated: 0, unknown: 0, countedHours: 0, pending: 0, failed: [] };
+  if (!ghLedgers.some((file) => existsSync(file))) return report; // a host that has had no ledger has nothing to tell from: the wakes stay as they are, absent, and print under `null`
+  let sends: ReturnType<typeof sendsOfLogs>;
+  let counted: Set<string>;
+  try {
+    sends = sendsOfLogs(promptLogs.filter((file) => existsSync(file)).map((file) => readFileSync(file, "utf8")));
+  } catch (error) {
+    return { ...report, failed: [`wake outcomes not derived, a prompt:session log cannot be read: ${(error as Error).message}`] };
+  }
+  try {
+    counted = countedHours({ ledgerCalls: ledgerCallsPerHour(ghLedgers), events: store.events });
+  } catch {
+    return report;
+  }
+  const readable = (from: number, to: number) => {
+    for (let hour = Math.floor(from / MS_PER_HOUR) * MS_PER_HOUR; hour <= to; hour += MS_PER_HOUR) if (!counted.has(hourOf(hour))) return false;
+    return true;
+  };
+  const corrected = wakeOutcomes({ events: store.events, sends, readable, now });
+  report.countedHours = counted.size;
+  report.pending = corrected.length;
+  if (corrected.length === 0 || Math.min(...corrected.map((wake) => wake.at)) > now - SETTLE_AFTER_MS) return report;
+  appendToStore(store, corrected);
+  for (const wake of corrected) {
+    report.settled += 1;
+    if (wake.outcome === "wrote") report.wrote += 1;
+    else if (wake.outcome === "no-op") report.noOp += 1;
+    else if (wake.outcome === "escalated") report.escalated += 1;
+    else report.unknown += 1;
+  }
+  return report;
 }
 
 /**
@@ -413,7 +522,7 @@ export function ingestHome({ home = homedir(), since, storePath, rowRepo, ledger
   const cache = join(home, ".cache", "a11ign");
   return ingestTranscripts({
     root: join(home, ".claude", "projects"), codexRoot: join(home, ".codex", "sessions"), since, ledger: ledger ?? parseLedger(readFileSync(join(cache, "wake-ledger"), "utf8")), rowRepo, storePath,
-    ghLedgers: ghLedgerFiles(home), deferralLogs: [join(cache, DEFERRAL_LOG_FILE)], now,
+    ghLedgers: ghLedgerFiles(home), deferralLogs: [join(cache, DEFERRAL_LOG_FILE)], promptLogs: promptLogFiles(cache), now,
   });
 }
 
@@ -422,7 +531,7 @@ export function ingestHome({ home = homedir(), since, storePath, rowRepo, ledger
  * counted only the first would stay green over a ledger it was not ingesting. A file that is merely absent is not a failure (a host with no Codex, no deferral log yet).
  */
 export function ingestFailures(ingested: IngestReport): string[] {
-  return [...ingested.failed, ...(ingested.ghCalls?.failed ?? []), ...(ingested.deferrals?.failed ?? [])];
+  return [...ingested.failed, ...(ingested.ghCalls?.failed ?? []), ...(ingested.deferrals?.failed ?? []), ...(ingested.outcomes?.failed ?? [])];
 }
 
 /** What `--ingest` prints: one line (read, unchanged, added, failed), the failed files under it, and a cold start said as one. `added` is every kind of event the run appended. */
@@ -1066,7 +1175,7 @@ async function readSources({ since, storePath, budget, log }: { since: number; s
   const cache = join(homedir(), ".cache", "a11ign");
   const now = Date.now();
   const ledger = parseLedger(readFileSync(join(cache, "wake-ledger"), "utf8"));
-  const { store, report: ingested } = ingestTranscripts({ root: join(homedir(), ".claude", "projects"), codexRoot: join(homedir(), ".codex", "sessions"), since, ledger, rowRepo, storePath, ghLedgers: ghLedgerFiles(), deferralLogs: [join(cache, DEFERRAL_LOG_FILE)], now });
+  const { store, report: ingested } = ingestTranscripts({ root: join(homedir(), ".claude", "projects"), codexRoot: join(homedir(), ".codex", "sessions"), since, ledger, rowRepo, storePath, ghLedgers: ghLedgerFiles(), deferralLogs: [join(cache, DEFERRAL_LOG_FILE)], promptLogs: promptLogFiles(cache), now });
   const validatorsDir = dirname(storePath);
   const heldValidators = readValidators(validatorsDir);
   const metered = meteredGhApi({ held: heldValidators, now });
@@ -1205,6 +1314,17 @@ async function mainWakeCache() {
   console.log(json ? JSON.stringify(report, null, 2) : renderWakeCache(report, { footer: ["", ...ingestLines(ingested)] }));
 }
 
+/** `--wake-outcomes`: ingest (which settles the outcomes of the wakes whose windows have closed), then print the split of the window's wakes. */
+async function mainWakeOutcomes() {
+  const { since, until, store: storePath, json } = parseWakeOutcomesArgs(process.argv.slice(2));
+  const { homeProjectDeclaration } = await import("../project-config.ts");
+  const { store, report: ingested } = ingestHome({ since, storePath, rowRepo: homeProjectDeclaration().tracker[0].repo });
+  const split = outcomeSplit({ events: store.events, window: { from: since, to: until } });
+  const reader = `reader: outcome and runId of each wake event, set by \`settleWakeOutcomes\` (src/trace/trace.ts) from the \`gh\` ledgers' lines in the store, the turns' command text and tool calls, and the two prompt:session logs; `
+    + `${ingested.outcomes?.countedHours ?? 0} UTC hours are counted by the ledger with no shortfall in the store; ${ingested.outcomes?.settled ?? 0} wake outcomes written by this run, ${ingested.outcomes?.pending ?? 0} waiting for a batch (written together once the oldest is ${SETTLE_AFTER_MS / MS_PER_HOUR} hours old)`;
+  console.log(json ? JSON.stringify(split, null, 2) : renderOutcomeSplit(split, { footer: ["", reader, ...ingestLines(ingested)] }));
+}
+
 async function main() {
   if (isDuplicates(process.argv.slice(2))) return mainDuplicates();
   if (isCost(process.argv.slice(2))) return mainCost();
@@ -1213,12 +1333,13 @@ async function main() {
   if (isFreshness(process.argv.slice(2))) return mainFreshness();
   if (isAggregate(process.argv.slice(2))) return mainAggregate();
   if (isWakeCache(process.argv.slice(2))) return mainWakeCache();
+  if (isWakeOutcomes(process.argv.slice(2))) return mainWakeOutcomes();
   if (isMap(process.argv.slice(2))) return mainMap();
   const { number, since, store: storePath, json, html, out } = parseArgs(process.argv.slice(2));
   const { homeProjectDeclaration } = await import("../project-config.ts");
   const rowRepo = homeProjectDeclaration().tracker[0].repo;
   const cache = join(homedir(), ".cache", "a11ign");
-  const { store, report: ingested } = ingestTranscripts({ root: join(homedir(), ".claude", "projects"), codexRoot: join(homedir(), ".codex", "sessions"), since, ledger: parseLedger(readFileSync(join(cache, "wake-ledger"), "utf8")), rowRepo, storePath, ghLedgers: ghLedgerFiles(), deferralLogs: [join(cache, DEFERRAL_LOG_FILE)] });
+  const { store, report: ingested } = ingestTranscripts({ root: join(homedir(), ".claude", "projects"), codexRoot: join(homedir(), ".codex", "sessions"), since, ledger: parseLedger(readFileSync(join(cache, "wake-ledger"), "utf8")), rowRepo, storePath, ghLedgers: ghLedgerFiles(), deferralLogs: [join(cache, DEFERRAL_LOG_FILE)], promptLogs: promptLogFiles(cache) });
   const gh = countingGh(ghApi);
   const { rows, prs } = resolveSubject(number, rowRepo, gh);
   const seen = readGithubEvents({ rows, prs, repo: rowRepo, gh });
