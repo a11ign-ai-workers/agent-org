@@ -78,6 +78,7 @@ import { stateEntryPath } from "./host-config.ts"; // #2799
 import { REPEAT_TICKS, normaliseLine, repeatingLinesTick, type RepeatingGroup } from "./repeating-lines.ts";
 // #2936: THE ORG-HEALTH QUESTION, in its own leaf for the same reason: relative imports only, so the gate keeps the property its own header states.
 import { redSinceOf, readToolAgreement, readReleaseRuns } from "./org-health.ts";
+import { ghQueueTick } from "./gh-ledger.ts"; // #4898
 import { readNodeStrips } from "./node-strips-types.ts";
 import { liveClassRepeatIo, readClassRepeat } from "./class-repeat.ts";
 import { cachedReleaseBehind, readReleaseBehind, npmRegistryRead } from "./release-behind-main.ts";
@@ -8186,13 +8187,26 @@ export function withStaleRefusals(prs: any[], required: string[] | null, { portF
   return stamped.size === 0 ? prs : prs.map((pr) => (stamped.has(Number(pr?.number)) ? { ...pr, staleRefusal: stamped.get(Number(pr.number)) } : pr));
 }
 
+/**
+ * (#4898) THE REFUSED-CALL QUEUE'S TICK, said on stderr where the tick log reads it. A write GitHub refused for a rate limit was held by `host/gh`; the
+ * gate makes it once the reset has passed and writes the 70% incident for a pool nearly spent. NEVER FAILS THE TICK: a queue that cannot be read is a line,
+ * and the orders this tick would have sent are not held behind it.
+ */
+export function ghQueueTickOrSay(tick: () => string[] = ghQueueTick, log: (line: string) => void = (line) => process.stderr.write(line)) {
+  try {
+    for (const line of tick()) log(`${line}\n`);
+  } catch (error) {
+    log(`gh-queue: the tick could not run (${String((error as Error)?.message ?? error).split("\n")[0]}); queued calls stay queued\n`);
+  }
+}
+
 function main() {
   refuseUnknownFlags([], { entry: import.meta.url, command: "node packages/agent-org/src/work-gate.ts" });
   const githubStatus = startGithubStatus(); // #3723: FIRST, so its wall overlaps the reads below and never adds to them
   // READ BEFORE ANY GITHUB CALL (#2163), because it is the one reading a `CANNOT_ASK` exit must not hide: a tick
   // that cannot reach GitHub delivers nothing, so on that path the stderr line is the only thing that says the
   // disk is full. Its ORDER is put in front of the others further down.
-  const diskOrders = diskHeadroomTick();
+  const diskOrders = diskHeadroomTick(); ghQueueTickOrSay(); // #4898: BEFORE any read, which it does not wait on; `main` is at its line limit
   const prs = readPrs();
   const readyRows = readReadyRows();
 

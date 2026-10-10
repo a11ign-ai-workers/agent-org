@@ -1,0 +1,22 @@
+A GitHub rate limit no longer stops a session. `host/gh` queues a WRITE that GitHub refuses for a primary or secondary rate limit (the whole call, its working directory, stdin and any `--body-file`) under `<GH_CONFIG_DIR>/refused-queue`, says `QUEUED, NOT SENT ... the gate makes it after HH:MM:SSZ` and exits 75 ("held, not failed"); reads, successes and every other failure are exactly what they were. `pr-open` reports a held create as `QUEUED, NOT FAILED` (exit 75) and attaches the arm and the session label to the entry. The gate's tick (`ghQueueTick`, called once per `work-gate` run) makes each due call after its reset, requeues a refusal with a longer wait, and keeps any other failure (or a call over six hours old) under `failed/` with a `.why`. The same tick reads each identity's `gh-calls.tsv` and, when a pool has spent 70% of its hour, writes one `incident` ledger line naming the top callers.
+
+Done-when, by test name (all in the two files of the row's command): **queued** -- `a primary rate-limit refusal of a WRITE exits 75 ...` (and `END TO END`); **retried after the reset** -- `the retry makes nothing BEFORE the reset and makes the call AFTER it, once, and clears it` and the end-to-end case, which makes the call from its own directory with its own stdin; **70% alarm** -- `a pool alarms at 70% of its hour and not a point before; the line names the callers that spent it` (3499 quiet, exactly 3500 alarms).
+
+Evidence (this branch, agent-org worktree): `src/gh-ledger.test.ts` 13 and `src/pr-open.test.ts` 6 pass (`VERDICT pass: 19 tests in 2 files`); with the neighbouring wrapper, ledger, gate and pr-open suites `pass: 183 tests in 18 files`. `tsc --noEmit` reports only the two pre-existing `mjs-ratchet.test.ts` errors.
+
+Mutation (each restored from a copy in `$TMPDIR`, `diff` clean): the wrapper never queues -> 4 red (the queued write, the shell/TS phrase-list agreement, the secondary/blind/body-file case, the end to end); it queues reads too -> 1 red (the positive-control case); it exits 0 not 75 -> 3 red; the retry ignoring the reset -> 3 red (before-the-reset case among them); follow-ups run after a refusal -> 2 red; a refused-again call removed instead of requeued -> 1 red; the alarm line 0.7 -> 0.8 -> 3 red; the alarm `>=` -> `>` -> 1 red (the exactly-3500 boundary; the first draft left this one green and the fixture was tightened); pr-open returning the nothing-sent code for a held call -> 4 red.
+
+Acceptance: `bash -c 'cd /home/agent/repos/agent-org-wt-4898 && npx rstest run --config scripts/rstest/rstest.config.ts src/pr-open.test.ts src/gh-ledger.test.ts'`
+
+Outside-Region: src/packaging/host-project-paths.test.ts -- `TODAYS_GH_WRAPPER` is the sha256 of the shipped wrapper and moves with it, as at a11ign#4397, #4148 and #4900.
+Outside-Region: .changeset/a-github-rate-limit-never-stops-a-session.md -- the release entry every behaviour change carries.
+
+Not done, by choice: (1) the live queued-then-completed reading is the separate verify row's, not this PR's; (2) `worker-state` has no `waiting-github` declaration, so a session that is told "queued" ends its turn on `done`/`waiting-*` as before (a state outside the Region); (3) the pool limit is a fixed 5,000 points, which under-states a GitHub App's allowance, so an app's alarm fires early, never late; (4) the human `~/.config/gh` account is never retried by the gate, only the workers and leads configs; (5) the installed wrapper reads DIVERGED until `host:install` runs on the host, which is a host action.
+
+Closes a11ign/a11ign#4898
+
+platform: GitHub reports a rate limit as a refusal with the phrases in `refusalKind` (primary: `API rate limit exceeded`, HTTP 429; secondary: `secondary rate limit`, `abuse detection`) and the reset as `X-Ratelimit-Reset` on any real call; the wrapper reads that header off a probe call, never `rate_limit`, and falls back to an hour (primary) or two minutes (secondary).
+
+Net lines: positive (about 290 in `gh-ledger.ts`, 125 in `host/gh`, 75 in `pr-open.ts`, the gate hook is one line); the queue logic lives in the ledger module so the wrapper's shell stays the thin part.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
