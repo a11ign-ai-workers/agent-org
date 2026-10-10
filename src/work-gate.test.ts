@@ -78,7 +78,7 @@ test("(1a) THE CONTROL: the folded lanes are the server-side lanes, row for row,
   assert.ok(!asked[0].includes("--label"), "the one call is the whole open list");
 });
 
-test("(1b) a FULL open list may have been cut, so nothing is made from it: the label reads are asked as they were, and a row beyond the cut is found", () => {
+test("(1b) a FULL open list may have been cut, so nothing is made from it: the label reads are asked as they were (together, in a second batch), and a row beyond the cut is found", () => {
   const filler = Array.from({ length: OPEN_ROWS_LIMIT + 20 }, (_, at) => row(1000 + at, []));
   const beyond = row(2000, [BACKLOG_LABEL]);
   const open = [...FIXTURE, ...filler, beyond];
@@ -92,8 +92,9 @@ test("(1b) a FULL open list may have been cut, so nothing is made from it: the l
   const folded = readWithFirstWaveTogether((read) => ({ promotableRows: readPromotableRows(read), chairmanBlocked: readChairmanBlocked(read), openRowsRead: readOpenRows(read) }), answeringAlone, batch);
   assert.deepEqual(folded, unfolded);
   assert.ok((folded.promotableRows ?? []).some((r: any) => r.number === 2000), "the backlog row beyond the 500 is in the lane");
-  assert.equal(asked.length, 1, "the batch sent the whole list only");
-  assert.equal(direct.filter((a) => a[0] === "issue").length, 2, "and the two label reads ran on their own, as before");
+  assert.ok(!asked[0].includes("--label"), "the batch sent the whole list first");
+  assert.deepEqual(asked.slice(1).map((a) => a[a.indexOf("--label") + 1]).sort(), [BACKLOG_LABEL, NEEDS_CHAIRMAN_LABEL].sort(), "and then the two label reads, together, as they were asked before the fold");
+  assert.equal(direct.filter((a) => a[0] === "issue").length, 0, "none of them one by one");
 });
 
 test("(1c) a read that asks for a field the open list does not carry is not folded", () => {

@@ -375,17 +375,32 @@ function openRowsListOf(args: string[]): OpenRowsList | null {
  * it, so the folded call is not answered here and is asked as it always was (`readWithFirstWaveTogether` falls through to `run`): the fold is a saving
  * when the list is complete and never a different answer.
  */
-function foldIntoOpenRows(calls: { args: string[]; repo: string | undefined }[]): { send: typeof calls; derived: Map<string, { from: string; list: OpenRowsList }> } {
+function foldIntoOpenRows(calls: { args: string[]; repo: string | undefined }[]): { send: typeof calls; derived: Map<string, { from: string; list: OpenRowsList; call: (typeof calls)[number] }> } {
   const asked = calls.map((call) => ({ key: callKey(call.args, call.repo), repo: call.repo ?? "", list: openRowsListOf(call.args) }));
   const wholes = new Map<string, { key: string; list: OpenRowsList }>();
   for (const { key, repo, list } of asked) if (list !== null && list.label === null && list.limit === OPEN_ROWS_LIMIT) wholes.set(repo, { key, list });
-  const derived = new Map<string, { from: string; list: OpenRowsList }>();
-  for (const { key, repo, list } of asked) {
+  const derived = new Map<string, { from: string; list: OpenRowsList; call: (typeof calls)[number] }>();
+  for (const [at, { key, repo, list }] of asked.entries()) {
     const whole = wholes.get(repo);
     const foldable = list !== null && list.label !== null && whole !== undefined && list.limit <= OPEN_ROWS_LIMIT && list.fields.every((field) => whole.list.fields.includes(field));
-    if (foldable) derived.set(key, { from: whole.key, list });
+    if (foldable) derived.set(key, { from: whole.key, list, call: calls[at] });
   }
   return { send: calls.filter((call) => !derived.has(callKey(call.args, call.repo))), derived };
+}
+
+/**
+ * A folded call whose list could not answer it (the page came back full, or was refused) is asked as it always was: together with the others like it, in
+ * ONE more batch, and never one by one -- those reads were in the first wave before the fold. A single call is left to `run`, which is what a batch of one is.
+ * A batch that cannot be made leaves them to `run` too.
+ */
+function askTogether({ calls, batch, waiting, log }: { calls: { args: string[]; repo: string | undefined }[]; batch: typeof runBatch; waiting: Map<string, unknown>; log: (line: string) => void }): void {
+  if (calls.length < 2) return;
+  try {
+    const answers = batch(calls);
+    calls.forEach((call, at) => waiting.set(callKey(call.args, call.repo), answers[at]));
+  } catch (err) {
+    log(`NOTE: ${calls.length} folded gh calls could not be batched, so they run one by one: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
 }
 
 /** @returns the folded call's answer made from the whole list's, or `undefined` when that list is not a complete array of rows */
@@ -427,11 +442,14 @@ export function readWithFirstWaveTogether<T>(read: (run: (args: string[], repo?:
     return read(run);
   }
   const waiting = new Map(send.map((call, at) => [callKey(call.args, call.repo), answers[at]]));
-  for (const [key, { from, list }] of derived) {
+  const notFolded: typeof calls = [];
+  for (const [key, { from, list, call }] of derived) {
     const whole = waiting.get(from);
     const answer = whole !== undefined && !("failed" in whole) ? answerFromOpenRows(whole.stdout, list) : undefined;
     if (answer !== undefined) waiting.set(key, { stdout: answer });
+    else notFolded.push(call);
   }
+  askTogether({ calls: notFolded, batch, waiting, log });
   return read((args, repo = activeRepo) => {
     const key = callKey(args, repo);
     const answer = waiting.get(key);
