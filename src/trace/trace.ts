@@ -34,7 +34,7 @@ import { freshnessLine, sessionsWorking, STALE_AFTER_MS, storeFreshness, transcr
 import { fingerprint, HEAD_BYTES, loadState, planRead, saveState, stateFileFor } from "./ingest-state.ts";
 import type { Carry, FileState, IngestState } from "./ingest-state.ts";
 import type { GhCallsReport } from "./gh-calls.ts";
-import { appendToStore, CLIENT_CACHE_READ_RATE, compactStore, COST_BY, costBy, DEFINITIONS, duplicateIds, eventsForRow, eventsOfDeferrals, eventsOfTranscript, openStore, readStore, repriceEvents, subjectOf, subjectsOf as subjectsOfKey } from "./store.ts";
+import { appendToStore, CLIENT_CACHE_READ_RATE, compactStore, COST_BY, costBy, DEFINITIONS, duplicateIds, eventsForRow, eventsOfDeferrals, eventsOfTranscript, openStore, readStore, repriceEvents, subjectOf, subjectsOf as subjectsOfKey, withCompactionUsage } from "./store.ts";
 import { DEFINITIONS as WATERFALL_DEFINITIONS, renderWaterfall, waterfall } from "./waterfall.ts";
 import type { Stats } from "node:fs";
 import type { LedgerEntry, PullRequest } from "../wakes-per-row.ts";
@@ -385,7 +385,7 @@ export function ingest({ root, codexRoot = null, since, ledger, rowRepo, store, 
       failed.push(`${file}: ${(cause as Error).message}`);
     }
   }
-  const { added } = appendToStore(store, batch);
+  const { added } = appendToStore(store, withCompactionUsage(batch, store.events));
   return { ...counts, bytesRead: meter.bytes, failed, reread, added, coldStart, firstRunAt: state.firstRunAt, firstRunSince: state.firstRunSince, state: { ...state, files } };
 }
 
