@@ -2306,7 +2306,8 @@ export function missingUnitPrograms(deps: ShippedDeps & {
 
 /**
  * THE INSTALL THE HELD CHECKOUT IS WAITING FOR (a11ign/a11ign#4392): `host-install-pending`, one finding per installed unit (or the launcher) that runs a program the release
- * `update-tool` would move to lacks. The question lives in `update-tool.ts`, which asks it before every move, so the hold and this report cannot disagree; it is in `hostUnitDrift`
+ * `update-tool` would move to lacks, and (a11ign/agent-org#714) one `package.json` finding when the release declares `dependencies` the tool's `node_modules` does not hold, which
+ * `update-tool` installs itself and so reports only after that install failed. The questions live in `update-tool.ts`, which asks them before every move, so the hold and this report cannot disagree; it is in `hostUnitDrift`
  * so the gate's `hostDriftOrders` wakes `orchestrator` with the unit names from a tick that still runs. A host naming no `tool` has no checkout to hold, and reports nothing.
  * @param {ShippedDeps & { installedDir?: string, run?: (args: string[]) => string }} [deps] @returns {Finding[]}
  */
