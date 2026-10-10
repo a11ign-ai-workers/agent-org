@@ -18,7 +18,7 @@ VERDICT pass: 200 tests in 4 files   (the three above plus src/packaging/no-npm-
 $ npx tsc --noEmit -p tsconfig.json     # clean
 ```
 
-Acceptance: `npx rstest run --config scripts/rstest/rstest.config.ts src/update-tool.test.ts src/packaging/host-units.test.ts`
+Acceptance: `npx rstest run --config scripts/rstest/rstest.config.ts src/update-tool.test.ts src/packaging/no-npm-spawn.test.ts`
 
 Mutation: the install step dropped from `updateTool` -> 4 red (D1, D2, D4 and the source pin); the install moved AFTER the checkout -> 3 red (D1, D2, pin); a failed install no longer holds -> 1 red (D2); `dependencyDrift` always reports drift -> 3 red (D1, the negative control D3, D5); the dependency finding not returned -> 1 red (D2). Each restored with `cp` and `diff`ed byte-identical.
 
