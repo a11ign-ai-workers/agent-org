@@ -38,6 +38,7 @@ import type { Carry, Previous } from "./ingest-state.ts";
 export const DEFINITIONS = [
   "EVENT: one record in the store, `kind` turn | wake | compaction | gh_call | deferral, or one of GitHub's (`GITHUB_KINDS`). A record is never edited; running the ingest twice adds nothing, because every record has a stable `id`.",
   "TURN: one API message of a Claude session (de-duplicated by message id), with its tokens, cost and wall-clock. It belongs to the wake that precedes it in its transcript.",
+  "COMPACTION (`kind: compaction`, agent-org#478): one `isCompactSummary` record of a transcript. THE CALL THAT WROTE THE SUMMARY IS IN NO TURN and the transcript holds no usage for it (measured on 1,351 compactions: the summary is a `user` record with no `usage`, `compact_boundary` carries only `preTokens`, `postTokens` and `durationMs`, and no record between them has one). Its usage exists only in Claude Code's own OpenTelemetry, as an `api_request` with `query_source: \"compact\"`, which `otel-receiver.ts` stores (as `querySource`) for a process launched with the exporter's variables. When the ingest finds that request (the same session id, nearest the summary record, each used once) the event carries `tokens`, `model` and `costUsd` (priced like a turn, `null` for a model with no price, never 0); when it does not, the event carries `costUsd: null` and `unmeasured: \"no-usage-record\"`, which is NOT a free compaction. An event stored before the reader has neither and is read as unmeasured. The call is separate from the turn that follows (which re-reads the window and is priced as a turn), so adding it counts nothing twice.",
   "WAKE: a delivery that started a model turn (wakes-per-row's definition). `deliveryLagMs` is delivery minus the time `wake` typed the order, when the ledger line pairs (not the gate's deferral, which no record keeps).",
   "WALL-CLOCK OF A TURN (inferred): from the record before its first block to its last block. That record is stamped after a tool call ends, so the call is NOT in it: it is the model's own time.",
   "TOOL TIME OF A TURN (`toolMs`, measured): when the message follows a tool call, from the last block of the message before it to the tool's result record; `null` when it follows no tool call, never 0. A turn that follows an order or a prompt has none, and so does the first turn of a read when nothing was carried to say when the call began.",
@@ -102,7 +103,11 @@ export type TraceEvent = {
   script?: string; sessionId?: string; keyedBy?: "session" | "time" | null; unkeyed?: "script" | "no-turn";
   /** a turn's reasoning effort as Claude Code wrote it on the transcript record; ABSENT when the record carried none, which is not `low` (agent-org#469) */
   effort?: string;
+  /** a compaction whose summary call has no readable usage (`costUsd` is then null, never 0); ABSENT on a measured one, and on one stored before the reader, which says nothing */
+  unmeasured?: typeof NO_USAGE_RECORD;
 };
+
+export const NO_USAGE_RECORD = "no-usage-record";
 
 export type ToolRead = { tool: "Read" | "Grep" | "Glob" | "mixed"; tokens: number | null };
 
@@ -122,11 +127,11 @@ export function costOf(model: string | undefined, tokens: Tokens, cacheReadRate?
 /**
  * The events with every turn's `costUsd` REPRICED from `PRICES` as it stands now, never read off the line it was stored on: the store is append-only and a transcript that has not
  * changed is not read again, so a price added after ingest (a11ign/a11ign#3582) would otherwise never reach the turns stored before it (#3638: 147,675 turns kept `null`).
- * A model with no price stays `null`. A turn with no `tokens` has nothing to price from and is left as stored, and any event that is not a turn is returned as it came.
+ * A model with no price stays `null`. A turn with no `tokens` has nothing to price from and is left as stored, and any event that is not a turn or a measured compaction is returned as it came.
  */
 export function repriceEvents(events: TraceEvent[]): TraceEvent[] {
   return events.map((event) => {
-    if (event.kind !== "turn" || !event.tokens) return event;
+    if ((event.kind !== "turn" && event.kind !== "compaction") || !event.tokens) return event;
     const costUsd = costOf(event.model, event.tokens);
     return costUsd === event.costUsd ? event : { ...event, costUsd };
   });
@@ -335,7 +340,7 @@ export function eventsOfTranscript({ text, file, ledger, rowRepo, carry = null, 
     ?? { id: null, ...subjectOfSession(session, rowRepo), cause: null, causeKey: null };
   const priorAt = carry?.lastAt ?? null;
   const reads = toolReadsOf({ records, groups: groups.filter((group) => !held.includes(group)), end: settled.length, carried: carry?.previous ?? null });
-  events.push(...turnsOf({ records, groups: groups.filter((group) => !held.includes(group)), session, transcript: transcriptId(file), owner, priorAt, rowRepo, reads: reads.byMessage }), ...compactionsOf(settled, session, owner));
+  events.push(...turnsOf({ records, groups: groups.filter((group) => !held.includes(group)), session, transcript: transcriptId(file), owner, priorAt, rowRepo, reads: reads.byMessage }), ...compactionsOf(settled, session, owner, transcriptId(file)));
   const lastAt = settled.findLast((candidate) => !Number.isNaN(candidate.at))?.at ?? priorAt;
   const remembered = [...used, ...spent].filter((entry) => latest === null || entry.at >= latest.at - LEDGER_MEMORY_MS);
   return {
@@ -500,12 +505,64 @@ function toolMsBefore(records: Rec[], first: number, startedAt: number | null): 
   return startedAt === null || Number.isNaN(resultAt) ? null : Math.max(0, resultAt - startedAt);
 }
 
-function compactionsOf(records: { index: number; at: number; record: any; }[], session: string, owner: Owner): TraceEvent[] {
+/**
+ * One event per compaction summary record. THE TRANSCRIPT HOLDS NO USAGE FOR THE CALL THAT WROTE IT (a11ign/agent-org#478, measured: 0 of 1,351 compactions have a record with
+ * `usage` between `compact_boundary`'s start and the summary, and the summary is a `user` record), so the event is born `unmeasured`; `measureCompactions` fills it from Claude
+ * Code's own `api_request` when the exporter saw the call. `transcript` is the id that request names as its `session.id`.
+ */
+function compactionsOf(records: { index: number; at: number; record: any; }[], session: string, owner: Owner, transcript: string): TraceEvent[] {
   return records.filter(({ record }) => record?.isCompactSummary === true && !Number.isNaN(Date.parse(record.timestamp))).map(({ at }) => {
     const own = owner(at);
     return { id: `compaction:${session}:${at}`, kind: "compaction", source: "transcript", at, session, row: own.row, pr: own.pr, repo: own.repo, ...listedBy(own),
-      cause: own.cause, causeKey: own.causeKey, wakeId: own.id };
+      cause: own.cause, causeKey: own.causeKey, wakeId: own.id, transcript, costUsd: null, unmeasured: NO_USAGE_RECORD };
   });
+}
+
+/** What of an `otel-receiver.ts` `api_request` the join reads (the store holds it under `kind: "api_request"`). */
+export type SummaryRequest = { kind?: string; id: string; at: number; sessionId: string | null; querySource?: string | null; model: string | null;
+  usage: { input: number | null; output: number | null; cacheRead: number | null; cacheCreation: number | null }; };
+
+/** A request and the summary record it wrote are stamped milliseconds apart (measured: 5 ms); a minute is far more than that and far less than the gap between two compactions. */
+export const SUMMARY_MATCH_MS = 60_000;
+const COMPACT_QUERY_SOURCE = "compact";
+
+/**
+ * The compactions with the usage of the call that wrote their summary, where Claude Code's exporter saw it: `api_request` with `query_source: "compact"`, of the same session id,
+ * nearest the summary record, each request used once. Its tokens go in the store's shape (an unsplit cache write at the 1-hour rate, as the COST definition says), priced by `costOf`:
+ * `null` for a model with no price, never 0. A compaction with no such request, or whose request lacks a count, is returned as it came: `unmeasured`, not free.
+ * It is a SEPARATE API call from every turn, so no turn changes and none is added.
+ */
+export function measureCompactions(compactions: TraceEvent[], requests: SummaryRequest[]): TraceEvent[] {
+  const wanted = requests.filter((request) => request.kind === "api_request" && request.querySource === COMPACT_QUERY_SOURCE && request.sessionId !== null);
+  const used = new Set<string>();
+  return [...compactions].sort((a, b) => a.at - b.at).map((compaction) => {
+    if (compaction.kind !== "compaction" || compaction.transcript === undefined) return compaction;
+    const near = wanted.filter((request) => request.sessionId === compaction.transcript && !used.has(request.id) && Math.abs(request.at - compaction.at) <= SUMMARY_MATCH_MS)
+      .sort((a, b) => Math.abs(a.at - compaction.at) - Math.abs(b.at - compaction.at) || a.at - b.at);
+    const found = near.find(({ usage }) => [usage.input, usage.output, usage.cacheRead, usage.cacheCreation].every((count) => count !== null));
+    if (!found) return compaction;
+    used.add(found.id);
+    const tokens: Tokens = { input: found.usage.input as number, output: found.usage.output as number, cacheRead: found.usage.cacheRead as number, cacheWrite5m: 0, cacheWrite1h: found.usage.cacheCreation as number };
+    const measured: TraceEvent = { ...compaction, tokens, costUsd: found.model === null ? null : costOf(found.model, tokens) };
+    if (found.model !== null) measured.model = found.model;
+    delete measured.unmeasured;
+    return measured;
+  });
+}
+
+/**
+ * The batch an ingest appends, with the usage of each compaction's summary call where the store holds the exporter's request for it: the compactions of the batch, and the ones
+ * already stored `unmeasured` whose request has arrived since (the receiver is another writer, so it is often later than the transcript). A late one is a corrected copy of the
+ * stored event and replaces it (SUPERSEDED); one still `unmeasured` is not appended again.
+ * @param stored the store's events, among them the `api_request` lines of `otel-receiver.ts`
+ */
+export function withCompactionUsage(batch: TraceEvent[], stored: TraceEvent[]): TraceEvent[] {
+  const requests = stored.filter((event) => (event.kind as string) === "api_request") as unknown as SummaryRequest[];
+  if (requests.length === 0) return batch;
+  const inBatch = new Set(batch.map((event) => event.id));
+  const late = stored.filter((event) => event.kind === "compaction" && event.unmeasured === NO_USAGE_RECORD && !inBatch.has(event.id));
+  const measured = new Map(measureCompactions([...batch.filter((event) => event.kind === "compaction"), ...late], requests).map((event) => [event.id, event]));
+  return [...batch.map((event) => measured.get(event.id) ?? event), ...late.map((event) => measured.get(event.id) as TraceEvent).filter((event) => event.unmeasured === undefined)];
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------

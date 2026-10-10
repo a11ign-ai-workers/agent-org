@@ -224,7 +224,9 @@ test("REPEAT CLASSES: each class's count and dollars, each turn priced once, and
   assert.deepEqual([byId.deferred.count, byId.deferred.dollars], [0, NOT_HELD]);
   near(total.dollars, 0.5 + 0.012 + 0.3 + 0.4 + 0.006);
   assert.equal(total.tokens, classes.reduce((sum: any, entry: { tokens: any; }) => sum + entry.tokens, 0), "the headline's tokens are every class's, the not-derivable ones too");
-  assert.equal(total.floor, false);
+  // agent-org#478: the ceo's compaction has no usage record for its summary call, so the compaction line, and the headline that sums it, omit that spend: a floor, counted once.
+  assert.equal(byId.compaction.unmeasured, 1);
+  assert.equal(total.floor, true);
 });
 
 test("REPEAT CLASSES: a class whose turns are all unpriced is not derivable (never 0), and the week before has none of week B's repeats", () => {
