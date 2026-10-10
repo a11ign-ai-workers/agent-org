@@ -67,7 +67,7 @@ const inOneHour = () => Math.floor(Date.now() / 1000) + 1800;
 
 test("#4898: a primary rate-limit refusal of a WRITE exits 75, says QUEUED, keeps the refusal text, and holds the call whole", () => {
   const reset = inOneHour();
-  const h = host({ reply: GRAPHQL_REFUSAL, status: 1, headers: `HTTP/2.0 403 Forbidden\nX-Ratelimit-Remaining: 0\nX-Ratelimit-Reset: ${reset}\n\n` });
+  const h = host({ reply: GRAPHQL_REFUSAL, status: 1, headers: `HTTP/2.0 403 Forbidden\nX-Ratelimit-Reset: ${reset}\n\n` });
   const r = h.run({}, "", "issue", "comment", "12", "--body", "line one\nline two\n", "--repo", "a11ign/a11ign");
   assert.equal(r.status, QUEUED_EXIT);
   assert.match(r.stderr, /GraphQL: API rate limit already exceeded/, "the refusal itself is still printed, unchanged");
