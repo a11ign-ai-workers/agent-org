@@ -38,7 +38,11 @@ import { AUTOCOMPACT_WINDOW_TOKENS, clampWindow, haikuTierProfile, HAIKU_TIER_LA
 export type Route = "haiku/high" | "sonnet/medium" | "sonnet/high";
 /** `override` is a `tier:haiku` label deciding; `refused` is a row nothing may lower; `jev` is a provider's answers composed; `fallback` is the file-count rule. */
 export type Via = "override" | "refused" | "jev" | "fallback";
-export type RouteRow = { number: number; title: string; labels: readonly string[]; body: string };
+export type RouteRow = {
+  number: number;
+  /** The tracker key of another tracker's row (`agent-org`); absent for the first tracker's. It spells the ledger id, so `agent-org#7` and a11ign's `#7` are two rows (a11ign/agent-org#756). */
+  key?: string;
+  title: string; labels: readonly string[]; body: string };
 export type Routed = { route: Route; via: Via;
   /** THE REASON THE ROUTE WAS TAKEN, one text: the work tick's `routed ...` journal line and the decision log's outcome line (`route <route> via <via> (<why>)`) both print it. */ why: string;
   /** `null` is the ordinary Sonnet/high profile at the ordinary window, byte-identical to before. */ profile: TierProfile | null;
@@ -89,6 +93,8 @@ const ACCEPTANCE_CHARS = 600;
 const DONE_WHEN_ITEMS = 8;
 const DONE_WHEN_CHARS = 200;
 const ID_PREFIX = "row-";
+/** The decision log's id for a row: `row-<n>` for the first tracker's, `row-<key>-<n>` for another's -- the spelling its worker is named by. */
+const idOf = ({ key, number }: Pick<RouteRow, "key" | "number">): string => `${ID_PREFIX}${key === undefined || key === "" ? "" : `${key}-`}${number}`;
 
 // --- the criteria: what each answer means, with rows whose outcome is known (#4764 change 3 and #4752, the method of #4627's 07:45Z direction) ---
 //
@@ -455,7 +461,7 @@ export async function routeEngineer(row: RouteRow, deps: RouteDeps): Promise<Rou
   const routed = sizeWindow(chosen, row, provided, deps);
   const window = `${windowLabel(windowOf(routed))}${routed.windowWhy === undefined ? "" : ` (${routed.windowWhy})`}`;
   const wouldBe = routed.via === "jev" ? ` [fallback would be ${fallbackRoute(row)}]` : "";
-  recordOutcome("model-routing", `${ID_PREFIX}${row.number}`, `route ${routed.route} window ${window} via ${routed.via} (${routed.why})${wouldBe}`, deps, routed.reason);
+  recordOutcome("model-routing", idOf(row), `route ${routed.route} window ${window} via ${routed.via} (${routed.why})${wouldBe}`, deps, routed.reason);
   if (routed.via === "jev") guardRouteCost(deps);
   return routed;
 }
@@ -499,7 +505,7 @@ async function routeOnly(row: RouteRow, deps: RouteDeps): Promise<Chosen> {
   }
   const held = whyHeld(row);
   if (held !== null) return alone({ ...ordinary("refused", held), reason: held });
-  const decision = await decide("model-routing", routeState(row), QUESTIONS, { ...deps, id: `${ID_PREFIX}${row.number}` });
+  const decision = await decide("model-routing", routeState(row), QUESTIONS, { ...deps, id: idOf(row) });
   if (decision.via === "none") return alone(withReason(profiled(fallbackRoute(row), "fallback", row, deps.haikuSwitchPath), decision.reason ?? "the provider gave no answer and no reason"));
   const composed = composeRoute(readingsOf(decision.answers), { regionFiles: regionFileCount(row.body) });
   const routed = profiled(composed, "jev", row, deps.haikuSwitchPath);
