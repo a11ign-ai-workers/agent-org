@@ -1,6 +1,6 @@
 The engineer route is ONE choice put to Jev, accepted with uneven thresholds, instead of four questions composed by hand thresholds; a project's `routing` block selects it, and an absent block routes exactly as before (a11ign#4904).
 
-Closes a11ign#4904
+Closes a11ign/a11ign#4904
 
 ## What changes, and why
 
