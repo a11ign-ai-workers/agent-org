@@ -117,29 +117,36 @@ export function renderReport(entries: LedgerEntry[], where: { account?: string; 
 
 /**
  * (#4148) THE HOURLY ROLLUP BESIDE THE LEDGER. The ledger keeps its newest half past 2 MiB (70 minutes of the busy afternoon this was written in), so `host/gh` counts what
- * a trim is about to drop into `<ledger>.hourly` first: TAB lines of hour (`2026-10-08T13`), account, resource, calls, points READ, floor points. A reading for an hour is
- * the two files added, and they never overlap, because a line is dropped from the ledger in the same step that puts it in the rollup.
+ * a trim is about to drop into `<ledger>.hourly` first: TAB lines of hour (`2026-10-08T13`), account, resource, calls, points READ, floor points and, 7th, the caller SCRIPT
+ * (a11ign/a11ign#4148 residual: without it a per-caller reading existed only for the 80 minutes the raw ledger holds). A six-field line is one written before the caller was
+ * kept: it is read as it always was and its calls have no caller to name. A reading for an hour is the two files added, and they never overlap, because a line is dropped from
+ * the ledger in the same step that puts it in the rollup.
  * @param {string} ledgerPath
  */
 export const rollupPathOf = (ledgerPath: string) => `${ledgerPath}.hourly`;
 
-export type HourRow = {hour: string, account: string, resource: string, calls: number, read: number, floor: number};
+/** `caller` is the script that made the calls; it is absent on a row written before the rollup kept one, whose calls have no caller to name */
+export type HourRow = {hour: string, account: string, resource: string, calls: number, read: number, floor: number, caller?: string};
 
-/** @param {string} text @returns {HourRow[]} a line that is not six fields with numbers is skipped, as a half ledger line is */
+/** @param {string} text @returns {HourRow[]} a line that is not six or seven fields with numbers is skipped, as a half ledger line is */
 export function parseRollup(text: string): HourRow[] {
   const rows: HourRow[] = [];
   for (const line of text.split("\n")) {
     const f = line.split("\t");
     const [calls, read, floor] = [Number(f[3]), Number(f[4]), Number(f[5])];
-    if (f.length === 6 && /^\d{4}-\d\d-\d\dT\d\d$/.test(f[0]) && [calls, read, floor].every(Number.isFinite)) {
-      rows.push({ hour: f[0], account: f[1], resource: f[2], calls, read, floor });
+    if ((f.length === 6 || f.length === 7) && /^\d{4}-\d\d-\d\dT\d\d$/.test(f[0]) && [calls, read, floor].every(Number.isFinite)) {
+      rows.push({ hour: f[0], account: f[1], resource: f[2], calls, read, floor, ...(f[6] ? { caller: f[6] } : {}) });
     }
   }
   return rows;
 }
 
 /** @param {LedgerEntry} e @returns {HourRow} one call as the row it adds to its hour */
-const hourRowOf = (e: LedgerEntry): HourRow => ({ hour: e.time.slice(0, HOUR_CHARS), account: e.account, resource: e.resource.replace(/\?$/, ""), calls: 1, read: e.cost ?? 0, floor: points(e) });
+const hourRowOf = (e: LedgerEntry): HourRow => ({ hour: e.time.slice(0, HOUR_CHARS), account: e.account, resource: e.resource.replace(/\?$/, ""), calls: 1, read: e.cost ?? 0, floor: points(e), caller: callerScript(e.caller) });
+
+/** The rollup's rows and the ledger's lines, as the one kind of row they are, for one account's one resource if named. */
+const hourRows = (entries: LedgerEntry[], rollup: HourRow[], { account, resource }: { account?: string; resource?: string; }): HourRow[] =>
+  [...rollup, ...entries.map(hourRowOf)].filter((r) => (account === undefined || r.account === account) && (resource === undefined || r.resource === resource));
 
 /**
  * One reading per UTC hour for one account's one resource: the calls, the points the responses REPORTED (`read`) and the floor, which adds one point for every
@@ -150,9 +157,7 @@ const hourRowOf = (e: LedgerEntry): HourRow => ({ hour: e.time.slice(0, HOUR_CHA
  */
 export function perHour(entries: LedgerEntry[], rollup: HourRow[], { account, resource }: { account?: string; resource?: string; } = {}): { hour: string; calls: number; read: number; floor: number; }[] {
   const byHour: Map<string, { hour: string; calls: number; read: number; floor: number; }> = new Map();
-  for (const r of [...rollup, ...entries.map(hourRowOf)]) {
-    if (account !== undefined && r.account !== account) continue;
-    if (resource !== undefined && r.resource !== resource) continue;
+  for (const r of hourRows(entries, rollup, { account, resource })) {
     const row = byHour.get(r.hour) ?? { hour: r.hour, calls: 0, read: 0, floor: 0 };
     row.calls += r.calls;
     row.read += r.read;
@@ -162,10 +167,46 @@ export function perHour(entries: LedgerEntry[], rollup: HourRow[], { account, re
   return [...byHour.values()].sort((a, b) => a.hour.localeCompare(b.hour));
 }
 
-/** @param {ReturnType<typeof perHour>} hours @returns {string} one line per hour; a ledger and a rollup with nothing for the account say so, never print an empty reading */
-export function renderPerHour(hours: ReturnType<typeof perHour>): string {
+/** What the calls of an hour that no caller is recorded for are called: a rollup row from before the caller was kept, which is never given a guess. */
+export const NO_CALLER = "(caller not recorded)";
+
+export type HourCallers = { hour: string; callers: { caller: string; calls: number; read: number; floor: number }[] };
+
+/**
+ * WHO SPENT EACH HOUR: per UTC hour, the `limit` callers with the most floor points, from the same two files `perHour` adds. A caller is the script (`callerScript`),
+ * so the ledger's lines and the rollup's rows land in one bucket; a row with no caller is `NO_CALLER` and is never folded into a script it may not belong to.
+ * @param {LedgerEntry[]} entries @param {HourRow[]} rollup
+ * @param {{account?: string, resource?: string, limit?: number}} [where]
+ * @returns {HourCallers[]} oldest hour first
+ */
+export function perHourCallers(entries: LedgerEntry[], rollup: HourRow[], { account, resource, limit = DEFAULT_TOP }: { account?: string; resource?: string; limit?: number; } = {}): HourCallers[] {
+  const byKey: Map<string, { hour: string; caller: string; calls: number; read: number; floor: number }> = new Map();
+  for (const r of hourRows(entries, rollup, { account, resource })) {
+    const caller = r.caller ?? NO_CALLER;
+    const row = byKey.get(`${r.hour}\t${caller}`) ?? { hour: r.hour, caller, calls: 0, read: 0, floor: 0 };
+    row.calls += r.calls;
+    row.read += r.read;
+    row.floor += r.floor;
+    byKey.set(`${r.hour}\t${caller}`, row);
+  }
+  const byHour: Map<string, HourCallers["callers"]> = new Map();
+  for (const { hour, ...reading } of byKey.values()) byHour.set(hour, [...(byHour.get(hour) ?? []), reading]);
+  return [...byHour].sort(([a], [b]) => a.localeCompare(b))
+    .map(([hour, callers]) => ({ hour, callers: callers.sort((a, b) => b.floor - a.floor || b.calls - a.calls || a.caller.localeCompare(b.caller)).slice(0, limit) }));
+}
+
+/**
+ * @param {ReturnType<typeof perHour>} hours @param {HourCallers[]} [callers] when given (`--top`), each hour's line is followed by its top callers
+ * @returns {string} one line per hour; a ledger and a rollup with nothing for the account say so, never print an empty reading
+ */
+export function renderPerHour(hours: ReturnType<typeof perHour>, callers?: HourCallers[]): string {
   if (hours.length === 0) return "gh ledger: no calls recorded for that account and resource\n";
-  return `${hours.map((h) => `${h.hour}Z  ${String(h.calls).padStart(6)} calls  ${String(h.read).padStart(6)} points read  ${String(h.floor).padStart(6)} floor points`).join("\n")}\n`;
+  const lines = hours.flatMap((h) => [
+    `${h.hour}Z  ${String(h.calls).padStart(6)} calls  ${String(h.read).padStart(6)} points read  ${String(h.floor).padStart(6)} floor points`,
+    ...(callers?.find((c) => c.hour === h.hour)?.callers ?? []).map((c) =>
+      `    ${String(c.floor).padStart(6)} floor points (${String(c.read).padStart(6)} read)  ${String(c.calls).padStart(6)} calls  ${c.caller}`),
+  ]);
+  return `${lines.join("\n")}\n`;
 }
 
 /**
@@ -501,11 +542,12 @@ const readIfThere = (path: string): string => (existsSync(path) ? readFileSync(p
 if (import.meta.url === `file://${process.argv[1]}`) {
   const { file, perHour: hourly, ...where } = cliOptions(process.argv.slice(2));
   if (file === undefined) {
-    console.error("usage: node src/gh-ledger.ts <path to gh-calls.tsv> [--account <login>] [--resource graphql|core] [--top <n>] [--per-hour]");
+    console.error("usage: node src/gh-ledger.ts <path to gh-calls.tsv> [--account <login>] [--resource graphql|core] [--top <n>] [--per-hour]  (--per-hour --top <n>: each hour's top <n> callers)");
     process.exit(2);
   }
   const entries = parseLedger(readFileSync(file, "utf8"));
+  const rollup = parseRollup(readIfThere(rollupPathOf(file)));
   process.stdout.write(hourly
-    ? renderPerHour(perHour(entries, parseRollup(readIfThere(rollupPathOf(file))), where))
+    ? renderPerHour(perHour(entries, rollup, where), where.limit === undefined ? undefined : perHourCallers(entries, rollup, where))
     : renderReport(entries, where));
 }

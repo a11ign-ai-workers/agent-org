@@ -130,7 +130,8 @@ const TODAYS_TEXT = {
 // agent-org#486 MOVED IT AGAIN, deliberately: `issue comment`, `pr comment` and `pr review` get a trailing `<!-- decided-by: <role> run: <id> -->` line. Same staleness, same remedy.
 // a11ign/a11ign#4900 MOVED IT AGAIN, deliberately: a role `host.json` declares as `github-apps` calls as that app (`GH_TOKEN` from `app-token.ts`'s cache); for the recorded host, which declares none, the block is inert. Same staleness, same remedy.
 // a11ign/a11ign#4898 MOVED IT AGAIN, deliberately: a WRITE that GitHub refuses for a rate limit is queued under `<GH_CONFIG_DIR>/refused-queue` and the wrapper exits 75 ("held, not failed"); the gate's `ghQueueTick` makes it after the reset. Same staleness, same remedy. The review of #779 moved it once more: a `gh api graphql` whose BODY is a mutation in `--input FILE` or `-F name=@FILE` is a write too.
-const TODAYS_GH_WRAPPER = "4320270dd59d18173e56057e276f566023ca7469aac53c11328b33fe1ad8799c";
+// a11ign/a11ign#4148 residual (agent-org#741) MOVED IT AGAIN, deliberately: the caller is cut to 160 characters AFTER its `--import` preload is taken out, and the hourly rollup gains a seventh field, the caller's script. Same staleness, same remedy.
+const TODAYS_GH_WRAPPER = "4a7f1e64023828c0065d7a665c242ad69e3a0bd9721e00408bb96bc6c5446cd8";
 // #2896 MOVED THIS ONE, deliberately: the recorded host's header says `pnpm run host:install` / `pnpm run host:check` where it said `npm run`.
 const TODAYS_LEADS_LIST = "dbca070c4bb7934ff1e9cdc9505f9edee638d98fcff10963b18d5d3a743770a2";
 
