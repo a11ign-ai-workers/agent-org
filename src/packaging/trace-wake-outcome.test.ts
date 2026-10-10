@@ -236,6 +236,24 @@ test("settling: a batch is written once the oldest wake is old enough, a wake in
   assert.equal(settleWakeOutcomes({ store: h.store, ghLedgers: [h.ledger], promptLogs: h.logs, now: Date.parse("2026-10-10T19:00:00Z") }).settled, 0, "a second run changes nothing");
 });
 
+test("settling: the production readability scan ends for the final wake of a session (no wake after it) and a wake with no readable start is `null`, not whole", () => {
+  const h = host();
+  const at = (time: string) => Date.parse(time);
+  // `a` closes on `a2`, `b` on `b2`; `z` is a session's LAST wake with a turn, so nothing bounds its window but its own last turn. Its hour (12) is whole in the ledger.
+  appendToStore(h.store, [
+    { ...wake("z", 0, "pm"), at: at("2026-10-10T12:10:00Z") }, { ...turn("z", 0, { transcript: "run-z", session: "pm" }), at: at("2026-10-10T12:11:00Z") },
+    { ...wake("n", 0, "qa"), at: Number.NaN }, { ...turn("n", 0, { transcript: "run-n", session: "qa" }), at: at("2026-10-10T12:12:00Z") },
+  ] as TraceEvent[]);
+  const started = Date.now();
+  const done = settleWakeOutcomes({ store: h.store, ghLedgers: [h.ledger], promptLogs: h.logs, now: at("2026-10-10T18:00:00Z") });
+  assert.ok(Date.now() - started < 5_000, "the scan is bounded by the wake's own last turn");
+  const wakes = h.read();
+  assert.equal(wakes.z.outcome, "no-op", "a final wake in a whole hour is told, with the same scan the ingest runs");
+  assert.equal(wakes.z.runId, "run-z");
+  assert.equal(wakes.n.outcome, null, "a wake whose start is not a time is never read as a whole hour");
+  assert.deepEqual(done.failed, []);
+});
+
 test("settling: a host with no ledger file writes nothing, so its wakes print under `null` and a store with duplicate ids is not compacted behind the detector's back", () => {
   const h = host();
   const bare = settleWakeOutcomes({ store: h.store, ghLedgers: [join(h.dir, "gh", "absent.tsv")], promptLogs: h.logs, now: Date.parse("2026-10-10T18:00:00Z") });

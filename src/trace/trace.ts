@@ -496,6 +496,7 @@ export function settleWakeOutcomes({ store, ghLedgers, promptLogs, now }: { stor
     return report;
   }
   const readable = (from: number, to: number) => {
+    if (!Number.isFinite(from) || !Number.isFinite(to)) return false; // a span with no end is not a span the ledger can be whole for, and its scan would not end
     for (let hour = Math.floor(from / MS_PER_HOUR) * MS_PER_HOUR; hour <= to; hour += MS_PER_HOUR) if (!counted.has(hourOf(hour))) return false;
     return true;
   };
