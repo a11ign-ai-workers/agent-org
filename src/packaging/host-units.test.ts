@@ -2031,7 +2031,8 @@ test("#2332: an agent workspace that is NOT on the leads list gets the workers a
     for (const id of ["w3", "w9", "wD", "w-unknown"]) {
       const r = run({ HERDR_WORKSPACE_ID: id }, "api", "user");
       assert.match(r.stdout, new RegExp(`CONFIG=<${workersDir}/gh>`), `${id} must be routed to the workers account`);
-      assert.equal(r.reachedWith, "reached api user", "the stub PROVES it ran, with the caller's arguments");
+      // #4899: a plain `api <path>` GET is asked with `-i` (the wrapper reads the ETag off the header block and cuts the block off again), so the caller's arguments arrive with it.
+      assert.equal(r.reachedWith, "reached api -i user", "the stub PROVES it ran, with the caller's arguments");
       assert.equal(r.status, STUB_EXIT, "and gh-real's own exit status is the wrapper's");
     }
   } finally { rmSync(root, { recursive: true, force: true }); }
