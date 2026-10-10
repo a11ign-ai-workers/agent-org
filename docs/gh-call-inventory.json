@@ -3,11 +3,11 @@
   "summary": {
     "files": 94,
     "spawns": 133,
-    "calls": 389,
+    "calls": 390,
     "shapes": {
       "api rest": 136,
       "issue list": 42,
-      "api graphql": 37,
+      "api graphql": 38,
       "issue view": 34,
       "pr list": 29,
       "issue comment": 26,
@@ -302,7 +302,7 @@
     "src/close-rows-sweep.ts": {
       "spawns": 1,
       "calls": {
-        "api graphql": 1,
+        "api graphql": 2,
         "issue close": 1,
         "pr list": 1
       },
