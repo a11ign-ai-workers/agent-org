@@ -6137,6 +6137,15 @@ function rowMention({ key, number }: RowRef): string {
 }
 
 /**
+ * THE KEY A ROUTE IS FILED UNDER (a11ign/agent-org#756): the bare number for the first tracker's row, `agent-org#7` for another's, so a keyed row never takes the route of the
+ * first tracker's row of the same number. The first tracker's stays a number, as every reader of the routes already has it.
+ */
+export type RouteKey = number | string;
+export function routeKeyOf({ key, number }: RowRef): RouteKey {
+  return key === "" ? number : `${key}#${number}`;
+}
+
+/**
  * The repository a tracker KEY names in the project's declaration, or `null` for a key it does not declare -- which the caller reads as
  * "cannot tell", never as the first tracker's repository (#4685). The row lives in the TRACKER, which is not always the code repository
  * ({@link codeRepositoryOf}), so the tracker list answers.
@@ -6455,7 +6464,7 @@ export function spawnClaimer({ exec = defaultExec, exists = existsSync, worktree
   primary = PRIMARY_CHECKOUT, cloneOf = keyedClone, settle = () => {}, kept = () => null, forget = () => {}, readRow = readRowForTier, switchPath, routes }: {
         exec?: Exec; exists?: (path: string) => boolean; worktreesDir?: string; primary?: string; cloneOf?: (key: string) => { clone: string; } | { refusal: string; };
         settle?: (role: string) => void; kept?: (row: number) => KeptClaim | null; forget?: (row: number) => void;
-        readRow?: (row: number) => RowForTier; switchPath?: string; routes?: ReadonlyMap<number, Routed>;
+        readRow?: (row: number, key?: string) => RowForTier; switchPath?: string; routes?: ReadonlyMap<RouteKey, Routed>;
     } = {}): SpawnClaimer {
   return {
     claim(order, role, env) {
@@ -6485,8 +6494,7 @@ export function spawnClaimer({ exec = defaultExec, exists = existsSync, worktree
       return { refusal: `the claim of ${rowMention(ref)} as ${role} did not hold (${why})${undone}` };
     },
     release: (claimed, role, env) => releaseClaim(claimed, role, env, exec),
-    // The tier label and the route are read from the FIRST tracker's row of that number: for a keyed row that is another row's, so it gets the ordinary profile.
-    tier: (claimed) => (claimed.key === undefined || claimed.key === "" ? tierOfRow(claimed.row, { readRow, switchPath, routes }) : null),
+    tier: (claimed) => tierOfRow({ key: claimed.key ?? "", number: claimed.row }, { readRow, switchPath, routes }),
   };
 }
 
@@ -6495,13 +6503,16 @@ export function spawnClaimer({ exec = defaultExec, exists = existsSync, worktree
  * tick asks BEFORE it delivers) decides; with none, the `tier:haiku` label alone does (a11ign/a11ign#4382). A row that CANNOT BE READ gets the ordinary profile and the log says so:
  * the trial never blocks a spawn, because the claim has already landed and a refused spawn here would release a row over a spend experiment.
  */
-function tierOfRow(row: number, { readRow, switchPath, routes }: { readRow: (row: number) => RowForTier; switchPath?: string; routes?: ReadonlyMap<number, Routed> }): TierProfile | null {
+function tierOfRow(ref: RowRef, { readRow, switchPath, routes }: { readRow: (row: number, key?: string) => RowForTier; switchPath?: string; routes?: ReadonlyMap<RouteKey, Routed> }): TierProfile | null {
   const log = (line: string) => { process.stderr.write(`${line}\n`); };
-  const routed = routes?.get(row);
+  const { number: row } = ref;
+  const routed = routes?.get(routeKeyOf(ref));
   if (routed !== undefined) {
-    log(`wake: #${row} routed ${routed.route} via ${routed.via} (${routed.why}).`);
+    log(`wake: ${rowMention(ref)} routed ${routed.route} via ${routed.via} (${routed.why}).`);
     return routed.profile;
   }
+  // The `tier:haiku` label is read from the FIRST tracker's row of that number: a keyed row with no route of its own is another row's there, so it gets the ordinary profile.
+  if (ref.key !== "") return null;
   try {
     return haikuTierProfile({ number: row, ...readRow(row) }, { switchPath, log });
   } catch (err) {
@@ -6513,8 +6524,10 @@ function tierOfRow(row: number, { readRow, switchPath, routes }: { readRow: (row
 type RowForTier = { labels: string[]; body: string; title?: string };
 
 /** The title, labels and body of a row, one `gh` read; THROWS when it fails, and {@link tierOfRow} says so. */
-function readRowForTier(row: number): RowForTier {
-  const read = JSON.parse(defaultGh(["issue", "view", String(row), "--repo", REPO, "--json", "labels,body,title"]));
+function readRowForTier(row: number, key = ""): RowForTier {
+  const repo = key === "" ? REPO : trackerRepositoryOf(key);
+  if (repo === null) throw new Error(`the project declares no tracker "${key}"`);
+  const read = JSON.parse(defaultGh(["issue", "view", String(row), "--repo", repo, "--json", "labels,body,title"]));
   return { labels: (read.labels as { name: string }[]).map((l) => l.name), body: String(read.body ?? ""), title: String(read.title ?? "") };
 }
 
@@ -6522,20 +6535,21 @@ function readRowForTier(row: number): RowForTier {
 export const ROUTE_AHEAD = 3;
 
 /**
- * #4629: THE ROUTE OF EACH ROW THE TICK MAY START, resolved BEFORE the (synchronous) delivery, keyed by row. A row that cannot be read or routed is simply absent, and then
- * {@link tierOfRow} does what it did before. Never throws: the route lowers cost and must not cost a start.
+ * #4629: THE ROUTE OF EACH ROW THE TICK MAY START, resolved BEFORE the (synchronous) delivery, keyed by {@link routeKeyOf}. Another tracker's row is routed too (a11ign/agent-org#756):
+ * it is read from THAT tracker, filed under its keyed ref and logged under `row-<key>-<n>`, so it neither takes nor gives the route of the first tracker's row of the same number.
+ * A row that cannot be read or routed is simply absent, and then {@link tierOfRow} does what it did before. Never throws: the route lowers cost and must not cost a start.
  */
 export async function routesForStarts(orders: readonly { causeKey: string }[], { host, ledgerPath, readRow = readRowForTier, route = routeEngineer, projectDir = PRIMARY_CHECKOUT, switchPath }: {
-  host: Parameters<typeof routeEngineer>[1]["host"]; ledgerPath: string; readRow?: (row: number) => RowForTier; route?: typeof routeEngineer; projectDir?: string; switchPath?: string;
-}): Promise<Map<number, Routed>> {
-  const rows = orders.map(rowOfOrder).filter((row): row is number => row !== null).slice(0, ROUTE_AHEAD);
+  host: Parameters<typeof routeEngineer>[1]["host"]; ledgerPath: string; readRow?: (row: number, key?: string) => RowForTier; route?: typeof routeEngineer; projectDir?: string; switchPath?: string;
+}): Promise<Map<RouteKey, Routed>> {
+  const refs = orders.map(rowRefOfOrder).filter((ref): ref is RowRef => ref !== null).slice(0, ROUTE_AHEAD);
   const deps = { host, switchesPath: decisionSwitchesPath(projectDir), logPath: decisionLogPathFrom(ledgerPath), haikuSwitchPath: switchPath };
-  const found = await Promise.all(rows.map(async (number) => {
+  const found = await Promise.all(refs.map(async (ref) => {
     try {
-      const { labels, body, title = "" } = readRow(number);
-      return [number, await route({ number, title, labels, body }, deps)] as const;
+      const { labels, body, title = "" } = readRow(ref.number, ref.key);
+      return [routeKeyOf(ref), await route({ number: ref.number, ...(ref.key === "" ? {} : { key: ref.key }), title, labels, body }, deps)] as const;
     } catch (err) {
-      process.stderr.write(`wake: could not route #${number} (${firstLine(err)}) -- the ordinary profile.\n`);
+      process.stderr.write(`wake: could not route ${rowMention(ref)} (${firstLine(err)}) -- the ordinary profile.\n`);
       return null;
     }
   }));
@@ -7929,7 +7943,7 @@ function claimOrdersText(ledgerPath: string): string {
  * #4630: THE ROWS WHOSE LATER START MUST BE SONNET, from the record: every row with an `escalation` line. Layered over the tick's routes so that the gate's own respawn of an
  * escalated row (a restart that failed, or a worker that ended later) does not read the row's `tier:haiku` label and start Haiku again -- the label is KEPT, on purpose.
  */
-export function escalatedRoutes(recordText: string, routes: ReadonlyMap<number, Routed>): Map<number, Routed> {
+export function escalatedRoutes(recordText: string, routes: ReadonlyMap<RouteKey, Routed>): Map<RouteKey, Routed> {
   const layered = new Map(routes);
   for (const line of recordText.split("\n").filter(Boolean)) {
     try {
@@ -7961,7 +7975,7 @@ export function recentlyVoidedKeys(ledgerPath: string, since: number): Set<strin
 /**
  * The spawner's claim, wired to the host: a worktree a release KEPT for the row is adopted, not refused (#2470), and forgotten once claimed.
  */
-function claimerFor(spares: ReturnType<typeof sparePathsFrom>, ledgerPath: string, hostLayout: ReturnType<typeof layoutUnder>, routes: ReadonlyMap<number, Routed>) {
+function claimerFor(spares: ReturnType<typeof sparePathsFrom>, ledgerPath: string, hostLayout: ReturnType<typeof layoutUnder>, routes: ReadonlyMap<RouteKey, Routed>) {
   const keptPath = keptClaimsPath(ledgerPath);
   return spawnClaimer({ ...hostLayout, routes, settle: (role) => { settleAbsentInstance(spares, role); },
     kept: (row) => readKeptClaims(keptPath)[row] ?? null,
