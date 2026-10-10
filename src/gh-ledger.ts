@@ -184,22 +184,72 @@ export function topSpender(entries: LedgerEntry[], { account, resource = "graphq
   return top === undefined || top.points === 0 ? null : { caller: top.caller, command: top.command, points: top.points, share: top.points / total, total };
 }
 
+const APP_LOGIN = /^(.+)\[bot\]$/;
+
+/** @param {string} login @returns {boolean} an App installation's login (`<slug>[bot]`), which no ledger line is written under */
+export const isAppLogin = (login: string): boolean => APP_LOGIN.test(login);
+
+/**
+ * (#4916) THE NAME A POOL'S LOGIN IS LEDGERED UNDER. An account's calls are written under its own login, but `host/gh` writes an App's under `app:<role>`
+ * (the role's token, not a name GitHub gave it), so the login a pool's headers report (`a11ign-scheduler[bot]`) never equals a ledger account and every
+ * App pool read as spent by nobody. `appRoles` is the roles `host.json` declares as `github-apps`. THE DECLARATION HOLDS NO SLUG (only `appId`, `keyPath`
+ * and `installationId`), so the slug is matched to the role it names: the slug IS the role, or ends `-<role>` (`a11ign-scheduler` for `scheduler`).
+ * @param {string} login @param {readonly string[]} appRoles
+ * @returns {string | null} the ledger account; `null` for an App no declared role owns, which is an unknown and never "nobody spent it"
+ */
+export function ledgerAccountOf(login: string, appRoles: readonly string[]): string | null {
+  const slug = APP_LOGIN.exec(login)?.[1];
+  if (slug === undefined) return login;
+  const owner = appRoles.find((role) => slug === role || slug.endsWith(`-${role}`));
+  return owner === undefined ? null : `app:${owner}`;
+}
+
+/** @param {readonly string[]} paths @param {(path: string) => string} read @returns {{entries: LedgerEntry[], unread: string[]}} each distinct path once, so a ledger named twice is not counted twice */
+function readLedgers(paths: readonly string[], read: (path: string) => string): { entries: LedgerEntry[]; unread: string[]; } {
+  const entries: LedgerEntry[] = [];
+  const unread: string[] = [];
+  for (const path of new Set(paths)) {
+    try {
+      entries.push(...parseLedger(read(path)));
+    } catch {
+      unread.push(path); // named in the sentence, so the reader knows which directory the reading is short of
+    }
+  }
+  return { entries, unread };
+}
+
+export type SpenderQuestion = { ledgers: readonly string[]; login: string; appRoles?: readonly string[]; now?: number; read?: (path: string) => string };
+
+/**
+ * (#4916) The sentence `api-pool-low` appends for ONE pool's login, read from EVERY ledger the identity's calls may be written to (the workers', the leads' and the
+ * reviewer's config directories each hold their own, and a role's calls land in the directory of whichever session made them). "No graphql point is recorded" is
+ * said ONLY when every ledger named was read; one that could not be makes the reading UNREADABLE, since an unread directory may hold the spend. `null` is "no ledger
+ * could be read at all", which the caller words.
+ * @param {SpenderQuestion} question
+ */
+export function spenderPhraseFor({ ledgers, login, appRoles = [], now = Date.now(), read = (path) => readFileSync(path, "utf8") }: SpenderQuestion): string | null {
+  const account = ledgerAccountOf(login, appRoles);
+  if (account === null) return `${login} is an App no declared role owns (declared: ${appRoles.join(", ") || "none"}), so its spender is UNREADABLE`;
+  const { entries, unread } = readLedgers(ledgers, read);
+  if (unread.length === new Set(ledgers).size) return null; // an absent ledger is "could not read", which the caller words; there is nothing to guess at
+  const as = account === login ? "" : `, read from ${account} ledger lines`;
+  const top = topSpender(entries, { account, now });
+  if (top === null) {
+    return unread.length === 0 ? `no graphql point is recorded for ${login} in the last hour`
+      : `no graphql point is recorded for ${login} in the ledgers that were read, and ${unread.join(", ")} could not be read, so the spender is UNREADABLE`;
+  }
+  const short = unread.length === 0 ? "" : ` (${unread.join(", ")} could not be read, so this is a floor)`;
+  return `${login}'s last hour (${top.total} floor points${as}): top caller ${top.caller} [${top.command}], ${top.points} points (${Math.round(top.share * PERCENT)}%)${short}`;
+}
+
 /**
  * The sentence `api-pool-low` appends: who spent the account's last hour, from the ledger beside the config the call ran under. A ledger that is absent or unreadable is
- * `null`, not a guess: the caller leaves the detail as it was.
+ * `null`, not a guess: the caller leaves the detail as it was. ONE ledger and an ordinary account; `spenderPhraseFor` is the form that reads an App.
  * @param {string} ledgerPath @param {string} account @param {number} [now]
  * @param {(path: string) => string} [read]
  */
 export function spenderPhrase(ledgerPath: string, account: string, now: number = Date.now(), read: (path: string) => string = (path) => readFileSync(path, "utf8")) {
-  let entries;
-  try {
-    entries = parseLedger(read(ledgerPath));
-  } catch {
-    return null; // an absent ledger is "could not read", which the caller words; there is nothing to guess at
-  }
-  const top = topSpender(entries, { account, now });
-  if (top === null) return `no graphql point is recorded for ${account} in the last hour`;
-  return `${account}'s last hour (${top.total} floor points): top caller ${top.caller} [${top.command}], ${top.points} points (${Math.round(top.share * PERCENT)}%)`;
+  return spenderPhraseFor({ ledgers: [ledgerPath], login: account, now, read });
 }
 
 // --- #4898: A RATE LIMIT NEVER STOPS A SESSION -- THE REFUSED-CALL QUEUE -------------------------------------------------

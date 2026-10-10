@@ -49,12 +49,13 @@
 // A LEAF, RELATIVE IMPORTS ONLY, like `repeating-lines.ts`: `work-gate.ts` imports this, and it runs before any `pnpm install`/build.
 import { canStrip, describeBad, type NodeStripFact } from "./node-strips-types.ts";
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./lib/git-env.ts";
-import { spenderPhrase } from "./gh-ledger.ts";
+import { isAppLogin, spenderPhraseFor } from "./gh-ledger.ts";
+import { GITHUB_ROLES, homeHostConfig, roleIdentity, type HostConfig } from "./host-config.ts";
 // A LEAF (`claim-labels.ts` imports nothing), so the label is read from where it is declared, as `repeating-lines.ts` does.
 import { READY_LABEL, STATE_LABELS, stateLabelFindings } from "./claim-labels.ts";
 import { boardTruthTable } from "./board-truth-audit.ts";
@@ -646,7 +647,48 @@ export function poolLowReading({ pools, spenderOf = ledgerSpender }: { pools: Po
 /** The config directory `host/gh` writes this process's ledger under: the one `gh` itself reads, else the default. */
 const ledgerDir = () => process.env.GH_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "gh");
 
-const ledgerSpender = (account: string): string | null => spenderPhrase(join(ledgerDir(), "gh-calls.tsv"), account);
+/** @param {HostConfig} host @returns {string} the reviewer's `gh` config directory, `<home>/reviewer/gh` */
+export const reviewerGhDir = (host: HostConfig): string => join(host.home, "reviewer", "gh");
+
+/**
+ * (#4916) EVERY LEDGER A DECLARED ROLE'S CALLS ARE WRITTEN TO: this process's own config directory and the workers', leads' and reviewer's (`host/gh` routes a role to
+ * whichever of them its session runs under, and `app:<role>` lines are in each). A directory that does not exist is not a ledger of this host and is left out; this
+ * process's own stays, so a ledger it cannot read is still said. The reviewer's is `wake.ts`'s `REVIEWER_GH_CONFIG_DIR`, derived from `home` because `wake.ts` imports
+ * this file; `org-health-app-spender.test.ts` pins the two together.
+ * @param {{host: HostConfig, ownDir: string}} where @returns {string[]} the `gh-calls.tsv` paths, each once
+ */
+export function ledgerPathsOf({ host, ownDir }: { host: HostConfig; ownDir: string; }): string[] {
+  const dirs = [ownDir, join(host.gh.workers, "gh"), join(host.gh.leads, "gh"), reviewerGhDir(host)].map((dir) => resolve(dir));
+  return [...new Set(dirs)].filter((dir) => dir === resolve(ownDir) || existsSync(dir)).map((dir) => join(dir, "gh-calls.tsv"));
+}
+
+/** A config directory that exists and holds no `gh-calls.tsv` has had no call written to it, which is a ledger with nothing in it; a directory that is not there is unread. */
+const readLedgerFile = (path: string): string => (existsSync(dirname(path)) && !existsSync(path) ? "" : readFileSync(path, "utf8"));
+
+/** @param {HostConfig} host @returns {string[]} the roles `host.json` declares as `github-apps` */
+const declaredAppRoles = (host: HostConfig): string[] => GITHUB_ROLES.filter((role) => roleIdentity(host, role).mode === "github-apps");
+
+/**
+ * The spender sentence for ONE pool's login: an account is read from its own ledger line name, an App (`<slug>[bot]`) from the `app:<role>` lines of the role that
+ * owns it, and both from every ledger `ledgerPathsOf` names. `read` is the seam a test uses.
+ * @param {{account: string, host: HostConfig, ownDir: string, now?: number, read?: (path: string) => string}} where
+ */
+export function spenderOfAccount({ account, host, ownDir, now, read = readLedgerFile }: { account: string; host: HostConfig; ownDir: string; now?: number; read?: (path: string) => string; }): string | null {
+  return spenderPhraseFor({ ledgers: ledgerPathsOf({ host, ownDir }), login: account, appRoles: declaredAppRoles(host), now, read });
+}
+
+export function ledgerSpender(account: string, hostOf: () => HostConfig = homeHostConfig): string | null {
+  const ownDir = ledgerDir();
+  let host: HostConfig;
+  try {
+    host = hostOf();
+  } catch (cause) {
+    // The declaration could not be read: an ordinary account still has this process's own ledger, but an App's role cannot be named from nothing.
+    if (isAppLogin(account)) return `${account} is an App and the host declaration that names its role could not be read (${(cause as Error).message}), so its spender is UNREADABLE`;
+    return spenderPhraseFor({ ledgers: [join(ownDir, "gh-calls.tsv")], login: account, read: readLedgerFile });
+  }
+  return spenderOfAccount({ account, host, ownDir });
+}
 
 /**
  * `. Spender: ...` for each low GRAPHQL pool whose account is named, else "". An account the ledger cannot say anything of reads `UNREADABLE`, because the omission would look
