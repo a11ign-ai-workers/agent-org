@@ -5,13 +5,14 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { test } from "node:test";
-import { decide, decisionLogPathFrom, decisionSwitchesPath, MAX_STATE_BYTES, type DecisionDeps } from "./decision-provider.ts";
+import { decide, decisionLogPathFrom, decisionSwitchesPath, MAX_STATE_BYTES, type Answer, type DecisionDeps } from "./decision-provider.ts";
 import {
   composeRoute, HAIKU_MAX_P_DEBUGGING, HAIKU_MAX_P_SUBSYSTEMS, HAIKU_MIN_P_MECHANICAL, HAIKU_MIN_P_SCORE, HAIKU_MIN_P_SMALL, MEDIUM_MAX_P_SUBSYSTEMS, MEDIUM_MIN_P_SCORE, scoreAtMost, type Readings, fallbackRoute, fallbackWindow, GUARD_DECISIONS, isWindowTooSmall, LARGE_ROW_FILES, LARGEST_ROW_FILES, recordRouteOutcome, recordWindowTooSmall, regionSize, routeCostEvents,
   MECHANICAL_DATA, DEBUGGING_DATA, routeCostReading, ROUTE_COSTLIER_THAN_FALLBACK, routeEngineer, routeState, SCORE_LEVEL_DATA, SMALL_ROW_FILES, SUBSYSTEMS_DATA, windowOf, windowReadings, windowReportLines, QUESTIONS,
-  type Answers, type Route, type RouteRow,
+  acceptPick, pickedOf, ROUTE_DATA, routeQuestion, type Answers, type Route, type RouteRow,
 } from "./engineer-route.ts";
 import { parseHostConfig } from "./host-config.ts";
+import { ABSENT_ROUTING, type RoutingDeclaration } from "./project-config.ts";
 import { tmpDir } from "./lib/tmp-fixture.ts";
 import { freshState } from "./triage-provider.ts";
 import { ROUTE_AHEAD, routesForStarts, spawnClaimer } from "./wake.ts";
@@ -896,4 +897,206 @@ test("recordWindowTooSmall appends one outcome line beside the route's, which wi
   await routeEngineer(rowOf({ number: 77, body: bodyOf({ region: files(LARGE_ROW_FILES) }) }), r.deps);
   recordWindowTooSmall(77, { window: "400k", compactions: 3 }, r.deps);
   assert.deepEqual(windowReadings(r.log()).map((x) => [x.row, x.windowK, x.tooSmall]), [[77, 400, true]]);
+});
+
+// --- the route as ONE choice (#4904) ---
+
+const CHOICE: RoutingDeclaration = { ...ABSENT_ROUTING, question: "choice" };
+/** A row whose fallback is Sonnet/high: a fourth file is not small. The row with `rowOf()` has a fallback of Sonnet/medium. */
+const FOUR_FILES = (): RouteRow => rowOf({ body: bodyOf({ region: ["a.ts", "b.ts", "c.ts", "d.ts"] }) });
+
+/** The route question's reply: P(route) set outright, the pick the likeliest, its confidence what TypeSafe's formula gives of three options. */
+function routeReply(given: Record<string, number>, over: Given = {}) {
+  const [pick, pMax] = Object.entries(given).sort(([, a], [, b]) => b - a)[0];
+  const route = { type: "choice", choice: pick, confidence: confidenceOf(pMax, 3), probabilities: given };
+  return { answers: { ...reply(over).answers, route } };
+}
+/** Probabilities over the three routes with `route` at `p` and the remainder split 2:1 over the others, so `route` is the likeliest for any p over 0.4. */
+function at(route: Route, p: number): Record<string, number> {
+  const others = (["haiku/high", "sonnet/medium", "sonnet/high"] as Route[]).filter((r) => r !== route);
+  return { [route]: p, [others[0]]: (1 - p) * (2 / 3), [others[1]]: (1 - p) / 3 };
+}
+async function choose(row: RouteRow, body: unknown, over: { routing?: RoutingDeclaration; haikuSwitch?: string; validates?: boolean } = {}) {
+  const r = rig({ triage: JEV, switches: ON, body, haikuSwitch: over.haikuSwitch, validates: over.validates });
+  const routed = await routeEngineer(row, { ...r.deps, routing: over.routing ?? CHOICE });
+  return { routed, r, picked: pickedOf(outcomeOf(r)) };
+}
+
+test("#4904 DONE-WHEN 1: a Haiku/high pick at P=0.55 routes Haiku over a Sonnet/medium fallback, and at 0.45 it does not -- the cheaper threshold is 0.5", async () => {
+  const taken = await choose(rowOf(), routeReply(at("haiku/high", 0.55)));
+  assert.deepEqual([taken.routed.route, taken.routed.via, taken.routed.profile?.model], ["haiku/high", "jev", HAIKU_MODEL_ID]);
+  const under = await choose(rowOf(), routeReply(at("haiku/high", 0.45)));
+  assert.deepEqual([under.routed.route, under.routed.via, under.picked?.because, under.picked?.pick, under.picked?.ran], ["sonnet/medium", "fallback", "low-confidence", "haiku/high", "sonnet/medium"]);
+  assert.match(under.routed.reason!, /needs P >= 0\.5/);
+});
+
+test("#4904 DONE-WHEN 1: a Sonnet/high pick at P=0.6 over a Sonnet/medium fallback takes the fallback, and at 0.7 it is taken -- the dearer threshold is 0.7", async () => {
+  const held = await choose(rowOf(), routeReply(at("sonnet/high", 0.6)));
+  assert.deepEqual([held.routed.route, held.routed.via, held.picked?.because], ["sonnet/medium", "fallback", "low-confidence"]);
+  assert.equal((await choose(rowOf(), routeReply(at("sonnet/high", 0.69)))).routed.route, "sonnet/medium", "the boundary: 0.69 is under it");
+  const taken = await choose(rowOf(), routeReply(at("sonnet/high", 0.7)));
+  assert.deepEqual([taken.routed.route, taken.routed.via, taken.picked?.because], ["sonnet/high", "jev", "jev"]);
+  // And the cheaper pick over a Sonnet/high fallback is the mirror: 0.5 takes it where the dearer would not.
+  assert.equal((await choose(FOUR_FILES(), routeReply(at("sonnet/medium", 0.5)))).routed.route, "sonnet/medium");
+});
+
+test("#4904 the thresholds are config values: a declaration's 0.8 for dearer and 0.3 for cheaper moves where each pick stands", async () => {
+  const routing = { ...CHOICE, cheaperMinP: 0.3, dearerMinP: 0.8 };
+  assert.equal((await choose(rowOf(), routeReply(at("haiku/high", 0.45)), { routing })).routed.route, "haiku/high");
+  assert.equal((await choose(rowOf(), routeReply(at("sonnet/high", 0.75)), { routing })).routed.route, "sonnet/medium");
+  assert.equal((await choose(rowOf(), routeReply(at("sonnet/high", 0.8)), { routing })).routed.route, "sonnet/high");
+});
+
+test("#4904 DONE-WHEN 1: an off-list answer is the fallback with the reason invalid-option -- a route nobody configured, and a configured one this project left out", async () => {
+  const off = await choose(rowOf(), { answers: { ...reply({}).answers, route: { type: "choice", choice: "opus/max", confidence: 0.99, probabilities: { "opus/max": 0.99 } } } });
+  assert.deepEqual([off.routed.route, off.routed.via, off.picked?.because, off.picked?.pick], ["sonnet/medium", "fallback", "invalid-option", null]);
+  const noHaiku = { ...CHOICE, routes: ["sonnet/medium", "sonnet/high"] as RoutingDeclaration["routes"] };
+  const left = await choose(rowOf(), routeReply(at("haiku/high", 0.9)), { routing: noHaiku });
+  assert.deepEqual([left.routed.route, left.picked?.because], ["sonnet/medium", "invalid-option"], "Haiku is not an option of this project's question");
+  assert.deepEqual(Object.keys((left.r.sent[0] as { questions: { route: { criteria: object } } }).questions.route.criteria), ["sonnet/medium", "sonnet/high"]);
+  assert.equal((await choose(rowOf(), routeReply(at("haiku/high", 0.9)))).routed.route, "haiku/high", "the control: the same reply under all three routes is taken");
+});
+
+test("#4904 DONE-WHEN 1: no provider leaves the fallback unchanged, in either mode, and the provider is asked zero times", async () => {
+  for (const routing of [CHOICE, ABSENT_ROUTING]) {
+    const off = rig();
+    const routed = await routeEngineer(FOUR_FILES(), { ...off.deps, routing });
+    assert.deepEqual([routed.route, routed.via, routed.profile], ["sonnet/high", "fallback", null], routing.question);
+    assert.equal(off.calls(), 0);
+    assert.equal(outcomeOf(off), "route sonnet/high window 200k via fallback (no triage provider is declared)" + (routing.question === "choice" ? " [pick none; ran sonnet/high; because fallback; P not given; 0ms]" : ""));
+  }
+  const failed = rig({ triage: JEV, switches: ON, throws: true });
+  assert.equal((await routeEngineer(rowOf(), { ...failed.deps, routing: CHOICE })).route, "sonnet/medium", "a failed call is the fallback, never Haiku");
+});
+
+test("#4904 DONE-WHEN 1: tier:sonnet-high beats Jev, tier:sonnet-medium too, and the provider is not asked; two labels give the dearer", async () => {
+  const r = rig({ triage: JEV, switches: ON, body: routeReply(at("haiku/high", 0.95)) });
+  const deps = { ...r.deps, routing: CHOICE };
+  const high = await routeEngineer(rowOf({ labels: ["ready", "tier:sonnet-high"] }), deps);
+  assert.deepEqual([high.route, high.via, high.profile], ["sonnet/high", "override", null]);
+  const medium = await routeEngineer(FOUR_FILES(), { ...deps }).then(() => routeEngineer({ ...FOUR_FILES(), labels: ["tier:sonnet-medium"] }, deps));
+  assert.deepEqual([medium.route, medium.via, medium.profile?.effort], ["sonnet/medium", "override", "medium"]);
+  const both = await routeEngineer(rowOf({ labels: ["tier:haiku", "tier:sonnet-high"] }), deps);
+  assert.equal(both.route, "sonnet/high");
+  assert.equal(r.calls(), 1, "only the unlabelled FOUR_FILES row was asked");
+  assert.equal((await routeEngineer(rowOf({ labels: ["tier:haiku"] }), deps)).route, "haiku/high", "tier:haiku is still every project's");
+  // The control: a label for a route this project did not configure is no label.
+  const noHaiku = { ...CHOICE, routes: ["sonnet/medium", "sonnet/high"] as RoutingDeclaration["routes"] };
+  const ignored = await routeEngineer(rowOf({ labels: ["tier:haiku"] }), { ...r.deps, routing: noHaiku });
+  assert.notEqual(ignored.via, "override");
+});
+
+test("#4904 DONE-WHEN 1: a refused row is not lowered by a label -- tier:sonnet-medium, tier:sonnet-high and tier:haiku each give Sonnet/high with the refusal, and the provider is not asked", async () => {
+  const r = rig({ triage: JEV, switches: ON, body: routeReply(at("haiku/high", 0.95)) });
+  const refused: Partial<RouteRow>[] = [{ labels: ["lane:ceo"] }, { labels: ["needs:chairman"] }, { body: bodyOf({ region: [".github/workflows/ci.yml"] }) }, { body: bodyOf({ acceptance: null }) }];
+  for (const label of ["tier:sonnet-medium", "tier:sonnet-high", "tier:haiku"]) {
+    for (const over of refused) {
+      const row = rowOf({ ...over, labels: [...(over.labels ?? []), label] });
+      const routed = await routeEngineer(row, { ...r.deps, routing: CHOICE });
+      assert.deepEqual([routed.route, routed.via, routed.profile], ["sonnet/high", "override", null], `${label} ${JSON.stringify(over)}`);
+      assert.match(routed.reason!, new RegExp(`^${label} was refused`));
+    }
+  }
+  assert.equal(r.calls(), 0);
+});
+
+test("#4904 DONE-WHEN 1: `traits` mode reproduces today's routes -- the four decide, no route question is sent, and an absent block is the same", async () => {
+  const bodies = [reply({}), reply({ mechanical: "no", subsystems: "no", score: 3 }), reply({ mechanical: "no", subsystems: "no", score: 3, low: "subsystems" }), reply({ mechanical: "no", subsystems: "yes", score: 3 }), reply({ debugging: "yes" })];
+  const routes: Route[] = [];
+  for (const body of bodies) {
+    const absent = rig({ triage: JEV, switches: ON, body });
+    const traits = rig({ triage: JEV, switches: ON, body });
+    const a = await routeEngineer(rowOf(), { ...absent.deps, routing: ABSENT_ROUTING });
+    const t = await routeEngineer(rowOf(), { ...traits.deps, routing: { ...CHOICE, question: "traits" } });
+    assert.deepEqual(t, a);
+    assert.equal(outcomeOf(traits), outcomeOf(absent));
+    assert.ok(!outcomeOf(traits).includes("[pick"), "a traits line has no route bracket");
+    assert.ok(!("route" in (traits.sent[0] as { questions: object }).questions));
+    routes.push(t.route);
+  }
+  assert.deepEqual(routes, ["haiku/high", "haiku/high", "sonnet/medium", "sonnet/high", "sonnet/high"]);
+  // A project that dropped Haiku from its routes moves a composed Haiku UP to the next configured route, never down.
+  const noHaiku = { ...ABSENT_ROUTING, routes: ["sonnet/medium", "sonnet/high"] as RoutingDeclaration["routes"] };
+  assert.equal((await routeEngineer(rowOf(), { ...rig({ triage: JEV, switches: ON }).deps, routing: noHaiku })).route, "sonnet/medium");
+});
+
+test("#4904 in `choice` mode the four are still ASKED and still LOGGED, and no longer decide: four clean answers do not hold a Sonnet/high pick, and four contrary ones do not hold a Haiku pick", async () => {
+  const dear = await choose(rowOf(), routeReply(at("sonnet/high", 0.9)));
+  assert.equal(dear.routed.route, "sonnet/high", "the four say Haiku and the route question says Sonnet/high");
+  const cheap = await choose(rowOf(), routeReply(at("haiku/high", 0.9), { debugging: "yes", subsystems: "yes" }));
+  assert.equal(cheap.routed.route, "haiku/high", "the four say Sonnet/high and the route question says Haiku");
+  const sent = (cheap.r.sent[0] as { questions: Record<string, unknown> }).questions;
+  assert.deepEqual(Object.keys(sent), ["mechanical", "subsystems", "debugging", "score", "route"], "one call, the four and the route");
+  const request = cheap.r.log().find((l) => l.answers !== undefined);
+  assert.deepEqual(Object.keys(request.answers), ["mechanical", "subsystems", "debugging", "score", "route"], "the request line keeps every answer for route-accuracy");
+  assert.equal(cheap.r.calls(), 1);
+});
+
+test("#4904 DONE-WHEN 2: a decision line carries every route's probability, the pick, the route that ran, the reason and the call's duration -- and `route-outcome`'s reader gets them back", async () => {
+  const r = rig({ triage: JEV, switches: ON, body: routeReply({ "haiku/high": 0.4, "sonnet/medium": 0.25, "sonnet/high": 0.35 }) });
+  let clock = 1_000;
+  r.deps.now = () => { const t = clock; clock += 40; return t; };
+  const routed = await routeEngineer(rowOf(), { ...r.deps, routing: CHOICE });
+  assert.equal(routed.route, "sonnet/medium", "0.4 is under the 0.5 a cheaper pick needs");
+  const line = outcomeOf(r);
+  assert.match(line, /\[pick haiku\/high; ran sonnet\/medium; because low-confidence; P haiku\/high=0\.400 sonnet\/medium=0\.250 sonnet\/high=0\.350; \d+ms\]$/);
+  assert.ok(!line.includes("[fallback would be"), "a route the fallback took is not a comparison: the cost guard counts jev lines only");
+  const read = pickedOf(line);
+  assert.deepEqual([read?.pick, read?.ran, read?.because, read?.probabilities], ["haiku/high", "sonnet/medium", "low-confidence", { "haiku/high": 0.4, "sonnet/medium": 0.25, "sonnet/high": 0.35 }]);
+  assert.ok((read?.ms ?? 0) >= 40, "the call's duration, from the injected clock");
+  assert.equal(pickedOf("route sonnet/medium window 200k via fallback (x)"), null, "a line from before #4904 has no bracket");
+  // The probabilities are also on the request line, as the provider gave them.
+  const request = r.log().find((l) => l.answers !== undefined);
+  assert.deepEqual(request.answers.route.probabilities, { "haiku/high": 0.4, "sonnet/medium": 0.25, "sonnet/high": 0.35 });
+});
+
+test("#4904 every reason is on the line: jev, low-confidence, invalid-option, override, refused and fallback; and the cost guard still reads the line", async () => {
+  const reasons: string[] = [];
+  const outcomes: string[] = [];
+  const cases: [Partial<RouteRow>, unknown][] = [
+    [{}, routeReply(at("sonnet/medium", 0.9))], [{}, routeReply(at("sonnet/high", 0.55))],
+    [{}, { answers: { ...reply({}).answers, route: choice("maybe") } }], [{ labels: ["tier:sonnet-high"] }, undefined],
+    [{ labels: ["lane:ceo"] }, undefined],
+  ];
+  for (const [over, body] of cases) {
+    const { r, picked } = await choose(rowOf(over), body ?? reply({}));
+    reasons.push(picked!.because);
+    outcomes.push(outcomeOf(r));
+  }
+  const failed = rig({ triage: JEV, switches: ON, throws: true });
+  await routeEngineer(rowOf(), { ...failed.deps, routing: CHOICE });
+  reasons.push(pickedOf(outcomeOf(failed))!.because);
+  assert.deepEqual(reasons, ["jev", "low-confidence", "invalid-option", "override", "refused", "fallback"]);
+  // `[fallback would be X]` is still LAST on a provider line, which is what `routeCostReading` anchors on: twenty Sonnet/high picks over a Sonnet/medium fallback still read as costlier.
+  const lines = Array.from({ length: 20 }, (_, i) => ({ use: "model-routing", id: `row-${i}`, at: i, outcome: outcomes[0].replace("route sonnet/medium", "route sonnet/high").replace("pick sonnet/medium", "pick sonnet/high") }));
+  assert.deepEqual(routeCostReading(lines), { kind: "read", compared: 20, providerMean: 3, fallbackMean: 2, costlier: true });
+});
+
+test("#4904 the route question is POSTED valid: an option per configured route of `what`, `signals`, `not_for` and 2-3 examples, the cheapest-route instruction, and the API accepts the request", async () => {
+  const { r, routed } = await choose(rowOf(), routeReply(at("haiku/high", 0.9)), { validates: true });
+  assert.equal(routed.via, "jev", "the API's shape check passed, so the reply was read and not an HTTP 422 fallback");
+  const q = (r.sent[0] as { questions: { route: { type: string; instructions: string; criteria: Record<string, { what: string; signals: string[]; not_for: string; examples: string[] }> } } }).questions.route;
+  assert.equal(q.type, "choice");
+  assert.match(q.instructions, /cheapest route that finishes this row in one pass, with no move up to a stronger route/);
+  assert.deepEqual(Object.keys(q.criteria), ["haiku/high", "sonnet/medium", "sonnet/high"]);
+  for (const [route, option] of Object.entries(q.criteria)) {
+    assert.ok(option.what.length > 0 && option.not_for.length > 0 && option.signals.length > 0, route);
+    assert.ok(option.examples.length >= 2 && option.examples.length <= 3, `${route}: ${option.examples.length} examples`);
+    assert.ok(option.examples.every((e) => /#\d+/.test(e)), `${route}: every example names a row of ours`);
+  }
+  // A declaration's guidance replaces a route's whole entry and leaves the others.
+  const own = { what: "w", signals: ["s"], notFor: "n", examples: ["#1 e", "#2 f"] };
+  const custom = routeQuestion({ routes: ["sonnet/medium", "sonnet/high"], guidance: { "sonnet/high": own } }, "sonnet/medium");
+  assert.deepEqual((custom as { criteria: Record<string, unknown> }).criteria["sonnet/high"], { what: "w", signals: ["s"], not_for: "n", examples: ["#1 e", "#2 f"] });
+  assert.deepEqual((custom as { criteria: Record<string, unknown> }).criteria["sonnet/medium"], { what: ROUTE_DATA["sonnet/medium"].what, signals: ROUTE_DATA["sonnet/medium"].signals, not_for: ROUTE_DATA["sonnet/medium"].notFor, examples: ROUTE_DATA["sonnet/medium"].examples });
+});
+
+test("#4904 a Haiku pick the switch refuses is the fallback it would have had -- not Sonnet/high -- and the line says Haiku was refused; acceptPick is pure on its answer", async () => {
+  const off = await choose(rowOf(), routeReply(at("haiku/high", 0.9)), { haikuSwitch: '{ "enabled": false }' });
+  assert.deepEqual([off.routed.route, off.routed.via, off.picked?.because], ["sonnet/medium", "fallback", "fallback"]);
+  assert.match(off.routed.reason!, /Haiku was refused/);
+  const answer: Answer = { value: "sonnet/high", confidence: 0.5, probabilities: at("sonnet/high", 0.7), fellBack: false };
+  assert.deepEqual(acceptPick(answer, "sonnet/medium", CHOICE), { route: "sonnet/high", via: "jev", because: "jev", why: acceptPick(answer, "sonnet/medium", CHOICE).why });
+  assert.equal(acceptPick({ ...answer, probabilities: undefined }, "sonnet/medium", CHOICE).because, "low-confidence", "a pick with no distribution moves nothing");
+  assert.equal(acceptPick({ ...answer, confidence: undefined }, "sonnet/medium", CHOICE).because, "invalid-option");
 });
