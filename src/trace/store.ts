@@ -38,11 +38,12 @@ import type { Carry, Previous } from "./ingest-state.ts";
 export const DEFINITIONS = [
   "EVENT: one record in the store, `kind` turn | wake | compaction | gh_call | deferral, or one of GitHub's (`GITHUB_KINDS`). A record is never edited; running the ingest twice adds nothing, because every record has a stable `id`.",
   "TURN: one API message of a Claude session (de-duplicated by message id), with its tokens, cost and wall-clock. It belongs to the wake that precedes it in its transcript.",
+  "COMPACTION (`kind: compaction`, agent-org#478): one `isCompactSummary` record of a transcript. THE CALL THAT WROTE THE SUMMARY IS IN NO TURN and the transcript holds no usage for it (measured on 1,351 compactions: the summary is a `user` record with no `usage`, `compact_boundary` carries only `preTokens`, `postTokens` and `durationMs`, and no record between them has one). Its usage exists only in Claude Code's own OpenTelemetry, as an `api_request` with `query_source: \"compact\"`, which `otel-receiver.ts` stores (as `querySource`) for a process launched with the exporter's variables. When the ingest finds that request (the same session id, nearest the summary record, each used once) the event carries `tokens`, `model` and `costUsd` (priced like a turn, `null` for a model with no price, never 0); when it does not, the event carries `costUsd: null` and `unmeasured: \"no-usage-record\"`, which is NOT a free compaction. An event stored before the reader has neither and is read as unmeasured. The call is separate from the turn that follows (which re-reads the window and is priced as a turn), so adding it counts nothing twice.",
   "WAKE: a delivery that started a model turn (wakes-per-row's definition). `deliveryLagMs` is delivery minus the time `wake` typed the order, when the ledger line pairs (not the gate's deferral, which no record keeps).",
   "WALL-CLOCK OF A TURN (inferred): from the record before its first block to its last block. That record is stamped after a tool call ends, so the call is NOT in it: it is the model's own time.",
   "TOOL TIME OF A TURN (`toolMs`, measured): when the message follows a tool call, from the last block of the message before it to the tool's result record; `null` when it follows no tool call, never 0. A turn that follows an order or a prompt has none, and so does the first turn of a read when nothing was carried to say when the call began.",
   "TOOL READ (`toolRead`, measured): on the turn that CARRIES a result, the growth of the window the result caused: this turn's `input + cacheRead + cacheWrite5m + cacheWrite1h`, less the previous message's, less the previous message's own `output` (which re-enters the window the same way). Present only when the previous message called `Read`, `Grep` or `Glob`; `tool` is that tool, or `mixed` when the message called more than one tool (any mix with a tool that is not one of the three is in it too), and `tokens` is `null` (never 0) when the window cannot be read that way: a prompt, an order or a compaction came between, the window shrank, or the previous message is not in the store. `null` on a turn stored by this reader means no such call preceded it; an ABSENT field is a turn stored before the reader, which says nothing.",
-  "COST: tokens x the rate in PRICES, cache writes at the 1-hour rate when the split is absent (every transcript seen writes 1-hour). `null` for a model with no price.",
+  "COST: tokens x the rate in PRICES, cache writes at the 1-hour rate when the split is absent (every transcript seen writes 1-hour). `null` for a model with no price. A STORED `costUsd` IS A FIRST READING, priced at the rates of the day it was ingested (the stored value switched cache-read pricing from $0.20 to $0.10 on 2026-10-08), so a sum of stored `costUsd` over the raw file is wrong for that reason as well as for the duplicate ids under SUPERSEDED: `repriceEvents` reprices every turn at read and `trace cost` is the command that sums.",
   "GITHUB EVENT: what GitHub's REST API holds of a row or pull request (`source: github`, session `github`): filed/opened, claimed/released (the claim-record comments), labeled/unlabeled for an order to a session or a hold, ready_for_review, reviewed (state, and the head it was posted on), head_moved, ci_run, added_to_merge_queue, removed_from_merge_queue, merged, closed.",
   "HEAD_MOVED (inferred): `at` is the commit's own date, not the push's; the timeline carries no push event. CI RUN: each head the timeline names is asked for its check-runs; the merge queue's own runs, on its temporary branch, and legacy commit statuses are not read.",
   "OUTCOME of a queue exit (inferred): `merged` when it falls within 5 s of the pull request's merge, else `unmerged` (an ejection or a person). GitHub writes the same event for both.",
@@ -102,18 +103,23 @@ export type TraceEvent = {
   script?: string; sessionId?: string; keyedBy?: "session" | "time" | null; unkeyed?: "script" | "no-turn";
   /** a turn's reasoning effort as Claude Code wrote it on the transcript record; ABSENT when the record carried none, which is not `low` (agent-org#469) */
   effort?: string;
+  /** a compaction whose summary call has no readable usage (`costUsd` is then null, never 0); ABSENT on a measured one, and on one stored before the reader, which says nothing */
+  unmeasured?: typeof NO_USAGE_RECORD;
 };
+
+export const NO_USAGE_RECORD = "no-usage-record";
 
 export type ToolRead = { tool: "Read" | "Grep" | "Glob" | "mixed"; tokens: number | null };
 
 /**
  * Cost of a turn, or `null` when the model has no price: an unpriced turn is unknown, and 0 would say it was free.
+ * @param cacheReadRate dollars per million for the cache-read tokens in place of the model's own: how `trace cost` reads a turn the way Claude Code's own display does
  */
-export function costOf(model: string | undefined, tokens: Tokens): number | null {
+export function costOf(model: string | undefined, tokens: Tokens, cacheReadRate?: number): number | null {
   const price = PRICES.find((entry) => (entry.model === undefined ? model?.startsWith(entry.prefix ?? "") : model === entry.model));
   if (!price) return null;
   if (price.maxPrompt !== undefined && tokens.input + tokens.cacheRead + tokens.cacheWrite5m + tokens.cacheWrite1h > price.maxPrompt) return null;
-  const dollars = (tokens.input * price.input + tokens.output * price.output + tokens.cacheRead * price.cacheRead
+  const dollars = (tokens.input * price.input + tokens.output * price.output + tokens.cacheRead * (cacheReadRate ?? price.cacheRead)
     + tokens.cacheWrite5m * price.input * WRITE_5M_FACTOR + tokens.cacheWrite1h * price.input * WRITE_1H_FACTOR) / TOKENS_PER_MILLION;
   return Math.round(dollars * COST_PRECISION) / COST_PRECISION;
 }
@@ -121,11 +127,11 @@ export function costOf(model: string | undefined, tokens: Tokens): number | null
 /**
  * The events with every turn's `costUsd` REPRICED from `PRICES` as it stands now, never read off the line it was stored on: the store is append-only and a transcript that has not
  * changed is not read again, so a price added after ingest (a11ign/a11ign#3582) would otherwise never reach the turns stored before it (#3638: 147,675 turns kept `null`).
- * A model with no price stays `null`. A turn with no `tokens` has nothing to price from and is left as stored, and any event that is not a turn is returned as it came.
+ * A model with no price stays `null`. A turn with no `tokens` has nothing to price from and is left as stored, and any event that is not a turn or a measured compaction is returned as it came.
  */
 export function repriceEvents(events: TraceEvent[]): TraceEvent[] {
   return events.map((event) => {
-    if (event.kind !== "turn" || !event.tokens) return event;
+    if ((event.kind !== "turn" && event.kind !== "compaction") || !event.tokens) return event;
     const costUsd = costOf(event.model, event.tokens);
     return costUsd === event.costUsd ? event : { ...event, costUsd };
   });
@@ -334,7 +340,7 @@ export function eventsOfTranscript({ text, file, ledger, rowRepo, carry = null, 
     ?? { id: null, ...subjectOfSession(session, rowRepo), cause: null, causeKey: null };
   const priorAt = carry?.lastAt ?? null;
   const reads = toolReadsOf({ records, groups: groups.filter((group) => !held.includes(group)), end: settled.length, carried: carry?.previous ?? null });
-  events.push(...turnsOf({ records, groups: groups.filter((group) => !held.includes(group)), session, transcript: transcriptId(file), owner, priorAt, rowRepo, reads: reads.byMessage }), ...compactionsOf(settled, session, owner));
+  events.push(...turnsOf({ records, groups: groups.filter((group) => !held.includes(group)), session, transcript: transcriptId(file), owner, priorAt, rowRepo, reads: reads.byMessage }), ...compactionsOf(settled, session, owner, transcriptId(file)));
   const lastAt = settled.findLast((candidate) => !Number.isNaN(candidate.at))?.at ?? priorAt;
   const remembered = [...used, ...spent].filter((entry) => latest === null || entry.at >= latest.at - LEDGER_MEMORY_MS);
   return {
@@ -499,12 +505,64 @@ function toolMsBefore(records: Rec[], first: number, startedAt: number | null): 
   return startedAt === null || Number.isNaN(resultAt) ? null : Math.max(0, resultAt - startedAt);
 }
 
-function compactionsOf(records: { index: number; at: number; record: any; }[], session: string, owner: Owner): TraceEvent[] {
+/**
+ * One event per compaction summary record. THE TRANSCRIPT HOLDS NO USAGE FOR THE CALL THAT WROTE IT (a11ign/agent-org#478, measured: 0 of 1,351 compactions have a record with
+ * `usage` between `compact_boundary`'s start and the summary, and the summary is a `user` record), so the event is born `unmeasured`; `measureCompactions` fills it from Claude
+ * Code's own `api_request` when the exporter saw the call. `transcript` is the id that request names as its `session.id`.
+ */
+function compactionsOf(records: { index: number; at: number; record: any; }[], session: string, owner: Owner, transcript: string): TraceEvent[] {
   return records.filter(({ record }) => record?.isCompactSummary === true && !Number.isNaN(Date.parse(record.timestamp))).map(({ at }) => {
     const own = owner(at);
     return { id: `compaction:${session}:${at}`, kind: "compaction", source: "transcript", at, session, row: own.row, pr: own.pr, repo: own.repo, ...listedBy(own),
-      cause: own.cause, causeKey: own.causeKey, wakeId: own.id };
+      cause: own.cause, causeKey: own.causeKey, wakeId: own.id, transcript, costUsd: null, unmeasured: NO_USAGE_RECORD };
   });
+}
+
+/** What of an `otel-receiver.ts` `api_request` the join reads (the store holds it under `kind: "api_request"`). */
+export type SummaryRequest = { kind?: string; id: string; at: number; sessionId: string | null; querySource?: string | null; model: string | null;
+  usage: { input: number | null; output: number | null; cacheRead: number | null; cacheCreation: number | null }; };
+
+/** A request and the summary record it wrote are stamped milliseconds apart (measured: 5 ms); a minute is far more than that and far less than the gap between two compactions. */
+export const SUMMARY_MATCH_MS = 60_000;
+const COMPACT_QUERY_SOURCE = "compact";
+
+/**
+ * The compactions with the usage of the call that wrote their summary, where Claude Code's exporter saw it: `api_request` with `query_source: "compact"`, of the same session id,
+ * nearest the summary record, each request used once. Its tokens go in the store's shape (an unsplit cache write at the 1-hour rate, as the COST definition says), priced by `costOf`:
+ * `null` for a model with no price, never 0. A compaction with no such request, or whose request lacks a count, is returned as it came: `unmeasured`, not free.
+ * It is a SEPARATE API call from every turn, so no turn changes and none is added.
+ */
+export function measureCompactions(compactions: TraceEvent[], requests: SummaryRequest[]): TraceEvent[] {
+  const wanted = requests.filter((request) => request.kind === "api_request" && request.querySource === COMPACT_QUERY_SOURCE && request.sessionId !== null);
+  const used = new Set<string>();
+  return [...compactions].sort((a, b) => a.at - b.at).map((compaction) => {
+    if (compaction.kind !== "compaction" || compaction.transcript === undefined) return compaction;
+    const near = wanted.filter((request) => request.sessionId === compaction.transcript && !used.has(request.id) && Math.abs(request.at - compaction.at) <= SUMMARY_MATCH_MS)
+      .sort((a, b) => Math.abs(a.at - compaction.at) - Math.abs(b.at - compaction.at) || a.at - b.at);
+    const found = near.find(({ usage }) => [usage.input, usage.output, usage.cacheRead, usage.cacheCreation].every((count) => count !== null));
+    if (!found) return compaction;
+    used.add(found.id);
+    const tokens: Tokens = { input: found.usage.input as number, output: found.usage.output as number, cacheRead: found.usage.cacheRead as number, cacheWrite5m: 0, cacheWrite1h: found.usage.cacheCreation as number };
+    const measured: TraceEvent = { ...compaction, tokens, costUsd: found.model === null ? null : costOf(found.model, tokens) };
+    if (found.model !== null) measured.model = found.model;
+    delete measured.unmeasured;
+    return measured;
+  });
+}
+
+/**
+ * The batch an ingest appends, with the usage of each compaction's summary call where the store holds the exporter's request for it: the compactions of the batch, and the ones
+ * already stored `unmeasured` whose request has arrived since (the receiver is another writer, so it is often later than the transcript). A late one is a corrected copy of the
+ * stored event and replaces it (SUPERSEDED); one still `unmeasured` is not appended again.
+ * @param stored the store's events, among them the `api_request` lines of `otel-receiver.ts`
+ */
+export function withCompactionUsage(batch: TraceEvent[], stored: TraceEvent[]): TraceEvent[] {
+  const requests = stored.filter((event) => (event.kind as string) === "api_request") as unknown as SummaryRequest[];
+  if (requests.length === 0) return batch;
+  const inBatch = new Set(batch.map((event) => event.id));
+  const late = stored.filter((event) => event.kind === "compaction" && event.unmeasured === NO_USAGE_RECORD && !inBatch.has(event.id));
+  const measured = new Map(measureCompactions([...batch.filter((event) => event.kind === "compaction"), ...late], requests).map((event) => [event.id, event]));
+  return [...batch.map((event) => measured.get(event.id) ?? event), ...late.map((event) => measured.get(event.id) as TraceEvent).filter((event) => event.unmeasured === undefined)];
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -566,6 +624,100 @@ export function readStore(path: string, chunkBytes: number = STORE_READ_CHUNK): 
 export function openStore(path: string, read: (path: string) => TraceEvent[] = readStore): { path: string; events: TraceEvent[]; at: Map<string, number>; } {
   const events = read(path);
   return { path, events, at: new Map(events.map((event, position) => [event.id, position])) };
+}
+
+const ID_PREFIX = Buffer.from('{"id":"');
+const QUOTE_BYTE = 0x22;
+const BACKSLASH_BYTE = 0x5c;
+
+/**
+ * The id of one stored line WITHOUT parsing the line into an event: an event is written `{"id":"...",...}`, so the id is the bytes up to the next quote. A line that does not start that
+ * way, or whose id holds an escape, is parsed as JSON, so the answer never depends on the key order of the writer that wrote it.
+ */
+function idOfLine(line: Buffer): string {
+  if (line.subarray(0, ID_PREFIX.length).equals(ID_PREFIX)) {
+    const close = line.indexOf(QUOTE_BYTE, ID_PREFIX.length);
+    if (close !== -1 && !line.subarray(ID_PREFIX.length, close).includes(BACKSLASH_BYTE)) return line.toString("utf8", ID_PREFIX.length, close);
+  }
+  const { id } = JSON.parse(line.toString("utf8"));
+  if (typeof id !== "string") throw new Error(`a stored line carries no id: ${line.toString("utf8", 0, 120)}`);
+  return id;
+}
+
+/** `ids` maps each id found on more than one line to the number of lines it is on; `extra` is the lines past the first of each, which is what `compact-store` removes. */
+export type Duplicates = { lines: number; distinct: number; extra: number; ids: Map<string, number>; };
+
+/**
+ * The ids that appear on more than one line of a store file, and how many extra lines they hold: the count `readStore` hides, because it keeps the last copy of each id. It reads the file
+ * in chunks and takes each line's id off its first bytes, never parsing a line into an event (the file is hundreds of megabytes and this runs on a clock). The unterminated end is a line a
+ * writer is still writing, and is not counted. A missing file holds none.
+ * @param chunkBytes a parameter so a test can make a line span chunks
+ */
+export function duplicateIds(path: string, chunkBytes: number = STORE_READ_CHUNK): Duplicates {
+  const copies = new Map<string, number>();
+  let lines = 0;
+  if (existsSync(path)) {
+    const fd = openSync(path, "r");
+    try {
+      eachLine(fd, (line, terminated) => {
+        if (!terminated || line.length === 0) return;
+        const id = idOfLine(line);
+        lines += 1;
+        copies.set(id, (copies.get(id) ?? 0) + 1);
+      }, chunkBytes);
+    } finally {
+      closeSync(fd);
+    }
+  }
+  const ids = new Map([...copies].filter(([, count]) => count > 1));
+  return { lines, distinct: copies.size, extra: lines - copies.size, ids };
+}
+
+/** What Claude Code's own cost display reads a cache-read token at, per million (the stored value was priced at it until 2026-10-08, and `PRICES` holds the page's rate). */
+export const CLIENT_CACHE_READ_RATE = 0.2;
+
+export type CostBy = "day" | "row" | "cause" | "session";
+export const COST_BY: CostBy[] = ["day", "row", "cause", "session"];
+export type CostRow = { key: string; turns: number; unpriced: number; usd: number; usdAtClientRate: number; };
+
+const NO_KEY = { row: "(no row)", cause: "(no cause)" };
+
+/** The keys a turn is reported under. A turn on SEVERAL rows (`rows`, `row` null) is under each of them, as `DEFINITIONS` says, so the rows of a `--by row` are not to be added. */
+function costKeys(event: TraceEvent, by: CostBy): string[] {
+  if (by === "day") return [new Date(event.at).toISOString().slice(0, "YYYY-MM-DD".length)];
+  if (by === "session") return [event.session];
+  if (by === "cause") return [event.cause ?? NO_KEY.cause];
+  if (event.row !== null) return [`#${event.row}`];
+  return event.rows && event.rows.length > 0 ? event.rows.map((row) => `#${row}`) : [NO_KEY.row];
+}
+
+/**
+ * The turns of a store summed by `day` (UTC), `row`, `cause` or `session`: each turn ONCE (the caller read through `readStore`) and priced from `PRICES` at the call, never from the stored
+ * `costUsd` (a stored value that disagrees is not the one summed). `usdAtClientRate` is the same turns with every cache-read token priced at `CLIENT_CACHE_READ_RATE`, so the two differ by
+ * the cache-read tokens times the gap between that rate and the model's own. A turn with no price (or no tokens) is counted in `unpriced` and adds no dollars, which is not the same as free.
+ * @returns the rows by key, and the total, in which a turn counts once however many rows it is on
+ */
+export function costBy(events: TraceEvent[], by: CostBy, since: number | null = null): { rows: CostRow[]; total: CostRow; } {
+  const sum = (key: string): CostRow => ({ key, turns: 0, unpriced: 0, usd: 0, usdAtClientRate: 0 });
+  const total = sum("total");
+  const rows = new Map<string, CostRow>();
+  const add = (row: CostRow, usd: number | null, atClient: number | null) => {
+    row.turns += 1;
+    if (usd === null || atClient === null) row.unpriced += 1;
+    else {
+      row.usd += usd;
+      row.usdAtClientRate += atClient;
+    }
+  };
+  for (const event of events) {
+    if (event.kind !== "turn" || (since !== null && event.at < since)) continue;
+    const usd = event.tokens ? costOf(event.model, event.tokens) : null;
+    const atClient = event.tokens ? costOf(event.model, event.tokens, CLIENT_CACHE_READ_RATE) : null;
+    add(total, usd, atClient);
+    for (const key of costKeys(event, by)) add(rows.get(key) ?? rows.set(key, sum(key)).get(key) as CostRow, usd, atClient);
+  }
+  const settled = (row: CostRow): CostRow => ({ ...row, usd: Math.round(row.usd * COST_PRECISION) / COST_PRECISION, usdAtClientRate: Math.round(row.usdAtClientRate * COST_PRECISION) / COST_PRECISION });
+  return { rows: [...rows.values()].map(settled).sort((a, b) => a.key.localeCompare(b.key, "en", { numeric: true })), total: settled(total) };
 }
 
 /** What a store file holds: its lines, the ids among them, the lines a rewrite removes (all but the last copy of an id) and how many of those are of each `kind`. */

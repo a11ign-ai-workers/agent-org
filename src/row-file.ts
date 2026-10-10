@@ -99,7 +99,7 @@ import { readFileSync, realpathSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { flagValue, refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { leakRefusalReason } from "./lib/leak-patterns.ts";
-import { missingTemplateFields, templateFieldsReason, wholeSuiteAcceptanceReason }
+import { bareRstestRunReason, missingTemplateFields, templateFieldsReason, wholeSuiteAcceptanceReason }
   from "./row-claim/template-fields-rule.ts";
 import { waitingLanguageWarning } from "./row-claim/waiting-language-rule.ts";
 import { moveProjectStatus, filedByLine, fetchLabels as fetchIssueLabels, ensureLabelsExist } from "./row-claim.ts";
@@ -725,6 +725,10 @@ export function fileRefusalReason(body: string | null): string | null {
   if (acceptance) return `row-file: ${acceptance}`;
   const wholeSuite = wholeSuiteAcceptanceReason(body, "row-file");
   if (wholeSuite) return wholeSuite;
+  // #775: A COMMAND THAT CAN RUN BUT NEVER PASS. `rstest run` on an agent-org test without its config finds no suites; the rule is in
+  // `template-fields-rule.ts` beside the whole-suite one, and this is its one call, filing-side only.
+  const bareRstest = bareRstestRunReason(body, "row-file");
+  if (bareRstest) return bareRstest;
   // #2099: THE FOURTH CAPABILITY, REFUSED WHERE THE OTHER "this job cannot run that" verdicts are. One
   // line here and the whole rule in `acceptance-commands.ts`, beside the classifier whose verdict it
   // moves earlier -- the same seam `acceptancePathsReason` and `labFetchPathReason` below already use,

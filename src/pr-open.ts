@@ -517,14 +517,17 @@ export function sendFailureLine({ mode, branch, head, message }: { mode: string;
  * (#4898) A RATE-LIMITED CREATE IS HELD, NOT FAILED, and the steps after it travel with it. The arm and the label name the branch (`--head`, or
  * the tree's own), not a PR number, so they can be written down before the PR exists and made by the gate once the create has been.
  * @param {string} mode @param {string[]} rest
- * @param {{ owner: string | null, labelExists?: (name: string) => boolean }} deps
+ * @param {{ owner: string | null, labelExists?: (name: string, repo?: string) => boolean }} deps
  * @returns {string[][]} the label's own `gh` argv, preceded by the label's creation when the repository is known not to have it
  */
-function labelStepsAfterCreate(mode: string, rest: string[], { owner, labelExists }: { owner: string | null; labelExists?: (name: string) => boolean; }): string[][] {
+function labelStepsAfterCreate(mode: string, rest: string[], { owner, labelExists }: { owner: string | null; labelExists?: (name: string, repo?: string) => boolean; }): string[][] {
   const steps: string[][] = [];
   for (const args of labelAfterCreate(mode, rest, owner)) {
     const name = args[args.length - 1];
-    if (labelExists !== undefined && !labelExists(name)) steps.push(["label", "create", name, "--description", "The session that owns the pull request (pr:open)"]);
+    const repo = flagAfter(args, "--repo"); // the same repository `ensureLabel` asks and creates in
+    if (labelExists !== undefined && !labelExists(name, ...(repo === null ? [] : [repo]))) {
+      steps.push(["label", "create", name, "--description", "The session that owns the pull request (pr:open)", ...(repo === null ? [] : ["--repo", repo])]);
+    }
     steps.push(args);
   }
   return steps;
@@ -608,13 +611,13 @@ function branchName(fact: (args: string[], fallback: string) => string) {
  * @param {string} mode
  * @param {string[]} rest
  * @param {{ run?: (args: string[]) => void, git?: (args: string[]) => string,
- *           err?: (line: string) => void, owner?: () => string | null, labelExists?: (name: string) => boolean }} [deps]
+ *           err?: (line: string) => void, owner?: () => string | null, labelExists?: (name: string, repo?: string) => boolean }} [deps]
  * @returns {number} the header's exit code: 0, EXIT_NOTHING_SENT, or EXIT_LANDED_THEN_FAILED
  */
 export function sendToGitHub(mode: string, rest: string[],
   { run = defaultGh, git = defaultGit, err = writeErr, owner = ownerOfTree, labelExists, queued = readQueuedEntry, attach = attachFollowUps }: {
       run?: (args: string[]) => void; git?: (args: string[]) => string;
-      err?: (line: string) => void; owner?: () => string | null; labelExists?: (name: string) => boolean;
+      err?: (line: string) => void; owner?: () => string | null; labelExists?: (name: string, repo?: string) => boolean;
       queued?: () => { dir: string; id: string; resetAt: number; } | null; attach?: typeof attachFollowUps;
   } = {}): number {
   // AN ERROR HANDLER THAT CAN ITSELF ERROR IS THE ONE PLACE A THROW COSTS THE MOST (worker-capture,
@@ -668,15 +671,15 @@ export function sendToGitHub(mode: string, rest: string[],
  * @param {string} mode
  * @param {string[]} rest
  * @param {{ run: (args: string[]) => void, err: (line: string) => void, owner: string | null,
- *           labelExists?: (name: string) => boolean }} deps
+ *           labelExists?: (name: string, repo?: string) => boolean }} deps
  */
 function labelCreatedPr(mode: string, rest: string[], { run, err, owner, labelExists }: {
         run: (args: string[]) => void; err: (line: string) => void; owner: string | null;
-        labelExists?: (name: string) => boolean;
+        labelExists?: (name: string, repo?: string) => boolean;
     }) {
   for (const args of labelAfterCreate(mode, rest, owner)) {
     try {
-      ensureLabel(args[args.length - 1], { run, labelExists });
+      ensureLabel(args[args.length - 1], { run, labelExists, repo: flagAfter(args, "--repo") });
       run(args);
     } catch (error) {
       err(`pr-open: the PR was created but labelling it failed -- ${messageOf(error)}\n`
@@ -693,11 +696,11 @@ function labelCreatedPr(mode: string, rest: string[], { run, err, owner, labelEx
  * propagates to `labelCreatedPr`'s warning rather than being swallowed: the same outage as the missing label.
  * OFF when `labelExists` is not wired, like `rowBody`: the tests call `main` directly and must not reach `gh`.
  * @param {string} name
- * @param {{ run: (args: string[]) => void, labelExists?: (name: string) => boolean }} deps
+ * @param {{ run: (args: string[]) => void, labelExists?: (name: string, repo?: string) => boolean }} deps
  */
-function ensureLabel(name: string, { run, labelExists }: { run: (args: string[]) => void; labelExists?: (name: string) => boolean; }) {
-  if (labelExists === undefined || labelExists(name)) return;
-  run(["label", "create", name, "--description", "The session that owns the pull request (pr:open)"]);
+function ensureLabel(name: string, { run, labelExists, repo = null }: { run: (args: string[]) => void; labelExists?: (name: string, repo?: string) => boolean; repo?: string | null; }) {
+  if (labelExists === undefined || labelExists(name, ...(repo === null ? [] : [repo]))) return;
+  run(["label", "create", name, "--description", "The session that owns the pull request (pr:open)", ...(repo === null ? [] : ["--repo", repo])]);
 }
 
 /**
@@ -837,9 +840,9 @@ const defaultRowLabels = (number: number, repo: string): string[] => JSON.parse(
  * @param {string} name
  * @returns {boolean}
  */
-function defaultLabelExists(name: string): boolean {
+function defaultLabelExists(name: string, repo: string = "{owner}/{repo}"): boolean {
   try {
-    execFileSync("gh", ["api", `repos/{owner}/{repo}/labels/${encodeURIComponent(name)}`, "--silent"], { stdio: "pipe" });
+    execFileSync("gh", ["api", `repos/${repo}/labels/${encodeURIComponent(name)}`, "--silent"], { stdio: "pipe" });
     return true;
   } catch (error) {
     if (/HTTP 404|Not Found/i.test(`${(error as {stderr?: unknown}).stderr ?? ""}`)) return false;
@@ -987,41 +990,46 @@ function verifyStampStep(mode: string, rest: string[], body: string, { verifySta
  *           prHead?: (repo: string, number: string) => { ref: string, oid: string } | null,
  *           runAcceptance?: (command: string) => number, runMutation?: (command: string) => number,
  *           owner?: () => string | null, rowBody?: (number: number, repo?: string) => string, rootFiles?: Set<string>,
- *           rowLabels?: (number: number, repo: string) => string[], labelExists?: (name: string) => boolean,
+ *           rowLabels?: (number: number, repo: string) => string[], labelExists?: (name: string, repo?: string) => boolean,
  *           claimedRows?: (prRepo: string) => ClaimedRow[] | ClaimedRows | null,
  *           code?: readonly { key: string, repo: string }[], login?: () => string, lanes?: {lanes: import("./lane-ownership.ts").Lane[]} | null,
  *           verifyStamp?: (body: string) => import("./verify-stamp.ts").VerifyReading, write?: (path: string, text: string) => void,
- *           readFile?: (path: string) => string, out?: (line: string) => void, err?: (line: string) => void }} [deps]
+ *           readFile?: (path: string) => string, branchHead?: (repo: string, branch: string) => string | null,
+ *           out?: (line: string) => void, err?: (line: string) => void }} [deps]
  * @returns {number}
  */
 export function main(argv: string[] = process.argv.slice(2),
   { run, git, prHead, runAcceptance, runMutation = runForReal, owner, rowBody, rowLabels, labelExists, rootFiles, code, login, lanes,
-    claimedRows, verifyStamp, write, readFile, out = writeOut, err = writeErr }: {
+    claimedRows, verifyStamp, write, readFile, branchHead, out = writeOut, err = writeErr }: {
           run?: (args: string[]) => void; git?: (args: string[]) => string;
           prHead?: (repo: string, number: string) => { ref: string; oid: string; } | null;
           runAcceptance?: (command: string) => number; runMutation?: (command: string) => number;
           owner?: () => string | null; rowBody?: (number: number, repo?: string) => string; rootFiles?: Set<string>;
-          rowLabels?: (number: number, repo: string) => string[]; labelExists?: (name: string) => boolean;
+          rowLabels?: (number: number, repo: string) => string[]; labelExists?: (name: string, repo?: string) => boolean;
           claimedRows?: (prRepo: string) => ClaimedRow[] | ClaimedRows | null;
           code?: readonly { key: string; repo: string; }[]; login?: () => string; lanes?: { lanes: import("./lane-ownership.ts").Lane[]; } | null;
           verifyStamp?: (body: string) => import("./verify-stamp.ts").VerifyReading; write?: (path: string, text: string) => void;
-          readFile?: (path: string) => string; out?: (line: string) => void; err?: (line: string) => void;
+          readFile?: (path: string) => string; branchHead?: (repo: string, branch: string) => string | null;
+          out?: (line: string) => void; err?: (line: string) => void;
       } = {}): number {
-  const [mode, ...rest] = argv;
+  const [mode, ...given] = argv;
   if (mode !== "create" && mode !== "edit") {
     err(usage());
     return EXIT_USAGE;
   }
-  const body = bodyFromArgs(rest);
+  const body = bodyFromArgs(given);
   if (body === null) {
     err(`pr-open ${mode}: --body or --body-file is required -- this wrapper checks the `
       + "body before gh sends it, and cannot check a body it was never given. Use `gh pr " + mode
       + "` directly, unguarded, for an interactive editor session.\n");
     return EXIT_USAGE;
   }
+  // agent-org#753: a row whose Region names another repository opens its pull request THERE, so the branch is asked of that repository.
+  const crossRepo = otherRepositoryOf(mode, given, body, { git, rowBody, rootFiles, code, branchHead });
+  const rest = crossRepo !== null && flagAfter(given, "--repo") === null ? [...given, "--repo", crossRepo] : given;
   // #1344: BEFORE checkBody, because checkBody RUNS the Acceptance -- in this working tree, whatever --head says.
   // #2939: and a `Hand-fix:` line the ledger could not read, which it would silently not count. Pure, like the heads.
-  const headRefused = headTreeRefusal(mode, rest, { git }) ?? editTreeRefusal(mode, rest, { git, prHead })
+  const headRefused = headTreeRefusal(mode, rest, { git, crossRepo, branchHead }) ?? editTreeRefusal(mode, rest, { git, prHead })
     ?? declarationRefusal(body) ?? authorshipRefusal(mode, rest, { git, login, lanes });
   if (headRefused) {
     err(`${headRefused}\n`);
@@ -1095,7 +1103,9 @@ export function unstampableRefusal(mode: string, owner: string | null): string |
  * @param {{ git?: (args: string[]) => string }} [deps]
  * @returns {string | null} the refusal, or null when the tree under test is the head being sent
  */
-export function headTreeRefusal(mode: string, rest: string[], { git = defaultGit }: { git?: (args: string[]) => string; } = {}): string | null {
+export function headTreeRefusal(mode: string, rest: string[], { git = defaultGit, crossRepo = null, branchHead }: {
+        git?: (args: string[]) => string; crossRepo?: string | null; branchHead?: (repo: string, branch: string) => string | null;
+    } = {}): string | null {
   if (mode !== "create") return null;
   const head = flagAfter(rest, "--head");
   if (head === null) return null;
@@ -1111,6 +1121,8 @@ export function headTreeRefusal(mode: string, rest: string[], { git = defaultGit
       + `\`${head}\`. ${nothingRan}`;
   }
   const local = read(["rev-parse", "HEAD"]);
+  // agent-org#753: the pull request opens in ANOTHER repository, whose branch this tree's `origin/<head>` is not a reading of.
+  if (crossRepo !== null && branchHead) return otherRepositoryHeadRefusal(head, crossRepo, local, branchHead);
   const remote = read(["rev-parse", `refs/remotes/origin/${head}`]);
   if (local === null || remote === null || local !== remote) {
     return `pr-open: REFUSED -- this tree is on \`${head}\` at \`${local ?? "(unreadable)"}\`, but \`origin/${head}\` `
@@ -1119,6 +1131,111 @@ export function headTreeRefusal(mode: string, rest: string[], { git = defaultGit
   }
   return null;
 }
+
+/**
+ * agent-org#753: THE BRANCH OF THE REPOSITORY THE PULL REQUEST OPENS IN, READ FROM THAT REPOSITORY. `origin/<head>` is this tree's own remote, and
+ * for a row whose Region is another repository's (a11ign#4889: `agent-org:` paths, branch pushed to a11ign/agent-org) it is "unreadable --
+ * push the branch first" whatever was pushed, so the row stalled with finished work. A branch the repository does not hold, one it holds at
+ * another commit, and a read that fails each refuse and name the repository; none is read as a match. `null` is "this tree is that head".
+ * @param {string} head @param {string} repo @param {string | null} local the commit the Acceptance runs on
+ * @param {(repo: string, branch: string) => string | null} branchHead the commit `repo` holds `branch` at, or null when it holds none
+ * @returns {string | null}
+ */
+function otherRepositoryHeadRefusal(head: string, repo: string, local: string | null, branchHead: (repo: string, branch: string) => string | null): string | null {
+  const nothingRan = "Nothing ran and nothing was sent (agent-org#753).";
+  let held: string | null;
+  try {
+    held = branchHead(repo, head);
+  } catch (error) {
+    return `pr-open: REFUSED -- could not read branch \`${head}\` of ${repo} (${messageOf(error).split("\n")[0]}), where this pull request opens, so the tree under `
+      + `test cannot be compared with its head. Retry once GitHub answers. ${nothingRan}`;
+  }
+  if (held === null) {
+    return `pr-open: REFUSED -- ${repo} holds no branch \`${head}\`, and the pull request opens there (the row's Region names ${repo}). `
+      + `Push \`${head}\` to ${repo} first. ${nothingRan}`;
+  }
+  if (local === null || local !== held) {
+    return `pr-open: REFUSED -- this tree is on \`${head}\` at \`${local ?? "(unreadable)"}\`, but ${repo} holds \`${head}\` at \`${held}\`. `
+      + `The Acceptance would test a tree that is not the head GitHub opens; push or pull until they are the same commit. ${nothingRan}`;
+  }
+  return null;
+}
+
+/**
+ * agent-org#753: THE REPOSITORY A PULL REQUEST OPENS IN WHEN IT IS NOT THIS TREE'S, or null when it is (or when nothing can say). The one
+ * single repository the Regions of the rows the body closes name -- `agent-org:src/x.ts` is the declared repository keyed `agent-org`, a bare
+ * path is the row's stated repository or else the project's first -- or an explicit `--repo`, which outranks it. Compared with the repository
+ * this tree's `origin` is; `Closes: none`, a row that cannot be read or has no Region, and Regions spread over several repositories name none,
+ * and the tree's own `origin/<head>` is read as ever. OFF when no `branchHead` is wired, which is every direct caller of `main` (the entry block wires it).
+ * @param {string} mode @param {string[]} rest @param {string} body
+ * @param {{ git?: (args: string[]) => string, rowBody?: (number: number, repo?: string) => string, rootFiles?: Set<string>,
+ *   code?: readonly { key: string, repo: string }[], branchHead?: (repo: string, branch: string) => string | null }} deps
+ * @returns {string | null}
+ */
+export function otherRepositoryOf(mode: string, rest: string[], body: string, { git = defaultGit, rowBody, rootFiles, code, branchHead }: {
+        git?: (args: string[]) => string; rowBody?: (number: number, repo?: string) => string; rootFiles?: Set<string>;
+        code?: readonly { key: string; repo: string; }[]; branchHead?: (repo: string, branch: string) => string | null;
+    }): string | null {
+  if (mode !== "create" || !branchHead || flagAfter(rest, "--head") === null) return null;
+  const target = flagAfter(rest, "--repo") ?? (rowBody ? regionRepository(body, { rowBody, rootFiles, code }) : null);
+  if (target === null) return null;
+  let slug: string | undefined;
+  try {
+    slug = /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\s*$/.exec(git(["remote", "get-url", "origin"]))?.[1];
+  } catch (error) {
+    void error; // an origin that cannot be read is no proof the tree is the target's, so GitHub is asked about the target
+  }
+  return slug !== undefined && slug.toLowerCase() === target.toLowerCase() ? null : target;
+}
+
+/**
+ * agent-org#753: the ONE repository the Regions of the rows a body closes are written against, or null. Pure over `rowBody`.
+ * @param {string} body
+ * @param {{ rowBody: (number: number, repo?: string) => string, rootFiles?: Set<string>, code?: readonly { key: string, repo: string }[] }} deps
+ * @returns {string | null}
+ */
+function regionRepository(body: string, { rowBody, rootFiles, code = homeProjectDeclaration().code }: {
+        rowBody: (number: number, repo?: string) => string; rootFiles?: Set<string>; code?: readonly { key: string; repo: string; }[];
+    }): string | null {
+  const closes = extractClosesDeclaration(body);
+  if (closes.kind !== "closes") return null;
+  const repositories = new Set<string>();
+  for (const reference of closesReferences(closes)) {
+    let text;
+    try {
+      text = reference.repo === null ? rowBody(reference.number) : rowBody(reference.number, reference.repo);
+    } catch (error) {
+      void error; // an unread row is `regionStep`'s refusal to make, in its own words
+      return null;
+    }
+    const declared = declaredRegionFiles(text, rootFiles ? { rootFiles } : undefined);
+    if (declared === null) return null;
+    for (const entry of declared) {
+      const { key } = splitRegionEntry(entry);
+      const repo = key === "" ? (statedRepository(text) ?? code[0]?.repo) : code.find((candidate) => candidate.key === key)?.repo;
+      if (repo === undefined) return null;
+      repositories.add(repo);
+    }
+  }
+  return repositories.size === 1 ? [...repositories][0] : null;
+}
+
+/**
+ * agent-org#753: the commit `repo` holds `branch` at, over REST like `defaultRowBody`; null when the repository answers 404 (it holds no such
+ * branch), a throw for any other failure -- which `otherRepositoryHeadRefusal` refuses on rather than read as absent.
+ * @param {string} repo @param {string} branch
+ * @returns {string | null}
+ */
+const defaultBranchHead = (repo: string, branch: string): string | null => {
+  try {
+    const path = branch.split("/").map(encodeURIComponent).join("/");
+    return execFileSync("gh", ["api", `repos/${repo}/branches/${path}`, "--jq", ".commit.sha"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim() || null;
+  } catch (error) {
+    const said = `${(error as { stderr?: unknown }).stderr ?? ""}${messageOf(error)}`;
+    if (/HTTP 404|Not Found/i.test(said)) return null;
+    throw error;
+  }
+};
 
 /** The login `gh` will author the pull request as -- `gh pr create` runs under the same account and `GH_CONFIG_DIR`. */
 const defaultLogin = () => execFileSync("gh", ["api", "user", "--jq", ".login"], { encoding: "utf8" }).trim();
@@ -1234,7 +1351,7 @@ export function editTreeRefusal(mode: string, rest: string[], { git = defaultGit
 export function armAfterCreate(mode: string, rest: string[]): string[][] {
   if (mode !== "create" || rest.includes("--draft")) return [];
   const head = flagAfter(rest, "--head");
-  return [["pr", "merge", "--auto", "--merge", ...(head ? [head] : [])]];
+  return [["pr", "merge", "--auto", "--merge", ...(head ? [head] : []), ...repoFlagOf(rest)]];
 }
 
 /**
@@ -1274,7 +1391,18 @@ export function labelAfterCreate(mode: string, rest: string[], owner: string | n
   if (mode !== "create" || owner === null) return [];
   if (!isLiveSession(owner)) return [];
   const head = flagAfter(rest, "--head");
-  return [["pr", "edit", ...(head ? [head] : []), "--add-label", `${SESSION_PREFIX}${owner}`]];
+  return [["pr", "edit", ...(head ? [head] : []), ...repoFlagOf(rest), "--add-label", `${SESSION_PREFIX}${owner}`]];
+}
+
+/**
+ * agent-org#753: `--repo <repo>` when the call was made for one, else nothing -- the arm and the label of a pull request opened in another
+ * repository are aimed there too, because `gh pr merge <branch>` and `gh pr edit <branch>` otherwise look in the checkout's own.
+ * @param {string[]} rest
+ * @returns {string[]}
+ */
+function repoFlagOf(rest: string[]): string[] {
+  const repo = flagAfter(rest, "--repo");
+  return repo === null ? [] : ["--repo", repo];
 }
 
 /**
@@ -1297,7 +1425,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.arg
     process.exitCode = EXIT_NOTHING_SENT;
   } else {
     process.exitCode = main(undefined, { rowBody: defaultRowBody, verifyStamp: defaultVerifyStamp,
-      claimedRows: (prRepo) => lookupClaimedRowsOfTrackers(trackerReposFor(prRepo)),
+      claimedRows: (prRepo) => lookupClaimedRowsOfTrackers(trackerReposFor(prRepo)), branchHead: defaultBranchHead,
       rowLabels: defaultRowLabels, labelExists: defaultLabelExists, write: writeAcceptanceFile });
   }
 }

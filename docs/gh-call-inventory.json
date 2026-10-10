@@ -2,10 +2,10 @@
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
     "files": 95,
-    "spawns": 134,
-    "calls": 390,
+    "spawns": 135,
+    "calls": 391,
     "shapes": {
-      "api rest": 136,
+      "api rest": 137,
       "issue list": 42,
       "api graphql": 37,
       "issue view": 34,
@@ -556,9 +556,9 @@
       "parsesCloses": false
     },
     "src/pr-open.ts": {
-      "spawns": 6,
+      "spawns": 7,
       "calls": {
-        "api rest": 5,
+        "api rest": 6,
         "label create": 2,
         "pr edit": 1,
         "pr merge": 1
