@@ -60,7 +60,7 @@
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
 import { existsSync, realpathSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // RELATIVE, NOT the `@a11ign/screenreader-fleet/cli-flags` package specifier: that export map
 // points at `dist/`, so it needs both `node_modules` AND a completed build. This file is reachable
@@ -1944,15 +1944,18 @@ function undoCreatedWorktree({ branch, worktree }: { branch: string; worktree: s
  * @param {string} mySession
  * @param {{ branch: string, worktree: string, adopt?: string, run?: typeof defaultRun, exists?: (path: string) => boolean,
  *   owner?: (worktree: string) => string | null, stamp?: (worktree: string, session: string) => void,
- *   claim?: typeof claimRow, claimDeps?: Parameters<typeof claimRow>[2], clone?: string, release?: typeof declineRow }} args
- *   `adopt` (#2470) claims the EXISTING tree of the session it names, in place -- see {@link adoptionReason}
+ *   claim?: typeof claimRow, claimDeps?: Parameters<typeof claimRow>[2], clone?: string, release?: typeof declineRow,
+ *   exec?: typeof defaultExec }} args
+ *   `adopt` (#2470) claims the EXISTING tree of the session it names, in place -- see {@link adoptionReason}. `exec` (agent-org#851) runs
+ *   {@link installLockedDependencies}'s `npm ci` IN the tree, which `run` cannot say: it names no directory
  * @returns {ReturnType<typeof claimRow>}
  */
 export function claimWithWorktree(issueNumber: number, mySession: string, { branch, worktree, adopt, run: ranIn = defaultRun, exists = existsSync,
-  owner = worktreeOwner, stamp = stampWorktree, claim = claimRow, claimDeps = {}, clone, release = declineRow }: {
+  owner = worktreeOwner, stamp = stampWorktree, claim = claimRow, claimDeps = {}, clone, release = declineRow, exec = defaultExec }: {
         branch: string; worktree: string; adopt?: string; run?: typeof defaultRun; exists?: (path: string) => boolean;
         owner?: (worktree: string) => string | null; stamp?: (worktree: string, session: string) => void;
         claim?: typeof claimRow; claimDeps?: Parameters<typeof claimRow>[2]; clone?: string; release?: typeof declineRow;
+        exec?: typeof defaultExec;
     }): ReturnType<typeof claimRow> {
   // The keyed claim's git calls name their checkout (`-C`), as `git-reads-name-their-checkout.test.ts` asks of every read; `gh` is untouched.
   const run: typeof defaultRun = clone === undefined ? ranIn : (cmd, args) => ranIn(cmd, cmd === "git" ? ["-C", clone, ...args] : args);
@@ -1976,8 +1979,11 @@ export function claimWithWorktree(issueNumber: number, mySession: string, { bran
       if (claimDeps.tracker === undefined) throw cause;
       throw takenBack(cause, { issueNumber, mySession, branch, worktree: tree, run, tracker: claimDeps.tracker, release, landed });
     }
-    if (result.claimed) return replaced ? { ...result, replacedTip: replaced } : result;
-    return { claimed: false, reason: `${result.reason} -- and ${undoCreatedWorktree({ branch, worktree: tree }, run)}` };
+    if (!result.claimed) return { claimed: false, reason: `${result.reason} -- and ${undoCreatedWorktree({ branch, worktree: tree }, run)}` };
+    // agent-org#851: the claim stands first; an install that fails is a line in its report, never a reason to take the row back.
+    const install = installLockedDependencies(tree, { exec, exists });
+    const made = replaced ? { ...result, replacedTip: replaced } : result;
+    return install === null ? made : { ...made, install };
   });
 }
 
@@ -2030,6 +2036,36 @@ function replacedMergedTip(branch: string, run: typeof defaultRun): string | nul
   if (reading.exists && reading.free) return tip;
   throw new Error(`row-claim: --branch=${branch} exists locally and is not free to recreate after the fetch: `
     + `${reading.exists ? reading.why : "it vanished"}. Nothing was written.`);
+}
+
+/** agent-org#851: a command run IN a directory, which `defaultRun` cannot be: it takes no `cwd`, and a `git -C` is not an `npm ci`. */
+const defaultExec: (cmd: string, args: string[], where: { cwd: string; }) => string = (cmd, args, { cwd }): string =>
+  execFileSync(cmd, args, { cwd, encoding: "utf8", env: sandboxGitEnv(), stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60 * 1000 });
+
+/**
+ * agent-org#851 (a11ign#4957 cause 2): A WORKTREE THE CLAIM MADE IS PROVISIONED FROM THE COMMITTED LOCKFILE. `git worktree add` makes a tree with no
+ * `node_modules`, so a fresh worker's Acceptance (`node --test`, `rstest`) exited 1 before it tested anything and agent-org#816 stopped on exactly that.
+ * Runs `npm ci --ignore-scripts` in `tree` when the tree HAS a `package-lock.json` and NO `node_modules`, and answers the word the claim's line
+ * carries: `installed`, or `install failed: <first error line>`. A repository with no lockfile, or a tree that already has its modules, answers
+ * `null` and is claimed exactly as before.
+ *
+ * NEVER THROWS: the claim is already made and the row is the worker's, so a failed install is REPORTED, where it is the worker's first command that
+ * would otherwise have failed with no word of why. `--ignore-scripts`: a claim must not run a package's lifecycle scripts as a side effect.
+ * @param {string} tree
+ * @param {{ exec: typeof defaultExec, exists: (path: string) => boolean }} deps
+ * @returns {string | null}
+ */
+export function installLockedDependencies(tree: string, { exec, exists }: { exec: typeof defaultExec; exists: (path: string) => boolean; }): string | null {
+  if (!exists(join(tree, "package-lock.json")) || exists(join(tree, "node_modules"))) return null;
+  try {
+    exec("npm", ["ci", "--ignore-scripts"], { cwd: tree });
+    return "installed";
+  } catch (cause) {
+    const failed = cause as { stderr?: unknown; stdout?: unknown; message?: unknown; };
+    const lines = [failed.stderr, failed.stdout, failed.message].flatMap((text) => String(text ?? "").split("\n").map((line) => line.trim()).filter(Boolean));
+    const first = lines.find((line) => /\bERR!?\b|error/i.test(line)) ?? lines[0] ?? "no output";
+    return `install failed: ${first.slice(0, 200)}`;
+  }
 }
 
 /**
@@ -2791,11 +2827,12 @@ function renderTrackerStatus(tracker: Tracker, { issueNumber, title, status, bod
  * @param {"dispatch" | "claim"} mode
  * @param {number} issueNumber
  * @param {string} mySession
- * @param {{ branch?: string, worktree?: string, adopt?: string, replacedTip?: string, key?: string }} record `key` (agent-org#575) names a row of a
+ * @param {{ branch?: string, worktree?: string, adopt?: string, replacedTip?: string, install?: string, key?: string }} record `install` (agent-org#851) is
+ *   `installed` or `install failed: <line>`, said after the worktree; `key` (agent-org#575) names a row of a
  *   tracker that is not the first `<key>#<n>`, as `check` does, so two trackers' row 7 read as two rows
  * @returns {string}
  */
-export function claimLineFor(mode: "dispatch" | "claim", issueNumber: number, mySession: string, { branch, worktree, adopt, replacedTip, key = "" }: { branch?: string; worktree?: string; adopt?: string; replacedTip?: string; key?: string; }): string {
+export function claimLineFor(mode: "dispatch" | "claim", issueNumber: number, mySession: string, { branch, worktree, adopt, replacedTip, install, key = "" }: { branch?: string; worktree?: string; adopt?: string; replacedTip?: string; install?: string; key?: string; }): string {
   const label = mode === "dispatch" ? "DISPATCHED" : "STARTED";
   const startedSuffix = mode === "claim" ? ` / ${STARTED_LABEL}` : "";
   // #987: `branch <name>`, not `branch:<name>` -- the colon form named a LABEL, and this claim no longer
@@ -2805,8 +2842,10 @@ export function claimLineFor(mode: "dispatch" | "claim", issueNumber: number, my
   const worktreeSuffix = mode === "claim" && worktree ? ` / worktree ${worktree}${adopt ? ` (ADOPTED from ${adopt}, work kept)` : ""}` : "";
   // #3745: the leftover branch's tip, so a reader can find what the name held; it is an ancestor of origin/main by construction.
   const replacedSuffix = replacedTip ? ` (recreated over a leftover branch merged into origin/main, old tip ${replacedTip})` : "";
+  // agent-org#851: what installing the new tree's lockfile came to, so the worker's first failing command is not a mystery.
+  const installSuffix = mode === "claim" && install ? ` / ${install}` : "";
   return `${label} -- ${key}#${issueNumber} is now ${CLAIM_LABEL} / session:${mySession}`
-    + `${startedSuffix}${branchSuffix}${worktreeSuffix}${replacedSuffix}`;
+    + `${startedSuffix}${branchSuffix}${worktreeSuffix}${replacedSuffix}${installSuffix}`;
 }
 
 /**
@@ -3047,7 +3086,8 @@ function runDispatchOrClaim(mode: "dispatch" | "claim", issueNumber: number, res
       // recording it would leave an entry no release removes, refusing the worker's later legitimate claim.
       if (mode === "claim") recordHeldRow(mySession, issueNumber);
       const claimLine = claimLineFor(mode, issueNumber, mySession, { branch, worktree, adopt,
-        replacedTip: (result as { replacedTip?: string }).replacedTip, ...(key === "" ? {} : { key }) });
+        replacedTip: (result as { replacedTip?: string }).replacedTip, install: (result as { install?: string }).install,
+        ...(key === "" ? {} : { key }) });
       if (result.statusMoved) {
         process.stdout.write(`${claimLine}\n`);
         process.exitCode = 0;
