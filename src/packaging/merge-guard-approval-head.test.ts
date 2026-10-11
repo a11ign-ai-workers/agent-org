@@ -1,3 +1,4 @@
+// no-token: gh -- every input is injected; the guard is asked about facts, and no lookup runs.
 /**
  * RULE: DOES AN APPROVAL COVER THE HEAD? -- a11ign#5038, `src/merge-guard/approval-head-rule.ts`.
  * Replaces GitHub's `require_last_push_approval`, which marked an approval stale on every merge-base change
