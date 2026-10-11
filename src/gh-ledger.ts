@@ -17,9 +17,10 @@ import { homedir } from "node:os";
 import { dirname, join } from "node:path";
 
 /**
- * `sessionId` is the 9th field, the id of the session that made the call (`host/gh`, #3589); a line from before it has 8 fields and NO `sessionId` key, so it reads to the same entry it always did
+ * `sessionId` is the 9th field, the id of the session that made the call (`host/gh`, #3589); a line from before it has 8 fields and NO `sessionId` key, so it reads to the same entry it always did.
+ * `cache` is the 10th field, raw: `-` for a call the read cache did not look at, the verdict for a read it did (`verdictOf`), and NO key on a line from before it.
  */
-export type LedgerEntry = {time: string, account: string, resource: string, cost: number | null, status: number, command: string, workspace: string, caller: string, sessionId?: string};
+export type LedgerEntry = {time: string, account: string, resource: string, cost: number | null, status: number, command: string, workspace: string, caller: string, sessionId?: string, cache?: string};
 
 const FIELDS = 8;
 const NO_SESSION = "-";
@@ -45,8 +46,11 @@ export function parseLine(line: string): LedgerEntry | null {
   const status = Number(f[4]);
   if (!Number.isInteger(status)) return null;
   const sessionId = f.length > FIELDS ? f[FIELDS] : NO_SESSION;
+  // Everything after the 9th field is the 10th, so a tab inside it leaves a field `verdictOf` refuses rather than shifting the ones before it
+  const cache = f.length > FIELDS + 1 ? f.slice(FIELDS + 1).join("\t") : undefined;
   return { time: f[0], account: f[1], resource: f[2], cost: f[3] === "" ? null : Number(f[3]), status,
-    command: f[5], workspace: f[6], caller: f[FIELDS - 1], ...(sessionId === NO_SESSION || sessionId === "" ? {} : { sessionId }) };
+    command: f[5], workspace: f[6], caller: f[FIELDS - 1], ...(sessionId === NO_SESSION || sessionId === "" ? {} : { sessionId }),
+    ...(cache === undefined ? {} : { cache }) };
 }
 
 /** @param {string} text @returns {LedgerEntry[]} */
@@ -573,14 +577,109 @@ export function ghQueueTick({ home = process.env.A11Y_GH_QUEUE_HOME ?? homedir()
   return said;
 }
 
+// --- #4148 residual (agent-org#742): WHICH READS MISS, AND WHY -----------------------------------------------------------------
+//
+// `host/gh` ends a read's ledger line with the read cache's verdict: `<hit|miss>-<why>:<argv digest>:<key digest>:<repository slug>`
+// (`-` for a call the cache did not look at). The argument digest says "the same question", so a group of reads with one caller,
+// subcommand, repository and digest is one question asked again. A HIT's line says `cache` (it spent no pool), so it is counted with
+// the group its call made: it is in scope under `--resource` only when a call of that group spent the pool named.
+
+/** The 10th field: the verdict's grammar. A tab inside it, or any other shape, is refused rather than read. */
+const VERDICT = /^(hit|miss)-([a-z-]+):([0-9a-f]+):([0-9a-f]+):([A-Za-z0-9._-]+)$/;
+
+/** What the cache said about one read: a hit, or a miss and the `why` `read_cache_fresh` gave. */
+export type Verdict = { outcome: "hit" | "miss"; why: string; argv: string; repository: string };
+
+/** @returns {Verdict | null} null for a field that is not the wrapper's grammar: a line that cannot say is never given an answer */
+export function verdictOf(cache: string): Verdict | null {
+  const m = VERDICT.exec(cache);
+  return m === null ? null : { outcome: m[1] === "hit" ? "hit" : "miss", why: m[2], argv: m[3], repository: m[5] };
+}
+
+/** The group of a line with no verdict to read: a line from before the 10th field, or one whose field is not the grammar. */
+export const NO_VERDICT = "(no verdict)";
+const NO_DIGEST = "-";
+
+type ReadLine = { key: string; caller: string; command: string; repository: string; digest: string; resource: string; time: string; outcome: "hit" | "miss" | "unknown"; why: string };
+
+/** @returns {ReadLine | null} null for a line that is not a read: an incident, or a call the cache did not look at (`-`), which is counted apart */
+function readLineOf(e: LedgerEntry): ReadLine | null {
+  if (e.resource === "incident" || e.cache === "-") return null;
+  const caller = callerScript(e.caller);
+  const resource = e.resource.replace(/\?$/, "");
+  const v = e.cache === undefined ? null : verdictOf(e.cache);
+  const repository = v?.repository ?? NO_VERDICT;
+  const digest = v?.argv ?? NO_DIGEST;
+  return { key: [caller, e.command, repository, digest].join("\t"), caller, command: e.command, repository, digest, resource, time: e.time,
+    outcome: v?.outcome ?? "unknown", why: v?.why ?? NO_VERDICT };
+}
+
+export type ReadGroup = { caller: string; command: string; repository: string; digest: string; calls: number; hits: number; unknown: number; misses: Record<string, number>; };
+export type ReadReport = { from: string; to: string; groups: ReadGroup[]; calls: number; hits: number; misses: number; unknown: number; uncached: number; };
+
+const missesOf = (g: ReadGroup) => Object.values(g.misses).reduce((n, c) => n + c, 0);
+
+/**
+ * THE READS, GROUPED: by caller script, subcommand, repository and arguments' digest (the key's digest is left out on purpose, so "the same
+ * question with M different keys" is one group). Per group: its calls, its hits and its misses by `why`. The busiest first, at most `limit`;
+ * the totals are over all of them. Hits join to their group's calls (see the section note), and `resource` and `account` narrow the reads.
+ * @param {LedgerEntry[]} entries @param {{account?: string, resource?: string, limit?: number}} [where]
+ * @returns {ReadReport}
+ */
+export function readGroups(entries: LedgerEntry[], { account, resource, limit = DEFAULT_TOP }: { account?: string; resource?: string; limit?: number; } = {}): ReadReport {
+  const own = entries.filter((e) => account === undefined || e.account === account);
+  const onPool = (name: string) => resource === undefined || name === resource;
+  const uncached = own.filter((e) => e.cache === "-" && onPool(e.resource.replace(/\?$/, ""))).length;
+  const lines = own.map(readLineOf).filter((r): r is ReadLine => r !== null);
+  const spent = new Set(lines.filter((r) => r.outcome !== "hit" && onPool(r.resource)).map((r) => r.key));
+  const scoped = lines.filter((r) => (r.outcome === "hit" ? resource === undefined || spent.has(r.key) : onPool(r.resource)));
+
+  const byKey: Map<string, ReadGroup> = new Map();
+  for (const r of scoped) {
+    const g = byKey.get(r.key) ?? { caller: r.caller, command: r.command, repository: r.repository, digest: r.digest, calls: 0, hits: 0, unknown: 0, misses: {} };
+    g.calls += 1;
+    if (r.outcome === "hit") g.hits += 1;
+    else if (r.outcome === "unknown") g.unknown += 1;
+    else g.misses[r.why] = (g.misses[r.why] ?? 0) + 1;
+    byKey.set(r.key, g);
+  }
+  const all = [...byKey.values()].sort((a, b) => b.calls - a.calls || a.caller.localeCompare(b.caller) || a.command.localeCompare(b.command)
+    || a.repository.localeCompare(b.repository) || a.digest.localeCompare(b.digest));
+  const sum = (f: (g: ReadGroup) => number) => all.reduce((n, g) => n + f(g), 0);
+  const times = scoped.map((r) => r.time).sort();
+  return { from: times[0] ?? "", to: times[times.length - 1] ?? "", groups: all.slice(0, limit), calls: sum((g) => g.calls), hits: sum((g) => g.hits),
+    misses: sum(missesOf), unknown: sum((g) => g.unknown), uncached };
+}
+
+/**
+ * The report `--by-read` prints: a header naming the window, the totals and the calls the cache did not read, then one line per group with
+ * its misses by why. A reading with no reads says so; it never prints an empty table.
+ * @param {ReadReport} report @param {{account?: string, resource?: string}} [where]
+ */
+export function renderByRead(report: ReadReport, where: { account?: string; resource?: string; } = {}): string {
+  const scope = `${where.account ? `, account ${where.account}` : ""}${where.resource ? `, resource ${where.resource}` : ""}`;
+  const uncached = `${report.uncached} calls the cache did not look at`;
+  if (report.calls === 0) return `gh ledger: no reads recorded${scope}; ${uncached}\n`;
+  const head = `gh ledger reads: ${report.calls} reads, ${report.from} .. ${report.to}${scope}: ${report.hits} hits, ${report.misses} misses, ` +
+    `${report.unknown} with no verdict; ${uncached}\n`;
+  const rows = report.groups.map((g) => {
+    const why = Object.entries(g.misses).sort(([a, x], [b, y]) => y - x || a.localeCompare(b)).map(([w, n]) => `${w} ${n}`);
+    if (g.unknown > 0) why.push(`${NO_VERDICT} ${g.unknown}`);
+    return `${String(g.calls).padStart(6)} calls  ${String(g.hits).padStart(6)} hits  ${g.caller}  [${g.command}]  ${g.repository}  ${g.digest}  ` +
+      (why.length === 0 ? "no miss" : `misses: ${why.join(", ")}`);
+  });
+  return `${head}${rows.join("\n")}\n`;
+}
+
 /** @param {string[]} argv */
 function cliOptions(argv: string[]) {
-  const out: { file?: string; account?: string; resource?: string; limit?: number; perHour?: boolean; } = {};
+  const out: { file?: string; account?: string; resource?: string; limit?: number; perHour?: boolean; byRead?: boolean; } = {};
   for (let i = 0; i < argv.length; i += 1) {
     if (argv[i] === "--account") out.account = argv[++i];
     else if (argv[i] === "--resource") out.resource = argv[++i];
     else if (argv[i] === "--top") out.limit = Number(argv[++i]);
     else if (argv[i] === "--per-hour") out.perHour = true;
+    else if (argv[i] === "--by-read") out.byRead = true;
     else out.file = argv[i];
   }
   return out;
@@ -590,14 +689,18 @@ function cliOptions(argv: string[]) {
 const readIfThere = (path: string): string => (existsSync(path) ? readFileSync(path, "utf8") : "");
 
 if (import.meta.url === `file://${process.argv[1]}`) {
-  const { file, perHour: hourly, ...where } = cliOptions(process.argv.slice(2));
+  const { file, perHour: hourly, byRead, ...where } = cliOptions(process.argv.slice(2));
   if (file === undefined) {
-    console.error("usage: node src/gh-ledger.ts <path to gh-calls.tsv> [--account <login>] [--resource graphql|core] [--top <n>] [--per-hour]  (--per-hour --top <n>: each hour's top <n> callers)");
+    console.error("usage: node src/gh-ledger.ts <path to gh-calls.tsv> [--account <login>] [--resource graphql|core] [--top <n>] [--per-hour] [--by-read]  (--per-hour --top <n>: each hour's top <n> callers; --by-read: the reads grouped by caller, subcommand, repository and digest, with their misses by why)");
     process.exit(2);
   }
   const entries = parseLedger(readFileSync(file, "utf8"));
   const rollup = parseRollup(readIfThere(rollupPathOf(file)));
-  process.stdout.write(hourly
-    ? renderPerHour(perHour(entries, rollup, where), where.limit === undefined ? undefined : perHourCallers(entries, rollup, where))
-    : renderReport(entries, where));
+  if (byRead) {
+    process.stdout.write(renderByRead(readGroups(entries, where), where));
+  } else {
+    process.stdout.write(hourly
+      ? renderPerHour(perHour(entries, rollup, where), where.limit === undefined ? undefined : perHourCallers(entries, rollup, where))
+      : renderReport(entries, where));
+  }
 }
