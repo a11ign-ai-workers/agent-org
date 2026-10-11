@@ -39,24 +39,59 @@ function home() {
   return { dir, claude, transcript, storePath, touch, working: (now = NOW) => sessionsWorking({ roots: transcriptRoots(dir), now }) };
 }
 
-test("FRESH: the newest turn is 3 minutes old and a message was written 2 minutes ago -- not stale", () => {
+test("FRESH: the newest turn is 3 minutes old and a message was written 6 minutes ago -- not stale", () => {
   const h = home();
   writeStore(h.storePath, [turn("t1", NOW - 3 * MINUTE)]);
-  h.touch(2 * MINUTE);
+  h.touch(6 * MINUTE);
   const reading = storeFreshness({ storePath: h.storePath, now: NOW, working: h.working() });
   assert.equal(reading.working, true, "POSITIVE CONTROL: somebody is working, so the store's age is the only thing keeping this from being stale");
   assert.equal(reading.ageMs, 3 * MINUTE);
   assert.equal(reading.stale, false);
 });
 
-test("STALE: the newest turn is 11 minutes old and a message was written 2 minutes ago", () => {
+test("STALE: the newest turn is 11 minutes old and a message written 7 minutes ago is past the hold-back, so the ingest was owed a turn for it", () => {
   const h = home();
   writeStore(h.storePath, [turn("t1", NOW - 11 * MINUTE)]);
-  h.touch(2 * MINUTE);
+  h.touch(7 * MINUTE);
   const reading = storeFreshness({ storePath: h.storePath, now: NOW, working: h.working() });
+  assert.equal(reading.working, true, "POSITIVE CONTROL: the message is inside the window and past the hold-back");
   assert.equal(reading.ageMs, 11 * MINUTE);
   assert.equal(reading.stale, true);
   assert.match(freshnessLine(reading), /STALE/);
+});
+
+test("HELD BACK: the 2026-10-11 timeline is NOT stale: a session that went quiet and spoke again has its messages inside the hold-back, which no turn exists for yet", () => {
+  const h = home();
+  const T = NOW; // the newest turn, from messages written at T - 1 minute
+  writeStore(h.storePath, [turn("t1", T)]);
+  const at = T + 10 * MINUTE + 10 * 1000; // the check runs at T + 10m10s
+  writeFileSync(h.transcript, `${[message("assistant", T - 6 * MINUTE), message("user", T + 6 * MINUTE), message("assistant", T + 9 * MINUTE + 50 * 1000)].join("\n")}\n`);
+  setMtime(h.transcript, T + 9 * MINUTE + 50 * 1000);
+  const reading = storeFreshness({ storePath: h.storePath, now: at, working: h.working(at) });
+  assert.equal(reading.ageMs, 10 * MINUTE + 10 * 1000, "the store is over ten minutes old");
+  assert.equal(reading.working, false, "NEGATIVE CONTROL: both messages inside the window are younger than the hold-back, so the ingest is not owed a turn for either");
+  assert.equal(reading.stale, false);
+  assert.match(freshnessLine(reading), /no session is working.*not stale/);
+
+  // POSITIVE CONTROL: the same store with one message BETWEEN the turn and `at - 5 minutes` (here T + 3m), which the ingest was owed a turn for and does not have.
+  writeFileSync(h.transcript, `${[message("assistant", T - 6 * MINUTE), message("assistant", T + 3 * MINUTE), message("user", T + 6 * MINUTE), message("assistant", T + 9 * MINUTE + 50 * 1000)].join("\n")}\n`);
+  setMtime(h.transcript, T + 9 * MINUTE + 50 * 1000);
+  const stale = storeFreshness({ storePath: h.storePath, now: at, working: h.working(at) });
+  assert.equal(stale.working, true, "the owed message is inside the window");
+  assert.equal(stale.stale, true, "so the held-back case is not passing by the check going blind");
+});
+
+test("HELD BACK: the edge is the hold-back itself, a message exactly five minutes old is owed and one a millisecond younger is not", () => {
+  const h = home();
+  writeStore(h.storePath, [turn("t1", NOW - 11 * MINUTE)]);
+  writeFileSync(h.transcript, `${message("assistant", NOW - 5 * MINUTE + 1)}\n`);
+  setMtime(h.transcript, NOW);
+  assert.equal(h.working(), false, "a message one millisecond inside the hold-back is held back");
+  assert.equal(storeFreshness({ storePath: h.storePath, now: NOW, working: h.working() }).stale, false);
+  writeFileSync(h.transcript, `${message("assistant", NOW - 5 * MINUTE)}\n`);
+  setMtime(h.transcript, NOW);
+  assert.equal(h.working(), true, "a message exactly five minutes old is past it");
+  assert.equal(storeFreshness({ storePath: h.storePath, now: NOW, working: h.working() }).stale, true);
 });
 
 test("NEGATIVE CONTROL: an 11-minute-old store is NOT stale when every transcript has been untouched for an hour", () => {
@@ -92,13 +127,13 @@ test("a TOUCHED transcript is not a working session: mtime inside the window, ne
   assert.equal(reading.stale, false, "an 11-minute-old store is not stale when nobody has produced a turn");
   assert.match(freshnessLine(reading), /no session is working/);
 
-  // POSITIVE CONTROL: the same file, the same mtime, with one message inside the window ahead of the same bookkeeping lines.
-  writeFileSync(h.transcript, `${[message("user", NOW - 40 * MINUTE), message("assistant", NOW - 4 * MINUTE), ...bookkeeping()].join("\n")}\n`);
+  // POSITIVE CONTROL: the same file, the same mtime, with one message inside the window and past the hold-back ahead of the same bookkeeping lines.
+  writeFileSync(h.transcript, `${[message("user", NOW - 40 * MINUTE), message("assistant", NOW - 7 * MINUTE), ...bookkeeping()].join("\n")}\n`);
   setMtime(h.transcript, NOW - MINUTE);
   assert.equal(h.working(), true);
   const stale = storeFreshness({ storePath: h.storePath, now: NOW, working: h.working() });
   assert.equal(stale.stale, true);
-  assert.match(freshnessLine(stale), /a message was written in the last 10 minutes.*STALE/);
+  assert.match(freshnessLine(stale), /a message written in the last 10 minutes and past the 5-minute hold-back.*STALE/);
   assert.doesNotMatch(freshnessLine(stale), /transcript changed/);
 
   // the window's edge is the message's own time, and an attachment's timestamp is not a message's.
@@ -120,11 +155,11 @@ test("a transcript untouched for the window is not opened: a message line inside
 test("the message is found from the tail: past one huge line, in a file longer than the first window, and with a half-written last line", () => {
   const h = home();
   const big = JSON.stringify({ type: "user", timestamp: new Date(NOW - 60 * MINUTE).toISOString(), message: { content: "y".repeat(600_000) } });
-  const lines = [message("user", NOW - 90 * MINUTE), message("assistant", NOW - 2 * MINUTE), big, ...bookkeeping()];
+  const lines = [message("user", NOW - 90 * MINUTE), message("assistant", NOW - 7 * MINUTE), big, ...bookkeeping()];
   writeFileSync(h.transcript, `${lines.join("\n")}\n`);
   setMtime(h.transcript, NOW);
   assert.ok(statSync(h.transcript).size > 512 * 1024, "POSITIVE CONTROL: the huge line is longer than the first tail window");
-  assert.equal(newestMessageAt(h.transcript), NOW - 2 * MINUTE, "the first window ends inside the huge line and holds only bookkeeping, so the window grew to the message behind it");
+  assert.equal(newestMessageAt(h.transcript), NOW - 7 * MINUTE, "the first window ends inside the huge line and holds only bookkeeping, so the window grew to the message behind it");
   assert.equal(h.working(), true);
   appendFileSync(h.transcript, `${message("assistant", NOW - MINUTE)}\n{"type":"assistant","timestamp":"${new Date(NOW).toISOString()}","mess`); // a writer in the middle of a line
   assert.equal(newestMessageAt(h.transcript), NOW - MINUTE, "an unparseable last line is not a message");
@@ -142,7 +177,7 @@ test("a Codex rollout counts by its `response_item` lines, and its `token_count`
   writeFileSync(rollout, `${[item("response_item", { type: "message", role: "assistant" }, NOW - 30 * MINUTE), item("event_msg", { type: "token_count" }, NOW - MINUTE)].join("\n")}\n`);
   setMtime(rollout, NOW - MINUTE);
   assert.equal(working(), false, "NEGATIVE CONTROL: only a token_count event is inside the window");
-  appendFileSync(rollout, `${item("response_item", { type: "function_call_output" }, NOW - 2 * MINUTE)}\n`);
+  appendFileSync(rollout, `${item("response_item", { type: "function_call_output" }, NOW - 7 * MINUTE)}\n`);
   assert.equal(working(), true);
 });
 
@@ -169,7 +204,7 @@ const oldTurns = (count: number, prefix = "old") => Array.from({ length: count }
 
 test("COLD START (a11ign/agent-org#709): a turn one minute old on the FIRST line and more than a window of two-day-old turns last is NOT stale, and the one-minute-old turn is returned", () => {
   const h = home();
-  h.touch(2 * MINUTE);
+  h.touch(6 * MINUTE);
   writeStore(h.storePath, [turn("fresh", NOW - MINUTE), ...oldTurns(30000)]);
   assert.ok(statSync(h.storePath).size > 1.2 * FIRST_WINDOW, "the cold-start shape: the old turns alone fill more than the first window");
   assert.equal(newestTurnAt(h.storePath, NOW), NOW - MINUTE);
@@ -198,7 +233,7 @@ test("COLD START: the window edge falls INSIDE the line that holds the recent tu
 
 test("POSITIVE CONTROL: a store whose every turn is two days old reads stale while a session works, and returns the newest of them wherever on the file it is", () => {
   const h = home();
-  h.touch(2 * MINUTE);
+  h.touch(6 * MINUTE);
   writeStore(h.storePath, [turn("newest-of-old", NOW - TWO_DAYS + 60 * MINUTE), ...oldTurns(30000)]);
   assert.ok(statSync(h.storePath).size > 1.2 * FIRST_WINDOW);
   assert.equal(newestTurnAt(h.storePath, NOW), NOW - TWO_DAYS + 60 * MINUTE, "the whole file is read before an old reading is given as the answer");
@@ -209,7 +244,7 @@ test("POSITIVE CONTROL: a store whose every turn is two days old reads stale whi
 
 test("a store of more than a window with no `turn` at all still returns null, and is stale while a session works", () => {
   const h = home();
-  h.touch(2 * MINUTE);
+  h.touch(6 * MINUTE);
   writeStore(h.storePath, Array.from({ length: 30000 }, (_, i) => other(`g${i}`, NOW - i)));
   assert.ok(statSync(h.storePath).size > 1.2 * FIRST_WINDOW);
   assert.equal(newestTurnAt(h.storePath, NOW), null);
@@ -416,6 +451,7 @@ test("`--freshness` exits 1 for a stale store and 0 for a fresh one, and 0 for a
   assert.match(fresh.stdout, /not stale/);
 
   writeStore(h.storePath, [turn("t1", now - 11 * MINUTE)]);
+  touch(7 * MINUTE); // past the hold-back: the 2-minute message above is still held back, so it is not evidence of work
   const stale = h.run("--freshness");
   assert.equal(stale.status, 1, stale.stdout + stale.stderr);
   assert.match(stale.stdout, /STALE/);
