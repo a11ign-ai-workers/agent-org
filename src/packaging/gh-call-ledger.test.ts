@@ -83,7 +83,7 @@ test("#3466: a `gh api graphql` call appends ONE line naming account, resource, 
     assert.ok(entry, "the line is one the reader parses");
     assert.deepEqual({ ...entry, caller: callerScript(entry.caller) }, {
       time: NOW, account: WORKERS, resource: "graphql", cost: COST, status: 0, command: "api graphql", workspace: "w3",
-      caller: "fake-caller.sh" });
+      caller: "fake-caller.sh", cache: "-" });
   } finally { rmSync(h.root, { recursive: true, force: true }); }
 });
 
