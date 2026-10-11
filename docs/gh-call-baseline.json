@@ -51,7 +51,7 @@
     },
     "src/board-truth-audit.ts": {
       "spawns": 1,
-      "calls": 10
+      "calls": 11
     },
     "src/branch-inventory-report.ts": {
       "spawns": 3,
