@@ -71,7 +71,7 @@ import { refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { REPO } from "./project-identity.ts";
 import { homeProjectDeclaration, PROJECT_DECLARATION_PATH } from "./project-config.ts";
 import { READY_LABEL, WAS_READY_LABEL } from "./ready-label-audit.ts";
-import { gitCommonDir, appendJsonl } from "./merge-guard.ts";
+import { gitCommonDir, appendJsonl, testsFirstOf, readTestsFirstFlag } from "./merge-guard.ts";
 import { withBoardSnapshot, PROJECT_OWNER, PROJECT_NUMBER } from "./board-snapshot.ts";
 import { runnerReason, laneReason, drainReason, oneRowReason } from "./row-claim/runner-rule.ts";
 import { activeDrain, sparePathsFrom, ledgerPathFrom, isSpareRole, isPersistentRole, readSpareRegistry } from "./wake.ts";
@@ -1124,9 +1124,23 @@ export function persistentReason(mySession: string, persistent: boolean): string
  *   `scope` (#4739) is the `scopeHash` of the very body the template check just read, so the record names the row as it was checked and not
  *   as a second read finds it; `null` when the body could not be read, which the record leaves out rather than hashing nothing.
  */
-function preWriteChecks({ issueNumber, mySession, before, drained, instance, adoptedBranch, blockedBy, repo = REPO }: {
+/**
+ * #5109, ROWS ARE HAIKU-READY: a row that says `Tests-first:` must NAME A TEST FILE, because the worker's first commit adds those
+ * tests unchanged and a row that names none gives a small model a spec with no oracle. `null` is "claimable". Unmarked rows
+ * (decomposition, investigation, fleet) are exempt by saying nothing, and `enabled` is `rows.testsFirst`, OFF by default.
+ */
+export function testsFirstClaimReason(body: string, issueNumber: number, { enabled }: { enabled: boolean; }): string | null {
+  if (!enabled) return null;
+  const { marked, paths } = testsFirstOf(body);
+  if (!marked || paths.length > 0) return null;
+  return `row #${issueNumber} says \`Tests-first:\` and names no test file. Write the path of the test file the worker must make pass `
+    + "(`Tests-first: <path>.test.ts`), land it as the row's tests, then claim -- or remove the line if this row is a decomposition, "
+    + "investigation or fleet row, which stay unmarked.";
+}
+
+function preWriteChecks({ issueNumber, mySession, before, drained, instance, adoptedBranch, blockedBy, repo = REPO, testsFirst = false }: {
         issueNumber: number; mySession: string; before: { labels: string[]; }; drained: readonly string[];
-        instance: { spare: boolean; rows: readonly number[]; }; adoptedBranch?: string; blockedBy?: string; repo?: string;
+        instance: { spare: boolean; rows: readonly number[]; }; adoptedBranch?: string; blockedBy?: string; repo?: string; testsFirst?: boolean;
     }, preWrite: typeof defaultRun): { refusal: { claimed: false; reason: string; } | null; blockedByNote: Parameters<typeof postBlockedByNoteIfAny>[1]; scope: string | null; } {
   // #707: THE TEMPLATE FIELDS, checked on EVERY claim attempt -- unlike the session-eligibility block
   // below, this is a property of the ROW, not of who is claiming it or when they last touched it, so it
@@ -1138,6 +1152,9 @@ function preWriteChecks({ issueNumber, mySession, before, drained, instance, ado
   if (body !== null) {
     const templateReason = templateFieldsReason(body, issueNumber);
     if (templateReason) return { refusal: { claimed: false, reason: templateReason }, blockedByNote: null, scope: null };
+    // #5109: a row that says `Tests-first:` and names no test file is incomplete for the same reason, so it is asked on every attempt too.
+    const testsFirstRefusal = testsFirstClaimReason(body, issueNumber, { enabled: testsFirst });
+    if (testsFirstRefusal) return { refusal: { claimed: false, reason: testsFirstRefusal }, blockedByNote: null, scope: null };
   }
 
   // #1886, PR #1891 NOT CONVINCED (reviewer, 576a678b): THE ROW'S OWN `blockedBy` EDGE, checked on EVERY
@@ -1207,11 +1224,11 @@ function writeRowLabels(issueNumber: number, mySession: string, extraLabels: str
   { run = defaultRun, moveStatus = moveProjectStatus, branch, worktree, blockedBy, drained = [],
     instance = { spare: false, rows: [] }, adoptedBranch, persistent = false,
     batch = run === defaultRun ? runBatch : undefined,
-    labelBatch = run === defaultRun ? runBatch : undefined, tracker }: {
+    labelBatch = run === defaultRun ? runBatch : undefined, tracker, testsFirst = readTestsFirstFlag() }: {
           run?: typeof defaultRun; moveStatus?: typeof moveProjectStatus; branch?: string;
           worktree?: string; blockedBy?: string; drained?: readonly string[];
           instance?: { spare: boolean; rows: readonly number[]; }; adoptedBranch?: string; persistent?: boolean;
-          batch?: typeof runBatch; labelBatch?: typeof runBatch; tracker?: Tracker;
+          batch?: typeof runBatch; labelBatch?: typeof runBatch; tracker?: Tracker; testsFirst?: boolean;
       } = {}): { claimed: true; statusMoved: true; } | { claimed: true; statusMoved: false; notOnBoard: boolean; statusReason: string; } | { claimed: false; reason: string; } {
   const repo = tracker?.repo ?? REPO;
   const before = fetchLabels(issueNumber, { run, repo });
@@ -1225,7 +1242,7 @@ function writeRowLabels(issueNumber: number, mySession: string, extraLabels: str
   // the checks' own; a read the rehearsal could not foresee (the claimed rows' Regions wait for a Region that names a file) runs on its own as before.
   // NOTHING FROM THE FIRST WRITE ON IS PART OF THIS: the labels above and the labels `applyClaimLabels` reads again stay fresh and sequential.
   const checked = readWithFirstWaveTogether(
-    (together) => preWriteChecks({ issueNumber, mySession, before, drained, instance, adoptedBranch, blockedBy, repo },
+    (together) => preWriteChecks({ issueNumber, mySession, before, drained, instance, adoptedBranch, blockedBy, repo, testsFirst },
       readsOnce((cmd, args) => {
         if (cmd !== "gh") return run(cmd, args);
         assertNoLeakInArgv(cmd, args); // #1053: the batch is a spawn of its own, so the guard `defaultRun` carries is asked here as well
@@ -1385,6 +1402,7 @@ export function claimRow(issueNumber: number, mySession: string, deps: {
     run?: typeof defaultRun; moveStatus?: typeof moveProjectStatus; branch?: string;
     worktree?: string; blockedBy?: string; drained?: readonly string[];
     instance?: { spare: boolean; rows: readonly number[]; }; adoptedBranch?: string; persistent?: boolean; tracker?: Tracker;
+    testsFirst?: boolean;
 } = {}): { claimed: true; statusMoved: true; } | { claimed: true; statusMoved: false; notOnBoard: boolean; statusReason: string; } | { claimed: false; reason: string; } {
   return writeRowLabels(issueNumber, mySession, [STARTED_LABEL], deps);
 }

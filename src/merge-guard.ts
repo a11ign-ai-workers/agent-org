@@ -60,16 +60,19 @@
 // `merge-queue.ts`, `row-claim.ts`, `workflow-run-liveness.ts`, and
 // `pre-push-armed-pr.test.ts` -- need no changes at all), and runs the CLI.
 import { pathToFileURL } from "node:url";
-import { realpathSync } from "node:fs";
+import { realpathSync, readFileSync } from "node:fs";
+import { join } from "node:path";
 // RELATIVE, NOT the `@a11ign/screenreader-fleet/cli-flags` package specifier: that export map
 // points at `dist/`, so it needs both `node_modules` AND a completed build. This file is reachable
 // from a pre-install entry (see `pre-install-import-graph.test.ts`, which derives that population
 // rather than naming it), and there it dies on startup with ERR_MODULE_NOT_FOUND.
 import { refuseUnknownFlags, flagValue } from "./lib/cli-flags.ts";
 import { REPO } from "./project-identity.ts";
+import { HOME_CHECKOUT, PROJECT_DECLARATION_PATH } from "./project-config.ts";
 import { SESSION_PREFIX } from "./project-vocabulary.ts";
 
 import { reasonKind } from "./merge-guard/reason-kind.ts";
+import { testsFirstReadsOf, type TestsFirstFacts } from "./ticket-port/tests-first-reads.ts";
 import { gh, lookup, lookupRequiredContexts, lookupBranchTip, lookupCheckRuns, lookupClosingIssues,
   lookupApprovalFacts }
   from "./merge-guard/lookups.ts";
@@ -104,6 +107,130 @@ export {
 };
 
 const EXIT = { READY: 0, REFUSED: 1, CANNOT_ASK: 2 };
+
+// --- ROWS ARE HAIKU-READY (a11ign#5109): THE TESTS A ROW NAMES ARE THE ROW'S, NOT THE WORKER'S ----------------------------------------
+//
+// A row that says `Tests-first: <test file>` has its acceptance tests written BEFORE the worker starts. The claim checks the line
+// names a test file (`row-claim.ts`'s `testsFirstClaimReason`); THIS is the other half: the worker's first commit lands those tests
+// unchanged, and a PR that moves them afterwards is refused unless a reviewer who is not its author approves the change in so many
+// words. A worker that may edit its own oracle has no oracle (Haiku 3/12 one-shot, 11/12 with a suite it could not move).
+//
+// BEHIND `rows.testsFirst` in `.agent-org/project.json`, ABSENT MEANING OFF, so a project that never declared it makes exactly the
+// calls it always made. The facts come from REST only -- the required gate answers through a GraphQL outage (see `ciGateFacts`) -- so
+// the rows a PR closes are read from its own `Closes` line, which `pr:open` and CI already refuse a PR for omitting.
+
+/** The review-body line that lets a PR move its named tests. Explicit on purpose: an ordinary approval says nothing about the tests. */
+const TESTS_FIRST_APPROVAL = /^\s*Tests-first:\s*changes?\s+approved\b/im;
+const TESTS_FIRST_INLINE = /^\s*(?:\*\*|__)?Tests-first:(?:\*\*|__)?\s*(.*)$/i;
+const TESTS_FIRST_HEADING = /^\s*#{1,6}\s*Tests-first\b(?::\s*(.*))?.*$/i;
+const MARKDOWN_HEADING = /^\s*#{1,6}\s/;
+const PATH_SHAPE = /^[\w@.+~-]+(?:\/[\w@.+~-]+)*\.\w+$/;
+const TEST_NAMED = /(^|[._-])(test|tests|spec)([._-]|$)/i;
+const TEST_DIRECTORY = /(^|\/)(tests?|__tests__)\//;
+const CLOSING_LIST = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+((?:[\w.-]+\/[\w.-]+)?#\d+(?:\s*,\s*(?:[\w.-]+\/[\w.-]+)?#\d+)*)/gi;
+
+export type { TestsFirstFacts };
+
+function testFilePath(token: string): string | null {
+  const bare = token.replace(/^[-*>\s`'"(]+|[`'",;.)]+$/g, "").replace(/^[a-z0-9][\w-]*:(?=[^/])/i, "");
+  if (!PATH_SHAPE.test(bare)) return null;
+  const base = bare.slice(bare.lastIndexOf("/") + 1);
+  return TEST_NAMED.test(base) || TEST_DIRECTORY.test(bare) ? bare : null;
+}
+
+function testsFirstValue(body: string): string | null {
+  const lines = body.split(/\r\n|\r|\n/);
+  for (const [index, line] of lines.entries()) {
+    const found = TESTS_FIRST_HEADING.exec(line) ?? TESTS_FIRST_INLINE.exec(line);
+    if (!found) continue;
+    const inline = (found[1] ?? "").trim();
+    if (inline.length > 0) return inline;
+    const rest: string[] = [];
+    for (const later of lines.slice(index + 1)) {
+      if (MARKDOWN_HEADING.test(later)) break;
+      rest.push(later);
+    }
+    return rest.join("\n");
+  }
+  return null;
+}
+
+/**
+ * What a row's body says about `Tests-first:`. `marked` is whether it says it at all -- an UNMARKED row (decomposition,
+ * investigation, fleet) is exempt by saying nothing -- and `paths` the test files it names, `[]` for a mark that names none.
+ */
+export function testsFirstOf(body: string): { marked: boolean; paths: string[]; } {
+  const value = testsFirstValue(body);
+  if (value === null) return { marked: false, paths: [] };
+  const paths = value.split(/[\s,;]+/).map(testFilePath).filter((path): path is string => path !== null);
+  return { marked: true, paths: [...new Set(paths)] };
+}
+
+/** `rows.testsFirst` of a project declaration's TEXT: on only when exactly `true`, so absent, unreadable and mistyped are all OFF. */
+export function testsFirstFlagOf(declarationText: string): boolean {
+  try {
+    return JSON.parse(declarationText)?.rows?.testsFirst === true;
+  } catch (cause) {
+    void cause; // not JSON is not a declaration that turned the flag on; the declaration reader refuses it where it matters
+    return false;
+  }
+}
+
+/** The flag as this checkout's declaration says it. A checkout with no declaration is a project that never declared it: OFF. */
+export function readTestsFirstFlag(checkout: string = HOME_CHECKOUT): boolean {
+  try {
+    return testsFirstFlagOf(readFileSync(join(checkout, PROJECT_DECLARATION_PATH), "utf8"));
+  } catch (cause) {
+    if ((cause as NodeJS.ErrnoException).code === "ENOENT") return false;
+    throw cause;
+  }
+}
+
+/** The rows a PR body closes by its `Closes` line, each with the repository it is in (a bare `#n` is `repo`'s own). */
+export function closedRowsOf(prBody: string, repo: string = REPO): { number: number; repo: string; }[] {
+  const seen = new Map<string, { number: number; repo: string; }>();
+  for (const [, list] of prBody.matchAll(CLOSING_LIST)) {
+    for (const [, named, number] of list.matchAll(/([\w.-]+\/[\w.-]+)?#(\d+)/g)) {
+      seen.set(`${named ?? repo}#${number}`, { number: Number(number), repo: named ?? repo });
+    }
+  }
+  return [...seen.values()];
+}
+
+/**
+ * THE VERDICT, PURE: reasons a PR moves the tests its rows name. An approval by a reviewer who read the head silences both, because
+ * what a reviewer approves is the change; a first commit that lacks the tests is the other fault and is named first.
+ */
+export function testsFirstEditReasons(number: number | string, facts: TestsFirstFacts): string[] {
+  if (facts.approvedBy.length > 0) return [];
+  const absent = facts.paths.filter((path) => !facts.firstCommitFiles.includes(path));
+  const moved = facts.paths.filter((path) => !absent.includes(path) && facts.changedSinceFirst.includes(path));
+  const way = "A reviewer who agrees posts an approving review whose body carries the line `Tests-first: change approved`.";
+  return [
+    ...absent.length > 0 ? [`TESTS-FIRST: the FIRST commit of #${number} does not carry ${absent.join(", ")}.\n`
+      + "  The row named these tests so the worker starts from them, failing; they land in the first commit, unchanged.\n  " + way] : [],
+    ...moved.length > 0 ? [`TESTS-FIRST: #${number} changes ${moved.join(", ")} after its first commit.\n`
+      + "  The row's tests are its acceptance, and the worker may not move them.\n  " + way] : [],
+  ];
+}
+
+/**
+ * The facts for PR `number`, or `undefined` when there is nothing to ask (flag off, no closed row names a test) -- never `[]` for
+ * that -- or `null` when a read failed, which is INCONCLUSIVE and never "the tests are where they were".
+ * `repo` is the PR's own repository; each closed row is read in the repository it is in.
+ */
+export function lookupTestsFirstFacts(
+  pr: { number: number; head: string; author: string | null; body: string | null; },
+  { run = gh, enabled = readTestsFirstFlag(), repo = REPO }: { run?: (args: string[]) => string; enabled?: boolean; repo?: string; } = {},
+): TestsFirstFacts | null | undefined {
+  if (!enabled) return undefined;
+  const rows = closedRowsOf(pr.body ?? "", repo);
+  if (rows.length === 0) return undefined;
+  return lookup(() => testsFirstReadsOf({
+    repo, number: pr.number, head: pr.head, author: pr.author, rows,
+    pathsOf: (rowBody) => testsFirstOf(rowBody).paths, isApproval: (reviewBody) => TESTS_FIRST_APPROVAL.test(reviewBody),
+  }, run));
+}
 
 /**
  * THE SUBSET OF `mergeReadiness` THAT NEVER ASKS ABOUT THIS RUN'S OWN SIBLING CHECKS — #298 (unit 1).
@@ -144,9 +271,9 @@ const EXIT = { READY: 0, REFUSED: 1, CANNOT_ASK: 2 };
  *   prLabels?: string[] | null}} facts
  * @returns {{code: number, reasons: string[]}}
  */
-export function mergeSafetyVerdict({ pr, branchTip, prLabels = [], approvals }: {
+export function mergeSafetyVerdict({ pr, branchTip, prLabels = [], approvals, testsFirst }: {
         pr: { headRefOid: string; number?: number; state?: string; }; branchTip: string | null;
-        prLabels?: string[] | null; approvals?: ApprovalFacts | null;
+        prLabels?: string[] | null; approvals?: ApprovalFacts | null; testsFirst?: TestsFirstFacts | null;
     }): { code: number; reasons: string[]; } {
   if (branchTip === null) {
     return { code: EXIT.CANNOT_ASK, reasons: [
@@ -190,8 +317,16 @@ export function mergeSafetyVerdict({ pr, branchTip, prLabels = [], approvals }: 
       + "  This is INCONCLUSIVE, not covered.",
     ] };
   }
+  // #5109: the same convention -- `undefined` is "nothing to ask" (flag off, or no closed row names a test), `null` is "asked and could not read".
+  if (testsFirst === null) {
+    return { code: EXIT.CANNOT_ASK, reasons: [
+      `CANNOT SAY whether #${pr.number ?? "?"} leaves its rows' named tests alone: the rows, the first commit or the reviews could not be read.\n`
+      + "  This is INCONCLUSIVE, not clear.",
+    ] };
+  }
   const reasons = [...headTipMismatchReason(pr, branchTip),
-    ...(approvals === undefined || pr.state === "closed" ? [] : approvalHeadReasons(pr.headRefOid, approvals))];
+    ...(approvals === undefined || pr.state === "closed" ? [] : approvalHeadReasons(pr.headRefOid, approvals)),
+    ...(testsFirst === undefined || pr.state === "closed" ? [] : testsFirstEditReasons(pr.number ?? "?", testsFirst))];
   return { code: reasons.length > 0 ? EXIT.REFUSED : EXIT.READY, reasons };
 }
 
@@ -216,7 +351,7 @@ export function mergeSafetyVerdict({ pr, branchTip, prLabels = [], approvals }: 
  */
 export function mergeReadiness({ pr, required, runs, mainTipIso, behindBy, branchTip, closes = [],
   prLabels = [],
-  session = null, approvals = undefined }: {
+  session = null, approvals = undefined, testsFirst = undefined }: {
         pr: { number: number; state: string; baseRefName: string; headRefOid: string; };
         required: string[] | null;
         runs: { name: string; status: string; conclusion: string | null; completedAt: string | null; }[] | null;
@@ -227,6 +362,7 @@ export function mergeReadiness({ pr, required, runs, mainTipIso, behindBy, branc
         prLabels?: string[] | null;
         session?: string | null;
         approvals?: ApprovalFacts | null;
+        testsFirst?: TestsFirstFacts | null;
     }): { code: number; reasons: string[]; notes: string[]; } {
   const missingLookups = [
     required === null && "the required status checks for `main` (branch protection)",
@@ -239,6 +375,7 @@ export function mergeReadiness({ pr, required, runs, mainTipIso, behindBy, branc
     closes === null && "which rows this PR would close (the closingIssuesReferences lookup)",
     prLabels === null && "this PR's own labels (which say whether somebody is holding it)",
     approvals === null && "this PR's reviews and the commits since each approval (#5038)",
+    testsFirst === null && "the tests its rows name, its first commit and its reviews (#5109)",
   ].filter(Boolean);
   if (missingLookups.length > 0) {
     return { code: EXIT.CANNOT_ASK, notes: [], reasons: [
@@ -261,7 +398,8 @@ export function mergeReadiness({ pr, required, runs, mainTipIso, behindBy, branc
     ...checkReasons(pr, knownRequired, knownRuns),
     ...ancestryReason(behindBy), ...stalenessReason(knownRuns, knownMainTipIso),
     ...closingClaimReasons(knownCloses, session), ...prHoldReasons(pr, knownPrLabels, session),
-    ...(approvals ? approvalHeadReasons(pr.headRefOid, approvals) : [])];
+    ...(approvals ? approvalHeadReasons(pr.headRefOid, approvals) : []),
+    ...(testsFirst ? testsFirstEditReasons(pr.number, testsFirst) : [])];
   return { code: reasons.length > 0 ? EXIT.REFUSED : EXIT.READY, reasons, notes };
 }
 
@@ -304,7 +442,11 @@ function ciGateFacts(number: number) {
     : null;
   const branchTip = lookupBranchTip(pr.headRefName);
   const approvals = lookupApprovalFacts(pr.number, pr.headRefOid);
-  return { pr, branchTip, prLabels, approvals };
+  // #5109: a CLOSED PR cannot merge, so it asks nothing; the rows come from the PR's own body because this gate is REST-only.
+  const testsFirst = raw.state === "open"
+    ? lookupTestsFirstFacts({ number: pr.number, head: pr.headRefOid, author: raw.user?.login ?? null, body: raw.body ?? "" })
+    : undefined;
+  return { pr, branchTip, prLabels, approvals, testsFirst };
 }
 
 /**
@@ -329,7 +471,7 @@ function facts(number: number) {
   // DELIBERATELY NOT REQUESTING `mergeStateStatus`. Asking for it at all would invite the next reader to
   // use it, and this tool's entire reason for existing is that its answer cannot be trusted here.
   const pr = JSON.parse(gh(["pr", "view", String(number), "--repo", REPO,
-    "--json", "number,state,baseRefName,headRefOid,headRefName,labels"]));
+    "--json", "number,state,baseRefName,headRefOid,headRefName,labels,body,author"]));
   // `null` WHEN THE SHAPE IS NOT THE ONE EXPECTED, never `[]` -- an empty array reads as "nobody holds
   // this PR", which is the safest-LOOKING answer and the wrong one when the truth is "I could not ask".
   // Same rule as every other lookup here, and the reason this file exists.
@@ -352,7 +494,8 @@ function facts(number: number) {
   const branchTip = lookupBranchTip(pr.headRefName);
   const closes = lookupClosingIssues(number);
   const approvals = lookupApprovalFacts(number, pr.headRefOid);
-  return { pr, required, runs, mainTipIso, behindBy, branchTip, closes, prLabels, approvals };
+  const testsFirst = lookupTestsFirstFacts({ number, head: pr.headRefOid, author: pr.author?.login ?? null, body: pr.body ?? "" });
+  return { pr, required, runs, mainTipIso, behindBy, branchTip, closes, prLabels, approvals, testsFirst };
 }
 
 /**
