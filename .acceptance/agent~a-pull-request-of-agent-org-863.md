@@ -18,7 +18,7 @@ Measured 2026-10-11 by running the step's command from a scratch project laid as
 
 - The step as written (`856 a11ign/agent-org`): `CLOSES MISMATCH: ok -- declared and resolved agree`.
 - The second argument left off (`856`, the defect): `REFUSED` -- it judged #856 against a11ign/a11ign, where GitHub would close #749. The wrong repository reads as a refusal of a right body, so the argument is not decoration.
-- A wrong declaration with the second argument given (`Closes a11ign/agent-org#1`): `REFUSED`, naming that GitHub will close #836 and not #1. The check refuses what it should.
+- A body declaring issue 1 of this repository (a closure GitHub would not make), second argument given: `REFUSED`, naming that GitHub will close #836 and not #1. The check refuses what it should.
 - The step deleted from `ci.yml`: the first command prints rc=1 (the `git grep` finds no `closes-mismatch-check`), and restored byte-identical (`diff` of a copy) it prints rc=0. The comment above the step does not itself spell the name, so a deleted step cannot be held green by its comment.
 
 - The step with `${{ github.repository }}` removed from its command (the defect, in the workflow): the second command prints rc=1 and the first, alone, still prints rc=0, so the second is the one that sees it. Restored byte-identical (`diff` of a copy).
