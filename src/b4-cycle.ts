@@ -53,8 +53,61 @@ export function deadlocksOf(shelvings: Shelving[], blockersOf: (row: number) => 
   return found;
 }
 
+/** A path as prose: `#4575, which waits on #4514, which waits on #4516`. */
+export function pathText(path: number[]): string {
+  const [closed, ...waits] = path;
+  return `#${closed}${waits.map((row) => `, which waits on #${row}`).join("")}`;
+}
+
 /** The tick's line: `blocking-impact: DEADLOCK #4516 is shelved by control#32, which closes #4575, which waits on #4514, which waits on #4516: no tick will clear it`. */
 export function deadlockLine({ shelved, pr, path }: Deadlock): string {
-  const [closed, ...waits] = path;
-  return `blocking-impact: DEADLOCK #${shelved} is shelved by ${pr}, which closes #${closed}${waits.map((row) => `, which waits on #${row}`).join("")}: no tick will clear it`;
+  return `blocking-impact: DEADLOCK #${shelved} is shelved by ${pr}, which closes ${pathText(path)}: no tick will clear it`;
+}
+
+// A LINE THAT PRINTS EVERY TICK IS NOT A RESOLUTION (agent-org#5009): agent-org#878 stood red for 1h45m in exactly this cycle, its worker waiting on #884 and B4 shelving #884 behind #878, and the gate printed
+// both halves each tick and joined them to no one. What follows is the cycle's life across ticks: a cycle is put to its holder ONCE, put to the escalation on the NEXT tick it is still read, and counted when
+// it is no longer read. The walker above is unchanged; this only remembers which cycles it found before.
+
+/** A cycle as the tick read it. `repo` is the keyed tracker the shelved row is in (absent for the home tracker's); `holder` is the session holding the pull request, `null` when none is known; `files` is the overlap B4 named, when its reason did. */
+export type Sighting = Deadlock & { repo?: string; holder: string | null; files?: string };
+/** A cycle standing across ticks. `woke` is the session its first sighting was put to (`null` when nobody was known to hold the pull request, which goes straight to the escalation, so `escalated` starts true). */
+export type DeadlockEpisode = { shelved: number; pr: string; repo?: string; since: number; woke: string | null; escalated: boolean };
+/** A cycle that was read on one tick and not on the next. `minutes` runs from the first tick that read it to the first that did not, so it can exceed the time it stood by up to one tick. */
+export type BrokenDeadlock = { key: string; shelved: number; pr: string; since: number; minutes: number; escalated: boolean };
+export type DeadlockMove =
+  | { kind: "wake-holder"; deadlock: Sighting; holder: string; since: number }
+  | { kind: "escalate"; deadlock: Sighting; woke: string | null; since: number };
+
+const MS_PER_MINUTE = 60 * 1000;
+
+/** A cycle's identity across ticks: the tracker its shelved row is in (two trackers' row numbers are different rows) and the pair that shelves. */
+export const deadlockKey = ({ repo, shelved, pr }: Pick<Sighting, "repo" | "shelved" | "pr">): string => `${repo ?? ""}#${shelved}<-${pr}`;
+
+/**
+ * THE NEXT EPISODES, AND WHAT THIS TICK MUST DO ABOUT THEM. A cycle not read last tick is put to its holder. One read last tick and again now has had its one wake and is escalated, once. One that was
+ * read last tick and is not read now has been broken and is returned for the record. A cycle named twice in one tick is one cycle.
+ * @param {Record<string, DeadlockEpisode>} previous the last tick's episodes, `{}` for none or for a tick after a gap in observation
+ */
+export function advanceDeadlocks(previous: Record<string, DeadlockEpisode>, seen: Sighting[], now: number): { episodes: Record<string, DeadlockEpisode>; moves: DeadlockMove[]; broken: BrokenDeadlock[] } {
+  const episodes: Record<string, DeadlockEpisode> = {};
+  const moves: DeadlockMove[] = [];
+  for (const deadlock of seen) {
+    const key = deadlockKey(deadlock);
+    if (Object.hasOwn(episodes, key)) continue;
+    const prior = Object.hasOwn(previous, key) ? previous[key] : undefined;
+    const { shelved, pr, repo, holder } = deadlock;
+    const identity = { shelved, pr, ...(repo === undefined ? {} : { repo }) };
+    if (prior === undefined) {
+      episodes[key] = { ...identity, since: now, woke: holder, escalated: holder === null };
+      moves.push(holder === null ? { kind: "escalate", deadlock, woke: null, since: now } : { kind: "wake-holder", deadlock, holder, since: now });
+    } else if (!prior.escalated) {
+      episodes[key] = { ...prior, escalated: true };
+      moves.push({ kind: "escalate", deadlock, woke: prior.woke, since: prior.since });
+    } else {
+      episodes[key] = prior;
+    }
+  }
+  const broken = Object.entries(previous).filter(([key]) => !Object.hasOwn(episodes, key))
+    .map(([key, { shelved, pr, since, escalated }]) => ({ key, shelved, pr, since, minutes: Math.max(0, Math.round((now - since) / MS_PER_MINUTE)), escalated }));
+  return { episodes, moves, broken };
 }
