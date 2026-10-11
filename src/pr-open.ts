@@ -592,12 +592,12 @@ export function sendFailureLine({ mode, branch, head, message }: { mode: string;
  * (#4898) A RATE-LIMITED CREATE IS HELD, NOT FAILED, and the steps after it travel with it. The arm and the label name the branch (`--head`, or
  * the tree's own), not a PR number, so they can be written down before the PR exists and made by the gate once the create has been.
  * @param {string} mode @param {string[]} rest
- * @param {{ owner: string | null, labelExists?: (name: string, repo?: string) => boolean }} deps
+ * @param {{ owner: string | null, labelExists?: (name: string, repo?: string) => boolean, branch: string | null }} deps
  * @returns {string[][]} the label's own `gh` argv, preceded by the label's creation when the repository is known not to have it
  */
-function labelStepsAfterCreate(mode: string, rest: string[], { owner, labelExists }: { owner: string | null; labelExists?: (name: string, repo?: string) => boolean; }): string[][] {
+function labelStepsAfterCreate(mode: string, rest: string[], { owner, labelExists, branch }: { owner: string | null; labelExists?: (name: string, repo?: string) => boolean; branch: string | null; }): string[][] {
   const steps: string[][] = [];
-  for (const args of labelAfterCreate(mode, rest, owner)) {
+  for (const args of labelAfterCreate(mode, rest, owner, branch)) {
     const name = args[args.length - 1];
     const repo = flagAfter(args, "--repo"); // the same repository `ensureLabel` asks and creates in
     if (labelExists !== undefined && !labelExists(name, ...(repo === null ? [] : [repo]))) {
@@ -703,11 +703,19 @@ export function sendToGitHub(mode: string, rest: string[],
   const fact: (args: string[], fallback: string) => string = (args, fallback): string => { try { return git(args) || fallback; } catch { return fallback; } };
   const head = () => fact(["rev-parse", "--short", "HEAD"], "(unknown)");
   const head8 = () => fact(["rev-parse", "--short=8", "HEAD"], "(unknown)");
+  // Read ONCE per create, and only after the create has been attempted: the arm and the label must name the same branch even
+  // if the checkout moves mid-call, and no other mode pays a git read it never uses.
+  let branchRead: { value: string | null } | null = null;
+  const branch = (): string | null => {
+    if (mode !== "create") return null;
+    if (branchRead === null) { const b = fact(["rev-parse", "--abbrev-ref", "HEAD"], ""); branchRead = { value: b === "" || b === "HEAD" ? null : b }; }
+    return branchRead.value;
+  };
   try {
     run(["pr", mode, ...rest]);
   } catch (error) {
     if ((error as { status?: number })?.status === EXIT_QUEUED) {
-      const steps = mode === "create" ? [...armAfterCreate(mode, rest), ...labelStepsAfterCreate(mode, rest, { owner: owner(), labelExists })] : [];
+      const steps = mode === "create" ? [...armAfterCreate(mode, rest, branch()), ...labelStepsAfterCreate(mode, rest, { owner: owner(), labelExists, branch: branch() })] : [];
       const entry = queued(); // read once: reading it consumes the file the wrapper left
       err(heldLine({ mode, branch: branchName(fact), head: head(), entry, attached: attachSteps(steps, { entry, attach }) }));
       return EXIT_QUEUED;
@@ -718,7 +726,7 @@ export function sendToGitHub(mode: string, rest: string[],
   // `armAfterCreate` returns a WHOLE `gh` argv (`["pr", "merge", ...]`) and `run` is `gh` with its args as
   // given -- `args.slice(1)` stripped `pr` and spawned `gh merge`, an unknown command, after every ready
   // create since #1277, so the wrapper exited 1 on a PR that already existed.
-  for (const args of armAfterCreate(mode, rest)) {
+  for (const args of armAfterCreate(mode, rest, branch())) {
     // #1479: the create has LANDED by here, so a failure is a partial success with its own code.
     try {
       run(args);
@@ -728,7 +736,7 @@ export function sendToGitHub(mode: string, rest: string[],
       return EXIT_LANDED_THEN_FAILED;
     }
   }
-  labelCreatedPr(mode, rest, { run, err, owner: owner(), labelExists });
+  labelCreatedPr(mode, rest, { run, err, owner: owner(), labelExists, branch: branch() });
   // #2929: only a create that LANDED and was armed -- the failed create and the failed arm returned above with their
   // own line, and this one never stands in for either. Last, so it is the line still on screen when the turn ends.
   if (mode === "create") err(ciPendingLine({ head: head8() }));
@@ -746,13 +754,13 @@ export function sendToGitHub(mode: string, rest: string[],
  * @param {string} mode
  * @param {string[]} rest
  * @param {{ run: (args: string[]) => void, err: (line: string) => void, owner: string | null,
- *           labelExists?: (name: string, repo?: string) => boolean }} deps
+ *           labelExists?: (name: string, repo?: string) => boolean, branch: string | null }} deps
  */
-function labelCreatedPr(mode: string, rest: string[], { run, err, owner, labelExists }: {
+function labelCreatedPr(mode: string, rest: string[], { run, err, owner, labelExists, branch }: {
         run: (args: string[]) => void; err: (line: string) => void; owner: string | null;
-        labelExists?: (name: string, repo?: string) => boolean;
+        labelExists?: (name: string, repo?: string) => boolean; branch: string | null;
     }) {
-  for (const args of labelAfterCreate(mode, rest, owner)) {
+  for (const args of labelAfterCreate(mode, rest, owner, branch)) {
     try {
       ensureLabel(args[args.length - 1], { run, labelExists, repo: flagAfter(args, "--repo") });
       run(args);
@@ -1550,12 +1558,13 @@ export function machineryRefusal(diff: import("./acceptance-commands.ts").DiffRe
  * org's rule. `--draft` anywhere in the args means "not now" and is never armed; `edit` never arms.
  * @param {string} mode
  * @param {string[]} rest the args handed to `gh pr <mode>`
+ * @param {string | null} branch the tree's own branch, which the create was made from
  * @returns {string[][]}
  */
-export function armAfterCreate(mode: string, rest: string[]): string[][] {
+export function armAfterCreate(mode: string, rest: string[], branch: string | null = null): string[][] {
   if (mode !== "create" || rest.includes("--draft")) return [];
-  const head = flagAfter(rest, "--head");
-  return [["pr", "merge", "--auto", "--merge", ...(head ? [head] : []), ...repoFlagOf(rest)]];
+  const selector = selectorOf(rest, branch);
+  return selector === null ? [] : [["pr", "merge", "--auto", "--merge", ...selector, ...repoFlagOf(rest)]];
 }
 
 /**
@@ -1589,13 +1598,14 @@ export function armAfterCreate(mode: string, rest: string[]): string[][] {
  * @param {string} mode
  * @param {string[]} rest the args handed to `gh pr <mode>`
  * @param {string | null} owner the worktree's stamped session, or null when nobody stamped it
+ * @param {string | null} branch the tree's own branch, which the create was made from
  * @returns {string[][]}
  */
-export function labelAfterCreate(mode: string, rest: string[], owner: string | null): string[][] {
+export function labelAfterCreate(mode: string, rest: string[], owner: string | null, branch: string | null = null): string[][] {
   if (mode !== "create" || owner === null) return [];
   if (!isLiveSession(owner)) return [];
-  const head = flagAfter(rest, "--head");
-  return [["pr", "edit", ...(head ? [head] : []), ...repoFlagOf(rest), "--add-label", `${SESSION_PREFIX}${owner}`]];
+  const selector = selectorOf(rest, branch);
+  return selector === null ? [] : [["pr", "edit", ...selector, ...repoFlagOf(rest), "--add-label", `${SESSION_PREFIX}${owner}`]];
 }
 
 /**
@@ -1607,6 +1617,22 @@ export function labelAfterCreate(mode: string, rest: string[], owner: string | n
 function repoFlagOf(rest: string[]): string[] {
   const repo = flagAfter(rest, "--repo");
   return repo === null ? [] : ["--repo", repo];
+}
+
+/**
+ * agent-org#952: the selector the arm and the label name the pull request by, after a create. `--head` when it was passed. Otherwise the
+ * tree's own branch, but only with `--repo`: gh refuses `--repo` with no selector ("argument required when using the --repo flag"), which left
+ * the PR unarmed and unlabelled, and without `--repo` gh reads the checkout's branch itself. `null` when `--repo` is given and no branch is known,
+ * so the step is not sent at all rather than sent in the form gh refuses.
+ * @param {string[]} rest
+ * @param {string | null} branch
+ * @returns {string[] | null}
+ */
+function selectorOf(rest: string[], branch: string | null): string[] | null {
+  const head = flagAfter(rest, "--head");
+  if (head) return [head];
+  if (repoFlagOf(rest).length === 0) return [];
+  return branch === null ? null : [branch];
 }
 
 /**
