@@ -1,15 +1,15 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 96,
-    "spawns": 136,
-    "calls": 395,
+    "files": 97,
+    "spawns": 137,
+    "calls": 396,
     "shapes": {
       "api rest": 139,
       "issue list": 42,
       "api graphql": 38,
       "issue view": 34,
-      "pr list": 29,
+      "pr list": 30,
       "issue comment": 27,
       "pr view": 17,
       "issue edit": 13,
@@ -1145,6 +1145,14 @@
         "$ANSWER_PREFIX",
         "$SESSION_PREFIX"
       ],
+      "parsesCloses": false
+    },
+    "src/worker-stop-hook.ts": {
+      "spawns": 1,
+      "calls": {
+        "pr list": 1
+      },
+      "labels": [],
       "parsesCloses": false
     },
     "src/workflow-run-liveness.ts": {
