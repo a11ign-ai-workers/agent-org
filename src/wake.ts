@@ -46,7 +46,7 @@ import type { BlockingRecord } from "./blocking-impact.ts";
 import { HAIKU_DEFAULT_CI_FAILURES, haikuDefaultOn, routeEngineer, type Routed } from "./engineer-route.ts";
 import { DEFAULT_CAPS, ESCALATION_KIND, ESCALATION_USE, claimFacts, escalationLogLine, escalationNote, haikuStarts, isHaiku, shouldEscalate, transcriptCounts } from "./engineer-escalation.ts";
 import { decisionLogPathFrom, decisionSwitchesPath } from "./decision-provider.ts";
-import { classifyCiFailure, classLine, classNote, readCiFailure, type Gh } from "./ci-failure-class.ts";
+import { classifyCiFailure, classLine, classNote, notesTheOrder, readCiFailure, type Gh } from "./ci-failure-class.ts";
 import { depthEffort, depthLine, readDepthState, reviewDepth, type Depth } from "./review-depth.ts";
 import { profileFor, agentArgs, haikuTierProfile, type TierProfile, armOf, ARM, CALM_FINISH_PARAGRAPH, tripsArmOf, TRIPS_ARM, ROUND_TRIPS_PARAGRAPH } from "./worker-profile.ts";
 import { JUDGMENT_CAUSES, ANSWER_PREFIX, LAUNCH_PLACEHOLDER, REVIEWER_REGISTRY_FILE, readReviewerRegistry, scopesOf,
@@ -6750,8 +6750,8 @@ function redPullRequestOf(order: Enrichable): { repo: string; number: number; he
 }
 
 /**
- * `ci-failure-class` (#4632) for each settled-red order. The class and the route go in the journal line whoever chose; the ORDER's text gains them only when the PROVIDER chose, so with
- * no provider the order is the gate's, byte for byte. `read` and `classify` are seams for a test.
+ * `ci-failure-class` (#4632) for each settled-red order. The class and the route go in the journal line whoever chose; the ORDER's text gains them only when the PROVIDER chose, or when a rule
+ * says WAIT for a pin bump (#5151, `notesTheOrder`), so otherwise with no provider the order is the gate's, byte for byte. `read` and `classify` are seams for a test.
  */
 export async function withCiFailureClass<T extends Enrichable>(orders: readonly T[], deps: EnrichDeps & { read?: typeof readCiFailure; classify?: typeof classifyCiFailure; now?: number }): Promise<T[]> {
   const { gh = defaultGh, read = readCiFailure, classify = classifyCiFailure, now = Date.now() } = deps;
@@ -6762,7 +6762,7 @@ export async function withCiFailureClass<T extends Enrichable>(orders: readonly 
       if (failure === null) return;
       const decision = await classify(failure, enrichDecisionDeps(deps, order.causeKey));
       process.stderr.write(`wake: ${order.causeKey} ${classLine(decision)}\n`);
-      if (decision.via === "jev") notes.set(order.causeKey, classNote(decision));
+      if (notesTheOrder(decision)) notes.set(order.causeKey, classNote(decision));
     } catch (err) {
       process.stderr.write(`wake: could not classify ${order.causeKey} (${firstLine(err)}) -- the order as the gate wrote it.\n`);
     }

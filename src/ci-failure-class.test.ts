@@ -57,7 +57,7 @@ test("the rule with no provider: red on main is another repository, a rate limit
 });
 
 test("each class has its own route, and a flaky failure is rerun once and never a second time", () => {
-  assert.deepEqual(CI_FAILURE_CLASSES.map((c) => routeFor(c, false)), ["owner", "rerun-once", "cross-repo-incident", "rerun-after-reset"]);
+  assert.deepEqual(CI_FAILURE_CLASSES.map((c) => routeFor(c, false)), ["owner", "rerun-once", "cross-repo-incident", "rerun-after-reset", "wait-for-pin-bump"]);
   assert.equal(routeFor("flaky", true), "owner");
   // the already-rerun fact moves only the flaky class
   for (const c of CI_FAILURE_CLASSES.filter((k) => k !== "flaky")) assert.equal(routeFor(c, true), routeFor(c, false));
@@ -92,22 +92,22 @@ test("use switched off: the rule, no request; the same inputs switched on ask th
   assert.equal(on.net.calls.length, 1);
 });
 
-test("provider on: its class and route win, for each of the four classes", async () => {
+test("provider on: its class and route win, for each of the five classes (the fifth is offered only with its fact)", async () => {
   for (const klass of CI_FAILURE_CLASSES) {
     const { deps, net } = rig({ reply: { body: answer(klass) } });
-    const out = await classifyCiFailure(failure(), deps);
+    const out = await classifyCiFailure(failure({ waitsOnPinBump: true }), deps);
     assert.deepEqual([out.klass, out.route, out.via, out.fellBack, out.confidence], [klass, routeFor(klass, false), "jev", false, 0.95]);
     assert.equal(net.calls.length, 1);
   }
 });
 
-test("provider on: the request carries the trimmed state and the four criteria, and never an agent-written body", async () => {
+test("provider on: the request carries the trimmed state and the four criteria (five with the pin fact), and never an agent-written body", async () => {
   const { deps, net } = rig();
   await classifyCiFailure(failure({ redOnOtherPrs: true }), deps);
   const sent = net.calls[0].body;
   assert.deepEqual(Object.keys(sent.state).sort(), ["errorLines", "readsOutsideRepository", "rateLimitOrRunnerLost", "redOnMain", "redOnOtherPrs"].sort());
   assert.equal(sent.state.redOnOtherPrs, true);
-  assert.deepEqual(Object.keys(sent.questions.class.criteria), [...CI_FAILURE_CLASSES]);
+  assert.deepEqual(Object.keys(sent.questions.class.criteria), CI_FAILURE_CLASSES.filter((klass) => klass !== "waiting-on-pin-bump"));
 });
 
 test("a flaky answer on a run already rerun routes to the owner and keeps the class", async () => {
@@ -161,8 +161,8 @@ test("the line the order and the log carry names the class, the route and who ch
   assert.equal(classLine(jev), "CI failure class: flaky -> rerun-once (provider)");
 });
 
-test("the four classes are the four the row names", () => {
-  const names: CiFailureClass[] = ["own-defect", "flaky", "another-repository-changed", "infrastructure"];
+test("the classes are the four the first row named and the one #5151 added", () => {
+  const names: CiFailureClass[] = ["own-defect", "flaky", "another-repository-changed", "infrastructure", "waiting-on-pin-bump"];
   assert.deepEqual([...CI_FAILURE_CLASSES], names);
 });
 
@@ -391,4 +391,117 @@ test("#5098 the roll-up is no cause: by its name, by the step it fails, and by t
   assert.equal(readSignature(checkOf("ci-ok"), jobRun("Every job that ran, ran clean", "##[error]boom")), null, "the other spelling of the roll-up step, as the row names it");
   assert.equal(readSignature(checkOf("ci-ok"), jobRun("Check results", "##[error]a job reported 'failure', not success")), null);
   assert.deepEqual(readSignature(checkOf("ci-ok"), jobRun("Check results", "##[error]boom"))?.line, "boom", "positive control: the same step and a real error is read");
+});
+
+// ---------------------------------------------------------------------------------------------------
+// #5151: a copy carried ahead of the pin WAITS for the bump pull request; it is not its holder's defect.
+
+test("#5151 the rule: a copy waiting on the bump is its own class, after a lost runner and before main", () => {
+  assert.equal(fallbackClass(failure({ waitsOnPinBump: true })), "waiting-on-pin-bump");
+  assert.equal(fallbackClass(failure({ waitsOnPinBump: true, redOnMain: true })), "waiting-on-pin-bump");
+  assert.equal(fallbackClass(failure({ waitsOnPinBump: true, rateLimitOrRunnerLost: true })), "infrastructure");
+  // negative controls: absent and false are today's classifier
+  assert.equal(fallbackClass(failure()), "own-defect");
+  assert.equal(fallbackClass(failure({ waitsOnPinBump: false, redOnMain: true })), "another-repository-changed");
+  assert.equal(routeFor("waiting-on-pin-bump", true), "wait-for-pin-bump");
+});
+
+test("#5151 the provider is never offered the wait class without its fact, and cannot choose it", async () => {
+  const without = rig({ reply: { body: answer("waiting-on-pin-bump") } });
+  const out = await classifyCiFailure(failure(), without.deps);
+  assert.ok(!Object.keys(without.net.calls[0].body.questions.class.criteria).includes("waiting-on-pin-bump"));
+  assert.equal(out.klass, "own-defect", "an answer outside the offered classes is the rule's");
+  const withFact = rig({ reply: { body: answer("waiting-on-pin-bump") } });
+  assert.equal((await classifyCiFailure(failure({ waitsOnPinBump: true }), withFact.deps)).klass, "waiting-on-pin-bump");
+  assert.equal(withFact.net.calls[0].body.state.waitsOnPinBump, true);
+});
+
+const PIN = "1".repeat(40);
+const BUMP_PIN = "2".repeat(40);
+const CITED = "c0ffee123";
+const BUMP_HEAD = "b".repeat(40);
+const DRIFT_LOG = [
+  "FAIL  src/packaging/wait-condition.test.ts > THE SAME TICK",
+  "AssertionError: Expected values to be strictly deep-equal:",
+  "+     discriminator: 'copies-drifted@src/lib/cli-flags.ts,src/lib/git-env.ts',",
+].join("\n");
+/** The contents API's answer for a file: its text base64-encoded, as GitHub sends it (with the line breaks). */
+const contents = (text: string) => JSON.stringify({ content: Buffer.from(text).toString("base64").replace(/(.{60})/g, "$1\n") });
+const ciYml = (pin: string) => `name: ci\nenv:\n  # a comment\n  PROJECT_REF: ${pin}\non:\n  push:\n`;
+
+type PinWorld = {
+  log?: string; pin?: string; bump?: { pin: string } | null; cited?: Record<string, string>; status?: (base: string, head: string) => string;
+  checks?: { name: string; job: string }[]; unreadable?: string;
+};
+
+/** A `gh` over a repository with one red pull request: its checks, its log, its `ci.yml`, the open bump pull request, each copy's header, and the project's `compare`. */
+function pinGh(world: PinWorld = {}) {
+  const { log = DRIFT_LOG, pin = PIN, bump = { pin: BUMP_PIN }, checks = [{ name: "suite", job: "666" }, { name: "gate", job: "667" }] } = world;
+  const cited = world.cited ?? { "src/lib/cli-flags.ts": CITED, "src/lib/git-env.ts": CITED };
+  const status = world.status ?? ((base, head) => (base === CITED && head === BUMP_PIN ? "ahead" : base === CITED && head === PIN ? "behind" : "diverged"));
+  const asked: string[] = [];
+  const read = (args: string[]): string => {
+    const path = args[1];
+    asked.push(path);
+    if (world.unreadable !== undefined && path.includes(world.unreadable)) throw new Error("HTTP 404: Not Found");
+    if (path.endsWith("/pulls/77")) return JSON.stringify({ head: { sha: SHA, ref: "agent/x-77" } });
+    if (path.includes(`/commits/${SHA}/check-runs`)) {
+      return JSON.stringify({ check_runs: checks.map((c) => ({ name: c.name, conclusion: "failure", details_url: `https://github.com/o/r/actions/runs/555/job/${c.job}` })) });
+    }
+    if (path.endsWith("/actions/runs/555")) return JSON.stringify({ name: "ci", run_attempt: 1 });
+    if (path.endsWith("/logs")) return path.includes("/jobs/667/") ? "##[error]a job reported 'failure', not success\n" : log;
+    if (path.includes("/actions/runs?")) return JSON.stringify({ workflow_runs: [] });
+    if (path === `repos/o/r/contents/.github/workflows/ci.yml?ref=${SHA}`) return contents(ciYml(pin));
+    if (path === "repos/o/r/pulls?state=open&head=o:bot/project-ref-bump") return JSON.stringify(bump === null ? [] : [{ head: { sha: BUMP_HEAD } }]);
+    if (path === `repos/o/r/contents/.github/workflows/ci.yml?ref=${BUMP_HEAD}`) return contents(ciYml(bump?.pin ?? ""));
+    const copy = /^repos\/o\/r\/contents\/(src\/lib\/[\w.-]+)\?ref=/.exec(path)?.[1];
+    if (copy !== undefined) return contents(`// COPIED FROM \`packages/guards/src/x.ts\` at ${cited[copy] ?? "9".repeat(9)} (#1)\n// ==== end of copy header ====\n`);
+    const compare = /^repos\/a11ign\/a11ign\/compare\/(\w+)\.\.\.(\w+)\?per_page=1$/.exec(path);
+    if (compare !== null) return JSON.stringify({ status: status(compare[1], compare[2]) });
+    throw new Error(`unexpected gh ${args.join(" ")}`);
+  };
+  return { read, asked };
+}
+const waits = (world: PinWorld = {}) => readCiFailure(PR, pinGh(world).read, NOW)?.waitsOnPinBump === true;
+
+test("#5151 POSITIVE: every named copy cites a commit the pin lacks and the open bump has, and the roll-up `gate` is not the log read", () => {
+  const { read } = pinGh();
+  const out = readCiFailure(PR, read, NOW);
+  assert.equal(out?.waitsOnPinBump, true);
+  assert.equal(fallbackClass(out!), "waiting-on-pin-bump");
+  // the log read is the suite's: the roll-up lists first in no order that matters (gate listed first here)
+  const gateFirst = pinGh({ checks: [{ name: "gate", job: "667" }, { name: "suite", job: "666" }] });
+  assert.equal(readCiFailure(PR, gateFirst.read, NOW)?.waitsOnPinBump, true);
+  assert.ok(gateFirst.asked.every((path) => !path.includes("/jobs/667/")), "the roll-up's log names no cause and is not read");
+});
+
+test("#5151 each fact that makes the wait true is load-bearing: break it and the failure is the holder's again", () => {
+  assert.equal(waits({ log: "AssertionError: expected 3, got 4\n" }), false, "a failure that names no drift");
+  assert.equal(waits({ bump: null }), false, "no open bump pull request (the workflow is off, or has nothing newer)");
+  assert.equal(waits({ bump: { pin: PIN } }), false, "an open bump whose pin does not reach the cited commit");
+  assert.equal(waits({ status: (base, head) => (head === PIN ? "ahead" : base === CITED && head === BUMP_PIN ? "ahead" : "diverged") }), false, "the pin already has the cited commit: the copy is wrong, not early");
+  assert.equal(waits({ cited: { "src/lib/cli-flags.ts": CITED, "src/lib/git-env.ts": "9".repeat(9) } }), false, "ONE named copy that the bump does not reach is enough");
+  assert.equal(waits({ checks: [{ name: "suite", job: "666" }, { name: "typecheck", job: "668" }, { name: "gate", job: "667" }] }), false, "a second red check besides the roll-up: not only the drift");
+  // Every one of the eight copies cites the commit the bump reaches, so only the cap, not a copy that fails to reach, keeps this false.
+  const wide = [1, 2, 3, 4, 5, 6].map((n) => `src/lib/c${n}.ts`);
+  const citedByAll = Object.fromEntries([...wide, "src/lib/cli-flags.ts", "src/lib/git-env.ts"].map((path) => [path, CITED]));
+  assert.equal(waits({ log: `${DRIFT_LOG}\ncopies-drifted@${wide.join(",")}`, cited: citedByAll }), false, "a failure wider than the copies it will read one by one");
+  assert.equal(waits({ log: `${DRIFT_LOG}\ncopies-drifted@${wide.slice(0, 3).join(",")}`, cited: citedByAll }), true, "POSITIVE CONTROL: five copies, all cited and reached, is still a wait");
+  // With no bump open, a compare that would say `ahead` for anything must not be asked at all.
+  assert.equal(waits({ bump: null, status: (_base, head) => (head === PIN ? "behind" : "ahead") }), false, "no open bump: there is no commit to be reached");
+});
+
+test("#5151 a read that is refused is `false`, said once on stderr, and never drops the rest of the facts", () => {
+  const said: string[] = [];
+  const write = process.stderr.write;
+  process.stderr.write = ((line: string) => (said.push(String(line)), true)) as typeof process.stderr.write;
+  try {
+    const out = readCiFailure(PR, pinGh({ unreadable: "src/lib/git-env.ts" }).read, NOW);
+    assert.ok(out !== null);
+    assert.equal(out.waitsOnPinBump, undefined);
+    assert.ok(out.errorLines.length > 0, "the class the facts give alone is still readable");
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.equal(said.filter((line) => /could not read the pin/.test(line)).length, 1);
 });
