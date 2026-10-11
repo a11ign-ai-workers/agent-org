@@ -20,7 +20,7 @@ const BRANCH = "agent/wake-triage-digests-0-4889";
 const LOCAL = "293de90a1111111111111111111111111111111111";
 const ELSEWHERE = "5555555555555555555555555555555555555555";
 const ACCEPTANCE_FILE = ".acceptance/agent~wake-triage-1.md";
-const CHANGED = ["src/pr-open.ts"];
+const CHANGED = ["src/row-file.ts"];
 
 const row = (paths: string[]) => `## Region\n\n\`\`\`\n${paths.join("\n")}\n\`\`\`\n\n## Acceptance\n\nx\n`;
 const body = `## Acceptance\n\nnode -e "process.exit(0)"\n\nCloses: ${TRACKER}#4889\nMutation: none -- these tests drive the head check\n`;
@@ -71,7 +71,7 @@ function drive({ region, head = LOCAL, rest = [], wired = true, git = gitFor() }
   return { code, sent, acceptance, asked, out: out.join(""), err: err.join("") };
 }
 
-const OTHER_REGION = ["agent-org:src/pr-open.ts"];
+const OTHER_REGION = ["agent-org:src/row-file.ts"];
 
 test("agent-org#753 positive: a Region naming another repository, which holds the branch at the tested commit, opens the PR THERE", () => {
   const r = drive({ region: OTHER_REGION });
@@ -84,7 +84,7 @@ test("agent-org#753 positive: a Region naming another repository, which holds th
 });
 
 test("agent-org#753 positive: a bare path of a row that STATES the other repository is that repository's too", () => {
-  const stated = `The repository is **\`${OTHER}\`**; paths are relative to its root.\n\n${row(["src/pr-open.ts"])}`;
+  const stated = `The repository is **\`${OTHER}\`**; paths are relative to its root.\n\n${row(["src/row-file.ts"])}`;
   const sent: string[][] = [];
   const asked: string[] = [];
   const code = main(["create", "--draft", "--head", BRANCH, "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`], {
@@ -133,11 +133,11 @@ test("agent-org#753 negative: a read that FAILS is a refusal, never a match", ()
 });
 
 test("agent-org#753 control: a Region of the TREE's own repository reads `origin/<head>` and never asks GitHub", () => {
-  const unreadable = drive({ region: ["src/pr-open.ts"] });
+  const unreadable = drive({ region: ["src/row-file.ts"] });
   assert.equal(unreadable.code, EXIT_NOTHING_SENT);
   assert.deepEqual(unreadable.asked, []);
   assert.match(unreadable.err, /unreadable -- push the branch first/);
-  const fetched = drive({ region: ["src/pr-open.ts"], git: gitFor(undefined, LOCAL) });
+  const fetched = drive({ region: ["src/row-file.ts"], git: gitFor(undefined, LOCAL) });
   assert.equal(fetched.code, 0, fetched.err);
   assert.deepEqual(fetched.asked, []);
   assert.equal(fetched.sent[0].includes("--repo"), false, "no repository is added to a tree's own pull request");

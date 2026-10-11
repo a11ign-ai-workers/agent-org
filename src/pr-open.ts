@@ -1481,6 +1481,7 @@ export const MACHINERY_PATHS: readonly RegExp[] = Object.freeze([
   /^src\/(arm-pr|auto-arm-sweep|pr-armed-state|pr-hold|pr-hold-state|merge-queue|merge-guard)\.ts$/, /^src\/merge-guard\//, /^\.github\/workflows\/auto-arm\.yml$/,
   /^src\/release-[^/]+\.ts$/, /^src\/update-tool\.ts$/, /^\.github\/workflows\/release\.yml$/,
   /^src\/host-config\.ts$/, /^host\/gh$/,
+  /^src\/(org-health|pr-open)\.ts$/, // the canary and its own enforcement: a change to either is the one most worth a flag (review of #1014)
 ]);
 
 const MACHINERY_EXEMPT = /\.test\.[cm]?[jt]sx?$|\.md$|^docs\/|^\.acceptance\/|^\.changeset\//;

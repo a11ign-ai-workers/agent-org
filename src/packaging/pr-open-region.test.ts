@@ -284,7 +284,7 @@ test("#2417 WIRING: the shipped entry hands `main` the real row reader, and `mai
 // --- #3083: a row that STATES its repository is read in that repository's tree -------------------------------------
 
 /** The row #3078 and #3083 were filed as: the Region spelled bare, and a sentence saying whose root the paths are relative to. */
-const AGENT_ORG_ROW_PATHS = ["src/pr-open.ts", "src/packaging/pr-open-region.test.ts"];
+const AGENT_ORG_ROW_PATHS = ["src/row-file.ts", "src/packaging/pr-open-region.test.ts"];
 const agentOrgRow = (stated: string) => `The repository is **\`${stated}\`**; paths are relative to its root.\n\n${regionBody(AGENT_ORG_ROW_PATHS)}`;
 const CLOSES_3083 = prBody("Closes a11ign/a11ign#3083");
 const inAgentOrg = (body: string) => ["create", "--draft", "--repo", "a11ign/agent-org", "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`];
@@ -299,7 +299,7 @@ test("#3083 done-when 1: a path the row does NOT name is still refused, and it i
   const r = drive(inAgentOrg(CLOSES_3083), { rows: { 3083: agentOrgRow("a11ign/agent-org") }, changed: [...AGENT_ORG_ROW_PATHS, "src/board.ts"] });
   assert.equal(r.code, EXIT_NOTHING_SENT);
   assert.match(r.err, /^ {2}src\/board\.ts$/m);
-  assert.doesNotMatch(r.err, /^ {2}src\/pr-open\.ts$/m, "a path the row names is not listed as an offender");
+  assert.doesNotMatch(r.err, /^ {2}src\/row-file\.ts$/m, "a path the row names is not listed as an offender");
   assert.match(r.err, /1 path\(s\) changed outside/);
 });
 
@@ -331,10 +331,10 @@ test("#3083 WIRING: the sentence is read by the one `statedRepository` in row-fi
 // --- #3149: the refusal names `--repo` when this checkout is another repository of the project, and `(new)` is a note ----------------
 
 const AGENT_ORG_ORIGINS = ["https://github.com/a11ign/agent-org", "https://github.com/a11ign/agent-org.git", "git@github.com:a11ign/agent-org.git\n"];
-const PREFIXED_PATHS = ["agent-org:src/pr-open.ts", "agent-org:src/packaging/pr-open-region.test.ts"];
+const PREFIXED_PATHS = ["agent-org:src/row-file.ts", "agent-org:src/packaging/pr-open-region.test.ts"];
 const PREFIXED_ROW = regionBody(PREFIXED_PATHS);
 const CLOSES_3149 = prBody("Closes a11ign/a11ign#3149");
-const FILE_PATHS = ["src/pr-open.ts", "src/packaging/pr-open-region.test.ts"];
+const FILE_PATHS = ["src/row-file.ts", "src/packaging/pr-open-region.test.ts"];
 
 for (const origin of AGENT_ORG_ORIGINS) {
   test(`#3149 done-when 1: from an agent-org checkout (origin ${JSON.stringify(origin)}) WITHOUT --repo, the refusal names \`--repo a11ign/agent-org\``, () => {

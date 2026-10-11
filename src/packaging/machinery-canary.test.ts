@@ -271,6 +271,9 @@ test("#5100 (4b) THE DECLARATION'S EDGES: `Flag: none` needs a reason, signals c
 
   assert.deepEqual(machineryFilesIn(["src/work-gate.test.ts", "docs/a.md", ".changeset/x.md", ".acceptance/a.md", "src/packaging/machinery-canary.test.ts"]), [], "tests, docs, changesets and acceptance records are not machinery");
   assert.deepEqual(machineryFilesIn(["src/work-gate/org-health.ts", "src/claim-offer.ts", "src/wake.ts", "src/arm-pr.ts", "src/release-pr.ts"]).length, 5);
+  assert.deepEqual(machineryFilesIn(["src/org-health.ts", "src/pr-open.ts", "src/org-health-release-failed.test.ts", "src/pr-open.test.ts", "src/org-health-other.ts"]), ["src/org-health.ts", "src/pr-open.ts"],
+    "the canary and its own enforcement are machinery (their tests are not, and a sibling that merely shares the prefix is not)");
+  assert.match(String(machineryRefusal({ ok: true, files: ["src/org-health.ts"] }, "no lines at all")), /Flag:/, "a change to the canary itself opens with the three lines, as any machinery change does");
   assert.equal(machineryRefusal({ ok: true, files: ["docs/x.md", "src/board.ts"] }, "no lines at all"), null, "a change with no machinery in it is not asked");
   assert.equal(machineryRefusal({ ok: false, why: "git said: bad revision" }, "no lines at all"), null, "an unreadable diff is not a refusal");
 });
