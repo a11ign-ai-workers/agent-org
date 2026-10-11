@@ -17,6 +17,7 @@ import {
   UNREAD_SHARE_BOUND, assertBaseIsLive, gatherChanges, ledgerLine, readLedger,
 } from "../hand-fix-ledger.ts";
 import { buildReport, compareReadings, readingNumbers } from "../org-retro.ts";
+import { readsRowsSince, sinceAnswer } from "./rows-by-label-fixtures.ts";
 
 const NOW = new Date("2026-10-03T00:02:46Z");
 const DAY = "2026-10-02T12:00:00Z";
@@ -95,9 +96,9 @@ function seams(liveHead: string) {
     throw new Error(`unexpected git ${args.join(" ")}`);
   };
   const gh = (args: string[]) => {
+    if (readsRowsSince(args) !== null) return sinceAnswer(args, []); // #5076: the merged list is a connection; its argv also begins `api`
     if (args[0] === "api" && args[1] === "repos/o/r/commits/main") return `${liveHead}\n`;
     if (args[0] === "api") return "";
-    if (args[0] === "pr") return "[]";
     throw new Error(`unexpected gh ${args.join(" ")}`);
   };
   return { git, gh, repo: "o/r" };

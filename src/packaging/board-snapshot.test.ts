@@ -34,6 +34,7 @@ import { dirname as dirOf, join as joinPath } from "node:path";
 import { fileURLToPath as pathOf } from "node:url";
 import { HOME_CHECKOUT } from "../project-config.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
+import { connectionOf, readsRowsByLabel } from "./rows-by-label-fixtures.ts";
 
 /** One page of a real `gh api graphql` response, shaped exactly like the live schema returns it. */
 function page({ nodes, hasNextPage = false, endCursor = null, statusOptions }: {
@@ -403,27 +404,28 @@ test("#2157: the CANNOT TELL arm carries the refusal that caused it, so a reader
   assert.match(refusal, /FORBIDDEN: Resource not accessible by personal access token/);
 });
 
-test("fetchReadyIssueNumbers: reads --json number off gh issue list, filtered to open + ready", () => {
+test("fetchReadyIssueNumbers: reads the OPEN rows labelled ready as a CONNECTION, never a `--label` search (#5076)", () => {
   let seenArgs: string[] = [];
   const run = (_cmd: string, args: string[]) => {
     seenArgs = args;
-    return JSON.stringify([{ number: 717 }, { number: 725 }]);
+    return connectionOf([{ number: 717 }, { number: 725 }]);
   };
   assert.deepEqual(fetchReadyIssueNumbers({ run }), [717, 725]);
-  assert.ok(seenArgs.includes("--label") && seenArgs.includes("ready"));
-  assert.ok(seenArgs.includes("--state") && seenArgs.includes("open"));
-  assert.ok(seenArgs.includes("--json") && seenArgs.includes("number"));
+  assert.deepEqual(readsRowsByLabel(seenArgs), { label: "ready", state: "OPEN" });
+  assert.ok(!seenArgs.includes("--label") && !seenArgs.includes("--search"), "a connection read: no argv is a GitHub search");
+  assert.ok(seenArgs.some((arg) => arg.startsWith("query=") && arg.includes("nodes{number}")), "and the one field read is the number");
 });
 
 test("fetchReadyIssueNumbers: exactly `limit` rows back is refused as indistinguishable from truncated, "
   + "same discipline as ready-label-audit.ts's fetchIssues", () => {
-  const run = () => JSON.stringify(Array.from({ length: 3 }, (_, i) => ({ number: i })));
+  const run = () => connectionOf(Array.from({ length: 3 }, (_, i) => ({ number: i })));
   assert.throws(() => fetchReadyIssueNumbers({ run, limit: 3 }), /exactly the requested limit/);
+  assert.deepEqual(fetchReadyIssueNumbers({ run, limit: 4 }), [0, 1, 2], "control: one under the limit is a complete read");
 });
 
-test("fetchReadyIssueNumbers: a non-array response is refused rather than guessed at", () => {
+test("fetchReadyIssueNumbers: a response that is not a connection is refused rather than guessed at", () => {
   const run = () => JSON.stringify({ not: "a list" });
-  assert.throws(() => fetchReadyIssueNumbers({ run }), /was not a list/);
+  assert.throws(() => fetchReadyIssueNumbers({ run }), /could not list open ready issues[\s\S]*did not come back as a connection/);
 });
 
 test("fetchReadyIssueNumbers: gh failing throws, never falls back to an empty (falsely clean) "
@@ -432,10 +434,10 @@ test("fetchReadyIssueNumbers: gh failing throws, never falls back to an empty (f
   assert.throws(() => fetchReadyIssueNumbers({ run }), /could not list open ready issues/);
 });
 
-/** A `run` that answers BOTH calls `fetchBoardItems` now makes: the items page, and the ready-issue list. */
+/** A `run` that answers BOTH calls `fetchBoardItems` now makes: the items page, and the ready-issue connection. */
 function dualRun(itemsPageJson: string, readyNumbers: number[]) {
   return (_cmd: string, args: string[]) => {
-    if (args[0] === "issue" && args[1] === "list") return JSON.stringify(readyNumbers.map((number) => ({ number })));
+    if (readsRowsByLabel(args) !== null) return connectionOf(readyNumbers.map((number) => ({ number })));
     return itemsPageJson;
   };
 }
@@ -732,7 +734,7 @@ function recordingGh(pages: number) {
   let served = 0;
   const run = (cmd: string, args: string[]) => {
     calls.push({ cmd, args });
-    if (args[0] === "issue" && args[1] === "list") return "[]";
+    if (readsRowsByLabel(args) !== null) return connectionOf([]);
     if (args.some((arg) => arg.startsWith("issue="))) {
       throw new Error("the touched read is not served here -- board-snapshot-scope.test.ts drives it");
     }
@@ -743,8 +745,8 @@ function recordingGh(pages: number) {
         fieldValues: { nodes: [{ name: "Backlog", field: { name: "Status" } }] } }],
     } } } } });
   };
-  const readyLists = () => calls.filter((call) => call.args[0] === "issue" && call.args[1] === "list").length;
-  const boardPages = () => calls.filter((call) => call.args.includes("graphql")
+  const readyLists = () => calls.filter((call) => readsRowsByLabel(call.args) !== null).length;
+  const boardPages = () => calls.filter((call) => call.args.includes("graphql") && readsRowsByLabel(call.args) === null
     && !call.args.some((arg) => arg.startsWith("issue="))).length;
   return { run, calls, boardPages, readyLists };
 }

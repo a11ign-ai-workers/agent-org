@@ -12,6 +12,8 @@ import { chmodSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import * as audit from "./ready-label-audit.ts";
+import { connectionOf, readsRowsByLabel, type FakeRow } from "./packaging/rows-by-label-fixtures.ts";
+import { forgetRefusedReads } from "./ticket-port/rows-by-label.ts";
 
 const HOME = "a11ign/a11ign";
 const ORG = "a11ign/agent-org";
@@ -127,4 +129,44 @@ test("with ONE declared tracker the output is today's: no header, no key form, t
   assert.equal(one.err, SNAPSHOT.err);
   assert.equal(one.result.findings, 1);
   assert.deepEqual(one.result.refused, []);
+});
+
+// --- #5076: `fetchReadyRowsWithBodies` LISTS BY A CONNECTION, NOT BY `gh issue list --label` (a GitHub SEARCH) ----------------------------------------------------------
+
+/** A `run(cmd, args)` answering the one by-label connection read this fetcher makes; a search-backed argv is refused in the words of the exhausted allowance. */
+function readyBodiesRun(rows: unknown[], { fail = "" }: { fail?: string; } = {}) {
+  forgetRefusedReads(); // the refusal memory is the process's
+  const calls: string[][] = [];
+  const run = (command: string, args: string[]): string => {
+    calls.push(args);
+    assert.equal(command, "gh");
+    if (args.includes("--label") || args.includes("--search")) throw new Error("GraphQL: API rate limit already exceeded for installation ID 1");
+    if (fail) throw new Error(fail);
+    const asked = readsRowsByLabel(args);
+    assert.ok(asked !== null, `an unexpected gh call: ${args.join(" ")}`);
+    assert.deepEqual(asked, { label: "ready", state: "OPEN" });
+    return connectionOf(rows as FakeRow[]);
+  };
+  return { run: run as Parameters<typeof audit.fetchReadyRowsWithBodies>[0] extends { run?: infer R; } | undefined ? R : never, calls };
+}
+
+test("#5076 POSITIVE CONTROL: the ready rows with bodies come back in the `gh issue list` shape through a connection, with no `--label` or `--search` in the argv", () => {
+  const { run, calls } = readyBodiesRun([
+    { number: 7, title: "a row", body: "## Region\n\nsrc/a.ts\n", labels: ["ready", "lane:any"] },
+    { number: 8, title: "empty body", body: "", labels: [{ name: "ready" }] },
+  ]);
+  const rows = audit.fetchReadyRowsWithBodies({ run });
+  assert.deepEqual(rows, [
+    { number: 7, title: "a row", labels: ["ready", "lane:any"], body: "## Region\n\nsrc/a.ts\n" },
+    { number: 8, title: "empty body", labels: ["ready"], body: "" },
+  ]);
+  assert.equal(calls.length, 1);
+  assert.ok(!calls[0].includes("--label") && !calls[0].includes("--search"));
+});
+
+test("#5076 NEGATIVE CONTROL: a failed read throws the audit's own refusal, an entry with no body STRING is refused, and neither is an empty list", () => {
+  assert.throws(() => audit.fetchReadyRowsWithBodies({ run: readyBodiesRun([], { fail: "HTTP 502" }).run }),
+    /ready-label-audit: could not list open ready rows with bodies from .* -- refusing to guess\. HTTP 502/);
+  assert.throws(() => audit.fetchReadyRowsWithBodies({ run: readyBodiesRun([{ number: 9, title: "no body key", labels: ["ready"] }]).run }), /missing number\/title\/labels\/body/);
+  assert.deepEqual(audit.fetchReadyRowsWithBodies({ run: readyBodiesRun([]).run }), [], "control: a tracker with no ready row IS the empty list");
 });

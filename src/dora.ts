@@ -955,9 +955,10 @@ function run(command: string, args: string[], env?: Record<string, string | unde
   }
 }
 
-/** @param {string[]} args @returns {any} */
 /** The ONE place this file's `run` is handed `gh` for a list read: the text of the answer. The connection readers of `ticket-port/` take it as their `run`. */
 const ghText = (args: string[]): string => run("gh", args);
+
+/** @param {string[]} args @returns {any} */
 const ghJson = (args: string[]): any => JSON.parse(ghText(args));
 
 /**

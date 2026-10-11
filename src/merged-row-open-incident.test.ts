@@ -12,6 +12,7 @@ import { FAILURE_LEDGER_FILE, parseFailureLedger, recordFailures } from "./failu
 import { ROW_NOT_FINISHABLE } from "./idle-claim-incident.ts";
 import { MERGED_ROW_OPEN_MINUTES, mergedRowOpenEvents, mergedRowOpenIncidents, mergedRowOpenSummary, type NamingPr, type OpenRow } from "./merged-row-open-incident.ts";
 import { buildReport, readMergedRowOpen, renderReport, retrospectiveTick } from "./org-retro.ts";
+import { connectionOf, readsRowsByLabel, readsRowsSince, sinceAnswer } from "./packaging/rows-by-label-fixtures.ts";
 
 const MIN = 60_000;
 const NOW = Date.parse("2026-10-10T12:00:00Z");
@@ -151,8 +152,13 @@ function fakeGh({ refuse = "", mergedIn = CODE, over = {} }: { refuse?: string, 
   const asked: string[][] = [];
   const read = (args: string[]): any[] | null => {
     asked.push(args);
-    const kind = args[0] === "issue" ? (args.includes("--label") ? "issue claimed" : "issue open") : `pr ${args.includes("merged") ? "merged" : "open"} ${args[args.indexOf("-R") + 1]}`;
+    // #5076: the claimed rows are `issues(labels:)` and the merged list `pullRequests(states: MERGED)`, both connections the fake answers as `gh` would; the open lists are plain.
+    const since = readsRowsSince(args);
+    const kind = readsRowsByLabel(args) !== null ? "issue claimed" : since !== null ? `pr merged ${since.repo}`
+      : args[0] === "issue" ? "issue open" : `pr open ${args[args.indexOf("-R") + 1]}`;
     if (kind === refuse) return null;
+    if (kind === "issue claimed") return JSON.parse(connectionOf(lists[kind] ?? []));
+    if (since !== null) return JSON.parse(sinceAnswer(args, (lists[kind] ?? []).map((row) => ({ updatedAt: row.mergedAt, ...row }))));
     return lists[kind] ?? [];
   };
   return { read, asked };
@@ -188,11 +194,17 @@ test("readMergedRowOpen: a list at its ceiling may have stopped short, so it is 
   assert.notEqual(readMergedRowOpen({ now: NOW, declaration: DECLARATION, read: fakeGh({ over: { "issue open": filler(999) } }).read }), null);
 });
 
-test("readMergedRowOpen: the merged read looks back past the report's 24 hours, to the day the row was merged", () => {
+test("readMergedRowOpen: the merged read looks back past the report's 24 hours, to the day the row was merged -- and no further, and never as a search", () => {
+  const mergedOn = (minutesAgo: number) => ({ [`pr merged ${CODE}`]: [{ number: 7, body: "Closes: none -- built the thing", headRefName: "agent/the-thing-4001", mergedAt: ago(minutesAgo) }] });
+  const days = (n: number) => n * 24 * 60;
+  const threeDays = readMergedRowOpen({ now: NOW, declaration: DECLARATION, read: fakeGh({ over: mergedOn(days(3)) }).read });
+  assert.deepEqual(threeDays?.map((i) => i.ref), ["o/tracker#4001@o/code#7"], "a merge three days ago, past the report's 24 hours, is read");
+  assert.deepEqual(readMergedRowOpen({ now: NOW, declaration: DECLARATION, read: fakeGh({ over: mergedOn(days(8)) }).read }), [], "twin: one eight days ago is outside the look-back");
   const { read, asked } = fakeGh();
   readMergedRowOpen({ now: NOW, declaration: DECLARATION, read });
-  const search = asked.find((args) => args.includes("--search"))?.[asked.find((args) => args.includes("--search"))!.indexOf("--search")! + 1] ?? "";
-  assert.equal(search, `merged:>=${new Date(NOW - 7 * 24 * 60 * MIN).toISOString()}`);
+  const merged = asked.map((args) => readsRowsSince(args)).filter((ask) => ask !== null);
+  assert.deepEqual(merged.map((ask) => [ask.kind, ask.states.join(), ask.repo]).sort(), [["pullRequests", "MERGED", CODE], ["pullRequests", "MERGED", "o/other"]].sort());
+  assert.ok(asked.every((args) => !args.includes("--search") && !args.includes("--label")), "no read is a search");
 });
 
 const emptyReads = { merged: null, openPrs: null, journal: null, ledger: null, turns: null, handFixes: null };
