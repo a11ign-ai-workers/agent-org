@@ -8,6 +8,7 @@ import {
 } from "./ci-failure-class.ts";
 import { MAX_STATE_BYTES, type DecisionDeps } from "./decision-provider.ts";
 import { parseHostConfig } from "./host-config.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 import { freshState } from "./triage-provider.ts";
 
 const HOST = JSON.stringify({
@@ -246,6 +247,8 @@ function ghFake(over: { jobs?: Record<number, Job>; issues?: any[]; pulls?: Reco
   const issues = over.issues ?? [];
   const run: Run = (args) => {
     const [cmd, sub] = args;
+    const read = readsRowsByLabel(args); // #5039: the incident rows are read by label over graphql, not by `issue list`
+    if (read !== null) return connectionOf(issues.filter((i) => i.state === read.state.toLowerCase()));
     const path = args.find((a) => a.startsWith("repos/")) ?? "";
     if (cmd === "api" && /actions\/jobs\/\d+\/logs/.test(path)) return (over.jobs ?? {})[Number(/jobs\/(\d+)/.exec(path)![1])]?.log ?? (() => { throw new Error("refused"); })();
     if (cmd === "api" && /actions\/jobs\/\d+$/.test(path)) return JSON.stringify((over.jobs ?? {})[Number(/jobs\/(\d+)/.exec(path)![1])] ?? (() => { throw new Error("refused"); })());
@@ -256,10 +259,6 @@ function ghFake(over: { jobs?: Record<number, Job>; issues?: any[]; pulls?: Reco
     }
     if (cmd === "api" && /\/compare\//.test(path)) return JSON.stringify({ behind_by: over.behind ?? 3 });
     if (cmd === "api" && /\/pulls\/\d+$/.test(path)) return JSON.stringify((over.pulls ?? {})[Number(/pulls\/(\d+)/.exec(path)![1])] ?? { state: "open", head: { sha: "abc" }, base: { ref: "main" } });
-    if (cmd === "issue" && sub === "list") {
-      const state = args[args.indexOf("--state") + 1];
-      return JSON.stringify(issues.filter((i) => i.state === state));
-    }
     writes.push(args);
     if (cmd === "issue" && sub === "create") { issues.push({ number: 900 + issues.length, state: "open", body: args[args.indexOf("--body") + 1] }); return "https://github.com/a11ign/a11ign/issues/900"; }
     if (cmd === "issue" && sub === "edit") { const row = issues.find((i) => i.number === Number(args[2])); row.body = args[args.indexOf("--body") + 1]; }

@@ -83,6 +83,7 @@ import { gh, lookup } from "../merge-guard/lookups.ts";
 import { holdersOf } from "../pr-hold-state.ts";
 import { declaredRegionFiles, extractRegionSection, regionCovers, regionCoversIn, splitRegionEntry } from "../region-paths.ts";
 import { CLAIM_LABEL } from "../claim-labels.ts";
+import { readClaimedRows } from "../ticket-port/rows-by-label.ts";
 import { isAcceptancePath } from "../acceptance-file.ts";
 import { lookupBlockedByEdge } from "./blocked-by-edge-rule.ts";
 
@@ -403,25 +404,18 @@ export function claimedRegionsOf(rows: any[] | null | undefined, options?: { roo
     });
 }
 
-/** The most claimed rows one read asks for; a full page is read as cut short (see {@link lookupClaimedRegions}). */
-const CLAIMED_ROWS_LIMIT = 200;
-
 /**
- * #3475: THE CLAIM'S READ OF WHO HOLDS WHAT -- one `gh issue list --label in-progress` over the tracker's open rows, bodies and
- * `blockedBy` edges included. `null` on a failed read, which is INCONCLUSIVE and NEVER "nobody holds a file": the caller refuses
- * on it, because a comparison that cannot be made must not pass as a comparison that found nothing.
+ * #3475: THE CLAIM'S READ OF WHO HOLDS WHAT -- the tracker's open `in-progress` rows, bodies and `blockedBy` edges included. `null` on a
+ * failed read, which is INCONCLUSIVE and NEVER "nobody holds a file": the caller refuses on it, because a comparison that cannot be made
+ * must not pass as a comparison that found nothing.
+ *
+ * #5039: READ WITHOUT SEARCH. This was `gh issue list --label in-progress`, which `gh` sends as a GraphQL SEARCH, whose allowance the
+ * scheduler App's installation spent on 2026-10-11 and refused every claim for it. {@link readClaimedRows} reads the connection instead.
  *
  * @param [deps] `repo` is the TRACKER whose rows are listed
  */
 export function lookupClaimedRegions({ run = gh, repo = REPO, rootFiles }: { run?: (args: string[]) => string; repo?: string; rootFiles?: Set<string>; } = {}): { number: number; files: string[]; blockedBy: number[]; }[] | null {
-  return lookup(() => {
-    const raw = run(["issue", "list", "--repo", repo, "--state", "open", "--label", CLAIM_LABEL, "--limit", String(CLAIMED_ROWS_LIMIT),
-      "--json", "number,labels,body,blockedBy"]);
-    const listed = JSON.parse(raw);
-    // A FULL PAGE MAY BE A TRUNCATED ONE, and a missing row is a file nobody holds: refuse to read it rather than compare with part.
-    if (Array.isArray(listed) && listed.length >= CLAIMED_ROWS_LIMIT) throw new Error(`${listed.length} claimed rows: the list may be cut short`);
-    return claimedRegionsOf(listed, rootFiles === undefined ? undefined : { rootFiles });
-  });
+  return lookup(() => claimedRegionsOf(readClaimedRows({ run, repo }), rootFiles === undefined ? undefined : { rootFiles }));
 }
 
 /**

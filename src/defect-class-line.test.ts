@@ -9,6 +9,7 @@ import { CI_BODY_REPORTS, rowLabelsFromEnv, runCiBodyReports } from "./acceptanc
 import { DEFECT_LABEL, classLinesIn, defectClassReport } from "./defect-class-line.ts";
 import { main as prOpen, EXIT_NOTHING_SENT } from "./pr-open.ts";
 import { createIssue, kindRefusal, withKindLabel } from "./row-file.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 const EM = "—";
 const GOOD = `Class: stale-reading ${EM} any reader that caches a label it is asked for later; guard: #4122 child B's class-repeat reading`;
@@ -176,7 +177,7 @@ function fileWith(extra: any, { labelsOnRow = null as string[] | null } = {}) {
     const withKind = extra.length > 0;
     const code = createIssue(argv, {
       spawnGh: (a) => { created.push(...a); return FILED_URL; },
-      run: (_cmd, args) => (args[0] === "issue" && args[1] === "list" ? "[]" : args.includes("milestone") ? "CI reset" : args.includes("body") ? `${FILING_BODY}\n\nFiled-by: worker-1\n` : ""),
+      run: (_cmd, args) => (readsRowsByLabel(args) !== null ? connectionOf([]) : args[0] === "issue" && args[1] === "list" ? "[]" : args.includes("milestone") ? "CI reset" : args.includes("body") ? `${FILING_BODY}\n\nFiled-by: worker-1\n` : ""),
       fetchBoardStatus: () => "Backlog",
       fetchLabels: () => ({ number: 900, title: "a defect", labels: labelsOnRow ?? ["backlog", "lane:any", ...(withKind ? ["defect"] : [])] }),
       moveStatus: () => ({ moved: true }), loadLanesConfig: () => ({ lanes: [] }),

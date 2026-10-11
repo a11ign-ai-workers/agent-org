@@ -298,6 +298,8 @@ test("#2323 THE TICK: a QUIET gate still ends a finished spare -- work-tick call
       + `'{"result":{"workspaces":[{"label":"worker-4","workspace_id":"wD","agent_status":"idle"}]}}'`
       + " ;;\n  *) : ;;\nesac\n");
     writeFileSync(join(dir, "gh"), "#!/bin/sh\ncase \"$*\" in\n  \"issue list\"*) printf '%s' '[]' ;;\n"
+      // #5039: the rows carrying a claim label are read as a by-label graphql connection now, not an `issue list`: none are held.
+      + "  \"api graphql\"*\"label=\"*) printf '%s' '{\"data\":{\"repository\":{\"issues\":{\"pageInfo\":{\"hasNextPage\":false,\"endCursor\":null},\"nodes\":[]}}}}' ;;\n"
       + "  \"issue view\"*) printf '%s' '{\"state\":\"CLOSED\"}' ;;\n  *) exit 1 ;;\nesac\n");
     chmodSync(join(dir, "herdr"), STUB_MODE);
     chmodSync(join(dir, "gh"), STUB_MODE);

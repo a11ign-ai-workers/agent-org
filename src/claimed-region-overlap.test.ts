@@ -13,7 +13,7 @@
  * because the prose around a fenced Region declares nothing. The control for both is (1)/(9): the same rows without the label, or with the
  * file inside the fence, DO shelve, so the emptiness asserted below is read against a non-empty answer in the same test.
  */
-import { test, after } from "node:test";
+import { test, after, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
 import { cpSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
@@ -43,6 +43,9 @@ execFileSync("git", ["add", "-A"], { cwd: PROJECT, env: sandboxGitEnv() });
 process.chdir(PROJECT);
 
 const { NO_CODE_LEFT_LABEL, claimedRegionOverlapReason, claimedRegionsOf, lookupClaimedRegions } = await import("./row-claim/file-overlap-rule.ts");
+const { forgetRefusedReads } = await import("./ticket-port/rows-by-label.ts");
+// #5039: a read refused for a limit is remembered for the life of the process (the tick), so each test is a fresh one.
+beforeEach(() => forgetRefusedReads());
 const { declaredRegionFiles } = await import("./region-paths.ts");
 const { reportB4, sessionEligibilityReason } = await import("./row-claim.ts");
 const { partitionUnclaimed } = await import("./work-gate.ts");
@@ -82,16 +85,29 @@ const claimedRow = (number: number, files: string[], { blockedBy = [] as number[
   number, labels: labels.map((name) => ({ name })), body: rowBody(...files), blockedBy: { nodes: blockedBy.map((n) => ({ number: n })) },
 });
 
+/**
+ * #5039: THE CONNECTION'S ANSWER for rows written once in the `gh issue list --json` shape. The claim no longer sends `--label`, which `gh`
+ * turns into a SEARCH, so the fake answers the GraphQL `issues(labels:)` read and REFUSES an argv carrying either search flag, in the words the
+ * scheduler App's installation was refused in on 2026-10-11.
+ */
+const connection = (rows: any[], { hasNextPage = false }: { hasNextPage?: boolean } = {}) => JSON.stringify({ data: { repository: { issues: {
+  pageInfo: { hasNextPage, endCursor: hasNextPage ? "cursor" : null },
+  nodes: rows.map((row) => ({ number: row.number, body: row.body, labels: { nodes: row.labels }, blockedBy: row.blockedBy })),
+} } } });
+const refuseSearch = (args: string[]): void => {
+  if (args.includes("--label") || args.includes("--search")) throw new Error("GraphQL: API rate limit already exceeded for installation ID 170075049");
+};
+const readsClaimedRows = (args: string[]): boolean => args[0] === "api" && args[1] === "graphql" && args.includes("label=in-progress");
+
 /** One `gh` mock routed by subcommand shape, the way `row-claim-session-eligibility.test.ts` does it. */
 function ghFor({ own, claimedRows, prs = [], claimedRead }: {
   own: { number: number; region: string[] }; claimedRows: unknown[]; prs?: unknown[]; claimedRead?: () => string;
 }) {
   return (_cmd: string, args: string[]): string => {
+    refuseSearch(args);
+    if (readsClaimedRows(args)) return claimedRead ? claimedRead() : connection(claimedRows as any[]);
     if (args[0] === "issue" && args[1] === "view") {
       return JSON.stringify({ number: own.number, title: "A row", body: rowBody(...own.region), labels: [], blockedBy: { nodes: [] } });
-    }
-    if (args[0] === "issue" && args[1] === "list") {
-      return args.includes("number,labels,body,blockedBy") ? (claimedRead ? claimedRead() : JSON.stringify(claimedRows)) : "[]";
     }
     if (args[0] === "pr" && args[1] === "list") return JSON.stringify(prs);
     return "[]";
@@ -197,12 +213,13 @@ test("(6) a changeset-only overlap is no overlap, and a shared source file besid
 
 // --- (7) FAILS CLOSED ---------------------------------------------------------------------------------------------------------------
 
-test("(7) the claimed-row read failing is `null`, never `[]`: a throw, a bad payload and a full page are each unreadable", () => {
+test("(7) the claimed-row read failing is `null`, never `[]`: a throw, a bad payload and a list that is never whole are each unreadable", () => {
   assert.equal(lookupClaimedRegions({ run: () => { throw new Error("gh: 502"); }, repo: TRACKER }), null);
   assert.equal(lookupClaimedRegions({ run: () => "not json", repo: TRACKER }), null);
-  const fullPage = Array.from({ length: 200 }, (_, i) => claimedRow(1000 + i, [`src/f${i}.mjs`]));
-  assert.equal(lookupClaimedRegions({ run: () => JSON.stringify(fullPage), repo: TRACKER }), null, "200 may be a truncated page");
-  assert.deepEqual(lookupClaimedRegions({ run: () => JSON.stringify(fullPage.slice(0, 199)), repo: TRACKER })?.length, 199, "control: one fewer reads");
+  const page = Array.from({ length: 100 }, (_, i) => claimedRow(1000 + i, [`src/f${i}.mjs`]));
+  assert.equal(lookupClaimedRegions({ run: () => connection(page, { hasNextPage: true }), repo: TRACKER }), null, "a list with a next page it will not read is cut short");
+  const pages = [connection(page, { hasNextPage: true }), connection(page.slice(0, 99).map((row, i) => ({ ...row, number: 2000 + i })))];
+  assert.equal(lookupClaimedRegions({ run: () => pages.shift() as string, repo: TRACKER })?.length, 199, "control: the last page ending the list reads every page");
   assert.equal(claimedRegionsOf(null), null);
 });
 
@@ -372,6 +389,6 @@ test("(10)(6) A LABEL NOT ON THE CLAIMED ROW CHANGES NOTHING: on a ready row, or
   assert.deepEqual(claimedRegionsOf([notClaimed]), [], "a labelled row that is not claimed is not a claimed row, with or without the label");
   assert.equal(offered(readyRow(3509, REGION_3423), [notClaimed]), 1);
   assert.equal(lookupClaimedRegions({ run: () => { throw new Error("gh: 502"); }, repo: TRACKER }), null, "a failed read is still null, never []");
-  const body = JSON.stringify([claimedRow(3418, REGION_3423, { labels: ["in-progress", NO_CODE_LEFT_LABEL] })]);
+  const body = connection([claimedRow(3418, REGION_3423, { labels: ["in-progress", NO_CODE_LEFT_LABEL] })]);
   assert.deepEqual(lookupClaimedRegions({ run: () => body, repo: TRACKER }), [], "control: a successful read of a labelled row is [] -- a different value from null");
 });
