@@ -310,7 +310,7 @@ test("a row closed under an open half is found: a11ign#5115 still names #5109, w
   assert.deepEqual(found, [{ row: `${HOME}#5109`, half: `${HOME}#5115` }]);
   // THE CROSS-REPOSITORY FORM: the half is an agent-org pull request naming the row by its owner/repo.
   const named = { number: 1007, isDraft: false, repo: AGENT_ORG, body: `Closes ${HOME}#5109` };
-  assert.deepEqual(rowsClosedUnderOpenHalf({ prs: [named], trackers: [{ repo: HOME, rows: openRowsWithout(5109) }], homeRepo: HOME }), [{ row: `${HOME}#5109`, half: `${AGENT_ORG}#1007` }]);
+  assert.deepEqual(rowsClosedUnderOpenHalf({ prs: [named], trackers: [{ repo: HOME, rows: openRowsWithout(5109) }], homeRepo: HOME }), [{ row: `${HOME}#5109`, half: `${AGENT_ORG}#1007`, halfKey: "agent-org" }]);
   // THE CONTROLS, each the same pull request with one thing changed, so the finding above is the open list's absence alone:
   const none = (over: object, rows: readonly any[] | null = openRowsWithout(5109)) => rowsClosedUnderOpenHalf({ prs: [{ ...HALF_5115, ...over }], trackers: [{ repo: HOME, rows }], homeRepo: HOME });
   assert.deepEqual(none({}, openRowsWithout()), [], "the row is open: nothing to say");
@@ -325,6 +325,25 @@ test("the order goes to product-manager once per (row, half), names both and the
   const dir = mkdtempSync(join(tmpdir(), "closed-under-half-"));
   try {
     checkOrders(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the order's subject is the half's repository KEY, not the basename of its repository (reviewer-agent-org-1060)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "closed-under-half-key-"));
+  try {
+    const HALF_ON = withMachineryFlag(emptyCanaryState(), { name: CLOSED_UNDER_HALF_FLAG, on: true });
+    // key `layer` for `acme/other`, and a second repository with the SAME basename under another owner and another key: the two must not share a routing identity.
+    const half = (key: string, repo: string, closes: number) => ({ number: 7, isDraft: false, repo, repoKey: key, body: `Closes ${HOME}#${closes}` });
+    const prs = [half("layer", "acme/other", 5101), half("layer2", "elsewhere/other", 5102)];
+    const orders = closedUnderHalfOrders({ prs, trackers: [{ repo: HOME, rows: [] }], homeRepo: HOME, stateDir: dir, state: HALF_ON, log: () => {} });
+    assert.deepEqual(orders.map((order) => order.subject).sort(), ["pr-layer#7", "pr-layer2#7"]);
+    assert.equal(new Set(orders.map((order) => order.causeKey)).size, 2, "two halves, two routing identities");
+    assert.match(orders.find((order) => order.subject === "pr-layer#7")!.prompt, /acme\/other#7/, "the prompt keeps the full repository");
+    // THE CONTROL: the primary's own half stays the bare number, and carries no key.
+    const own = rowsClosedUnderOpenHalf({ prs: [HALF_5115], trackers: [{ repo: HOME, rows: openRowsWithout(5109) }], homeRepo: HOME });
+    assert.equal("halfKey" in own[0], false);
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

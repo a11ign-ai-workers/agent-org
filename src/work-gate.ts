@@ -5099,8 +5099,11 @@ export const CLOSED_UNDER_HALF_FLAG = "rows.closedUnderOpenHalf";
 export const CLOSED_UNDER_HALF_FILE = "closed-under-open-half.json";
 export const CLOSED_UNDER_HALF_SESSION = "product-manager";
 
-/** A row (`owner/repo#n`) and the open pull request (`owner/repo#n`) whose `Closes` still names it. */
-export type ClosedUnderHalf = { row: string; half: string };
+/**
+ * A row (`owner/repo#n`) and the open pull request (`owner/repo#n`) whose `Closes` still names it. `halfKey` is the half's repository KEY (ADR 0040) and is absent for the primary's own: the key is the
+ * subject's identity (`agent-org#7`) and is NOT the repository's basename, which a project may spell differently.
+ */
+export type ClosedUnderHalf = { row: string; half: string; halfKey?: string };
 /** One tracker's open rows as the tick read them; `null` when the read was refused. */
 export type TrackerRows = { repo: string; rows: readonly any[] | null };
 
@@ -5114,17 +5117,27 @@ export function rowsClosedUnderOpenHalf({ prs, trackers, homeRepo }: { prs: read
       const open = trackers.find((tracker) => tracker.repo === ref.repo)?.rows;
       if (open === null || open === undefined || open.length >= OPEN_ROWS_LIMIT) continue; // a list at the read's limit may be cut, and a row missing from a cut list is not a closed one
       const row = `${ref.repo}#${ref.number}`;
-      if (!open.some((candidate) => Number(candidate?.number) === ref.number) && !found.has(row)) found.set(row, { row, half: `${repo}#${Number(pr.number)}` });
+      if (!open.some((candidate) => Number(candidate?.number) === ref.number) && !found.has(row)) found.set(row, { row, half: `${repo}#${Number(pr.number)}`, ...halfKeyOf(pr, homeRepo) });
     }
   }
   return [...found.values()];
 }
 
-function closedUnderHalfOrder({ row, half }: ClosedUnderHalf, homeRepo: string): BlockingOrder {
-  const [halfRepo, halfNumber] = half.split("#");
+/**
+ * The key the tick TAGGED the pull request with (`tagged`), which is the half's identity in a ledger or an order's subject. A foreign pull request nobody tagged -- a fixture; the tick tags every one --
+ * falls back to its repository's basename rather than to the primary's bare number, which would name a different pull request.
+ */
+function halfKeyOf(pr: any, homeRepo: string): { halfKey?: string } {
+  const tagged = typeof pr.repoKey === "string" ? pr.repoKey : "";
+  const key = tagged !== "" ? tagged : pr.repo === undefined || String(pr.repo) === homeRepo ? "" : String(pr.repo).split("/").pop() ?? "";
+  return key === "" ? {} : { halfKey: key };
+}
+
+function closedUnderHalfOrder({ row, half, halfKey }: ClosedUnderHalf): BlockingOrder {
+  const halfNumber = half.split("#")[1];
   const [rowRepo, rowNumber] = row.split("#");
   const slug = `${row}-${half}`.replace(/[^\w.-]+/g, "-");
-  const subject = `pr-${halfRepo === homeRepo ? halfNumber : `${halfRepo.split("/")[1]}#${halfNumber}`}`; // the established spelling (`pr-1014`, `pr-agent-org#1037`)
+  const subject = `pr-${subjectRef(halfKey, halfNumber)}`; // the established spelling (`pr-1014`, `pr-agent-org#1037`), which the KEY spells and the basename may not
   return { session: CLOSED_UNDER_HALF_SESSION, cause: "ready-row-unclaimable", subject, discriminator: slug, causeKey: `${CLOSED_UNDER_HALF_SESSION}/closed-under-half/${slug}`, prompt:
     `Row ${row} is CLOSED, and ${half} -- an open pull request -- still \`Closes\` it (a11ign#5125): another pull request's merge closed the row while this half is unmerged, so ${half}'s merge will close nothing `
     + `and the row reads done with this half's work outstanding. Reopen it: \`gh issue reopen ${rowNumber} --repo ${rowRepo} --comment "closed by another half's merge; ${half} is still open"\`, and if the pull request `
@@ -5146,7 +5159,7 @@ export function closedUnderHalfOrders({ prs, trackers, homeRepo, stateDir, state
     const key = ({ row, half }: ClosedUnderHalf) => `${row}|${half}`;
     const fresh = standing.filter((found) => told[key(found)] === undefined);
     writeJsonObject(path, { told: Object.fromEntries(standing.map((found) => [key(found), told[key(found)] ?? Date.now()])) });
-    return fresh.map((found) => closedUnderHalfOrder(found, homeRepo));
+    return fresh.map((found) => closedUnderHalfOrder(found));
   } catch (error) {
     log(`closed-under-half: no order this tick, the record was not kept (${String((error as Error).message).split("\n")[0]}).\n`);
     return [];
