@@ -436,6 +436,10 @@ const OTHER_TOOL_FORMS: Readonly<Record<string, ReadonlyArray<readonly [RegExp, 
   "confidence-post.service.in": [
     [/^ExecStart=%h\/\.local\/bin\/node packages\/agent-org\/src\/decision-confidence-post\.ts$/m, "ExecStart=%h/.local/bin/node src/decision-confidence-post.ts"],
   ],
+  // THE AFTER-CRASH UNIT (a11ign#5127): run from the tool's checkout, like the kernel reboot above.
+  "crash-recover.service.in": [
+    [/^ExecStart=%h\/\.local\/bin\/node packages\/agent-org\/src\/crash-recover\.ts$/m, "ExecStart=%h/.local/bin/node src/crash-recover.ts"],
+  ],
   "shadow-window.service.in": [
     [/^ExecStart=%h\/\.local\/bin\/node packages\/agent-org\/src\/shadow-window\.ts /m, "ExecStart=%h/.local/bin/node src/shadow-window.ts "],
   ],

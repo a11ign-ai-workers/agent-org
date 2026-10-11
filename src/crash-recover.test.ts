@@ -7,6 +7,8 @@ import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, test } from "node:test";
+
+import { sandboxGitEnv } from "./lib/git-env.ts";
 import {
   crashRecoverEnabled, detectUncleanBoot, emptyGitFiles, lastTurnProfiles, planPaneActions, recover, repairGit, repeatCrash, restoreTruncated, resumeCommand,
   writeFileAtomic, type HerdrAgent, type Ports,
@@ -16,9 +18,9 @@ const made: string[] = [];
 after(() => { for (const dir of made) rmSync(dir, { recursive: true, force: true }); });
 
 const git = (cwd: string, args: string[]) => {
-  try { return { ok: true, out: execFileSync("git", args, { cwd, encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }) }; } catch (e) { return { ok: false, out: String(e) }; }
+  try { return { ok: true, out: execFileSync("git", args, { cwd, encoding: "utf8", env: sandboxGitEnv(), stdio: ["ignore", "pipe", "pipe"] }) }; } catch (e) { return { ok: false, out: String(e) }; }
 };
-const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" } });
+const sh = (cwd: string, ...args: string[]) => execFileSync("git", args, { cwd, encoding: "utf8", env: sandboxGitEnv({ GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@t", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@t" }) });
 
 /** An `origin` and a clone of it, with `project.json` and `notes.md` committed non-empty. */
 function fixture() {
@@ -41,7 +43,7 @@ const agent = (name: string, over: Partial<HerdrAgent> = {}): HerdrAgent => ({
   name, pane_id: `p-${name}`, agent: null, agent_session: { agent: "claude", value: "11111111-2222-3333-4444-555555555555" }, ...over,
 });
 
-function ports(over: Partial<Ports> & { checkouts: string[]; agents?: HerdrAgent[]; unclean?: boolean }): { p: Ports; calls: string[][]; said: string[]; woke: string[] } {
+function ports(over: Partial<Omit<Ports, "checkouts">> & { checkouts: string[]; agents?: HerdrAgent[]; unclean?: boolean }): { p: Ports; calls: string[][]; said: string[]; woke: string[] } {
   const calls: string[][] = [];
   const said: string[] = [];
   const woke: string[] = [];

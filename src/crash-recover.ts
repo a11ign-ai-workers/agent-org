@@ -18,6 +18,7 @@ import { basename, dirname, join } from "node:path";
 import { pathToFileURL } from "node:url";
 
 import { recordFailures } from "./failure-ledger.ts";
+import { sandboxGitEnv } from "./lib/git-env.ts";
 
 export const HARD_CRASH_CLASS = "host-hard-crash";
 const WEEK_MS = 7 * 24 * 3_600_000;
@@ -282,7 +283,7 @@ export async function recover(ports: Ports): Promise<Report> {
     try { run(); } catch (cause) { ports.log(`${name} failed: ${String((cause as Error).message).split("\n")[0]}`); }
   };
   step("restore", () => { for (const c of ports.checkouts()) report.restored.push(...restoreTruncated(c, ports.git).map((p) => `${basename(c)}:${p}`)); });
-  step("git", () => { for (const c of ports.checkouts()) report.git.push(repairGit({ checkout: c, git: ports.git, aside: ports.asideDir })); });
+  step("git-repair", () => { for (const c of ports.checkouts()) report.git.push(repairGit({ checkout: c, git: ports.git, aside: ports.asideDir })); });
   try { await ports.prepare(); } catch (cause) { ports.log(`prepare failed: ${String((cause as Error).message).split("\n")[0]}`); }
   step("panes", () => resumePanes(ports, report));
   step("reset-failed", () => { ports.resetFailed(); report.resetFailed = true; });
@@ -313,7 +314,7 @@ export function crashRecoverEnabled(host: HostFile): boolean {
 
 function realGit(cwd: string, args: string[]): { ok: boolean; out: string } {
   try {
-    return { ok: true, out: execFileSync("git", args, { cwd, encoding: "utf8", timeout: 300_000, stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 }) };
+    return { ok: true, out: execFileSync("git", args, { cwd, encoding: "utf8", timeout: 300_000, env: sandboxGitEnv(), stdio: ["ignore", "pipe", "pipe"], maxBuffer: 64 * 1024 * 1024 }) };
   } catch (cause) {
     return { ok: false, out: String((cause as Error).message) };
   }
