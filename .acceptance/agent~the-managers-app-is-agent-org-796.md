@@ -11,14 +11,14 @@ Closes a11ign/agent-org#796
 
 ## How you verified it
 
-Done-when 1: the row's Acceptance, run as written, exits 0 (it exited 1 at `origin/main`). Done-when 2: `src/packaging/work-gate.test.ts` `#796 (a)`..`(f)`. Done-when 3: `src/packaging/pipeline-lane-authorship.test.ts` `#796 (1)`..`(5)`.
+Done-when 1: the row's Acceptance, run as written, exits 0 (it exited 1 at `origin/main`). Done-when 2: `src/work-gate-codeowner-app-review.test.ts` `#796 (a)`..`(f)`. Done-when 3: `src/packaging/pipeline-lane-authorship.test.ts` `#796 (1)`..`(5)`.
 
-Acceptance: cd /home/agent/repos/agent-org && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node -e 'import("./src/lane-ownership.ts").then(m=>{const l={lanes:[{lane:"p",owner:"ceo",branchPrefixes:[],paths:[".github/workflows/"],why:"",reviewOnly:true}]}; if(["a11ign-ai-leads","a11ign-managers[bot]","a11ign-managers","app/a11ign-managers"].some(a=>!m.ownsReviewOnlyLane(a,l)))process.exit(1)})' && npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/pipeline-lane-authorship.test.ts src/packaging/work-gate.test.ts src/pr-open.test.ts
+Acceptance: cd /home/agent/repos/agent-org && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node -e 'import("./src/lane-ownership.ts").then(m=>{const l={lanes:[{lane:"p",owner:"ceo",branchPrefixes:[],paths:[".github/workflows/"],why:"",reviewOnly:true}]}; if(["a11ign-ai-leads","a11ign-managers[bot]","a11ign-managers","app/a11ign-managers"].some(a=>!m.ownsReviewOnlyLane(a,l)))process.exit(1)})' && npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/pipeline-lane-authorship.test.ts src/work-gate-codeowner-app-review.test.ts src/pr-open.test.ts
 
-Mutation: six, each restored with `cp` and `diff`ed byte-identical, run over `pipeline-lane-authorship.test.ts` and `work-gate.test.ts` (465 tests, all green unmutated). (1) the marker ignored, so the App's login alone clears the cause: 2 fail. (2) the App never counting: 3 fail. (3) the `AGENT_ORG_GH_ROLE` read removed from `loginThrough`: 1 fails. (4) any role string accepted, not only a declared one: 1 fails. (5) `app/a11ign-managers` dropped from `MANAGERS_APP_LOGINS`: 2 fail. (6) `app:<role>` not resolved by `ownsReviewOnlyLane`: 2 fail.
+Mutation: seven, each restored with `cp` and `diff`ed byte-identical, run over `pipeline-lane-authorship.test.ts` and `work-gate-codeowner-app-review.test.ts` (all green unmutated; counts below are failures in those two files). (1) the marker ignored, so the App's login alone clears the cause: 2 fail. (2) the App never counting: 3 fail. (3) the `AGENT_ORG_GH_ROLE` read removed from `loginThrough`: 1 fails. (4) any role string accepted, not only a declared one: 1 fails. (5) `app/a11ign-managers` dropped from `MANAGERS_APP_LOGINS`: 2 fail. (6) `app:<role>` not resolved by `ownsReviewOnlyLane`: 2 fail. (7) authorship widened, the App-authored PR exempted as the owner's own: 1 fails, `#796 (f)`.
 
 Outside-Region: src/packaging/pipeline-lane-authorship.test.ts — the `#796 (1)`..`(5)` tests for the lane predicate and `loginThrough`'s role read
-Outside-Region: src/packaging/work-gate.test.ts — the `#796 (a)`..`(f)` tests for `pipelineCodeownerReviewMissing`
+Outside-Region: src/work-gate-codeowner-app-review.test.ts — the `#796 (a)`..`(f)` tests for `pipelineCodeownerReviewMissing`, in a file a job without `history` can run
 Outside-Region: src/reviewer/pr-review-verdict.sh — Done-when 3 names its `gh api user` read: a comment saying what it does when the call is refused
 
 ## Anything a reviewer should be sceptical of
