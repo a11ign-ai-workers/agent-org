@@ -9,7 +9,7 @@ node -e 'const s=JSON.parse(require("node:fs").readFileSync("src/worker-settings
 
 Printed: the grep exits 0; `node --test` prints `tests 9, pass 9, fail 0`; the settings check exits 0. `pnpm run typecheck` is clean.
 
-Mutation (each from a copy in the scratchpad, restored with `cp` and `diff`ed byte-identical), 9 cases, run with `node --test`:
+Mutation: six mutants of `src/worker-stop-hook.ts`, each from a copy in the scratchpad, restored with `cp` and `diff`ed byte-identical, run with `node --test src/worker-stop-hook.test.ts` (9 cases):
 - The bound never firing (`refusals >= MAX_REFUSALS` made false): the BOUNDED case red.
 - `stop_hook_active` ignored: the allowances, the stdin-driven entry case and the real-process case red (3 of 9).
 - The hook never fires (always allows): the POSITIVE CONTROL, BOUNDED, the run-clearing case, the entry case and the twins case red (5 of 9).
