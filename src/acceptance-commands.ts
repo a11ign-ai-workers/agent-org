@@ -1736,6 +1736,85 @@ export function primaryCheckoutCdReason(body: string, tool: string, { primaryChe
     + "a `Hand-run: <who runs it and why>` line.";
 }
 
+// #859 (a11ign#4957, cause 2): AN ACCEPTANCE RUNS IN THE CLAIMED WORKTREE. `execSync` was given no `cwd`, so a command ran wherever `pr:open`
+// happened to be started, and the rows' own `cd <primary checkout> && ...` ran the PRIMARY checkout, which carries the change only after the
+// merge: the Acceptance tested the wrong tree. Refusing that `cd` at filing is #852's; this is the run, and the rewrite that keeps the rows
+// filed before it correct without amending their claimed bodies.
+
+/**
+ * The top level of the git working tree `cwd` is in, and the PRIMARY checkout of the repository that tree belongs to (the parent of its
+ * common `.git`, which is the primary checkout for a linked worktree too). `null` is "cannot tell" -- `cwd` is no working tree -- and the
+ * callers then run as they always did; `primary` is `null` for a bare or separate-git-dir repository, which has no such checkout to name.
+ */
+export function acceptanceTree(cwd: string = process.cwd()): { worktree: string; primary: string | null; } | null {
+  try {
+    const [worktree, common] = execFileSync("git", ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"],
+      { cwd, encoding: "utf8", env: sandboxGitEnv(), stdio: ["ignore", "pipe", "ignore"] }).split("\n");
+    if (!worktree) return null;
+    return { worktree, primary: basename(common ?? "") === ".git" ? dirname(common) : null };
+  } catch {
+    return null;
+  }
+}
+
+/** What follows `primary` in `target` (`""`, or `"/sub/dir"`), or null when `target` is not in that checkout. */
+function insidePrimary(target: string, primary: string): string | null {
+  const root = primary.replace(/\/+$/, "");
+  const path = target.replace(/\/+$/, "");
+  return path === root || path.startsWith(`${root}/`) ? path.slice(root.length) : null;
+}
+
+// The `cd` that OPENS a command: the start of the line, or the start of the `bash -c '...'` string that is the command (the second spelling
+// #4220 carries, and four of the fourteen rows' own). A `cd` after `&&` or `;` is not leading and is left where it is.
+const RUN_LEADING_CD = /^(\s*(?:(?:ba|z)?sh\s+-\w*c\s+['"]\s*)?cd\s+)("[^"]*"|'[^']*'|[^\s&;|'")]+)/;
+
+/**
+ * `command` with a LEADING `cd` into `primary` (or a directory in it) pointed at `worktree` instead, or null when it has none. The target is
+ * rewritten to `.` or `./sub` -- relative, because the command runs with `cwd` at the worktree's top level and so the path needs no quoting
+ * the original did not -- and `line` says so, for the run to print first. A `cd` into another repository's checkout is not this check's.
+ */
+export function rewriteLeadingCd(command: string, primary: string, worktree: string): { command: string; line: string; } | null {
+  const match = RUN_LEADING_CD.exec(command);
+  if (match === null) return null;
+  const token = match[2];
+  const quote = /^["']/.test(token) ? token[0] : "";
+  const target = quote ? token.slice(1, -1) : token;
+  const rest = insidePrimary(target, primary);
+  if (rest === null || primary === worktree) return null;
+  const relative = `.${rest}`;
+  return {
+    command: `${match[1]}${quote}${relative}${quote}${command.slice(match[0].length)}`,
+    line: `RUN-IN-WORKTREE: a leading \`cd ${target}\` is into the primary checkout (${primary}); run in this worktree (${worktree}) as \`cd ${relative}\``,
+  };
+}
+
+/**
+ * Runs one Acceptance command FOR REAL, in the top level of the worktree the process was started in, and prints the rewrite line first when a
+ * leading `cd` into the primary checkout was pointed at that worktree. The ONE runner: `pr-open.ts`'s check and CI's `main` both call it.
+ *
+ * @param [options] `env` is the child's environment (the process's, when absent); `cwd` is where the process was started, and is the
+ *   directory the command runs in when it is no working tree at all
+ * @returns the command's exit code
+ */
+export function runAcceptanceCommand(command: string, { env, cwd = process.cwd() }: { env?: NodeJS.ProcessEnv; cwd?: string; } = {}): number {
+  const tree = acceptanceTree(cwd);
+  let toRun = command;
+  if (tree?.primary) {
+    const rewrite = rewriteLeadingCd(command, tree.primary, tree.worktree);
+    if (rewrite) {
+      toRun = rewrite.command;
+      console.log(rewrite.line);
+    }
+  }
+  try {
+    execSync(toRun, { stdio: "inherit", shell: "/bin/bash", cwd: tree?.worktree ?? cwd, ...(env ? { env } : {}) });
+    return 0;
+  } catch (error) {
+    const status = (error as { status?: number }).status;
+    return typeof status === "number" ? status : 1;
+  }
+}
+
 function absentPathsRefusal(absent: { path: string; command: string; }[], tool: string) {
   if (absent.length === 0) return null;
   const named = absent.map(({ path, command }) => `\`${path}\` (named by \`${command}\`)`).join("; ");
@@ -2187,7 +2266,12 @@ const LEADING_CD = /^\s*cd\s+(?:"([^"]*)"|'([^']*)'|([^\s&;|]+))\s*&&\s*/;
  */
 function leadingCdTarget(command: string): string | null {
   const match = LEADING_CD.exec(command);
-  return match === null ? null : (match[1] ?? match[2] ?? match[3]);
+  if (match === null) return null;
+  const target = match[1] ?? match[2] ?? match[3];
+  // #859: the command RUNS in the worktree (`runAcceptanceCommand`), so a file it names is looked up there, not in the primary checkout.
+  const tree = acceptanceTree();
+  const rest = tree?.primary ? insidePrimary(target, tree.primary) : null;
+  return tree && rest !== null ? resolve(tree.worktree, `.${rest}`) : target;
 }
 
 /**
@@ -3185,16 +3269,10 @@ export function acceptanceReport(body: string | null | undefined, run: (command:
  * Runs a command for real, via a shell (these are arbitrary shell strings out of a PR body, potentially
  * carrying flags/pipes/quoting -- the same trust boundary `merge-guard.ts`'s `--ci-gate` and this
  * project's other CI-invoked scripts already accept, contained by `pull_request`'s read-only token and
- * fork checkout rather than by refusing shell syntax).
+ * fork checkout rather than by refusing shell syntax). #859: in the worktree, by `runAcceptanceCommand`.
  */
 function runForReal(command: string): number {
-  try {
-    execSync(command, { stdio: "inherit", shell: "/bin/bash" });
-    return 0;
-  } catch (error) {
-    const status = (error as { status?: number }).status;
-    return typeof status === "number" ? status : 1;
-  }
+  return runAcceptanceCommand(command);
 }
 
 // #471: A PR MUST DECLARE WHAT IT CLOSES, and an unrecognised body must not read as an honest opt-out.
