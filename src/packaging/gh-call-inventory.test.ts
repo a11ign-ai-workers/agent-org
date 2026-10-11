@@ -14,6 +14,7 @@ import { execFileSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
+import { sandboxGitEnv } from "@a11ign/toolchain/lib/git-env";
 import { stripComments } from "../lib/local-import-closure.ts";
 import { TOOL_REPO_ENV } from "../lib/pin-ratchet.ts";
 import { buildInventory, judgedRoot, render, sourceFiles, INVENTORY_PATH, REPO_ROOT, type Inventory } from "./gh-call-inventory.ts";
@@ -49,7 +50,7 @@ test("the inventory is generated and never committed: its path is ignored, no tr
   const ignored = readFileSync(join(root, ".gitignore"), "utf8").split("\n").map((line) => line.trim());
   assert.ok(ignored.includes(INVENTORY_PATH), `.gitignore must list ${INVENTORY_PATH}: a committed copy is rewritten by every pull request that adds a call, and they conflict (a11ign/a11ign#5126)`);
   if (existsSync(join(root, ".git"))) {
-    const tracked = execFileSync("git", ["ls-files", "--", INVENTORY_PATH], { cwd: root, encoding: "utf8" });
+    const tracked = execFileSync("git", ["ls-files", "--", INVENTORY_PATH], { cwd: root, encoding: "utf8", env: sandboxGitEnv() });
     assert.equal(tracked.trim(), "", `${INVENTORY_PATH} is tracked: \`git rm --cached\` it; run \`node --import tsx src/packaging/gh-call-inventory.ts\` to read it on demand`);
   }
   const first = render(buildInventory(root));
@@ -60,7 +61,7 @@ test("the inventory is generated and never committed: its path is ignored, no tr
 /** Runs `git` in a throwaway repository, with an identity and no signing, and returns whether it exited 0. */
 function gitSucceeds(cwd: string, ...args: string[]): boolean {
   try {
-    execFileSync("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args], { cwd, stdio: "ignore" });
+    execFileSync("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args], { cwd, stdio: "ignore", env: sandboxGitEnv() });
     return true;
   } catch {
     return false;
