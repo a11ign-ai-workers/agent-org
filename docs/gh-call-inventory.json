@@ -1363,6 +1363,10 @@
         "src/wakes-per-row.ts"
       ]
     },
+    "hold-holder-idle": {
+      "group": "ACTION",
+      "namedIn": []
+    },
     "row-off-board": {
       "group": "JUDGMENT",
       "namedIn": [

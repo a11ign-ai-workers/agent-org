@@ -96,7 +96,7 @@ import { tapShadowReads } from "./shadow-reads.ts"; // #2849
 // Both are leaf-shaped: `auto-arm-sweep.ts` imports only `node:*`, `cli-flags.ts` (already here) and
 // `pr-hold-state.ts` (no imports at all), so the gate keeps the property its own header states.
 import { armedFromApi, openPullRequestsQueryArgs } from "./auto-arm-sweep.ts";
-import { armabilityOf, holdersOf } from "./pr-hold-state.ts";
+import { armabilityOf, holdersOf, holderOrdersOf } from "./pr-hold-state.ts";
 // #3019: ARMED-AND-EJECTED IS READ WHERE `armed` IS DECIDED. `pr-armed-state.ts` is the leaf `armedFromApi` lives in; the
 // timeline reading is its sibling and this file only RUNS the query it builds, so there is still one place deciding it.
 import { ejectionQueryArgs, queueEjectionOf } from "./pr-armed-state.ts";
@@ -125,6 +125,7 @@ import { recordIgnoredChairmanLabels, recordTickFailures as recordFailuresOf } f
 import { diskHeadroom, MIN_FREE_FRACTION } from "./disk-headroom.ts";
 // #2470: A CLAIM THAT DOES NOT MOVE. A leaf, like every import above, so the gate keeps the property its own header states.
 import { KEPT_CLAIMS_FILE, readJsonObject, writeJsonObject } from "./claim-stall.ts";
+import { WORKER_STATE_DIR, readDeclarations } from "./worker-state.ts";
 // #2845: WHO STAMPED A WORKTREE -- the reading a refused claim names. Imports only `node:*` and `lib/`, like the rest.
 import { worktreeOwner } from "./worktree-owner.ts";
 // #2542: THE PULL-REQUEST ORDERS -- the orders that ask a session to act on a pull request's state -- live in
@@ -1276,6 +1277,40 @@ export const MAX_ROW_ORDERS_PER_TICK = 8;
  */
 export const chairmanAsksNow = (openRowsRead: any[] | null): any[] => chairmanAskOrders({ rows: openRowsRead, now: Date.now() },
   { run: defaultRun, repo: repoNow, readItemFacts: readWaitFacts, limit: MAX_ROW_ORDERS_PER_TICK });
+
+/** Where the hold-holder check (#4970) remembers, per hold, when its holder was first read idle and when it was woken and asked about. Beside the stall memory. */
+export const HOLD_HOLDERS_FILE = "hold-holders.json";
+
+/**
+ * #4970: A HOLD ON A PULL REQUEST OUTLIVES NO HOLDER. The tick's step over the held pull requests it already read: a holder idle 30 minutes with no declared state, or whose session
+ * no workspace carries, is woken ONCE; 30 minutes later, still idle or gone, `orchestrator` is asked to decide (`pr-hold-state.ts`'s `holderStep` is the reading). It COSTS NO `gh` CALL
+ * (the pull requests are in hand) and makes one `herdr` listing when something is held. NEVER LIFTS A HOLD, and never throws: a refused pull-request list, a listing that is not the
+ * whole org or declarations that cannot be read are silence, and the memory stays as it was.
+ */
+export function holdHolderOrdersNow({ prs, now = Date.now(), stateDir = REVIEWER_STATE_DIR, agents = readAgents, log = (line: string) => process.stderr.write(line) }:
+  { prs: any[] | null; now?: number; stateDir?: string; agents?: typeof readAgents; log?: (line: string) => void; }): any[] {
+  if (prs === null) return [];
+  try {
+    const path = `${stateDir}/${HOLD_HOLDERS_FILE}`;
+    const before = readJsonObject(path);
+    const held = prs.some((pr) => holdersOf(labelsOf(pr)).length > 0);
+    if (!held) {
+      if (Object.keys(before).length > 0) writeJsonObject(path, {});
+      return [];
+    }
+    const declarations = readDeclarations(`${stateDir}/${WORKER_STATE_DIR}`);
+    if (declarations === null) {
+      log("hold-holders: the worker-state directory could not be read -- no hold is judged idle this tick.\n");
+      return [];
+    }
+    const { orders, memory } = holderOrdersOf({ prs, agents: agents(), declarations: declarations.byClaimant, memory: before, now });
+    if (JSON.stringify(memory) !== JSON.stringify(before)) writeJsonObject(path, memory);
+    return orders;
+  } catch (err) {
+    log(`hold-holders: could not run (${String((err as Error)?.message ?? err).split("\n")[0].slice(0, 160)}) -- no order this tick.\n`);
+    return [];
+  }
+}
 
 /** The label `ceo` created for "offer this row before others"; `offerOrder` reads it (#2296). */
 export const PRIORITY_LABEL = "priority";
@@ -8388,7 +8423,8 @@ function main() {
   const shelvedElsewhere = others.flatMap((tick, at) => tick.blocked.map((row) => ({ ...row, repo: otherScopes[at].scope.tracker?.repo })));
   orders.push(...blockingImpactOrders({ shelved: [...shelvedHere, ...shelvedElsewhere], openRows: allOpen, trackers: Object.fromEntries(keyedTrackers), prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], stateDir: REVIEWER_STATE_DIR }));
   orders.push(...reviewerAuthTick({ orders }), ...repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) }), ...orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => readReleaseRuns(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) }),
-    ...rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() }), ...chairmanAsksNow(openRowsRead)); // #2848, #2936, #2997, #4020: before the dead man's switch -- a repeating line, a stuck org: something found
+    ...rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() }), ...chairmanAsksNow(openRowsRead),
+    ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
   // FIRST OF ALL, AND ON PURPOSE (#2163): `wake` delivers in this order and records each delivery with a write, so
   // on a full disk the tick can end partway. The order that says the disk is full must not be the one behind it.
   orders.unshift(...diskOrders);
