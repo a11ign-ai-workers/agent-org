@@ -240,7 +240,9 @@ const FIRST_READERS = (Object.freeze({ [SIGNALS.STATE_LABEL]: FIRST_READER, [SIG
 /**
  * `detail` is one line: for `unknown` it is WHY, for `tripped` the numbers. `firstTrippedAt` is epoch ms, or `null` when the signal's own source carries no time.
  */
-export type Reading = { signal: string, status: "tripped" | "clear" | "unknown", detail: string, firstTrippedAt?: number | null, discriminator?: string, prompt?: string };
+export type Reading = { signal: string, status: "tripped" | "clear" | "unknown", detail: string, firstTrippedAt?: number | null, discriminator?: string, prompt?: string,
+  /** agent-org#887: TRIPPED and raised as an incident only -- `orgHealthOrders` makes no order of it, so `ceo` is not woken by it (a first failed release, until a second follows) */
+  incidentOnly?: true };
 
 export type ToolAgreement = import("./lib/tool-version-agreement.ts").Agreement;
 
@@ -1332,7 +1334,7 @@ const RELEASE_JOBS_WINDOW = 100;
 const RELEASE_VERDICTS = Object.freeze(["success", "failure"]);
 
 export type ReleaseRun = { id: number, event: string, status: string, conclusion: string | null, sha: string, createdAt: string, updatedAt: string, url: string };
-export type FailedJob = { name: string, steps: string[] };
+export type FailedJob = { id?: number, name: string, steps: string[] };
 /**
  * `jobs` and `pending` are read only when the newest verdict is a failure; `null` is a read that was refused
  */
@@ -1384,7 +1386,7 @@ export function readReleaseRuns(run: (args: string[]) => string, repo: string): 
   const verdict = newestReleaseVerdict(runs);
   if (verdict?.conclusion !== "failure") return { runs };
   const jobs = tryJson(() => run(["api", `repos/${repo}/actions/runs/${verdict.id}/jobs?per_page=${RELEASE_JOBS_WINDOW}`,
-    "--jq", "[.jobs[] | select(.conclusion == \"failure\") | {name, steps: [.steps[] | select(.conclusion == \"failure\") | .name]}]"]));
+    "--jq", "[.jobs[] | select(.conclusion == \"failure\") | {id, name, steps: [.steps[] | select(.conclusion == \"failure\") | .name]}]"]));
   const files = tryJson(() => run(["api", `repos/${repo}/contents/.changeset?ref=main`, "--jq", "[.[].name]"]));
   return { runs, jobs: Array.isArray(jobs) ? jobs : null,
     pending: Array.isArray(files) ? files.filter((name) => name.endsWith(".md") && name !== "README.md") : null };
@@ -1397,6 +1399,189 @@ function tryJson(read: () => string): any {
   } catch {
     return null;
   }
+}
+
+// --- agent-org#887: A FAILED RELEASE ON ANY REPOSITORY THE ORG RELEASES, NAMING THE RUN'S FIRST ERROR LINE, AND THE SECOND ONE IN A ROW WAKES `ceo` ---------------------------------
+//
+// THE GAP (a11ign/agent-org#885 class 1, chairman 2026-10-11): `readReleaseRuns` is asked of ONE repository, the project's, so five failed `release.yml` runs of agent-org's own `main` were read by nobody for
+// 50+ minutes. THE READING IS NOW ONE PER REPOSITORY, each with its own discriminator (`release-run-failed@<repo>@<first failed run of the streak>`), so one repository's failure neither hides nor re-keys
+// another's, and a later success on one clears only that one. A FIRST failure is an INCIDENT ONLY (`fileReleaseIncidents`: an `incident` item in the tracker, no order); THE SECOND CONSECUTIVE FAILURE
+// is also an order to `ceo`, keyed on the streak, so a third and a fourth failure are the same order and not a page each.
+
+/** The key the incident item carries on its `Incident:` line, so `priority:emergency` can link it and the chairman's messaging finds it (`ORG_BLOCKING_INCIDENT_KEYS`, `readFixRow`). */
+export const RELEASE_INCIDENT_KEY = `incident:${SIGNALS.RELEASE_FAILED}`;
+/** How many failed releases in a row on one repository make the order to `ceo` (the chairman's "a second consecutive failure"). */
+export const RELEASE_FAILURES_TO_WAKE = 2;
+const LOG_STAMP = /^﻿?\d{4}-\d{2}-\d{2}T[\d:.]+Z ?/;
+const ANSI = /\u001b\[[0-9;]*m/g;
+const STEP_GROUP = "##[group]";
+const STEP_END = "##[endgroup]";
+const STEP_ERROR = "##[error]";
+/** What makes a line of a failing step an ERROR line: pnpm's `ERR_*` and npm's `ERR!`, the word `error`, and git's `fatal:`. */
+const ERROR_LINE = /\bERR_|\berr(?:or)?\b|\bfatal\b/i;
+const ERROR_LINE_CHARS = 240;
+
+/** What a failed run's log says: the first error line of the step that failed, or why none is quoted (never an empty quote). */
+export type FirstError = { line: string } | { unread: string };
+/** One repository's release read: its runs (`null` is a refused list) and, while the newest verdict is a failure, the failed job's first error line. */
+export type ReleaseFailureRead = { repo: string, runs: ReleaseRuns | null, firstError?: FirstError };
+
+/**
+ * THE FIRST ERROR LINE OF THE STEP THAT FAILED, from a job's log. GitHub marks the failure with a `##[error]` line (usually "Process completed with exit code 1", which says nothing), and the line
+ * that names the cause is inside the same step, before it: the step is the span from the nearest `##[group]` above the marker, and its output starts after that group's `##[endgroup]` (the lines
+ * between are the command echoed, which may say "error" without one). The first line of that output that reads as an error is quoted, else the marker's own text.
+ */
+export function firstErrorLine(log: string): FirstError {
+  const lines = log.split(/\r?\n/).map((line) => line.replace(LOG_STAMP, "").replace(ANSI, ""));
+  const marked = lines.findIndex((line) => line.startsWith(STEP_ERROR));
+  if (marked === -1) return { unread: "the failed job's log holds no `##[error]` line" };
+  let start = marked;
+  while (start > 0 && !lines[start].startsWith(STEP_GROUP)) start -= 1;
+  const ended = lines.slice(start, marked).findIndex((line) => line.startsWith(STEP_END));
+  const output = lines.slice(ended === -1 ? start + 1 : start + ended + 1, marked);
+  const found = output.find((line) => !line.startsWith("##[") && ERROR_LINE.test(line)) ?? lines[marked].slice(STEP_ERROR.length);
+  const text = found.trim();
+  if (text === "") return { unread: "the failed step's error line is empty" };
+  return { line: text.length > ERROR_LINE_CHARS ? `${text.slice(0, ERROR_LINE_CHARS - 1)}…` : text };
+}
+
+function readFirstError(run: (args: string[]) => string, repo: string, job: FailedJob | undefined): FirstError {
+  if (job?.id === undefined) return { unread: "the failed job's id was not read" };
+  try {
+    return firstErrorLine(run(["api", `repos/${repo}/actions/jobs/${job.id}/logs`]));
+  } catch {
+    return { unread: "the failed job's log could not be read" };
+  }
+}
+
+/**
+ * THE FACT FOR `releaseFailureReadings`: each repository's `release.yml` runs, and, only for one whose newest verdict is a failure, the failed job's log (ONE MORE CALL beside the jobs and
+ * `.changeset/` reads `readReleaseRuns` already makes). `known` is a repository's runs the tick already read (the project's, kept for the canary), so it is not asked twice. NEVER THROWS.
+ */
+export function readReleaseFailures(run: (args: string[]) => string, repos: readonly string[], { known = {} }: { known?: Record<string, ReleaseRuns | null | undefined> } = {}): ReleaseFailureRead[] {
+  return repos.map((repo) => {
+    const prior = known[repo];
+    const runs = prior !== undefined ? prior : readReleaseRuns(run, repo);
+    if (runs === null || newestReleaseVerdict(runs.runs)?.conclusion !== "failure") return { repo, runs };
+    return { repo, runs, firstError: runs.jobs ? readFirstError(run, repo, runs.jobs[0]) : { unread: "the failed job could not be read" } };
+  });
+}
+
+/**
+ * THE FAILED RELEASES IN A ROW on one repository, newest first: the verdict runs back to the newest success. A cancelled, skipped, neutral or unfinished run neither joins the streak nor breaks it.
+ * `ended` is whether a success closed it: false is a window with no success in it, so the streak is a floor.
+ */
+export function failureStreak(runs: ReleaseRun[]): { failures: ReleaseRun[]; ended: boolean } {
+  const verdicts = runs.filter((r) => RELEASE_VERDICTS.includes(String(r.conclusion))).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  const failures = [];
+  for (const verdict of verdicts) {
+    if (verdict.conclusion !== "failure") return { failures, ended: true };
+    failures.push(verdict);
+  }
+  return { failures, ended: false };
+}
+
+const firstErrorText = (error: FirstError | undefined): string => (error === undefined ? "its first error line was not read" : "line" in error ? `its first error line: "${error.line}"` : `its first error line is not quoted (${error.unread})`);
+
+/**
+ * SIGNAL 18 FOR EVERY REPOSITORY THE ORG RELEASES (agent-org#887): ONE READING PER REPOSITORY, tripped while that repository's newest release verdict is a failure. The discriminator names the repository
+ * and the FIRST failed run of its streak, so it holds while the streak grows (one order, not a page per failure) and is a new key for the next streak. A first failure is `incidentOnly`; the
+ * {@link RELEASE_FAILURES_TO_WAKE}th in a row is an order to `ceo`. A repository whose list was refused, or in which no run concluded, is UNKNOWN and never clear, and does not hide another's trip.
+ */
+export function releaseFailureReadings({ failures }: { failures: ReleaseFailureRead[] | null; }): Reading[] {
+  const signal = SIGNALS.RELEASE_FAILED;
+  if (failures === null) return [unknown(signal, "the repositories the org releases could not be listed, so no release is known to have succeeded")];
+  const tripped: Reading[] = [];
+  const unread: string[] = [];
+  for (const { repo, runs, firstError } of failures) {
+    if (runs === null) { unread.push(`${repo}: the runs of release.yml on main could not be read`); continue; }
+    const verdict = newestReleaseVerdict(runs.runs);
+    if (verdict === undefined) { unread.push(`${repo}: none of the newest ${runs.runs.length} release.yml run(s) on main concluded success or failure`); continue; }
+    if (verdict.conclusion === "success") continue;
+    const { failures: streak, ended } = failureStreak(runs.runs);
+    const first = streak[streak.length - 1];
+    const startedAt = Date.parse(first.updatedAt);
+    const times = streak.length;
+    const running = times >= RELEASE_FAILURES_TO_WAKE ? ` ${times}${ended ? "" : " or more"} times running (since run ${first.id})` : "";
+    tripped.push({ signal, status: "tripped", firstTrippedAt: Number.isFinite(startedAt) ? startedAt : null, discriminator: `${signal}@${repo}@${first.id}`,
+      ...(times < RELEASE_FAILURES_TO_WAKE && { incidentOnly: true as const }),
+      detail: `release.yml on ${repo}'s main FAILED${running} and no later run succeeded: run ${verdict.id} (${verdict.event}) at ${verdict.sha.slice(0, 9)}, ${failedJobsText(runs.jobs)}; ${firstErrorText(firstError)}; ${pendingText(runs.pending)}; ${verdict.url}` });
+  }
+  const gap = unread.length === 0 ? [] : [unknown(signal, `${unread.join("; ")}, so those repositories are not known to have released`)];
+  if (tripped.length === 0 && gap.length === 0) return [{ ...clear(signal), detail: `${failures.map(({ repo }) => repo).join(", ")}: the newest release run of each succeeded` }];
+  return [...tripped, ...gap];
+}
+
+/** The line of an incident item that names the failure it was raised for: `Release-failure: <repo>@<first failed run of the streak>`. */
+const RELEASE_FAILURE_LINE = /^Release-failure:[ \t]*(\S+)@(\d+)[ \t]*$/m;
+const releaseFailureOf = (body: string): { repo: string; episode: number } | null => {
+  const found = RELEASE_FAILURE_LINE.exec(body);
+  return found === null ? null : { repo: found[1], episode: Number(found[2]) };
+};
+
+/**
+ * THE INCIDENT ITEM of one failed streak: its title names the repository and the first error line, and the body carries what the order's detail does, the `Incident:` key
+ * ({@link RELEASE_INCIDENT_KEY}) and the `Release-failure:` line this file finds it again by.
+ */
+function releaseIncidentOf({ repo, runs, firstError }: ReleaseFailureRead & { runs: ReleaseRuns }): { title: string; body: string; episode: number } | null {
+  const verdict = newestReleaseVerdict(runs.runs);
+  if (verdict?.conclusion !== "failure") return null;
+  const { failures: streak } = failureStreak(runs.runs);
+  const episode = streak[streak.length - 1].id;
+  const quoted = firstError !== undefined && "line" in firstError ? `: ${firstError.line.slice(0, 100)}` : "";
+  return { episode, title: `Release failed on ${repo}${quoted}`,
+    body: [`release.yml on ${repo}'s main FAILED: run ${verdict.id} (${verdict.event}) at ${verdict.sha.slice(0, 9)}, ${failedJobsText(runs.jobs)}.`,
+      `The run's ${firstErrorText(firstError)}.`, `Failed releases in a row: ${streak.length}. ${pendingText(runs.pending)}.`, verdict.url, "",
+      `Incident: ${RELEASE_INCIDENT_KEY}`, `Release-failure: ${repo}@${episode}`, "",
+      `Raised by the gate's \`${SIGNALS.RELEASE_FAILED}\` reading (agent-org#887). A second consecutive failure on ${repo} also wakes \`ceo\`. The gate closes this item when a later release.yml run on ${repo} succeeds.`].join("\n") };
+}
+
+/**
+ * RAISE THE INCIDENT OF EACH FAILED RELEASE, ONCE, AND CLOSE IT WHEN THAT REPOSITORY RELEASES AGAIN. `tracker` is where incidents live (the project's tracker, as the canary's and the fleet's are). An item is
+ * found by its `Release-failure:` line: an OPEN one for the repository (any streak: a streak that slid out of the run window must not be filed again) or a CLOSED one for the same streak (a person who
+ * closed it did not ask for it again) means nothing is filed. A list that cannot be read files nothing and closes nothing: absence is not proof. Reads only when a repository's newest verdict is a failure
+ * or a success, and NEVER THROWS.
+ * @returns the titles filed and the numbers closed, for the caller's log
+ */
+export function fileReleaseIncidents(failures: ReleaseFailureRead[], { run, tracker, say = (line: string) => { process.stderr.write(line); } }:
+  { run: (args: string[]) => string; tracker: string; say?: (line: string) => void; }): { filed: string[]; closed: number[] } {
+  const out = { filed: [] as string[], closed: [] as number[] };
+  try {
+    const failed: { repo: string; episode: number; title: string; body: string }[] = [];
+    for (const f of failures) {
+      const incident = f.runs === null ? null : releaseIncidentOf({ ...f, runs: f.runs });
+      if (incident !== null) failed.push({ repo: f.repo, ...incident });
+    }
+    const released = new Set(failures.flatMap(({ repo, runs }) => (runs !== null && newestReleaseVerdict(runs.runs)?.conclusion === "success" ? [repo] : [])));
+    if (failed.length === 0 && released.size === 0) return out;
+    const open = openIncidentsOf(tracker, run);
+    if (open === null) {
+      say(`org-health: ${SIGNALS.RELEASE_FAILED} could not read the open incidents of ${tracker}, so none is filed or closed this tick.\n`);
+      return out;
+    }
+    const openFor = (repo: string) => open.some((item) => releaseFailureOf(item.body)?.repo === repo);
+    for (const item of open) {
+      const named = releaseFailureOf(item.body);
+      if (named === null || !released.has(named.repo)) continue;
+      run(["issue", "close", String(item.number), "--comment", `release.yml on ${named.repo}'s main succeeded again, so the failure this was raised for is over.`]);
+      out.closed.push(item.number);
+    }
+    for (const { repo, episode, title, body } of failed) {
+      if (openFor(repo)) continue;
+      const closed = tryJson(() => run(["api", "--method", "GET", `repos/${tracker}/issues`, "-f", "state=closed", "-f", "labels=incident", "-f", "per_page=100",
+        "--jq", "[.[] | select(.pull_request | not) | {number, body}]"]));
+      if (!Array.isArray(closed)) {
+        say(`org-health: ${SIGNALS.RELEASE_FAILED} could not read the closed incidents of ${tracker}, so the incident of ${repo} is not filed this tick.\n`);
+        continue;
+      }
+      if (closed.some((item) => { const named = releaseFailureOf(String(item?.body ?? "")); return named?.repo === repo && named.episode === episode; })) continue;
+      run(["issue", "create", "--title", title, "--label", "incident", "--body", body]);
+      out.filed.push(title);
+    }
+  } catch (err) {
+    say(`org-health: ${SIGNALS.RELEASE_FAILED} could not file its incident (${String((err as any)?.message ?? err).split("\n")[0].slice(0, MAX_REASON_CHARS)}).\n`);
+  }
+  return out;
 }
 
 /** An open build incident, as `readFleetBuildIncidents` keeps it: its body was read for the line and is not kept. `createdAt` is ISO, as the API gives it. */
@@ -1588,7 +1773,7 @@ export function milestoneClockReading({ now, fact }: { now: number; fact: Milest
  * THE READINGS, in a fixed order: the four of #2936, then the two of #2937 and the outcome clock (#3486, which replaced #2970's) WHEN ITS FACT IS GIVEN. An OMITTED fact (`undefined`) is
  * "this caller does not ask", which is silent; `null` is "asked and refused", which is a stated unknown. The two must not share a
  * value, or a gate that never wired the fleet read would log an unknown every tick for a fault nobody can fix from the log.
- * @param facts `claimRefusals` (agent-org#889) is `readClaimRefusals()`'s answer, which `orgHealthTick` reads itself when the caller gives none; `shelvedCircle` (#4401) is `shelvedCircles`' answer over the shelving list and pull requests the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `milestoneClock` (#4231) is the primary milestone's rows and the pull requests that close them, `null` for a refused open-row read and OMITTED when the caller does not ask; `classRepeat` (#4126) is `readClassRepeat()`'s answer, `null` or `{ unreadable }` for a refused read and OMITTED when the caller does not ask; facts `boardTruth` (#4043) is `boardTruthAudit`'s answer over the rows the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `releaseRuns` (#4001) is `readReleaseRuns()`'s answer, `null` for a refused read and OMITTED when the caller does not ask; `idle` (#3943) is `idleWithOpenRowsReading`'s answer over the rows the tick already read, OMITTED when the caller does not ask; `stateRows` (#3942) is the open rows the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `autoOff` (#3853) is `readAutoOffRefusal()`'s answer, which `orgHealthTick` reads itself when the caller gives none; `teamAccess` (#3634) is `readTeamAccess()`'s answer, OMITTED when the project declares none; `toolAgreement` (#3533) is `readToolAgreement()`'s answer, OMITTED when the caller does not ask; `pools` (#3448) is the API budgets the tick read, `null` when none was; the order-stall reading is the WAKER's and rides `orderStallOrders`
+ * @param facts `claimRefusals` (agent-org#889) is `readClaimRefusals()`'s answer, which `orgHealthTick` reads itself when the caller gives none; `shelvedCircle` (#4401) is `shelvedCircles`' answer over the shelving list and pull requests the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `milestoneClock` (#4231) is the primary milestone's rows and the pull requests that close them, `null` for a refused open-row read and OMITTED when the caller does not ask; `classRepeat` (#4126) is `readClassRepeat()`'s answer, `null` or `{ unreadable }` for a refused read and OMITTED when the caller does not ask; facts `boardTruth` (#4043) is `boardTruthAudit`'s answer over the rows the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `releaseRuns` (#4001) is `readReleaseRuns()`'s answer, `null` for a refused read and OMITTED when the caller does not ask; `releaseFailures` (agent-org#887) is `readReleaseFailures()`'s answer, one entry per repository the org releases, `null` for a repository list that could not be made and OMITTED when the caller does not ask; WHEN GIVEN IT REPLACES `releaseRuns`' reading; `idle` (#3943) is `idleWithOpenRowsReading`'s answer over the rows the tick already read, OMITTED when the caller does not ask; `stateRows` (#3942) is the open rows the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `autoOff` (#3853) is `readAutoOffRefusal()`'s answer, which `orgHealthTick` reads itself when the caller gives none; `teamAccess` (#3634) is `readTeamAccess()`'s answer, OMITTED when the project declares none; `toolAgreement` (#3533) is `readToolAgreement()`'s answer, OMITTED when the caller does not ask; `pools` (#3448) is the API budgets the tick read, `null` when none was; the order-stall reading is the WAKER's and rides `orderStallOrders`
  */
 export function orgHealthReadings(facts: {
         now: number; lastMergedAt: number | null; lastMergedIn?: string | null; work: { greenPrs: number; claimableRows: number; } | null; redPrs: RedPr[] | null;
@@ -1596,7 +1781,7 @@ export function orgHealthReadings(facts: {
         drift: { behind: number; ahead: number; dirty: string[]; } | null; primarySince: number | null;
         fleet?: FleetCaptures | null; waiting?: FleetWaiting | null; copies?: CopyPair[] | null; overdue?: { items: OverdueCandidate[] | null; unread?: string[]; };
         waits?: { stale: Parameters<typeof staleWaitReading>[0]["stale"]; bare: Parameters<typeof waitWithoutReasonReading>[0]["bare"]; manual: number; } | null;
-        pools?: PoolReading[] | null; toolAgreement?: { result: ToolAgreement; } | null; nodeStrips?: NodeStripFact | null; teamAccess?: TeamAccessFact; autoOff?: AutoOffFact; stateRows?: Parameters<typeof stateLabelReading>[0]["rows"]; idle?: import("./idle-with-open-rows.ts").IdleRows; shelvedCircle?: ShelvedCircle[] | null; releaseRuns?: ReleaseRuns | null; fleetBuildIncident?: FleetBuildIncident[] | null; releaseBehind?: import("./release-behind-main.ts").RepoFact[] | null; boardTruth?: Parameters<typeof boardTruthReading>[0]["audit"];
+        pools?: PoolReading[] | null; toolAgreement?: { result: ToolAgreement; } | null; nodeStrips?: NodeStripFact | null; teamAccess?: TeamAccessFact; autoOff?: AutoOffFact; stateRows?: Parameters<typeof stateLabelReading>[0]["rows"]; idle?: import("./idle-with-open-rows.ts").IdleRows; shelvedCircle?: ShelvedCircle[] | null; releaseRuns?: ReleaseRuns | null; releaseFailures?: ReleaseFailureRead[] | null; fleetBuildIncident?: FleetBuildIncident[] | null; releaseBehind?: import("./release-behind-main.ts").RepoFact[] | null; boardTruth?: Parameters<typeof boardTruthReading>[0]["audit"];
         classRepeat?: import("./class-repeat.ts").ClassRepeatFact | null; milestoneClock?: Omit<MilestoneClockFact, "endedAt"> | null;
         claimRefusals?: ClaimRefusal[] | null;
     }): Reading[] {
@@ -1618,7 +1803,9 @@ export function orgHealthReadings(facts: {
   if (facts.boardTruth !== undefined) readings.push(boardTruthReading({ audit: facts.boardTruth, day: isoOf(facts.now).slice(0, 10) }));
   if (facts.idle !== undefined) readings.push(idleWithOpenRowsSignal({ idle: facts.idle }));
   if (facts.shelvedCircle !== undefined) readings.push(shelvedCircleReading({ circles: facts.shelvedCircle }));
-  if (facts.releaseRuns !== undefined) readings.push(releaseFailedReading({ releaseRuns: facts.releaseRuns }));
+  // agent-org#887: the per-repository reading REPLACES the project-only one when the caller asks for it (the gate does); a caller that gives only `releaseRuns` still gets the old reading
+  if (facts.releaseFailures !== undefined) readings.push(...releaseFailureReadings({ failures: facts.releaseFailures }));
+  else if (facts.releaseRuns !== undefined) readings.push(releaseFailedReading({ releaseRuns: facts.releaseRuns }));
   if (facts.fleetBuildIncident !== undefined) readings.push(fleetBuildMixedReading({ now: facts.now, incident: facts.fleetBuildIncident }));
   if (facts.releaseBehind !== undefined) readings.push(...releaseBehindReadings({ now: facts.now, behind: facts.releaseBehind }));
   if (facts.classRepeat !== undefined) readings.push(...classRepeatReadings({ now: facts.now, classRepeat: facts.classRepeat }));
@@ -1733,7 +1920,7 @@ const readersOf = (signal: string): string[] => [...(FIRST_READERS[signal] ? [FI
  * session is delivered one order per tick (`repeating-lines.ts`' reason). An unknown or clear reading emits nothing here.
  */
 export function orgHealthOrders(readings: Reading[]): { session: string; cause: string; subject: string; discriminator: string; prompt: string; causeKey: string; }[] {
-  const tripped = readings.filter((r) => r.status === "tripped");
+  const tripped = readings.filter((r) => r.status === "tripped" && r.incidentOnly !== true); // agent-org#887: an incident-only reading is raised as an incident and orders no one
   return tripped.flatMap((r) => readersOf(r.signal).map((session) => {
     const others = tripped.filter((o) => o !== r).map((o) => o.signal);
     const when = r.firstTrippedAt ? ` It first tripped at ${isoOf(r.firstTrippedAt)}.` : "";

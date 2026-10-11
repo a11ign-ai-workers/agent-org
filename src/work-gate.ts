@@ -78,7 +78,7 @@ import { hostConfigPath, stateEntryPath } from "./host-config.ts"; // #2799; #50
 // #2848: THE REPEATING-LINE QUESTION, in its own leaf for the reason `disk-headroom.ts` is one: it reads the journal, not GitHub.
 import { REPEAT_TICKS, normaliseLine, repeatingLinesTick, type RepeatingGroup } from "./repeating-lines.ts";
 // #2936: THE ORG-HEALTH QUESTION, in its own leaf for the same reason: relative imports only, so the gate keeps the property its own header states.
-import { redSinceOf, readToolAgreement, readReleaseRuns, readFleetBuildIncidents, SIGNALS as ORG_HEALTH_SIGNALS, machineryCanaryTick, readCanaryOptions, realCanaryIo, readClaimRefusals, CANARY_STATE_FILE, UNQUEUED_MINUTES, parseCanaryState, machineryFlagOn, emptyCanaryState, type CanaryState, type ReleaseRuns, type Suppression, type CanaryIo } from "./org-health.ts"; // a11ign#5100: the machinery canary
+import { redSinceOf, readToolAgreement, readReleaseRuns, readReleaseFailures, fileReleaseIncidents, readFleetBuildIncidents, SIGNALS as ORG_HEALTH_SIGNALS, machineryCanaryTick, readCanaryOptions, realCanaryIo, readClaimRefusals, CANARY_STATE_FILE, UNQUEUED_MINUTES, parseCanaryState, machineryFlagOn, emptyCanaryState, type CanaryState, type ReleaseRuns, type Suppression, type CanaryIo } from "./org-health.ts"; // a11ign#5100: the machinery canary
 import { ghQueueTick } from "./gh-ledger.ts"; // #4898
 import { readNodeStrips } from "./node-strips-types.ts";
 import { liveClassRepeatIo, readClassRepeat } from "./class-repeat.ts";
@@ -145,7 +145,7 @@ export { redOnlyBySupersededRun, mergeConflictOrders, greenUnarmedOrders, review
 import { labJobFinishedOrders, readLabJobRecords, readDispatchedLabJobs } from "./work-gate/lab-job-orders.ts";
 // #2898: THE ORG-HEALTH FACTS AND ORDERS live in `work-gate/org-health.ts`, which imports the shared reads BACK from this file (the cycle `pr-orders.ts` above describes);
 // every name it exported is re-exported here, so no caller of `work-gate.ts` changes.
-import { orgHealthNow, rulingOrdersNow, readWaitFacts, boardTruthNow, waitTickFacts } from "./work-gate/org-health.ts";
+import { orgHealthNow, rulingOrdersNow, readWaitFacts, boardTruthNow, waitTickFacts, releaseRepositories } from "./work-gate/org-health.ts";
 import { approvedUnqueuedNow } from "./approved-unqueued.ts";
 import { recordRouteOutcomesOnHost } from "./work-gate/route-outcome-pass.ts";
 import { quietOrgHealth, classAndKeyOf as orgHealthClassAndKey } from "./work-gate/org-health-suppression.ts"; // #4065
@@ -710,6 +710,9 @@ export const GH_READS = Object.freeze({
     "api repos/{repo}/pulls?state=closed&sort=updated (readLastMergedAt -- org-health's no-merge-while-work-exists)",
     // #4001: ONE REST CALL on the core pool -- the 30 newest `release.yml` runs on `main` (readReleaseRuns -- org-health's release-run-failed). While the newest verdict is a failure it makes TWO
     // MORE (that run's jobs, and `.changeset/` on `main`), which are the failure's detail and are not counted here.
+    // agent-org#887: THE SAME CALL FOR EACH OTHER REPOSITORY THE ORG RELEASES (`releaseRepositories`: the project's, then every `dora` entry -- eight today, so eight calls a tick, 240 an hour of the
+    // 5,000 core pool). A failing repository costs ONE MORE (the failed job's log, for its first error line), and the open `incident` list is read while any release verdict is read (the same call
+    // `readFleetBuildIncidents` makes, which `host/gh` answers from disk inside 20 s).
     "api repos/{repo}/actions/workflows/release.yml/runs (readReleaseRuns -- org-health's release-run-failed)",
     // #4126: ONE REST CALL on the core pool -- the 100 newest-updated closed rows, projected to number, state, close time and labels (readClassRepeat -- org-health's class-repeat). It makes ONE MORE
     // PER CLASS whose newest instance closed in the last 90 minutes (that class's closed rows, all time), which are the repeat's detail and are not counted here.
@@ -9407,7 +9410,10 @@ function main() {
   orders.push(...closedUnderHalfOrders({ prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], homeRepo: repoNow(), stateDir: REVIEWER_STATE_DIR, state: readReenqueueState(), log: (line) => process.stderr.write(line),
     trackers: [{ repo: repoNow(), rows: openRowsRead }, ...otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }]))] })); // a11ign#5125: a row closed under an open half is said once; `null` rows are a refused read and say nothing
   const releaseSeen: { runs?: ReleaseRuns | null } = {}; // a11ign#5100: the release read `orgHealthNow` makes, kept for the canary, so it costs no second call
-  orders.push(...reviewerAuthTick({ orders }), ...repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) }), ...orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => (releaseSeen.runs = readReleaseRuns(defaultRun, repoNow())), readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) }),
+  orders.push(...reviewerAuthTick({ orders }), ...repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) }), ...orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => (releaseSeen.runs = readReleaseRuns(defaultRun, repoNow())),
+    readReleaseFailures: () => readReleaseFailures(defaultRun, releaseRepositories(), { known: { [repoNow()]: releaseSeen.runs } }), // agent-org#887: every repository the org releases; the project's runs are the ones read just above
+    raiseReleaseIncidents: (reads) => { fileReleaseIncidents(reads, { run: defaultRun, tracker: repoNow() }); },
+    readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) }),
     ...rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() }), ...chairmanAsksNow(openRowsRead),
     ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
   orders.push(...machineryCanaryNow({ unread: unreadLanes({ prs, readyRows, others }), unarmed: armingSplit === null ? null : armingSplit.unarmed, releaseRuns: releaseSeen.runs ?? null, suppressions: incident.suppressions, stranded: armingSplit?.stranded ?? [] })); // a11ign#5100, a11ign#5125
