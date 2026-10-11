@@ -21,6 +21,9 @@ const REASON_KINDS: [RegExp, string][] = [
   [/^WOULD CLOSE #/, "CLAIMED_BY_ANOTHER_SESSION"],
   [/^GITHUB'S HEAD IS NOT THE BRANCH TIP/, "HEAD_MISMATCH"],
   [/^APPROVAL DOES NOT COVER THE HEAD/, "APPROVAL_NOT_COVERING_HEAD"],
+  // `#<n>` is `#?` when the PR number is not known yet (`merge-guard.ts` falls back to it), so the number is any non-space run.
+  [/^TESTS-FIRST: #\S+ changes /, "TESTS_FIRST_TESTS_MOVED"],
+  [/^TESTS-FIRST: the FIRST commit of /, "TESTS_FIRST_NOT_IN_FIRST_COMMIT"],
 ];
 
 /**
