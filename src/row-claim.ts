@@ -74,6 +74,7 @@ import { READY_LABEL, WAS_READY_LABEL } from "./ready-label-audit.ts";
 import { gitCommonDir, appendJsonl, testsFirstOf, readTestsFirstFlag } from "./merge-guard.ts";
 import { withBoardSnapshot, PROJECT_OWNER, PROJECT_NUMBER } from "./board-snapshot.ts";
 import { runnerReason, laneReason, drainReason, oneRowReason } from "./row-claim/runner-rule.ts";
+import { readStandIns, type LaneStandIn } from "./row-claim/lane-stand-in.ts";
 import { activeDrain, sparePathsFrom, ledgerPathFrom, isSpareRole, isPersistentRole, readSpareRegistry } from "./wake.ts";
 import { readWithFirstWaveTogether, runBatch, readChairmanPriority, CHAIRMAN_PRIORITY_LABEL } from "./work-gate.ts"; // #3566, slice 4: `wake.ts` above already loads it, and it never loads this file. #4793: and the gate's own reading of whose a chairman row is
 import { lookup } from "./merge-guard/lookups.ts";
@@ -500,9 +501,12 @@ export function claimStatus(labels: string[]): { claimed: boolean; started: bool
  *
  * @param {string[]} labelsBefore
  * @param {string} mySession
+ * @param {{ row?: number, standIns?: readonly LaneStandIn[], now?: number }} [lane] #947: the row number and the
+ *   records of spawns, so a one-shot seat standing in for a lane owner passes THAT owner's lane for THAT row. Absent
+ *   (the merge guard's call), no record is read and the lane rule is exactly what it was.
  * @returns {{ proceed: true } | { proceed: false, reason: string }}
  */
-export function decideClaim(labelsBefore: string[], mySession: string): { proceed: true; } | { proceed: false; reason: string; } {
+export function decideClaim(labelsBefore: string[], mySession: string, lane?: { row?: number; standIns?: readonly LaneStandIn[]; now?: number; }): { proceed: true; } | { proceed: false; reason: string; } {
   // #444: a RESERVATION check, ahead of the CLAIM check -- a row can be `ready` (not yet `in-progress`)
   // and still reserved for a specific session, which is #324's own shape before anyone claims it.
   const reserved = runnerReason(labelsBefore, mySession);
@@ -511,14 +515,19 @@ export function decideClaim(labelsBefore: string[], mySession: string): { procee
   // #1039: BESIDE THE RESERVATION, AND BEFORE THE `claimed` CHECK for the same reason. A row can be
   // `ready` and in somebody else's lane, which is exactly the state #965 was in when it was claimed --
   // a check gated on `claimed` first would let anyone take an unclaimed row out of its owner's lane.
-  const lane = laneReason(labelsBefore, mySession);
-  if (lane) return { proceed: false, reason: lane };
+  const laneRefusal = laneReason(labelsBefore, mySession, lane);
+  if (laneRefusal) return { proceed: false, reason: laneRefusal };
 
   const status = claimStatus(labelsBefore);
   if (!status.claimed) return { proceed: true };
   if (status.sessions.includes(mySession)) return { proceed: true };
   const by = status.sessions.length > 0 ? status.sessions.join(", ") : "someone (no session label recorded yet)";
   return { proceed: false, reason: `issue is already claimed by ${by}` };
+}
+
+/** #947: the stand-in records handed to `decideClaim`, and only for an open row (an unread `state` is "not verified closed", as everywhere above). */
+function standInFor(issueNumber: number, issue: IssueClaim): { row?: number; standIns?: readonly LaneStandIn[]; } {
+  return issue.state === "CLOSED" ? {} : { row: issueNumber, standIns: readStandIns() };
 }
 
 /** The words a claim in a tracker that declares no board says instead of a move, and `runDispatchOrClaim` reads them back to print the line. */
@@ -1082,7 +1091,7 @@ function applyClaimLabels(issueNumber: number, { run, mySession, extraLabels, la
   const claimLabels = [CLAIM_LABEL, `${SESSION_PREFIX}${mySession}`, ...extraLabels];
   ensureLabelsExist([...claimLabels, WAS_READY_LABEL], { run, batch: labelBatch, repo });
   const fresh = fetchLabels(issueNumber, { run, repo });
-  const decision = decideClaim(fresh.labels, mySession);
+  const decision = decideClaim(fresh.labels, mySession, standInFor(issueNumber, fresh));
   if (!decision.proceed) {
     return { refusal: `${decision.reason} -- as read immediately before the label write, which a claim that `
       + "landed since the first read would otherwise have been erased by. Nothing was written." };
@@ -1232,7 +1241,7 @@ function writeRowLabels(issueNumber: number, mySession: string, extraLabels: str
       } = {}): { claimed: true; statusMoved: true; } | { claimed: true; statusMoved: false; notOnBoard: boolean; statusReason: string; } | { claimed: false; reason: string; } {
   const repo = tracker?.repo ?? REPO;
   const before = fetchLabels(issueNumber, { run, repo });
-  const decision = decideClaim(before.labels, mySession);
+  const decision = decideClaim(before.labels, mySession, standInFor(issueNumber, before));
   if (!decision.proceed) return { claimed: false, reason: decision.reason };
   const notEngineer = persistentReason(mySession, persistent);
   if (notEngineer) return { claimed: false, reason: notEngineer };
