@@ -45,7 +45,7 @@ export type HostProject = { id: string, checkout: string };
  * `triage` is the one key that `parseHostConfig` ALWAYS sets (a hand-built `HostConfig` in a test may leave it out, hence the `?`), `{ provider: "none" }` when the declaration has none, because "no triage" is a value the
  * wake path reads and not a question it asks of the shape (a later row routes on it; this one routes nothing).
  */
-export type HostConfig = { schema: number, home: string, binDir: string, primary: string, projects: HostProject[], gh: GhDirectories, tool?: string, toolVersion?: string, stateDir?: string, clones?: Readonly<Record<string, string>>, triage?: Readonly<TriageDeclaration>, events: Readonly<EventsDeclaration>, github?: Readonly<GithubDeclaration> };
+export type HostConfig = { schema: number, home: string, binDir: string, primary: string, projects: HostProject[], gh: GhDirectories, tool?: string, toolVersion?: string, stateDir?: string, clones?: Readonly<Record<string, string>>, triage?: Readonly<TriageDeclaration>, events?: Readonly<EventsDeclaration>, github?: Readonly<GithubDeclaration> };
 export type TriageDeclaration = { provider: "none" } | { provider: "jev", keyPath: string, minConfidence: number };
 export type EventsReceiver = { port: number, secretPath: string, tunnel: "cloudflare" | "tailscale" };
 export type EventsDeclaration = { source: "poll", reconcileMinutes?: number } | { source: "webhook", receiver: Readonly<EventsReceiver>, reconcileMinutes: number };
