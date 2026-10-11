@@ -10,6 +10,7 @@
  * board step a no-op and the second goes red; drop the title look and the third does.
  */
 import { test } from "node:test";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 import assert from "node:assert/strict";
 import { escalateStuck, ESCALATION_LABEL, MAX_DELIVERIES } from "./wake.ts";
 
@@ -26,6 +27,7 @@ function escalate({ open = [] as { number: number; title: string; }[], board = B
   const run = (args: string[]) => {
     calls.push(args);
     if (fail !== null && fail.test(args.join(" "))) throw new Error("GraphQL: Could not resolve to a ProjectV2");
+    if (readsRowsByLabel(args) !== null) return connectionOf(open);
     return args[1] === "list" ? JSON.stringify(open) : args[1] === "create" ? `${URL}\n` : "";
   };
   const labelled = escalateStuck([`${KEY}: delivered ${MAX_DELIVERIES} times`], run, (l: string) => log.push(l), { repoOf: declared, boardOf: () => board });

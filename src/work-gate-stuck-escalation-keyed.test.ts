@@ -14,6 +14,7 @@
  * red; make it return `null` for a keyed subject and the first does.
  */
 import { test } from "node:test";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 import assert from "node:assert/strict";
 import { escalateStuck, stuckRowOf, stuckSubjectOf, ESCALATION_LABEL, MAX_DELIVERIES } from "./wake.ts";
 import { answerOrders, rowsOwingAnswers } from "./work-gate.ts";
@@ -32,6 +33,7 @@ function escalate(keys: string[], { open = [] as { number: number, title: string
   const log: string[] = [];
   const run = (args: string[]) => {
     calls.push(args);
+    if (readsRowsByLabel(args) !== null) return connectionOf(open);
     return args[1] === "list" ? JSON.stringify(open) : args[1] === "create" ? ISSUE_URL : "";
   };
   const labelled = escalateStuck(keys.map((k) => `${k}: delivered ${MAX_DELIVERIES} times`), run, (l: string) => log.push(l), { repoOf });
@@ -106,7 +108,7 @@ test("a refused `gh` is reported and NOT recorded, so the next tick tries again"
   escalateStuck([`${MERGED}: x`], refuse, (l: string) => log.push(l), { repoOf: declared, record: (k: string) => recorded.push(k) });
   assert.match(log.join(""), /COULD NOT ESCALATE agent-org#56: HTTP 502/);
   assert.deepEqual<string[]>(recorded, []); // typed, or the assertion narrows `recorded` to `never[]` for the push that follows
-  escalateStuck([`${MERGED}: x`], (a: string[]) => (a[1] === "list" ? "[]" : ISSUE_URL), () => {}, { repoOf: declared, record: (k: string) => recorded.push(k) });
+  escalateStuck([`${MERGED}: x`], (a: string[]) => (a[0] === "api" ? connectionOf([]) : a[1] === "list" ? "[]" : ISSUE_URL), () => {}, { repoOf: declared, record: (k: string) => recorded.push(k) });
   assert.deepEqual(recorded, [MERGED], "CONTROL: a gh that answers records the key");
 });
 

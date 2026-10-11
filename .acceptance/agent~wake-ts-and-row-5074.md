@@ -29,3 +29,7 @@ Outside-Region: docs/gh-call-inventory.json — generated, regenerated with `nod
 Outside-Region: .changeset/the-tick-and-filing-list-no-search.md — a merge with no changeset is never live.
 
 platform: GitHub's own GraphQL connections (`repository.issues(labels:)`, a plain `issue list`) and the existing `host/gh` identical-read cache; nothing built beside them.
+Outside-Region: src/packaging/row-file-refuses-duplicate-title.test.ts — the duplicate-title read is a plain list of the newest 200 open rows, so its fake's limit and no-search assertion changed.
+Outside-Region: src/work-gate-stuck-escalation-keyed.test.ts — its fake answers the stuck-row label reads as connections.
+Outside-Region: src/stuck-row-state.test.ts — its fake answers the stuck-row label reads as connections.
+Outside-Region: src/stuck-row-answered.test.ts — its fake answers the parked-row label read as a connection.

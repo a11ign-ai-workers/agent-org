@@ -12,6 +12,7 @@
  * second, fourth and fifth do.
  */
 import { test } from "node:test";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 import assert from "node:assert/strict";
 import { escalateStuck, ESCALATION_LABEL, MAX_DELIVERIES } from "./wake.ts";
 
@@ -26,7 +27,7 @@ type Row = { number: number; title: string; labels: { name: string }[] };
 /** The title the tick files for `MERGED`, read off a first escalation so the fixture does not restate its wording. */
 const filedTitle = (() => {
   const calls: string[][] = [];
-  escalateStuck([`${MERGED}: x`], (a: string[]) => { calls.push(a); return a[1] === "list" ? "[]" : a[1] === "create" ? ISSUE_URL : ""; }, () => {}, { repoOf: declared });
+  escalateStuck([`${MERGED}: x`], (a: string[]) => { calls.push(a); return a[0] === "api" ? connectionOf([]) : a[1] === "list" ? "[]" : a[1] === "create" ? ISSUE_URL : ""; }, () => {}, { repoOf: declared });
   const create = calls.find((c) => c[1] === "create") as string[];
   return create[create.indexOf("--title") + 1];
 })();
@@ -39,12 +40,12 @@ function tick(key: string, open: Row[]) {
   const log: string[] = [];
   const run = (args: string[]) => {
     calls.push(args);
-    if (args[1] !== "list") return "";
-    const label = args[args.indexOf("--label") + 1];
-    return JSON.stringify(open.filter((r) => r.labels.some((l) => l.name === label)));
+    const asked = readsRowsByLabel(args);
+    if (asked === null) return args[1] === "list" ? "[]" : "";
+    return connectionOf(open.filter((r) => asked.state === "OPEN" && r.labels.some((l) => l.name === asked.label)));
   };
   escalateStuck([`${key}: delivered ${MAX_DELIVERIES} times`], run, (l: string) => log.push(l), { repoOf: declared, escalated: new Set([key]) });
-  return { calls, log: log.join(""), closes: calls.filter((c) => c[1] === "close"), writes: calls.filter((c) => c[1] !== "list") };
+  return { calls, log: log.join(""), closes: calls.filter((c) => c[1] === "close"), writes: calls.filter((c) => c[1] !== "list" && readsRowsByLabel(c) === null) };
 }
 
 test("an open filed stuck-cause row whose answer:ceo is gone is closed with a comment naming the cause key", () => {
@@ -77,7 +78,7 @@ test("a row re-routed to another session, or no longer parked, is left", () => {
 test("a label row of the primary is not closed: its answer is read by the re-ask, not here", () => {
   const { calls } = tick(PRIMARY, [row(["parked"], "Some row of the primary", 56)]);
   assert.deepEqual(calls.filter((c) => c[1] === "close"), []);
-  assert.deepEqual(calls.filter((c) => c[1] === "list"), [], "and no list is read for it");
+  assert.deepEqual(calls.filter((c) => c[1] === "list" || readsRowsByLabel(c) !== null), [], "and no list is read for it");
 });
 
 test("a refused `gh` is reported, not thrown, and closes nothing", () => {
