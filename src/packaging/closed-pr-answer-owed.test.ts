@@ -10,9 +10,10 @@
  * Its own file for #2280's reason: `work-gate.test.ts` reaches `gh`, which the token-less acceptance job refuses.
  *
  * THE FAKE IS GITHUB, NOT A CANNED REPLY. `fakeGitHub` holds issues and pull requests with states and labels and
- * answers `label list`, `issue list` and `pr list` by filtering them the way `gh` does for the arguments the reader
- * sends (`--state`, and `label:"a","b"` with or without `-is:open`). A reader that never asks about pull requests
- * therefore gets no merged PR back, and that is what makes the negative test fail for the defect and not for a
+ * answers `label list` and the two aliased connection reads (#5050: `issues(labels:, states:)` and `pullRequests(...)`,
+ * where `issue list --search` and `pr list --search` were) by filtering them the way GitHub does for what the reader
+ * sends -- the connection asked of, the states it names, and one alias per label. A reader that never asks about pull
+ * requests therefore gets no merged PR back, and that is what makes the negative test fail for the defect and not for a
  * mismatched argv. `ignoreLabelSearch` is the same fake with the label filter switched off, so the LOCAL half of the
  * reader (`withAnswerLabel`) is tested apart from the server-side half and neither hides the other's deletion.
  */
@@ -20,6 +21,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readClosedAnswerRows, withoutEndedAnswerSessions, rowsOwingAnswers, answerOrders, GH_READS,
   ANSWER_PREFIX } from "../work-gate.ts";
+import { readsClosedAnswerRows } from "./rows-by-label-fixtures.ts";
 
 /** A row as `readClosedAnswerRows` returns it. */
 type Row = { number: number, state?: string, labels: { name: string }[] };
@@ -28,29 +30,42 @@ type Subject = { kind: "issue" | "pr", number: number, state: "OPEN" | "CLOSED" 
 const issue = (number: number, state: Subject["state"], ...labels: string[]): Subject => ({ kind: "issue", number, state, labels });
 const pr = (number: number, state: Subject["state"], ...labels: string[]): Subject => ({ kind: "pr", number, state, labels });
 
-/** `gh`'s `--state` for the two commands: `pr list --state closed` is CLOSED-unmerged only; `merged` is MERGED only. */
-const stateMatches = (state: string, wanted: string) => wanted === "all" || wanted.toUpperCase() === state;
+/** The states a connection read names: `states: CLOSED` for the issues, `states: [CLOSED, MERGED]` for the pull requests (#5050). Read off the query, so a reader that asked for another set gets another answer. */
+const statesAsked = (query: string): string[] => {
+  const named = /states: (\[[^\]]*\]|[A-Z]+)/.exec(query)?.[1] ?? "";
+  return named.replace(/[[\]\s]/g, "").split(",").filter(Boolean);
+};
 
-/** A `run` seam answering as GitHub would for what this reader sends. `calls` records every argv, in order. */
+/**
+ * A `run` seam answering as GitHub would for what this reader sends. `calls` records every argv, in order.
+ *
+ * #5050: the closed read is ONE `gh api graphql` carrying one ALIAS per answer label (a connection's `labels:` is AND, so a search's OR became
+ * several aliases), and GitHub answers each alias on its own -- a row carrying two of the labels comes back under both, which the reader keeps once.
+ * Anything that is not the label list or that read throws, so a reader that wandered to a third call fails loud rather than being answered.
+ */
 function fakeGitHub(subjects: Subject[], { refuse = "", ignoreLabelSearch = false }:
   { refuse?: "issue" | "pr" | "label" | "", ignoreLabelSearch?: boolean } = {}) {
   const calls: string[][] = [];
   const known = [...new Set(subjects.flatMap((s) => s.labels))];
   const run = (args: string[]): string => {
     calls.push(args);
-    const [noun, verb] = args;
-    if (refuse === noun) throw new Error(`HTTP 502 on ${noun} ${verb}`);
-    if (noun === "label") return JSON.stringify(known.map((name) => ({ name })));
-    const flag = (name: string) => args[args.indexOf(name) + 1];
-    const search = flag("--search") ?? "";
-    const wanted = [...search.matchAll(/"([^"]+)"/g)].map((m) => m[1]);
-    const excludeOpen = search.includes("-is:open");
-    const rows = subjects.filter((s) => s.kind === (noun === "pr" ? "pr" : "issue")
-      && stateMatches(s.state, flag("--state"))
-      && !(excludeOpen && s.state === "OPEN")
-      && (ignoreLabelSearch || wanted.length === 0 || s.labels.some((l) => wanted.includes(l))));
-    return JSON.stringify(rows.slice(0, Number(flag("--limit"))).map((s) => ({ number: s.number, title: `t${s.number}`,
-      state: s.state, labels: s.labels.map((name) => ({ name })), ...(noun === "pr" ? { isDraft: false } : {}) })));
+    if (args[0] === "label" && args[1] === "list") {
+      if (refuse === "label") throw new Error("HTTP 502 on label list");
+      return JSON.stringify(known.map((name) => ({ name })));
+    }
+    const asked = readsClosedAnswerRows(args);
+    if (asked === null) throw new Error(`unexpected call: ${args.join(" ")}`);
+    if (refuse === (asked.kind === "issues" ? "issue" : "pr")) throw new Error(`HTTP 502 on ${asked.kind}`);
+    const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+    const states = statesAsked(query);
+    const first = Number(/first: (\d+)/.exec(query)?.[1]);
+    const selectsIsDraft = /\bisDraft\b/.test(query);
+    const repository = Object.fromEntries(asked.names.map((name, at) => [`a${at}`, { nodes: subjects
+      .filter((s) => s.kind === (asked.kind === "pullRequests" ? "pr" : "issue") && states.includes(s.state)
+        && (ignoreLabelSearch || s.labels.includes(name)))
+      .slice(0, first).map((s) => ({ number: s.number, title: `t${s.number}`, state: s.state,
+        labels: { nodes: s.labels.map((label) => ({ name: label })) }, ...(selectsIsDraft ? { isDraft: false } : {}) })) }]));
+    return JSON.stringify({ data: { repository } });
   };
   return { run, calls };
 }
@@ -154,8 +169,10 @@ test("#2641 DONE-WHEN 1: a refused read of EITHER half is `null`, never `[]` -- 
     assert.equal(readClosedAnswerRows(fakeGitHub(subjects, { refuse }).run), null, `${refuse} refused`);
   }
   const base = fakeGitHub(subjects).run;
-  assert.equal(readClosedAnswerRows((args) => (args[0] === "pr" ? "{}" : base(args))), null, "a PR search answering a non-list is a refusal");
-  assert.equal(readClosedAnswerRows((args) => (args[0] === "pr" ? "not json" : base(args))), null);
+  const prRead = (args: string[]) => readsClosedAnswerRows(args)?.kind === "pullRequests";
+  assert.equal(readClosedAnswerRows((args) => (prRead(args) ? "{}" : base(args))), null, "a PR read answering something that is not a connection is a refusal");
+  assert.equal(readClosedAnswerRows((args) => (prRead(args) ? "not json" : base(args))), null);
+  assert.deepEqual((readClosedAnswerRows(base) as Row[]).map((r) => r.number).sort(), [11, 12], "POSITIVE CONTROL: the same wrapper over the unbroken fake answers both");
 });
 
 // --- done-when 5: THE COST, counted ---
@@ -163,20 +180,32 @@ test("#2641 DONE-WHEN 1: a refused read of EITHER half is `null`, never `[]` -- 
 test("#2641 DONE-WHEN 5: the reader makes ONE more `gh` call than before (three, not two), and GH_READS names it", () => {
   const { run, calls } = fakeGitHub([pr(12, "MERGED", "answer:ceo")]);
   readClosedAnswerRows(run);
-  assert.deepEqual(calls.map((c) => c.slice(0, 2).join(" ")), ["label list", "issue list", "pr list"],
-    "one `label list` shared by both searches -- NOT a second one for the pull requests");
+  assert.equal(calls.length, 3);
+  assert.deepEqual(calls[0].slice(0, 2), ["label", "list"], "one `label list` shared by both reads -- NOT a second one for the pull requests");
+  assert.deepEqual(calls.slice(1).map((c) => readsClosedAnswerRows(c)?.kind), ["issues", "pullRequests"],
+    "#5050: then the closed issues and the closed pull requests, as two connection reads over `api graphql`, in that order");
   assert.equal(GH_READS.unconditional.filter((r: string) => r.includes("readClosedAnswerRows")).length, 3,
     "the label list, the closed-issue read and the pull-request read are each named");
-  assert.ok(GH_READS.unconditional.some((r: string) => r.startsWith("pr list --state all") && r.includes("readClosedAnswerRows")));
+  assert.ok(GH_READS.unconditional.some((r: string) => r.startsWith("api graphql repository { a<n>: pullRequests(") && r.includes("readClosedAnswerRows")));
 });
 
-test("#2641 DONE-WHEN 5: the PR read is a search by label NAME with no window -- `-is:open`, exact, the same names as the issue read", () => {
+test("#2641 DONE-WHEN 5: the PR read is a connection by label NAME, no search -- the same names as the issue read, states [CLOSED, MERGED]", () => {
   const { run, calls } = fakeGitHub([pr(12, "MERGED", "answer:ceo", "answer:worker-9")]);
   readClosedAnswerRows(run);
-  const [, issueCall, prCall] = calls;
-  const searchOf = (c: string[]) => c[c.indexOf("--search") + 1];
-  assert.equal(searchOf(prCall), `${searchOf(issueCall)} -is:open`, "the same label names, plus the one qualifier");
-  assert.equal(prCall[prCall.indexOf("--state") + 1], "all", "merged AND closed-unmerged: `--state closed` alone would miss a merge");
-  assert.ok(!prCall.includes("merged"), "not a newest-N window over merged PRs (a question older than it would fall out)");
+  const [labelCall, issueCall, prCall] = calls;
+  // #5050: this was `--search` with `-is:open` appended. A search is the thing the gate no longer makes, so the property is that NEITHER read is one.
+  for (const call of [issueCall, prCall]) {
+    assert.ok(!call.includes("--search"), `not a search: ${call.slice(0, 2).join(" ")}`);
+    assert.deepEqual(call.slice(0, 2), ["api", "graphql"]);
+  }
+  assert.ok(labelCall.includes("--search"), "the label list is the one `--search`: `labels(query:)` underneath, a label match and not an issue search");
+  const issueAsked = readsClosedAnswerRows(issueCall);
+  const prAsked = readsClosedAnswerRows(prCall);
+  assert.deepEqual(prAsked?.names, issueAsked?.names, "the same label names for the two reads");
+  assert.deepEqual(prAsked?.names, ["answer:ceo", "answer:worker-9"], "one alias per answer label, each asked for by its exact name: no newest-N window over all merged PRs");
+  const query = (call: string[]) => call.find((arg) => arg.startsWith("query=")) ?? "";
+  assert.deepEqual(statesAsked(query(prCall)), ["CLOSED", "MERGED"], "merged AND closed-unmerged -- and not OPEN, which is `readPrs`'s");
+  assert.deepEqual(statesAsked(query(issueCall)), ["CLOSED"]);
+  assert.ok(query(prCall).includes("isDraft"), "the PR read selects `isDraft`: that field is how `isPullRequest` knows the row came from a pull request");
   assert.ok(prCall.join(" ").includes(`"${ANSWER_PREFIX}ceo"`));
 });

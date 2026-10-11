@@ -18,6 +18,7 @@ import { execFileSync } from "node:child_process";
 import { REPO } from "../project-identity.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
 import { assertNoLeakInArgv } from "../lib/leak-patterns.ts";
+import { approvalFactsOf, type ApprovalFacts } from "../ticket-port/approval-reads.ts";
 
 /** @param {string[]} args */
 export const gh = (args: string[]) => {
@@ -110,6 +111,14 @@ export function lookupClosingIssues(number: number, repo: string = REPO): { numb
         labels: issue.labels.nodes.map((/** @type {{name: string}} */ l: { name: string; }) => l.name),
       }));
   });
+}
+
+/**
+ * What `approvalHeadReasons` needs for PR `number`, or `null` if any read failed. The reads live in the port, which names no `gh`.
+ * @param {number} number @param {string} head
+ */
+export function lookupApprovalFacts(number: number, head: string): ApprovalFacts | null {
+  return approvalFactsOf({ repo: REPO, number, head }, gh);
 }
 
 /** How many of the newest open-or-merged PRs `lookupRecentClosesPrs` reads: room for the 3 siblings the repo-wide check wants. */

@@ -39,6 +39,7 @@ import { filingWarnings, malformedAcceptanceCommandWarning, quotedTestCountWarni
 import { CLAIM_LABEL } from "../claim-labels.ts";
 import { filedByLine } from "../row-claim.ts";
 import { REPO } from "../project-identity.ts";
+import { connectionOf, readsRowsByLabel } from "./rows-by-label-fixtures.ts";
 import { withGitSandbox } from "@a11ign/toolchain/lib/git-sandbox";
 
 const CLI = fileURLToPath(new URL("../row-file.ts", import.meta.url));
@@ -442,6 +443,7 @@ function afterRun(body: string, milestone = "CI reset") {
   // #1011: the read-back now asks for the milestone as well as the body -- `gh` ACCEPTING `--milestone` is
   // not evidence the field is set. A fixture that answers only the body would report the row unverified.
   return (_cmd: string, args: string[]) => {
+    if (readsRowsByLabel(args) !== null) return connectionOf([]); // #5039: the claimed rows' by-label read (the sweep window's, the blast radius's) -- none held
     if (args[0] === "issue" && args[1] === "list") return "[]"; // #4294: the duplicate-title read -- no open row has the title
     if (args.includes("milestone")) return milestone;
     return args.includes("body") ? body : "";
@@ -637,6 +639,7 @@ test("#844 ACCEPTANCE: a failure adding the issue to Project 2 is refused distin
       ...happyDeps("worker-contracts", "backlog"),
       run: (_cmd: string, args: string[]) => {
         if (args[1] === "item-add") throw new Error("gh: could not add item");
+        if (readsRowsByLabel(args) !== null) return connectionOf([]);
         return args[0] === "issue" && args[1] === "list" ? "[]" : "";
       },
     });

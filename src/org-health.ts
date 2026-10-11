@@ -30,6 +30,9 @@
 //                                            no state excuses it. The state the gate can read (`stallReasonOf`: red, held-on-purpose,
 //                                            awaiting-review ...) rides on the alarm as a LABEL, and the gate understanding it is never a
 //                                            condition for raising it. The bounds and their measurement are beside `OVERDUE_PR_MINUTES`.
+// THE CLAIM-REFUSAL STORM, agent-org#889 (a11ign/agent-org#885 class 2, the chairman, 2026-10-11):
+//   claim-refusal-storm          > 10 / 15 min   more than ten claims refused inside fifteen minutes, naming the most frequent reason. THE BOUND IS THE CHAIRMAN'S,
+//                                            not a percentile: 163 refusals in 66 minutes (08:09-09:15) stopped every worker start, the fixer's included.
 // WHY THE 180-MINUTE "NOT PROGRESSING" SIGNAL WAS REPLACED, not tuned: it fired at about 13x the median open-to-merge, exempted held and
 // drafted PRs by construction (so a hold whose reason had gone, agent-org #149, and an approved draft with no stamp, #3406, were
 // invisible), and counted any comment as activity, so a PR the bots kept commenting on never aged (#2950 sat 7.5 h; #3460 was re-queued).
@@ -52,16 +55,20 @@ import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
+import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./lib/git-env.ts";
 import { isAppLogin, spenderPhraseFor } from "./gh-ledger.ts";
-import { GITHUB_ROLES, homeHostConfig, roleIdentity, type HostConfig } from "./host-config.ts";
+import { GITHUB_ROLES, homeHostConfig, roleIdentity, stateEntryPath, type HostConfig } from "./host-config.ts";
+// A LEAF too (node builtins only): the append-only log of events that never become a closed row, where a refused claim is written and read back.
+import { FAILURE_LEDGER_FILE, parseFailureLedger } from "./failure-ledger.ts";
 // A LEAF (`claim-labels.ts` imports nothing), so the label is read from where it is declared, as `repeating-lines.ts` does.
 import { READY_LABEL, STATE_LABELS, stateLabelFindings } from "./claim-labels.ts";
 import { boardTruthTable } from "./board-truth-audit.ts";
 // The checkout the tool serves and the project's own words are read from where they are declared (`standalone-roots.test.ts`, `project-vocabulary.test.ts`).
 import { HOME_CHECKOUT } from "./project-config.ts";
 import { ANSWER_PREFIX, BACKLOG_LABEL } from "./project-vocabulary.ts";
+import { openIncidentsOf } from "./ticket-port/open-incidents.ts";
 // A LEAF too (it imports `newest-check-run.ts` and `pr-hold-state.ts`, which import nothing): the ONE decider of what counts as red.
 import { brokenChecks } from "./red-pr.ts";
 // A LEAF too: the closed grammar of what a declared wait is waiting FOR (#2996), and the two ages that bound how long one may stand unexplained.
@@ -152,6 +159,14 @@ const MAX_NAMED = 5;
 const AGREEMENT_READ_MS = 90_000;
 /** No capture on the fleet for this long, with work that needs it waiting, is the idle fleet the chairman found (#2937). */
 export const FLEET_IDLE_HOURS = 24;
+
+/**
+ * How long a fleet may stay on mixed Windows builds before `ceo` is woken (the chairman's ruling on a11ign/a11ign#4405: "a mixed fleet that stays mixed for more than 4 hours wakes ceo").
+ * THE LINE IS THE CONTRACT the control row files the incident with (`fleet-watch` files it on the first mismatch): an OPEN incident issue whose body carries this line on a line of its own
+ * IS the stopped line, and a CLOSED one is the fleet reading one build. The constant lives in the filing row; this one copies it, and the test pins the copy.
+ */
+export const FLEET_BUILD_MIXED_HOURS = 4;
+export const FLEET_BUILD_INCIDENT_LINE = "Incident: incident:fleet-build-mixed";
 /** Where the declared copies sit, relative to the TOOL's root: its own `lib/`, each file headed by what it was copied from (#3041: this was the monorepo's `packages/agent-org/src/lib`, which in the standalone tool is `src/lib`). */
 const COPIES_DIR = "src/lib";
 /** The tool's root, by its own location: `src/` is this file's directory, so the root is one up. Neither the project's layout nor a count of directories above it. */
@@ -211,10 +226,12 @@ export const SIGNALS = Object.freeze({
   IDLE_WITH_OPEN_ROWS: "idle-with-open-rows",
   SHELVED_CIRCLE: "row-shelved-against-the-pr-that-waits-on-it",
   RELEASE_FAILED: "release-run-failed",
+  FLEET_BUILD_MIXED: "fleet-build-mixed-over-4h",
   RELEASE_BEHIND_MAIN: "release-behind-main",
   BOARD_TRUTH: "board-disagrees-with-reality",
   CLASS_REPEAT: "class-repeat",
   MILESTONE_CLOCK: "primary-milestone-idle",
+  CLAIM_REFUSAL_STORM: "claim-refusal-storm",
 });
 
 /** Signals whose first reader is not `ceo`: the order goes to that session as well as to `ceo`, who takes every signal. */
@@ -614,6 +631,73 @@ export function parseAutoOffMirror(text: string | null, path: string): AutoOffFa
 export function readAutoOffRefusal({ root = DEFAULT_ROOT, read = (path) => readFileSync(path, "utf8") }: { root?: string; read?: (path: string) => string; } = {}): AutoOffFact {
   const path = resolve(root, AUTO_OFF_MIRROR_PATH);
   return parseAutoOffMirror(readOrNull(read, path), path);
+}
+
+/**
+ * MORE THAN THIS MANY CLAIM REFUSALS IN {@link CLAIM_REFUSAL_STORM_MINUTES} IS A STORM (a11ign/agent-org#885 class 2, agent-org#889, the chairman 2026-10-11): TEN, so eleven trips.
+ * The case it is for: the stale-rule guard refused 163 claims between 08:09 and 09:15 on 2026-10-11 because `main` held an unreleased rule file, no worker started, and the
+ * worker that would have fixed it was one of the refused. Nothing raised, because each refusal was an answer to one claim and the sum of them was nobody's reading.
+ */
+export const CLAIM_REFUSAL_STORM_REFUSALS = 10;
+/** The window those refusals are counted in. */
+export const CLAIM_REFUSAL_STORM_MINUTES = 15;
+
+/**
+ * The failure ledger's event kind for ONE REFUSED CLAIM: `<kind>\t<ts, ms>\t<ref>` with the REASON as the ref, one line of it, so that a storm is a count of lines and "the
+ * most frequent reason" is a group by ref. Not seeded in `FAILURE_KINDS`, for the reason `MESSAGING_AUDIENCE_MISUSE_KIND` gives: `repeatsIn` and the daily pass read any key.
+ */
+export const CLAIM_REFUSED_KIND = "claim-refused";
+
+/** One refused claim, as the failure ledger holds it: when, and the claim's own words for why (a line, never a path through a stack). */
+export type ClaimRefusal = { at: number; reason: string };
+
+const squashed = (text: string): string => text.replace(/\s+/g, " ").trim();
+
+/**
+ * SIGNAL 26: CLAIMS ARE BEING REFUSED IN A STORM -- MORE THAN `CLAIM_REFUSAL_STORM_REFUSALS` REFUSALS IN THE LAST `CLAIM_REFUSAL_STORM_MINUTES`. It names the MOST FREQUENT REASON and
+ * how many of the window's refusals gave it, because "claims are refused" with no cause is the line the org read for an hour on 2026-10-11 and could not act on. A tie is
+ * broken by the reason's own text, so the same ledger names the same reason every tick.
+ *
+ * COUNTED, NOT DE-DUPLICATED: ten refusals of ten rows and ten refusals of one row are both ten claims the org could not make, which is what blocks work. A refusal exactly
+ * `CLAIM_REFUSAL_STORM_MINUTES` old is inside the window, and one dated after `now` (a clock a little ahead) is counted, never dropped.
+ *
+ * `refusals` is `null` for a ledger that could not be read, a stated unknown and never "no storm". Keyed on the commonest reason, so one storm is one order however many ticks
+ * it lasts and a storm that changes its cause is a second.
+ */
+export function claimRefusalStormReading({ now, refusals }: { now: number; refusals: ClaimRefusal[] | null; }): Reading {
+  const signal = SIGNALS.CLAIM_REFUSAL_STORM;
+  if (refusals === null) return unknown(signal, "the failure ledger could not be read, so whether claims are being refused in a storm is not known");
+  const window = CLAIM_REFUSAL_STORM_MINUTES * MS_PER_MINUTE;
+  const recent = refusals.filter((refusal) => now - refusal.at <= window).sort((a, b) => a.at - b.at);
+  if (recent.length <= CLAIM_REFUSAL_STORM_REFUSALS) return clear(signal);
+  const counts = new Map<string, number>();
+  for (const { reason } of recent) counts.set(squashed(reason), (counts.get(squashed(reason)) ?? 0) + 1);
+  const [reason, count] = [...counts].sort(([a, x], [b, y]) => y - x || a.localeCompare(b))[0];
+  const shown = reason.length > MAX_REASON_CHARS ? `${reason.slice(0, MAX_REASON_CHARS)}...` : reason;
+  return { signal, status: "tripped", firstTrippedAt: recent[CLAIM_REFUSAL_STORM_REFUSALS].at,
+    discriminator: `${signal}@${createHash("sha256").update(reason).digest("hex").slice(0, 8)}`,
+    detail: `${recent.length} claims were refused in the last ${CLAIM_REFUSAL_STORM_MINUTES} min (more than ${CLAIM_REFUSAL_STORM_REFUSALS}); the most frequent reason, ${count} of them: ${JSON.stringify(shown)}` };
+}
+
+/**
+ * THE FACT FOR `claimRefusalStormReading`: the failure ledger's `claim-refused` lines. A ledger that is not there is `[]`, because nothing has written one, which is what a
+ * host that has refused no claim holds; one that cannot be read, or holds a line that does not parse (`parseFailureLedger` throws, an event read wrong is a storm drawn
+ * wrong), is `null`. NEVER THROWS.
+ */
+export function readClaimRefusals({ path, read = (file) => readFileSync(file, "utf8") }: { path?: string; read?: (path: string) => string; } = {}): ClaimRefusal[] | null {
+  try {
+    const file = path ?? stateEntryPath(FAILURE_LEDGER_FILE);
+    let text: string;
+    try {
+      text = read(file);
+    } catch (err) {
+      if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return [];
+      throw err;
+    }
+    return parseFailureLedger(text, file).filter((entry) => entry.classKey === CLAIM_REFUSED_KIND).map(({ at, ref }) => ({ at, reason: ref }));
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -1318,6 +1402,50 @@ function tryJson(read: () => string): any {
   }
 }
 
+/** An open build incident, as `readFleetBuildIncidents` keeps it: its body was read for the line and is not kept. `createdAt` is ISO, as the API gives it. */
+export type FleetBuildIncident = { number: number; title: string; createdAt: string; };
+
+/**
+ * THE FACT FOR `fleetBuildMixedReading` (#4405): ONE REST CALL on the core pool for the OPEN issues labelled `incident` in `repo`, KEPT WHEN THEIR BODY CARRIES
+ * {@link FLEET_BUILD_INCIDENT_LINE} on a line of its own. A pull request is not an incident and is dropped. `null` is a refused or unparseable list, a stated unknown and never "no incident".
+ */
+export function readFleetBuildIncidents(run: (args: string[]) => string, repo: string): FleetBuildIncident[] | null {
+  const issues = openIncidentsOf(repo, run);
+  if (issues === null) return null;
+  return issues.filter((issue) => typeof issue.body === "string" && issue.body.split(/\r?\n/).some((line) => line.trim() === FLEET_BUILD_INCIDENT_LINE))
+    .map(({ number, title, createdAt }) => ({ number, title, createdAt }));
+}
+
+/** The box count the incident's title names (`Mixed Windows build across the fleet: <n> boxes behind <target>`), as the reading says it. */
+const boxesBehindOf = (title: string): string => {
+  const count = /(\d+) boxes? behind/.exec(title);
+  return count ? `${count[1]} boxes behind` : "box count not in its title";
+};
+
+/**
+ * SIGNAL 22 (#4405, the chairman's ruling): THE FLEET HAS STAYED ON MIXED WINDOWS BUILDS FOR `FLEET_BUILD_MIXED_HOURS`. An OPEN incident issue IS the stopped line: `fleet-watch` files it on the
+ * first mismatch, and it is closed only when the fleet reads one build, so an open one over the bound is a fleet that did not move forward. `incident` is {@link readFleetBuildIncidents}' answer,
+ * `null` for a refused read, which is unknown and NEVER clear. An incident with no creation time makes the answer unknown unless another trips, as the sibling readings do.
+ */
+export function fleetBuildMixedReading({ now, incident }: { now: number; incident: FleetBuildIncident[] | null; }): Reading {
+  const signal = SIGNALS.FLEET_BUILD_MIXED;
+  if (incident === null) return unknown(signal, "the open incident issues could not be read, so whether the fleet is on one Windows build is not known");
+  if (incident.length === 0) return clear(signal);
+  const dated = incident.map((issue) => ({ issue, openedAt: Date.parse(issue.createdAt) }));
+  const over = dated.filter(({ openedAt }) => Number.isFinite(openedAt) && now - openedAt >= FLEET_BUILD_MIXED_HOURS * MS_PER_HOUR).sort((a, b) => a.openedAt - b.openedAt);
+  if (over.length === 0) {
+    const undated = dated.filter(({ openedAt }) => !Number.isFinite(openedAt));
+    return undated.length === 0 ? clear(signal)
+      : unknown(signal, `${undated.length} open incident(s) carry no creation time, so how long the fleet has been mixed is not known`);
+  }
+  const oldest = over[0];
+  const named = over.slice(0, MAX_NAMED).map(({ issue, openedAt }) => `#${issue.number} (${boxesBehindOf(issue.title)}, open ${ageText(openedAt, now)})`);
+  const more = over.length > MAX_NAMED ? `, and ${over.length - MAX_NAMED} more` : "";
+  return { signal, status: "tripped", firstTrippedAt: oldest.openedAt + FLEET_BUILD_MIXED_HOURS * MS_PER_HOUR,
+    discriminator: `${signal}@${oldest.issue.number}`,
+    detail: `${over.length} build incident(s) have stood open over ${FLEET_BUILD_MIXED_HOURS} h with the fleet still on mixed Windows builds: ${named.join("; ")}${more}` };
+}
+
 /**
  * SIGNAL 21 (#4128, class fix for a11ign/a11ign#4084): A DORA REPOSITORY'S `main` HOLDS A SHIPPED-PATH COMMIT THAT NO RELEASE CARRIES, AND THE OLDEST IS OVER 24 HOURS OLD. Beside
  * `release-run-failed` (signal 18), which sees a release that ran and failed; this sees one that never started. ONE READING PER TRIPPED REPOSITORY, each with its own discriminator
@@ -1463,7 +1591,7 @@ export function milestoneClockReading({ now, fact }: { now: number; fact: Milest
  * THE READINGS, in a fixed order: the four of #2936, then the two of #2937 and the outcome clock (#3486, which replaced #2970's) WHEN ITS FACT IS GIVEN. An OMITTED fact (`undefined`) is
  * "this caller does not ask", which is silent; `null` is "asked and refused", which is a stated unknown. The two must not share a
  * value, or a gate that never wired the fleet read would log an unknown every tick for a fault nobody can fix from the log.
- * @param facts `shelvedCircle` (#4401) is `shelvedCircles`' answer over the shelving list and pull requests the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `milestoneClock` (#4231) is the primary milestone's rows and the pull requests that close them, `null` for a refused open-row read and OMITTED when the caller does not ask; `classRepeat` (#4126) is `readClassRepeat()`'s answer, `null` or `{ unreadable }` for a refused read and OMITTED when the caller does not ask; facts `boardTruth` (#4043) is `boardTruthAudit`'s answer over the rows the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `releaseRuns` (#4001) is `readReleaseRuns()`'s answer, `null` for a refused read and OMITTED when the caller does not ask; `idle` (#3943) is `idleWithOpenRowsReading`'s answer over the rows the tick already read, OMITTED when the caller does not ask; `stateRows` (#3942) is the open rows the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `autoOff` (#3853) is `readAutoOffRefusal()`'s answer, which `orgHealthTick` reads itself when the caller gives none; `teamAccess` (#3634) is `readTeamAccess()`'s answer, OMITTED when the project declares none; `toolAgreement` (#3533) is `readToolAgreement()`'s answer, OMITTED when the caller does not ask; `pools` (#3448) is the API budgets the tick read, `null` when none was; the order-stall reading is the WAKER's and rides `orderStallOrders`
+ * @param facts `claimRefusals` (agent-org#889) is `readClaimRefusals()`'s answer, which `orgHealthTick` reads itself when the caller gives none; `shelvedCircle` (#4401) is `shelvedCircles`' answer over the shelving list and pull requests the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `milestoneClock` (#4231) is the primary milestone's rows and the pull requests that close them, `null` for a refused open-row read and OMITTED when the caller does not ask; `classRepeat` (#4126) is `readClassRepeat()`'s answer, `null` or `{ unreadable }` for a refused read and OMITTED when the caller does not ask; facts `boardTruth` (#4043) is `boardTruthAudit`'s answer over the rows the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `releaseRuns` (#4001) is `readReleaseRuns()`'s answer, `null` for a refused read and OMITTED when the caller does not ask; `idle` (#3943) is `idleWithOpenRowsReading`'s answer over the rows the tick already read, OMITTED when the caller does not ask; `stateRows` (#3942) is the open rows the tick already read, `null` for a refused read and OMITTED when the caller does not ask; `autoOff` (#3853) is `readAutoOffRefusal()`'s answer, which `orgHealthTick` reads itself when the caller gives none; `teamAccess` (#3634) is `readTeamAccess()`'s answer, OMITTED when the project declares none; `toolAgreement` (#3533) is `readToolAgreement()`'s answer, OMITTED when the caller does not ask; `pools` (#3448) is the API budgets the tick read, `null` when none was; the order-stall reading is the WAKER's and rides `orderStallOrders`
  */
 export function orgHealthReadings(facts: {
         now: number; lastMergedAt: number | null; lastMergedIn?: string | null; work: { greenPrs: number; claimableRows: number; } | null; redPrs: RedPr[] | null;
@@ -1471,8 +1599,9 @@ export function orgHealthReadings(facts: {
         drift: { behind: number; ahead: number; dirty: string[]; } | null; primarySince: number | null;
         fleet?: FleetCaptures | null; waiting?: FleetWaiting | null; copies?: CopyPair[] | null; overdue?: { items: OverdueCandidate[] | null; unread?: string[]; };
         waits?: { stale: Parameters<typeof staleWaitReading>[0]["stale"]; bare: Parameters<typeof waitWithoutReasonReading>[0]["bare"]; manual: number; } | null;
-        pools?: PoolReading[] | null; toolAgreement?: { result: ToolAgreement; } | null; nodeStrips?: NodeStripFact | null; teamAccess?: TeamAccessFact; autoOff?: AutoOffFact; stateRows?: Parameters<typeof stateLabelReading>[0]["rows"]; idle?: import("./idle-with-open-rows.ts").IdleRows; shelvedCircle?: ShelvedCircle[] | null; releaseRuns?: ReleaseRuns | null; releaseBehind?: import("./release-behind-main.ts").RepoFact[] | null; boardTruth?: Parameters<typeof boardTruthReading>[0]["audit"];
+        pools?: PoolReading[] | null; toolAgreement?: { result: ToolAgreement; } | null; nodeStrips?: NodeStripFact | null; teamAccess?: TeamAccessFact; autoOff?: AutoOffFact; stateRows?: Parameters<typeof stateLabelReading>[0]["rows"]; idle?: import("./idle-with-open-rows.ts").IdleRows; shelvedCircle?: ShelvedCircle[] | null; releaseRuns?: ReleaseRuns | null; fleetBuildIncident?: FleetBuildIncident[] | null; releaseBehind?: import("./release-behind-main.ts").RepoFact[] | null; boardTruth?: Parameters<typeof boardTruthReading>[0]["audit"];
         classRepeat?: import("./class-repeat.ts").ClassRepeatFact | null; milestoneClock?: Omit<MilestoneClockFact, "endedAt"> | null;
+        claimRefusals?: ClaimRefusal[] | null;
     }): Reading[] {
   const readings = [noMergeReading(facts), redPrReading(facts), refusedRowReading(facts),
     primaryReading({ now: facts.now, drift: facts.drift, since: facts.primarySince })];
@@ -1493,9 +1622,11 @@ export function orgHealthReadings(facts: {
   if (facts.idle !== undefined) readings.push(idleWithOpenRowsSignal({ idle: facts.idle }));
   if (facts.shelvedCircle !== undefined) readings.push(shelvedCircleReading({ circles: facts.shelvedCircle }));
   if (facts.releaseRuns !== undefined) readings.push(releaseFailedReading({ releaseRuns: facts.releaseRuns }));
+  if (facts.fleetBuildIncident !== undefined) readings.push(fleetBuildMixedReading({ now: facts.now, incident: facts.fleetBuildIncident }));
   if (facts.releaseBehind !== undefined) readings.push(...releaseBehindReadings({ now: facts.now, behind: facts.releaseBehind }));
   if (facts.classRepeat !== undefined) readings.push(...classRepeatReadings({ now: facts.now, classRepeat: facts.classRepeat }));
   if (facts.milestoneClock !== undefined) readings.push(milestoneClockReading({ now: facts.now, fact: facts.milestoneClock === null ? null : { ...facts.milestoneClock, endedAt: facts.lastMergedAt } }));
+  if (facts.claimRefusals !== undefined) readings.push(claimRefusalStormReading({ now: facts.now, refusals: facts.claimRefusals }));
   return readings;
 }
 
@@ -1570,6 +1701,10 @@ const REMEDY = (Object.freeze({
     + "`gh run rerun <run id> --failed -R <the repository in the URL above>`. A cause FIXED ON `main` since (the run is at an older sha) needs a NEW run, which a rerun of the old one does not give: "
     + "`gh workflow run release.yml --ref main -R <repository>`. If the cause is not fixed yet, FILE THE FIX `" + READY_LABEL + "` WITH AN OWNER in this turn. "
     + "Do not wait for the next changeset: a run is only ever started by a merge that carries one, so waiting leaves it red for as long as nobody merges one. It clears the tick a later run succeeds.",
+  [SIGNALS.FLEET_BUILD_MIXED]: "An OPEN `incident` issue whose body carries `" + FLEET_BUILD_INCIDENT_LINE + "` has stood open for " + FLEET_BUILD_MIXED_HOURS + " hours or more, so the fleet has stayed on MIXED Windows builds that long and did not move forward. "
+    + "The incident is named above with its box count and its age. READ THE INCIDENT and the fleet's build status before choosing: `fleet-watch` files it on the first mismatch and closes it only when the fleet reads one build. "
+    + "Do not close the incident by hand to clear this; the signal clears when the incident is closed by the fleet, and a close the fleet did not earn only hides the mismatch. Offer the fix that moves the lagging boxes to the target build as a row, `" + READY_LABEL + "`, with an owner. "
+    + "It clears the tick no open incident is over the bound.",
   [SIGNALS.RELEASE_BEHIND_MAIN]: "A repository's `main` holds a commit on a releasable path that no release carries, and the oldest is over a day old: a consumer is on the old version. The release, the oldest commit "
     + "and its pull request are named above. FIND WHY IT WAS NOT RELEASED before choosing: the pull request carried no changeset (`changeset-required` is the gate that stops that, and this repository may not have adopted it), "
     + "a release run failed after the merge (`release-run-failed` would be tripped too), or the change should not ship and its pull request lacks a `no-release: <reason>` line. Then ADD THE CHANGESET in a pull request "
@@ -1587,6 +1722,10 @@ const REMEDY = (Object.freeze({
   [SIGNALS.WAIT_WITHOUT_REASON]: "Each item named holds a wait (`hold:*`, `" + ANSWER_PREFIX + "*`, the blocked label or `parked`) that says nothing about what it waits for, and nothing "
     + "has moved on it for hours (a `parked` row with no reason is named at once: the park with no reason is the defect). A wait nobody can check is how the 2026-10-02 freeze stood four hours after it ended. Ask its setter what ends it and write "
     + "`Waiting-for: <closed|merged|labelled <label>|unlabelled <label>> <#n>` on it, or remove the wait.",
+  [SIGNALS.CLAIM_REFUSAL_STORM]: "More than " + CLAIM_REFUSAL_STORM_REFUSALS + " claims were refused inside " + CLAIM_REFUSAL_STORM_MINUTES + " minutes, so rows are Ready and no engineer can take them, which includes the one who would fix this. "
+    + "The most frequent reason is quoted above: READ IT FIRST. A `COULD NOT DETERMINE` / `BEHIND THE RELEASE` reason is the stale-rule guard (`src/row-claim/stale-rule-guard.ts`) refusing from a checkout that is behind the newest release: "
+    + "run `update-tool` in the tool checkout, or find why the release did not cut (`release-run-failed`). Any other reason is the claim's own rule: fix the cause or file it `" + READY_LABEL + "` with an owner in this turn, and "
+    + "do not clear the signal by editing the ledger, which only hides the storm.",
 }) as Readonly<Record<string, string>>);
 
 /** @returns who is ordered: the signal's first reader if it has one, then `ceo`, who takes every signal */
@@ -1632,11 +1771,12 @@ function copiesToCompare(pairs: CopyPair[] | null): CopyPair[] | null | undefine
  * caller has them already, and a leaf that reads them keeps `work-gate.ts` out of it. In an extracted tree no original is
  * found, so the reading is left out rather than stated unknown every tick (`copiesToCompare`).
  */
-export function orgHealthTick(facts: Parameters<typeof orgHealthReadings>[0], { log = (line) => process.stderr.write(line), readCopies = () => readDeclaredCopies(), readAutoOff = () => readAutoOffRefusal() }: { log?: (line: string) => void; readCopies?: () => CopyPair[] | null; readAutoOff?: () => AutoOffFact; } = {}) {
+export function orgHealthTick(facts: Parameters<typeof orgHealthReadings>[0], { log = (line) => process.stderr.write(line), readCopies = () => readDeclaredCopies(), readAutoOff = () => readAutoOffRefusal(), readRefusals = () => readClaimRefusals() }: { log?: (line: string) => void; readCopies?: () => CopyPair[] | null; readAutoOff?: () => AutoOffFact; readRefusals?: () => ClaimRefusal[] | null; } = {}) {
   try {
     const copies = facts.copies !== undefined ? facts.copies : copiesToCompare(readCopies());
     const autoOff = facts.autoOff !== undefined ? facts.autoOff : readAutoOff();
-    const readings = orgHealthReadings({ ...facts, autoOff, ...(copies === undefined ? {} : { copies }) });
+    const claimRefusals = facts.claimRefusals !== undefined ? facts.claimRefusals : readRefusals();
+    const readings = orgHealthReadings({ ...facts, autoOff, claimRefusals, ...(copies === undefined ? {} : { copies }) });
     for (const r of readings) if (r.status === "unknown") log(`org-health: ${r.signal} UNKNOWN -- ${r.detail}; it is not read as clear.\n`);
     return orgHealthOrders(readings);
   } catch (err) {

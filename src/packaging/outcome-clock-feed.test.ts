@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sandboxGitEnv } from "../lib/git-env.ts";
+import { connectionOf, type FakeRow } from "./rows-by-label-fixtures.ts";
 
 // The project this file runs against is the recorded one `org-health.test.ts` explains (#3233): the host file is set FIRST and the tool imported AFTER it.
 const PROJECT_SCRATCH = mkdtempSync(join(tmpdir(), "outcome-clock-feed-project-"));
@@ -56,17 +57,22 @@ const claimedRow = (number: number): Row => ({ number, labels: label("in-progres
 
 /**
  * Run the gate against these reads and return what it offered for the clock and what it said on stderr. `claimed: "refused"` makes the claimed-rows read
- * fail the way an exhausted API pool does. The stub answers the claimed-rows read BEFORE the generic open-rows read, whose arguments it is a prefix of.
+ * fail the way an exhausted API pool does. #5050: the claimed rows are a CONNECTION read (`issues(states:OPEN,labels:[$label])` over `gh api graphql`, with
+ * `label=in-progress`), no longer `issue list --label in-progress`, which `gh` sent as a SEARCH. The stub answers that one before the generic by-label case
+ * (which says "no rows" to any other label or state, as the old `issue list` fallback did) and before the open-rows read.
  */
 function gate({ prs = [], rows = [], claimed = [] }: { prs?: Record<string, unknown>[]; rows?: Row[]; claimed?: Record<string, unknown>[] | "refused" }) {
   const dir = mkdtempSync(join(tmpdir(), "outcome-clock-feed-gate-"));
   try {
     writeFileSync(join(dir, "prs.json"), JSON.stringify(prs));
     writeFileSync(join(dir, "rows.json"), JSON.stringify(rows));
-    writeFileSync(join(dir, "claimed.json"), JSON.stringify(claimed === "refused" ? [] : claimed));
-    const claimedCase = claimed === "refused" ? `  "issue list --state open --label in-progress"*) exit 1 ;;\n`
-      : `  "issue list --state open --label in-progress"*) cat "${dir}/claimed.json" ;;\n`;
+    writeFileSync(join(dir, "claimed.json"), claimed === "refused" ? "[]" : connectionOf(claimed as FakeRow[]));
+    writeFileSync(join(dir, "none.json"), connectionOf([]));
+    const claimedRead = `"api graphql"*'states:OPEN,labels:[$label]'*"label=in-progress"*`;
+    const claimedCase = claimed === "refused" ? `  ${claimedRead}) exit 1 ;;\n` : `  ${claimedRead}) cat "${dir}/claimed.json" ;;\n`;
     writeFileSync(join(dir, "gh"), `#!/bin/sh\ncase "$*" in\n  "pr list --state open"*) cat "${dir}/prs.json" ;;\n${claimedCase}`
+      + `  "api graphql"*'labels:[$label]'*) cat "${dir}/none.json" ;;\n`
+      + `  "api graphql"*'issues(states:CLOSED,first:$first,orderBy'*) printf '%s' '{"data":{"repository":{"issues":{"nodes":[]}}}}' ;;\n`
       + `  "issue list --state open --limit 500"*) cat "${dir}/rows.json" ;;\n  "pr list"*|"issue list"*) printf '%s' '[]' ;;\n  *) exit 1 ;;\nesac\n`);
     writeFileSync(join(dir, "journalctl"), "#!/bin/sh\nexit 1\n");
     chmodSync(join(dir, "gh"), STUB_MODE);

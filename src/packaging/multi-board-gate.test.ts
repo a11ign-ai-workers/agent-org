@@ -22,6 +22,7 @@ import { decide, scopesOf, readLanes, scopeTick, unreadLanes, greenUnarmedOrders
 import { ledgerLine, readLedger, readLedgerDeliveries, reviewerMismatch, orderPullRequest, orderPullRequestRef, noReviewCheckoutFor,
   stuckRowOf, rowOfOrder, isReviewerOrder, liveReviewers, isPerRowInstance, codeRepositoryOf }
   from "../wake.ts";
+import { connectionOf, readsRowsByLabel, type FakeRow } from "./rows-by-label-fixtures.ts";
 import { parityOwner, reviewerSeat, reviewerInstance, reviewerInstanceNumber, seatName, subjectRef, subjectMention }
   from "../review-attribution.ts";
 
@@ -54,7 +55,9 @@ function fakeGh(byRepo: Record<string, { prs?: unknown[] | Error, ready?: unknow
       return JSON.stringify(value ?? []);
     };
     if (args[0] === "pr") return pick(answers.prs);
-    if (args.includes("--label") && args.includes("ready")) return pick(answers.ready);
+    // #5050: a label's rows are a connection read over `gh api graphql`, not `issue list --label` (which `gh` sent as a SEARCH). Only `ready` has rows here; any other label is empty.
+    const byLabel = readsRowsByLabel(args);
+    if (byLabel !== null) return connectionOf(byLabel.label === "ready" ? (answers.ready ?? []) as FakeRow[] : []);
     if (args.includes("--limit") && args[args.indexOf("--limit") + 1] === "500") return pick(answers.open);
     return "[]";
   };
@@ -304,7 +307,8 @@ test("DONE-WHEN 4: with one project the orders EQUAL the recorded fixture of tod
   const gh = fakeGh({ "acme/main": { prs: [pr(101)], ready: [row(201)], open: [row(201)] } });
   const lanes = readLanes(scopesOf([PRIMARY_DECLARATION])[0], gh.run);
   assert.deepEqual(lanes.prs, [pr(101)]);
-  assert.deepEqual(lanes.readyRows, [row(201)]);
+  // #5050: the connection carries the row's `blockedBy` edges, which `gh issue list --json ...,blockedBy` gave as `{ nodes }` too; the row is otherwise as it was written.
+  assert.deepEqual(lanes.readyRows, [{ ...row(201), blockedBy: { nodes: [] } }]);
   assert.ok(gh.calls.length >= 5 && gh.calls.every((c) => c.repo === undefined), "and every call is AIMED at nothing: the checkout's own repository, as before");
 });
 
@@ -322,7 +326,7 @@ test("a row in the SECOND tracker reaches the ready queue and is offered -- unde
   assert.equal(theirs[0].discriminator, "other#7");
   assert.match(theirs[0].prompt, /^Ready row other#7 is unclaimed: the other's row\./);
   assert.equal(ordersOf(other, gh).lanes.readyRows?.[0].repoKey, "other", "read from THE OTHER TRACKER's repository, not the primary's");
-  assert.ok(gh.calls.some((c) => c.repo === "acme/other" && c.args.includes("ready")), "the call was aimed at the second tracker's repository");
+  assert.ok(gh.calls.some((c) => c.repo === "acme/other" && readsRowsByLabel(c.args)?.label === "ready"), "the call was aimed at the second tracker's repository");
   // NEGATIVE: wake's row parser does NOT read the keyed key as the primary's row 7 -- claiming the wrong row would be worse than none.
   assert.equal(rowOfOrder({ causeKey: mine[0].causeKey }), 7);
   assert.equal(rowOfOrder({ causeKey: theirs[0].causeKey }), null);

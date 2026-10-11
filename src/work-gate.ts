@@ -78,7 +78,7 @@ import { hostConfigPath, stateEntryPath } from "./host-config.ts"; // #2799; #50
 // #2848: THE REPEATING-LINE QUESTION, in its own leaf for the reason `disk-headroom.ts` is one: it reads the journal, not GitHub.
 import { REPEAT_TICKS, normaliseLine, repeatingLinesTick, type RepeatingGroup } from "./repeating-lines.ts";
 // #2936: THE ORG-HEALTH QUESTION, in its own leaf for the same reason: relative imports only, so the gate keeps the property its own header states.
-import { redSinceOf, readToolAgreement, readReleaseRuns } from "./org-health.ts";
+import { redSinceOf, readToolAgreement, readReleaseRuns, readFleetBuildIncidents } from "./org-health.ts";
 import { ghQueueTick } from "./gh-ledger.ts"; // #4898
 import { readNodeStrips } from "./node-strips-types.ts";
 import { liveClassRepeatIo, readClassRepeat } from "./class-repeat.ts";
@@ -118,6 +118,8 @@ import { PROJECT_NUMBER, PROJECT_OWNER } from "./board-snapshot-scope.ts";
 import { withBoardSnapshot } from "./board-snapshot.ts"; // agent-org#490: the guard a board write keeps (#399, #1275); `row-file` and `row-claim` take it from the same place
 import type { ChangeRef, CodeHostPort, OpenItemsReader, TicketPort, TicketState } from "./ticket-port/port.ts"; // agent-org#484: the first consumer of the ticket port
 import { githubTicketAdapter, TRACKER } from "./ticket-port/github-adapter.ts";
+// #5050: EVERY LABEL LIST THE GATE READS GOES THROUGH THIS ONE READER, so none of them is a SEARCH and a refusal for a limit is asked once in the tick. See `labelledRows`.
+import { isRowsByLabelRead, readRowsByLabel, readUnlessRefused, type LabelledRead } from "./ticket-port/rows-by-label.ts";
 // #2356: A RED `main` WAKES A FIXER. Imports only `node:*`, `parent-recheck-summary.ts` and the repo identity,
 // so the gate keeps the property its own header states -- it runs before any `pnpm install` or build.
 import { readTrunkRed, trunkOfCodeRepository, trunkRedOrders } from "./trunk-red.ts";
@@ -359,14 +361,41 @@ export const OPEN_ROWS_LIMIT = 500;
 
 type OpenRowsList = { label: string | null; limit: number; fields: string[] };
 
-/** @returns what `issue list --state open [--label L] --limit N --json F` asks, or `null` for any other call (an extra flag is a different question, and is never folded) */
-function openRowsListOf(args: string[]): OpenRowsList | null {
-  // a string, not an array literal: this PARSES a call and makes none, and `gh-call-inventory.ts` counts an `issue list` array as a call site
-  const labelled = args[4] === "--label";
-  const rest = args.slice(labelled ? 6 : 4);
+/** @returns what `issue list --state open --limit N --json F` asks (the whole open list, which is no search), or `null` for any other call (an extra flag is a different question, and is never folded) */
+function wholeOpenListOf(args: string[]): OpenRowsList | null {
+  const rest = args.slice(4);
   const shaped = args.slice(0, 4).join(" ") === "issue list --state open" && rest.length === 4 && rest[0] === "--limit" && rest[2] === "--json" && /^\d+$/.test(rest[1]);
-  return shaped ? { label: labelled ? args[5] : null, limit: Number(rest[1]), fields: rest[3].split(",") } : null;
+  return shaped ? { label: null, limit: Number(rest[1]), fields: rest[3].split(",") } : null;
 }
+
+/** The names a GraphQL selection asks of the row itself, nested selections and their arguments left out: `number labels(first:50){nodes{name}}` is `number`, `labels`. */
+function topLevelFields(select: string): string[] {
+  const names: string[] = [];
+  let depth = 0;
+  let word = "";
+  for (const char of select) {
+    if (depth === 0 && /\w/.test(char)) { word += char; continue; }
+    if (word !== "") names.push(word);
+    word = "";
+    if (char === "(" || char === "{") depth += 1;
+    else if (char === ")" || char === "}") depth -= 1;
+  }
+  return word === "" ? names : [...names, word];
+}
+
+/**
+ * @returns what a FIRST PAGE of `ticket-port/rows-by-label.ts`'s read of OPEN rows carrying a label asks, or `null` for any other call -- a later page (`after=`), a closed
+ * read, or text that is not that reader's query. `limit` is the page size: a label with more rows than that is not answered from the open list (`answerFromOpenRows`).
+ */
+function labelledOpenListOf(args: string[]): OpenRowsList | null {
+  if (!isRowsByLabelRead(args) || args.some((arg) => arg.startsWith("after="))) return null;
+  const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+  const asked = /issues\(states:OPEN,labels:\[\$label\],first:(\d+),after:\$after[^)]*\)\{pageInfo\{hasNextPage endCursor\} nodes\{(.*)\}\}\}\}$/.exec(query);
+  const label = args.find((arg) => arg.startsWith("label="))?.slice("label=".length);
+  return asked === null || label === undefined ? null : { label, limit: Number(asked[1]), fields: topLevelFields(asked[2]) };
+}
+
+const openRowsListOf = (args: string[]): OpenRowsList | null => wholeOpenListOf(args) ?? labelledOpenListOf(args);
 
 /**
  * #4899: ONE LIST OF THE OPEN ROWS, ASKED ONCE, ANSWERS THE LISTS OF ITS LABELS. The wave asks `issue list --state open --limit 500` for every open row
@@ -406,14 +435,19 @@ function askTogether({ calls, batch, waiting, log }: { calls: { args: string[]; 
   }
 }
 
-/** @returns the folded call's answer made from the whole list's, or `undefined` when that list is not a complete array of rows */
+/**
+ * @returns the folded call's answer made from the whole list's, in the CONNECTION's shape the by-label reader parses (`labels` as `{ nodes }`), or `undefined` when that list is
+ * not a complete array of rows or the label has more rows than one page of the connection holds (a first page that is not the whole answer is never made here)
+ */
 function answerFromOpenRows(whole: string, { label, limit, fields }: OpenRowsList): string | undefined {
   let rows: any;
   try { rows = JSON.parse(whole); } catch { return undefined; }
   if (!Array.isArray(rows) || rows.length >= OPEN_ROWS_LIMIT) return undefined;
   const hasLabel = (row: any) => Array.isArray(row?.labels) && row.labels.some((l: any) => l?.name === label);
-  const project = (row: any) => Object.fromEntries(fields.map((field) => [field, row[field]]));
-  return JSON.stringify(rows.filter(hasLabel).slice(0, limit).map(project));
+  const matched = rows.filter(hasLabel);
+  if (matched.length > limit) return undefined;
+  const node = (row: any) => Object.fromEntries(fields.map((field) => [field, field === "labels" ? { nodes: row.labels } : row[field]]));
+  return JSON.stringify({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: matched.map(node) } } } });
 }
 
 /**
@@ -650,17 +684,20 @@ function writePagedFilesCache(path: string, cache: Record<string, string[]>, log
  */
 export const GH_READS = Object.freeze({
   // #3674: ONE `pr list` PER CODE REPOSITORY (readPrs, at `OPEN_PRS_FIRST_PAGE`, 1 point each), the primary's here and the others' in `perOtherCodeRepositoryOpenList`.
-  unconditional: ["pr list --state open --limit 20 (readPrs)", "issue list --label ready", "issue list --label backlog",
-    "issue list --label chairman-blocked", "issue list (all open: answer/blocked labels)",
+  unconditional: ["pr list --state open --limit 20 (readPrs)",
+    // #5050: THE THREE LABEL LISTS ARE CONNECTIONS, NOT SEARCHES -- `repository.issues(labels:, states: OPEN)` over `gh api graphql`, charged to the GraphQL points and never to the
+    // search allowance a `gh issue list --label` spends. On a tick whose open list is complete they are made from it and never sent (`foldIntoOpenRows`).
+    "api graphql repository.issues(labels: ready, states: OPEN) (readReadyRows)", "api graphql repository.issues(labels: backlog, states: OPEN) (readPromotableRows)",
+    "api graphql repository.issues(labels: needs:chairman, states: OPEN) (readChairmanBlocked)", "issue list (all open: answer/blocked labels)",
     // #2202: TWO SMALL CALLS, because a closed row still owing an answer is invisible to the open read above
     // and `gh` cannot filter a label PREFIX. The first lists the repo's `answer:` label names, the second
     // asks for the closed rows carrying any of them -- exact, so no window a row can fall out of silently.
     "label list --search answer: (readClosedAnswerRows)",
-    "issue list --state closed --search label:<answer labels> (readClosedAnswerRows -- answer-owed on a closed row)",
+    "api graphql repository { a<n>: issues(labels: [<answer label>], states: CLOSED) } (readClosedAnswerRows -- answer-owed on a closed row; one alias per label, since a search's OR is a connection's AND)",
     // #2641: THE THIRD OF THEM, and the one that moved the count from 9 to 10. A pull request that is no longer open is
     // not an `issue list` row and not a `readPrs` row, and a stuck cause whose subject is a MERGED one (`trunkRedOrders`)
     // labels it `answer:ceo` where nothing looked. Same label names as the call above, so no second `label list`.
-    "pr list --state all --search 'label:<answer labels> -is:open' (readClosedAnswerRows -- answer-owed on a merged or closed pull request)",
+    "api graphql repository { a<n>: pullRequests(labels: [<answer label>], states: [CLOSED, MERGED]) } (readClosedAnswerRows -- answer-owed on a merged or closed pull request)",
     // #2356: ONE REST CALL on the core pool -- the newest runs of `trunk.yml` on `main` (readTrunkRed).
     "api actions/workflows/trunk.yml/runs (readTrunkRed -- trunk-red)",
     // #2075: ONE GRAPHQL CALL PER 100 OPEN ROWS (one, at 50 open), each row carrying ITS OWN `projectItems` -- never the board
@@ -673,16 +710,18 @@ export const GH_READS = Object.freeze({
     "api repos/{repo}/actions/workflows/release.yml/runs (readReleaseRuns -- org-health's release-run-failed)",
     // #4126: ONE REST CALL on the core pool -- the 100 newest-updated closed rows, projected to number, state, close time and labels (readClassRepeat -- org-health's class-repeat). It makes ONE MORE
     // PER CLASS whose newest instance closed in the last 90 minutes (that class's closed rows, all time), which are the repeat's detail and are not counted here.
-    "api repos/{repo}/issues?state=closed (readClassRepeat -- org-health's class-repeat)"],
+    "api repos/{repo}/issues?state=closed (readClassRepeat -- org-health's class-repeat)",
+    // #4405: ONE REST CALL on the core pool -- the open issues labelled `incident` (readFleetBuildIncidents -- org-health's fleet-build-mixed-over-4h), kept when their body carries the fleet-build line.
+    "api repos/{repo}/issues?state=open&labels=incident (readFleetBuildIncidents -- org-health's fleet-build-mixed-over-4h)"],
   // #4128: NOT A PER-TICK READ, so it is in none of these lists. `releaseBehindNow` reads every dora repository at most ONCE AN HOUR (`cachedReleaseBehind`, kept in the state directory) and
   // judges the kept facts against the clock on every tick. Per hour, per repository: the latest release (the npm registry, or ONE `releases` call), one `commits?path=` call per releasable
   // path, and TWO calls (`commits/{sha}`, `commits/{sha}/pulls`) per unreleased commit up to 20 -- measured in the pull request that added it.
   // #3535: ONE GRAPHQL CALL, ONLY WHEN HERDR LISTS AT LEAST ONE `worker-<n>`, for THOSE rows' numbers (one aliased `issue(number: n)` each, state, labels and comments), asked with the
   // follow-ups' wave (`readOpenRowFollowUps`) so its wall time overlaps theirs. A row CLOSED while it still carries the claim is in none of the open lists above, and the instance
-  // holding it is only ever visible in herdr; an org running no per-row instance pays nothing. NOT `issue list --state closed --label in-progress`: 264 rows today, none a live claim.
+  // holding it is only ever visible in herdr; an org running no per-row instance pays nothing. NOT the closed `in-progress` list, with their comments: 264 rows today, none a live claim.
   // #3883: ONE CALL, EVERY TICK THAT HAS A COMPLETE HERDR LISTING (always, on a live org): the CLOSED rows still carrying `in-progress`, `number,labels` only, filtered
   // server-side, so what comes back is the claim debris and nothing else (the 25 live-seat rows plus whatever a hand close left since the last tick), never 264 rows' comments.
-  conditionalOnCompleteHerdrListing: "issue list --state closed --label in-progress --limit 1000 --json number,labels,closedAt (readClosedClaimLabelRows, once per declared tracker -- a closed row's claim labels, stripped when the holder is not listed, or is an idle worker past ten minutes)",
+  conditionalOnCompleteHerdrListing: "api graphql repository.issues(labels: in-progress, states: CLOSED) number,labels,closedAt, the newest 500 (readClosedClaimLabelRows, once per declared tracker -- a closed row's claim labels, stripped when the holder is not listed, or is an idle worker past ten minutes)",
   conditionalOnListedWorker: "api graphql repository { issue(number: <each listed worker-<n>, and each worker-<key>-<n> in its own tracker>) { state labels comments } } (readClosedClaimedRows -- a closed row's claim, one call per tracker a listed instance is of)",
   // #3390: TWO REST CALLS PER ROW LABELLED `needs:chairman` (its `labeled` events, and its comments), and NONE when nothing carries the label.
   conditionalOnChairmanLabelledRow: "api repos/{owner}/{repo}/issues/{n}/events and /comments (withChairmanEventTimes -- chairman-answered)",
@@ -1054,6 +1093,27 @@ export const PARKED_LABEL = "parked";
 export const LAUNCH_PLACEHOLDER = "<launch-directory>";
 
 /**
+ * #5050: THE GATE'S LABEL LISTS ARE NOT SEARCHES. `gh issue list --label X` is sent by `gh` as a GitHub SEARCH (`label:X repo:... type:issue`), whose allowance is separate
+ * from and far smaller than the GraphQL points: the scheduler App's installation spent it on 2026-10-11 and a tick read 1,781 list calls in 45 minutes, 593 of them
+ * refused. `repository.issues(labels:)` is a connection, charged to the points the gate already budgets, and it is the one reader the claim path uses (#5039).
+ *
+ * THE ROWS COME BACK IN THE SHAPE `gh issue list --json` GAVE (`labels` and `comments` as arrays), so no reader below and no comparison after it changed. A read that fails THROWS,
+ * and each reader's own `catch` turns that into `null`, never `[]`. A read refused for a limit is remembered for the tick by the reader and not asked again, whichever label it
+ * was for, and the line it leaves names the resource (`readRowsByLabel`). The fold (`foldIntoOpenRows`) still answers the open labels from the one open list.
+ *
+ * @param ask the label, the connection's `select`, and at most `newest` rows
+ */
+export function labelledRows(ask: Pick<LabelledRead, "label" | "state" | "select" | "run"> & { newest: number; }): any[] {
+  const flat = (field: any) => (Array.isArray(field?.nodes) ? field.nodes : field);
+  return readRowsByLabel(ask).map((node) => ({ ...node, ...(node.labels === undefined ? {} : { labels: flat(node.labels) }),
+    ...(node.comments === undefined ? {} : { comments: flat(node.comments) }) }));
+}
+
+/** The selection every row-reading list asks for its labels and dependency edges: `blockedBy` nodes carry `number` and `state`, which the waiting rules read. */
+const ROW_LABELS = "labels(first:50){nodes{name}}";
+const ROW_BLOCKED_BY = "blockedBy(first:50){nodes{number state}}";
+
+/**
  * Rows waiting on the chairman, oldest first.
  *
  * WHY THIS EXISTS, MEASURED: #63 (the org transfer) sat four days with its last comment from the chairman
@@ -1077,10 +1137,7 @@ export const LAUNCH_PLACEHOLDER = "<launch-directory>";
  */
 export function readChairmanBlocked(run: (args: string[]) => string = defaultRun): any[] | null {
   try {
-    const out = run(["issue", "list", "--state", "open", "--label", CHAIRMAN_LABEL, "--limit", "100",
-      "--json", "number,title,updatedAt"]);
-    const parsed = JSON.parse(out);
-    if (!Array.isArray(parsed)) return null;
+    const parsed = labelledRows({ label: CHAIRMAN_LABEL, state: "OPEN", select: "number title updatedAt", newest: 100, run });
     return withChairmanEventTimes(parsed.sort((a, b) => String(a.updatedAt).localeCompare(String(b.updatedAt))), run);
   } catch {
     return null;
@@ -1213,10 +1270,8 @@ export function readPromotableRows(run: (args: string[]) => string = defaultRun)
     // `blockedBy` AND `body` RIDE THE CALL THAT WAS ALREADY BEING MADE. `blockedBy` is GitHub's own
     // dependency edge -- `gh issue create --blocked-by` writes it, the UI renders it, and this `--json`
     // returns it -- so reading a waiting condition costs nothing this tick did not already spend.
-    const out = run(["issue", "list", "--state", "open", "--label", BACKLOG_LABEL, "--limit", "200",
-      "--json", "number,title,createdAt,labels,body,blockedBy"]);
-    const parsed = JSON.parse(out);
-    if (!Array.isArray(parsed)) return null;
+    const parsed = labelledRows({ label: BACKLOG_LABEL, state: "OPEN", newest: 200, run,
+      select: `number title createdAt ${ROW_LABELS} body ${ROW_BLOCKED_BY}` });
     // `NOT_STARTABLE`, NOT `NOT_PICKABLE`: a routed row is kept here and removed again by `ownerOf` for
     // the pool, so the one session it belongs to can still be told about it.
     const today = todayIso();
@@ -1254,10 +1309,8 @@ export function readPromotableRows(run: (args: string[]) => string = defaultRun)
  */
 export function readReadyRows(run: (args: string[]) => string = defaultRun): any[] | null {
   try {
-    const out = run(["issue", "list", "--state", "open", "--label", READY_LABEL, "--limit", "100",
-      "--json", "number,title,labels,body,blockedBy,milestone"]);
-    const parsed = JSON.parse(out);
-    return Array.isArray(parsed) ? parsed : null;
+    return labelledRows({ label: READY_LABEL, state: "OPEN", newest: 100, run,
+      select: `number title ${ROW_LABELS} body ${ROW_BLOCKED_BY} milestone{number title}` });
   } catch {
     return null;
   }
@@ -1727,6 +1780,39 @@ function refusedClosedRows(verb: string, reason: string): null {
 }
 
 /**
+ * How many CLOSED rows of one kind each answer label is read for, newest update first. It is the page `--limit 100` was for ALL the labels together, so a label can no longer be
+ * crowded out by another's rows; the request's price is this times the labels it names times the labels each row carries (`ANSWER_ROW_LABELS`), and 100 answer labels at
+ * 100 rows of 30 labels stay under GitHub's 500,000-node ceiling.
+ */
+const CLOSED_ANSWER_ROWS_PER_LABEL = 100;
+/** The labels read from each such row: enough to find the answer label among a row's own, and fewer than `ROW_LABELS` so many answer labels fit one request. */
+const ANSWER_ROW_LABELS = "labels(first:30){nodes{name}}";
+
+/**
+ * #5050: THE CLOSED ISSUES (or the closed and merged pull requests) CARRYING ANY OF THE ANSWER LABELS, as ONE aliased GraphQL read -- `repository { a0: issues(labels:["answer:x"],
+ * states:CLOSED) ... }`, a connection, where `issue list --search 'label:"answer:x","answer:y"'` was a SEARCH. A search's `label:a,b` is OR and a connection's `labels:[a,b]` is AND,
+ * hence one alias per label and a row carrying two of them read twice and kept once.
+ *
+ * @returns the rows in the shape `gh` gave (`labels` an array); `null` when the answer is not whole (`errors` beside `data` is refused too, as for the reads beside it); a throw
+ * is the caller's `catch`, which names the refused call
+ */
+function closedRowsCarrying(names: string[], { kind, run }: { kind: "issues" | "pullRequests"; run: (args: string[]) => string; }): any[] | null {
+  const states = kind === "issues" ? "CLOSED" : "[CLOSED, MERGED]";
+  const extra = kind === "issues" ? "" : " isDraft";
+  const aliased = names.map((name, at) => `a${at}: ${kind}(labels: [${JSON.stringify(name)}], states: ${states}, first: ${CLOSED_ANSWER_ROWS_PER_LABEL}, `
+    + `orderBy: {field: UPDATED_AT, direction: DESC}) { nodes { number title state${extra} ${ANSWER_ROW_LABELS} } }`);
+  const args = ["api", "graphql", "-f", `query=query($owner:String!,$name:String!){repository(owner:$owner,name:$name){ ${aliased.join(" ")} }}`, "-F", "owner={owner}", "-F", "name={repo}"];
+  const parsed = JSON.parse(readUnlessRefused({ what: `CLOSED ${kind} labelled ${names.length} answer label(s)`, run, read: () => run(args) }));
+  const repository = parsed?.errors ? null : parsed?.data?.repository;
+  if (repository === null || typeof repository !== "object") return null;
+  const connections: any[] = Object.values(repository);
+  if (!connections.every((connection) => Array.isArray(connection?.nodes))) return null;
+  const seen = new Set<number>();
+  return connections.flatMap((connection) => connection.nodes).filter((row: any) => !seen.has(row.number) && seen.add(row.number))
+    .map((row: any) => ({ ...row, labels: row.labels.nodes }));
+}
+
+/**
  * #2202: THE CLOSED ROWS THAT STILL OWE AN ANSWER -- the half of `answer-owed` that `readOpenRows` cannot see.
  *
  * `answer:<session>` is the org's only machine-readable "a named session still owes an answer here", and
@@ -1767,19 +1853,20 @@ export function readClosedAnswerRows(run: (args: string[]) => string = defaultRu
     // `gh label list --json` prints ZERO BYTES, not `[]`, when nothing matches (#472): a repository with no `answer:`
     // label -- agent-org, since it became a declared tracker -- is "nobody owes anything", not a refusal. Only the
     // EMPTY stdout is read so; text that does not parse, a non-array and a thrown `gh` stay `null` below.
-    const labelsText = ask(["label", "list", "--search", ANSWER_PREFIX, "--limit", "100", "--json", "name"]);
+    // #5050: under the tick's refusal memory too -- a limit the by-label reads met is not answered by asking the label list.
+    const labelsText = readUnlessRefused({ what: "the answer: label names", run, read: () => ask(["label", "list", "--search", ANSWER_PREFIX, "--limit", "100", "--json", "name"]) });
     if (labelsText.trim() === "") return [];
     const labels = JSON.parse(labelsText);
     if (!Array.isArray(labels)) return refusedClosedRows(asking, "answered something that is not a list");
     const names = labels.map((l) => l?.name).filter((n) => typeof n === "string" && n.startsWith(ANSWER_PREFIX));
     if (names.length === 0) return [];
-    const byLabel = `label:${names.map((n) => `"${n}"`).join(",")}`;
-    const closedIssues = JSON.parse(ask(["issue", "list", "--state", "closed", "--limit", "100",
-      "--search", byLabel, "--json", "number,title,labels,state"]));
-    const closedPrs = JSON.parse(ask(["pr", "list", "--state", "all", "--limit", "100",
-      "--search", `${byLabel} -is:open`, "--json", "number,title,labels,state,isDraft"]));
-    if (!Array.isArray(closedIssues) || !Array.isArray(closedPrs)) {
-      return refusedClosedRows(Array.isArray(closedIssues) ? "pr list" : "issue list", "answered something that is not a list");
+    // Named for what they ARE, not for the `api graphql` they travel as: the line a refusal leaves says which of the three reads failed.
+    asking = "issue list";
+    const closedIssues = closedRowsCarrying(names, { kind: "issues", run });
+    asking = "pr list";
+    const closedPrs = closedRowsCarrying(names, { kind: "pullRequests", run });
+    if (closedIssues === null || closedPrs === null) {
+      return refusedClosedRows(closedIssues === null ? "issue list" : "pr list", "answered something that is not a list");
     }
     return withAnswerLabel([...closedIssues, ...closedPrs]);
   } catch (err) {
@@ -3108,8 +3195,11 @@ function oldestUpdatedWhenOrdered(listed: any[]): number | undefined {
  */
 export function readRecentlyClosed(run: (args: string[]) => string = defaultRun): Closings | null {
   try {
-    const parsed = JSON.parse(run(["issue", "list", "--state", "closed", "--limit",
-      String(RECENTLY_CLOSED_LIMIT), "--search", "sort:updated-desc", "--json", "number,closedAt,updatedAt"]));
+    // #5050: `--search sort:updated-desc` was a SEARCH. The connection orders by the same field, newest update first, which `oldestUpdatedWhenOrdered` reads.
+    const query = "query($owner:String!,$name:String!,$first:Int!){repository(owner:$owner,name:$name){issues(states:CLOSED,first:$first,"
+      + "orderBy:{field:UPDATED_AT,direction:DESC}){nodes{number closedAt updatedAt}}}}";
+    const args = ["api", "graphql", "-f", `query=${query}`, "-F", "owner={owner}", "-F", "name={repo}", "-F", `first=${RECENTLY_CLOSED_LIMIT}`];
+    const parsed = JSON.parse(readUnlessRefused({ what: `the ${RECENTLY_CLOSED_LIMIT} newest-updated CLOSED rows`, run, read: () => run(args) }))?.data?.repository?.issues?.nodes;
     if (!Array.isArray(parsed)) return null;
     const closings: Closings = new Map();
     for (const r of parsed) {
@@ -3517,9 +3607,9 @@ function amendedOrder({ row, session, markers }: { row: any; session: string; ma
  */
 export function readClaimedRowComments(run: (args: string[]) => string = defaultRun, repo: string = repoNow()): any[] | null {
   try {
-    const parsed = JSON.parse(run(["issue", "list", "--state", "open", "--label", CLAIM_LABEL,
-      "--limit", "200", "--json", "number,comments"]));
-    return Array.isArray(parsed) ? withNewestCommentsOfCappedRows(parsed, run, repo) : null;
+    const parsed = labelledRows({ label: CLAIM_LABEL, state: "OPEN", newest: 200, run,
+      select: `number comments(first:${ISSUE_LIST_COMMENT_CAP}){nodes{id body createdAt author{login}}}` });
+    return withNewestCommentsOfCappedRows(parsed, run, repo);
   } catch {
     return null;
   }
@@ -3602,8 +3692,11 @@ export function readClosedClaimedRows(numbers: number[], run: (args: string[], r
 /** A closed claimed row as `readClosedClaimedRows` returns it; `tracker` is set for a row of a tracker other than the home one (agent-org#757). */
 type KeyedClosedClaimedRow = import("./claim-stall.ts").ClosedClaimedRow & { tracker?: { key: string; repo: string; }; };
 
-/** How many closed rows carrying the claim label one read asks for: the row's own acceptance asks for the same page, and a capped read strips the rest on the next tick. */
-const CLOSED_CLAIM_LABEL_LIMIT = 1000;
+/**
+ * How many closed rows carrying the claim label one read asks for, and the most `readRowsByLabel` holds (five pages of 100): a read for more would THROW when the label
+ * had more, and the strip would see no row at all. A capped read strips these and the next tick the rest, which is how the 1,000 it asked as a search drained too (#5050).
+ */
+const CLOSED_CLAIM_LABEL_LIMIT = 500;
 
 /**
  * #3883: THE CLOSED ROWS STILL CARRYING THE CLAIM LABEL, labels only, ONE CALL PER DECLARED TRACKER. `null` FOR A REFUSAL, NEVER `[]` (#1286): an unread list is not "no debris".
@@ -3624,9 +3717,8 @@ export function readClosedClaimLabelRows(run: (args: string[], repo?: string) =>
   const unread: string[] = [];
   for (const repo of trackers) {
     try {
-      const args = ["issue", "list", "--state", "closed", "--label", CLAIM_LABEL, "--limit", String(CLOSED_CLAIM_LABEL_LIMIT), "--json", "number,labels,closedAt"];
-      const parsed = JSON.parse(repo === undefined ? run(args) : run(args, repo));
-      if (!Array.isArray(parsed)) throw new Error("not a list");
+      const parsed = labelledRows({ label: CLAIM_LABEL, state: "CLOSED", newest: CLOSED_CLAIM_LABEL_LIMIT, select: `number ${ROW_LABELS} closedAt`,
+        run: (args) => (repo === undefined ? run(args) : run(args, repo)) });
       rows.push(...(repo === undefined ? parsed : parsed.map((row) => ({ ...row, repo }))));
     } catch {
       unread.push(repo ?? repoNow());
@@ -7569,8 +7661,8 @@ function blockingImpactOrders({ shelved, openRows, trackers, prs, stateDir }: { 
 function writeResolverDefect(defect: ResolverDefect, { run, log }: { run: (args: string[]) => string; log: (line: string) => void; }): boolean {
   const { title, comment } = resolverDefectText(defect);
   try {
-    const open = JSON.parse(run(["issue", "list", "--label", RESOLVER_DEFECT_LABEL, "--state", "open", "--limit", "1", "--json", "number"]));
-    if (Array.isArray(open) && open.length > 0) {
+    const open = labelledRows({ label: RESOLVER_DEFECT_LABEL, state: "OPEN", select: "number", newest: 1, run });
+    if (open.length > 0) {
       run(["issue", "comment", String(open[0].number), "--body", comment]);
     } else {
       run(["label", "create", RESOLVER_DEFECT_LABEL, "--force", "--description", "A pull request the gate could not own although it names a live claimant"]);
@@ -8774,7 +8866,7 @@ function main() {
   const keyedTrackers = otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [[scope.tracker.repo, read.openRows ?? []] as const])); // agent-org#695: each keyed tracker's rows by repository, which its shelvings' bare numbers are among
   const shelvedElsewhere = others.flatMap((tick, at) => tick.blocked.map((row) => ({ ...row, repo: otherScopes[at].scope.tracker?.repo })));
   orders.push(...blockingImpactOrders({ shelved: [...shelvedHere, ...shelvedElsewhere], openRows: allOpen, trackers: Object.fromEntries(keyedTrackers), prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], stateDir: REVIEWER_STATE_DIR }));
-  orders.push(...reviewerAuthTick({ orders }), ...repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) }), ...orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => readReleaseRuns(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) }),
+  orders.push(...reviewerAuthTick({ orders }), ...repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) }), ...orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => readReleaseRuns(defaultRun, repoNow()), readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) }),
     ...rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() }), ...chairmanAsksNow(openRowsRead),
     ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
   // FIRST OF ALL, AND ON PURPOSE (#2163): `wake` delivers in this order and records each delivery with a write, so

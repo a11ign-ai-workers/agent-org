@@ -8,7 +8,7 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, utimesSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
@@ -18,9 +18,11 @@ import {
   LEAK_POLICY_ENV,
   RUN_ROOT_ENV,
   createRunRoot,
+  describeEntry,
   enterFileDir,
   fileDirName,
   findLeaks,
+  finishRun,
   leakReport,
   privateBase,
   removeRunRoot,
@@ -123,6 +125,116 @@ test("findLeaks names a file whose directory holds something, not one whose dire
   assert.equal(existsSync(runRoot), false, "a run root with a nested tree is gone");
 });
 
+// ---- what each leaked entry is (agent-org#939: main went red twice on one `a11y-git-sandbox-*` and the report could not say what made it) --------------------
+
+/** The report line as it was before the details were appended: the new line must begin with it, so the log greps that read it keep matching. */
+const earlierLine = (file: string, names: string[]) => `  ${file} left ${names.length} in its TMPDIR: ${names.join(", ")}`;
+
+const NOW = Date.parse("2026-10-11T12:00:00.000Z");
+const touch = (path: string, msBeforeNow: number) => utimesSync(path, new Date(NOW - msBeforeNow), new Date(NOW - msBeforeNow));
+
+async function leakerDir(name: string, testPath = "/p/src/leaker.test.ts"): Promise<{ base: string; runRoot: string; dir: string }> {
+  const base = freshBase(name);
+  const runRoot = await createRunRoot({ base });
+  const dir = await enterFileDir({ runRoot, testPath, projectRoot: "/p", env: {}, base });
+  return { base, runRoot, dir };
+}
+
+test("a leaked directory is reported as a directory with its entry count, its first three names and its age; the earlier line is a prefix of the new one", async () => {
+  const { base, runRoot, dir } = await leakerDir("detail-dir");
+  const sandbox = join(dir, "a11y-git-sandbox-bhoTMu");
+  mkdirSync(join(sandbox, ".git"), { recursive: true });
+  writeFileSync(join(sandbox, "a.txt"), "x");
+  writeFileSync(join(sandbox, "b.txt"), "x");
+  touch(sandbox, 120);
+  const wide = join(dir, "wide");
+  mkdirSync(wide);
+  for (const name of ["a", "b", "c", "d", "e"]) writeFileSync(join(wide, name), "x");
+  touch(wide, 185_000);
+  const leaks = await findLeaks(runRoot, base, { now: NOW });
+  assert.deepEqual(leaks[0]?.details, [
+    { name: "a11y-git-sandbox-bhoTMu", kind: "directory", count: 3, first: [".git", "a.txt", "b.txt"], ageMs: 120 },
+    { name: "wide", kind: "directory", count: 5, first: ["a", "b", "c"], ageMs: 185_000 },
+  ]);
+  const [, line = ""] = leakReport(leaks);
+  assert.ok(line.startsWith(earlierLine("src/leaker.test.ts", ["a11y-git-sandbox-bhoTMu", "wide"])), line);
+  assert.match(line, /a11y-git-sandbox-bhoTMu: directory of 3 entries \(\.git, a\.txt, b\.txt\), modified 120ms before the teardown/);
+  assert.match(line, /wide: directory of 5 entries \(a, b, c, \.\.\.\), modified 3m05s before the teardown/);
+  await removeRunRoot(runRoot, base);
+});
+
+test("an empty directory, a plain file and a symlink are each reported as what they are, the file with its age and no entry count", async () => {
+  const { base, runRoot, dir } = await leakerDir("detail-file");
+  mkdirSync(join(dir, "a-empty"));
+  writeFileSync(join(dir, "b-file"), "x");
+  touch(join(dir, "b-file"), 5000);
+  symlinkSync("/nonexistent-target", join(dir, "c-link"));
+  const leaks = await findLeaks(runRoot, base, { now: NOW });
+  const [empty, file, link] = leaks[0]?.details ?? [];
+  assert.equal(empty?.kind, "directory");
+  assert.deepEqual(file, { name: "b-file", kind: "file", ageMs: 5000 });
+  assert.equal(link?.kind, "other", "a symlink is read as itself, and a dangling one is not 'vanished'");
+  const [, line = ""] = leakReport(leaks);
+  assert.match(line, /a-empty: empty directory, modified/);
+  assert.match(line, /b-file: file, modified 5\.0s before the teardown(;|$)/, "a file carries no entry count");
+  assert.match(line, /c-link: not a file or directory, modified/);
+  await removeRunRoot(runRoot, base);
+});
+
+test("NEGATIVE CONTROL: an entry that vanishes between the directory read and the lstat, and one that cannot be read, are each reported and each still a leak", async () => {
+  const { base, runRoot, dir } = await leakerDir("detail-unreadable");
+  mkdirSync(join(dir, "a-gone"));
+  writeFileSync(join(dir, "b-kept"), "x");
+  // The race, made deterministic: the entry is removed after the directory read listed it and before it is described.
+  const removingFirst: typeof describeEntry = async (parent, name, now) => {
+    if (name === "a-gone") rmSync(join(parent, name), { recursive: true });
+    return describeEntry(parent, name, now);
+  };
+  const leaks = await findLeaks(runRoot, base, { now: NOW, describe: removingFirst });
+  assert.deepEqual(leaks[0]?.entries, ["a-gone", "b-kept"], "the vanished entry is still counted");
+  assert.deepEqual(leaks[0]?.details[0], { name: "a-gone", kind: "vanished" });
+  assert.match(leakReport(leaks)[1] ?? "", /left 2 in its TMPDIR: a-gone, b-kept; a-gone: vanished before it could be read; b-kept: file/);
+  assert.deepEqual(await describeEntry(dir, "never-existed", NOW), { name: "never-existed", kind: "vanished" });
+
+  // `chmod 000` is not a barrier to root, so as root this half cannot be read and says so rather than passing on nothing.
+  if (process.getuid?.() === 0) return console.warn("private-tmp.test: the unreadable-directory half is not read, because this process is root and can read a mode-000 directory");
+  const locked = join(dir, "c-locked");
+  mkdirSync(locked);
+  chmodSync(locked, 0o000);
+  try {
+    const read = await findLeaks(runRoot, base, { now: NOW });
+    assert.ok(read[0]?.entries.includes("c-locked"), "an unreadable entry is still a leak");
+    const detail = read[0]?.details.find(({ name }) => name === "c-locked");
+    assert.deepEqual(detail, { name: "c-locked", kind: "unreadable", reason: "EACCES" });
+    assert.match(leakReport(read)[1] ?? "", /c-locked: unreadable \(EACCES\)/);
+  } finally {
+    chmodSync(locked, 0o700);
+    await removeRunRoot(runRoot, base);
+  }
+});
+
+test("a tidy run and a directory holding only the runtime's caches report nothing and stay green; a leak is red by default and green under `report`", async () => {
+  const tidy = await leakerDir("policy-tidy", "/p/src/tidy.test.ts");
+  const cacheOnly = await enterFileDir({ runRoot: tidy.runRoot, testPath: "/p/src/cache.test.ts", projectRoot: "/p", env: {}, base: tidy.base });
+  for (const name of ["tsx-1000", "v8-compile-cache-1000", "node-compile-cache"]) mkdirSync(join(cacheOnly, name));
+  const written: string[] = [];
+  const write = (line: string) => written.push(line);
+  assert.deepEqual(await findLeaks(tidy.runRoot, tidy.base, { now: NOW }), []);
+  await finishRun({ runRoot: tidy.runRoot, base: tidy.base, env: {}, write });
+  assert.deepEqual(written, [], "nothing is said");
+  assert.equal(existsSync(tidy.runRoot), false);
+
+  const leaking = await leakerDir("policy-leak");
+  mkdirSync(join(leaking.dir, "left-behind"));
+  await assert.rejects(finishRun({ runRoot: leaking.runRoot, base: leaking.base, env: {}, write }), /1 test file\(s\) left something/);
+  assert.match(written.join("\n"), /src\/leaker\.test\.ts left 1 in its TMPDIR: left-behind; left-behind: empty directory, modified/);
+  assert.equal(existsSync(leaking.runRoot), false, "the run root is removed even when the run is red");
+
+  const reported = await leakerDir("policy-report");
+  mkdirSync(join(reported.dir, "left-behind"));
+  await finishRun({ runRoot: reported.runRoot, base: reported.base, env: { [LEAK_POLICY_ENV]: "report" }, write });
+});
+
 // ---- the behaviour, through real rstest runs -----------------------------------------------------------------------------------------------------------
 
 const LEAKER = `test("leaks a directory", () => { const fs = require("node:fs"), os = require("node:os"), path = require("node:path");
@@ -157,6 +269,7 @@ test("POSITIVE CONTROL: a file that leaves a directory is named with the entry, 
   const run = runFixture("leaker", { "leaky.fixture.test.js": LEAKER, "tidy.fixture.test.js": TIDY }, REPORT_ONLY);
   assert.equal(run.status, 0, run.output);
   assert.match(run.output, /leaky\.fixture\.test\.js left 1 in its TMPDIR: left-behind-dir/);
+  assert.match(run.output, /left-behind-dir: empty directory, modified \d+(ms|\.\ds) before the teardown/, "and says what it is and how old it was");
   assert.equal(run.output.includes("tidy.fixture.test.js left"), false, "the same kind of file with a removal is not named");
   assert.deepEqual(run.runs, [], "the run root is removed when the run ends");
 });

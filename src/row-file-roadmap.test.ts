@@ -11,6 +11,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createIssue, parentFromArgv, parentRef, roadmapFromArgv, roadmapItemsOf, roadmapFieldOf, withFiledBy, type RoadmapItem } from "./row-file.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 const HOME = { key: "", repo: "a11ign/a11ign", board: { owner: "a11ign", number: 1 } };
 const DECLARATION = { tracker: [HOME], code: [{ key: "", repo: "a11ign/a11ign" }],
@@ -31,6 +32,7 @@ function fakeBoard(options: { epicValue?: string | null; epicUnreadable?: boolea
   const items = new Map<string, RoadmapItem[]>([[EPIC, [{ id: "PVTI_epic", number: 1, owner: "a11ign", value: options.epicValue ?? null }]]]);
   const log = { spawned: [] as string[][], edits: [] as string[][], reads: [] as string[], stderr: "", stdout: "" };
   const run = (_cmd: string, args: string[]): string => {
+    if (readsRowsByLabel(args) !== null) return connectionOf([]); // #5039: the claimed rows' by-label read (the sweep window's, the blast radius's) -- none held
     if (args[0] === "project" && args[1] === "item-add") { items.set(ROW, [{ id: "PVTI_900", number: 1, owner: "a11ign", value: null }]); return ""; }
     if (args[0] === "project" && args[1] === "item-edit" && args.includes("--single-select-option-id")) {
       log.edits.push(args);

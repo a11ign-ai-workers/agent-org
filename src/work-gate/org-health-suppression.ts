@@ -51,11 +51,13 @@ export const ORG_HEALTH_CLASSES: Readonly<Record<string, { severity: "page"; } |
   "fleet-auto-off-refusing": PAGE,
   "release-run-failed": PAGE,
   "release-behind-main": PAGE,
+  "fleet-build-mixed-over-4h": PAGE,
   "api-pool-low": PAGE,
   "node-cannot-strip": PAGE,
   "github-incident": PAGE,
   "pane-stopped-at-a-prompt": PAGE,
   "class-repeat": PAGE,
+  "claim-refusal-storm": PAGE, // agent-org#889: more than 10 refusals in 15 minutes is no worker starting; PAGE because the storm blocks the worker that would fix it
   "hold-on-idle-row": PAGE, // #571: a hold the refusal could not stop; PAGE because each is one hold with a decision to take, and its key is stable per hold
   "ruling-not-taken": PAGE,
   "chairman-ask-raised-order": PAGE,

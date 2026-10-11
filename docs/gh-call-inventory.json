@@ -1,15 +1,15 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 98,
+    "files": 101,
     "spawns": 137,
-    "calls": 408,
+    "calls": 402,
     "shapes": {
-      "api rest": 145,
-      "issue list": 43,
-      "api graphql": 38,
+      "api rest": 150,
+      "api graphql": 41,
       "issue view": 34,
-      "pr list": 31,
+      "issue list": 30,
+      "pr list": 30,
       "issue comment": 27,
       "pr view": 17,
       "issue edit": 15,
@@ -220,7 +220,6 @@
         "api rest": 8,
         "issue create": 1,
         "issue edit": 2,
-        "issue list": 1,
         "label create": 1
       },
       "labels": [
@@ -664,7 +663,6 @@
         "api rest": 1,
         "issue comment": 4,
         "issue edit": 2,
-        "issue list": 1,
         "issue view": 2,
         "label create": 1,
         "project item-edit": 1
@@ -707,7 +705,6 @@
       "spawns": 0,
       "calls": {
         "api rest": 1,
-        "issue list": 1,
         "issue view": 1,
         "pr list": 1
       },
@@ -724,7 +721,6 @@
         "api rest": 1,
         "issue comment": 1,
         "issue edit": 1,
-        "issue list": 1,
         "issue view": 2,
         "label create": 1,
         "pr list": 1,
@@ -830,12 +826,10 @@
       "spawns": 0,
       "calls": {
         "issue comment": 1,
-        "issue list": 1,
         "issue view": 1,
         "pr list": 1
       },
       "labels": [
-        "$CLAIM_LABEL",
         "$SESSION_PREFIX"
       ],
       "parsesCloses": false
@@ -848,10 +842,19 @@
       "labels": [],
       "parsesCloses": false
     },
+    "src/ticket-port/approval-reads.ts": {
+      "spawns": 0,
+      "calls": {
+        "api rest": 2
+      },
+      "labels": [],
+      "parsesCloses": false
+    },
     "src/ticket-port/github-adapter.ts": {
       "spawns": 0,
       "calls": {
         "api graphql": 2,
+        "api rest": 2,
         "issue comment": 1,
         "issue edit": 1,
         "project item-edit": 1
@@ -869,12 +872,30 @@
       ],
       "parsesCloses": false
     },
+    "src/ticket-port/open-incidents.ts": {
+      "spawns": 0,
+      "calls": {
+        "api rest": 1
+      },
+      "labels": [],
+      "parsesCloses": false
+    },
     "src/ticket-port/open-pulls.ts": {
       "spawns": 0,
       "calls": {
         "pr list": 1
       },
       "labels": [],
+      "parsesCloses": false
+    },
+    "src/ticket-port/rows-by-label.ts": {
+      "spawns": 0,
+      "calls": {
+        "api graphql": 1
+      },
+      "labels": [
+        "$CLAIM_LABEL"
+      ],
       "parsesCloses": false
     },
     "src/trace/freshness.ts": {
@@ -1038,14 +1059,14 @@
     "src/work-gate.ts": {
       "spawns": 1,
       "calls": {
-        "api graphql": 2,
+        "api graphql": 4,
         "api rest": 15,
         "issue comment": 2,
         "issue create": 1,
-        "issue list": 9,
+        "issue list": 1,
         "label create": 1,
         "label list": 1,
-        "pr list": 4,
+        "pr list": 3,
         "pr ready": 1,
         "project item-add": 1,
         "project item-edit": 1,
@@ -1053,6 +1074,7 @@
       },
       "labels": [
         "$ANSWER_PREFIX",
+        "$ANSWER_ROW_LABELS",
         "$AWAITING_EVIDENCE_LABEL",
         "$BACKLOG_LABEL",
         "$BLOCKED_LABEL",
@@ -1060,6 +1082,7 @@
         "$CHAIRMAN_LABEL",
         "$CHAIRMAN_PRIORITY_LABEL",
         "$CLAIM_LABEL",
+        "$CLOSED_ANSWER_ROWS_PER_LABEL",
         "$EPIC_LABEL",
         "$LANE_PREFIX",
         "$NEEDS_CHAIRMAN_LABEL",
@@ -1069,6 +1092,7 @@
         "$PRIORITY_LABEL",
         "$READY_LABEL",
         "$RESOLVER_DEFECT_LABEL",
+        "$ROW_LABELS",
         "$SESSION_PREFIX",
         "fleet-gated"
       ],

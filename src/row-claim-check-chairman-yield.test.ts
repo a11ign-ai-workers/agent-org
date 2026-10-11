@@ -16,6 +16,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./lib/git-env.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 // THE PROJECT THIS RUNS AGAINST IS A RECORDED ONE, as `row-claim-chairman-yield.test.ts` does it: the host file first, the tool imported after it.
 const SCRATCH = mkdtempSync(join(tmpdir(), "row-claim-check-chairman-yield-"));
@@ -69,11 +70,12 @@ function fakeGh(world: World) {
     if (args[0] === "issue" && args[1] === "view") {
       return JSON.stringify({ number: ASKER, title: "A row", body: bodyOf(SHARED), state: "OPEN", labels: [{ name: "ready" }], blockedBy: { nodes: [] } });
     }
-    if (args[0] === "issue" && args[1] === "list" && args.includes("priority:chairman")) {
-      return JSON.stringify(Object.keys(world.labelled ?? {}).map((number) => ({ number: Number(number), labels: [{ name: "priority:chairman" }] })));
+    const byLabel = readsRowsByLabel(args);
+    if (byLabel?.label === "priority:chairman") {
+      return connectionOf(Object.keys(world.labelled ?? {}).map((number) => ({ number: Number(number), labels: [{ name: "priority:chairman" }] })));
     }
-    if (args[0] === "issue" && args[1] === "list" && args.includes("number,labels,body,blockedBy")) {
-      return JSON.stringify((world.claimed ?? []).map((row) => ({ number: row.number, labels: [{ name: "in-progress" }], body: bodyOf(...row.files), blockedBy: { nodes: [] } })));
+    if (byLabel?.label === "in-progress") {
+      return connectionOf((world.claimed ?? []).map((row) => ({ number: row.number, labels: [{ name: "in-progress" }], body: bodyOf(...row.files), blockedBy: { nodes: [] } })));
     }
     if (args[0] === "api") {
       const asked = /^repos\/[^/]+\/[^/]+\/issues\/(\d+)\/events$/.exec(args[1] ?? "");

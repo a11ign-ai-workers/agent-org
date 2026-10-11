@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { homeProjectDeclaration } from "./project-config.ts";
 import { BATCH_MAX_CALLS, readElsewherePrs, readOtherScopes, readScopeTrunkRed, readWithFirstWaveTogether, runBatch, scopesOf } from "./work-gate.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 type Call = { args: string[], repo: string | undefined };
 type Answer = { stdout: string } | { failed: true, stdout: string, stderr: string, status: number | null, code?: string };
@@ -31,6 +32,8 @@ const prOf = (repo: string) => ({ number: repo.length, isDraft: false, headRefOi
 /** What `gh` answers per call: a pull request named for its repository, so a lane that reads another repository's answer is visible. */
 function answerOf({ args, repo }: Call): string {
   if (args[0] === "pr") return JSON.stringify([prOf(repo ?? "primary")]);
+  // #5050: a label list is a GraphQL connection now; an empty one, as the plain `issue list` answers `[]`
+  if (readsRowsByLabel(args) !== null) return connectionOf([]);
   return "[]";
 }
 const failingRepo = (repo: string) => (call: Call) => call.repo === repo && call.args[0] === "pr";
@@ -88,8 +91,8 @@ test("the first reads of every other repository arrive in ONE batch, and the lan
   const batched = readOtherScopes(sequentialRun(through), fakeBatch(batches));
   assert.equal(batches.length, 1, "ONE batch");
   assert.deepEqual(through, [], "and nothing the rehearsal named reached the run on its own");
-  // #4899: a tracker's label lists are made from its open list, so they are not asked (none, where the declaration names no other tracker)
-  const folded = seen.filter((call) => call.args[0] === "issue" && call.args.includes("--label"));
+  // #4899: a tracker's label lists are made from its open list, so they are not asked (none, where the declaration names no other tracker); #5050: they are by-label connection reads
+  const folded = seen.filter((call) => readsRowsByLabel(call.args) !== null);
   assert.equal(batches[0].length, seen.length - folded.length, "every call the one-at-a-time read made went in it, but the label lists its open list answers");
   assert.deepEqual(batches[0].filter((call) => call.args[0] === "pr").map((call) => call.repo).sort(), OTHER_CODE.map((scope) => scope.code!.repo).sort(),
     "an open list per other code repository, each aimed at its own");

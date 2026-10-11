@@ -21,6 +21,7 @@ import { claimRow } from "../row-claim.ts";
 import { sparePathsFrom } from "../wake.ts";
 import { HOME_CHECKOUT } from "../project-config.ts";
 import { copyToolAndProject, importClosure, toolFile } from "./copied-tool-fixture.ts";
+import { connectionOf } from "./rows-by-label-fixtures.ts";
 
 const ROW = 2407;
 const REFUSAL = /one instance, one row/;
@@ -93,11 +94,12 @@ test("#2407 (3) POSITIVE CONTROLS through `claimRow`: a fresh spare claims, a st
 // the WORKING TREE, so a mutation made there is the one under test.
 const ROW_CLAIM_ENTRY = fileURLToPath(new URL("../row-claim.ts", import.meta.url));
 const SESSIONS_JSON = ".agent-org/roles/sessions.json";
-// `HELD_ROWS` is what `gh issue list --label session:<me>` answers: the rows the instance holds NOW.
+// `HELD_ROWS` is the connection's answer to the one by-label read the claim makes of every `in-progress` row (#5039, `gh api graphql ... -F label=in-progress`):
+// the rows the instance holds NOW, each carrying its `session:<me>` label, which the claim tells from other instances' rows by itself.
 const GH_READY_ROW = `#!/bin/sh
 case "$*" in
   *number,title,labels,state*) printf '%s' '{"number":${ROW},"title":"A row","state":"OPEN","labels":[{"name":"ready"}]}' ;;
-  *"issue list"*) printf '%s' "\${HELD_ROWS:-[]}" ;;
+  *"api graphql"*"label=in-progress"*) printf '%s' "\${HELD_ROWS}" ;;
   *) exit 1 ;;
 esac
 `;
@@ -156,7 +158,7 @@ function claimProcess(session: string, { registry = null, held = [] }: { registr
     return spawnSync(process.execPath, [entry, "claim", String(ROW), `--session=${session}`], {
       encoding: "utf8",
       env: { ...sandboxGitEnv(), ...env, HOME: dir, PATH: `${dir}:${process.env.PATH ?? ""}`, A11Y_POLICY_LAUNCH_REASON: "#2407 drives the CLI",
-        HELD_ROWS: JSON.stringify(held.map((number) => ({ number }))) },
+        HELD_ROWS: connectionOf(held.map((number) => ({ number, labels: [`session:${session}`, "in-progress"] }))) },
     });
   } finally {
     removeFixture(dir);

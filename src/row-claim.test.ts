@@ -24,6 +24,7 @@ import { tmpdir } from "node:os";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./lib/git-env.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 import { parseProjectDeclaration } from "./project-config.ts";
 import { REPO } from "./project-identity.ts";
 import { PROJECT_NUMBER, PROJECT_OWNER } from "./board-snapshot.ts";
@@ -103,8 +104,12 @@ function fakeGithub(seed: { first?: string[], second?: string[], bodies?: { firs
     if (cmd !== "gh") return fail(`${cmd} is not gh`);
     const flag = args.indexOf("--repo");
     const api = args[0] === "api" ? /^repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/labels$/.exec(args[args.indexOf("PUT") + 1] ?? "") : null;
-    const repo = flag >= 0 ? args[flag + 1] : api ? api[1] : null;
+    // The by-label read of the claimed rows (#5039) names its repository as `-F owner=` / `-F name=`, not `--repo`: record THAT, so "every read goes to the tracker's repository" stays a reading.
+    const argOf = (key: string) => args.find((a) => a.startsWith(`${key}=`))?.slice(key.length + 1);
+    const byLabel = readsRowsByLabel(args) !== null;
+    const repo = flag >= 0 ? args[flag + 1] : api ? api[1] : byLabel ? `${argOf("owner")}/${argOf("name")}` : null;
     calls.push({ args, repo });
+    if (byLabel) return connectionOf([]);
     const number = Number(api ? api[2] : args[2]);
     const issue = issues.get(`${repo}#${number}`);
     if (args[0] === "issue" && args[1] === "view") {
@@ -178,7 +183,7 @@ test("`claim` in a keyed tracker labels THAT tracker's issue, comments there and
   assert.deepEqual(moves.map((call) => call.args), [["project", "item-edit", String(SECOND_BOARD), "--owner", PROJECT_OWNER,
     "--url", `https://github.com/${SECOND_REPO}/issues/${ROW}`, "--field", "Status", "--value", "In progress"]],
   "ONE item-edit, on the tracker's board, for the tracker's issue");
-  assert.deepEqual(gh.calls.filter((call) => call.args[0] === "project" || call.args.includes("graphql")).length, 1,
+  assert.deepEqual(gh.calls.filter((call) => call.args[0] === "project" || (call.args.includes("graphql") && readsRowsByLabel(call.args) === null)).length, 1,
     "and no board snapshot: the snapshot reads the FIRST tracker's board, so one taken here would guard the wrong board");
 });
 
@@ -327,7 +332,8 @@ test("a tracker that declares NO board is claimed with its labels alone: no `gh 
   assert.equal((result as { notOnBoard: boolean }).notOnBoard, true, "a known, permitted gap: the CLI exits clean on it");
   assert.match((result as { statusReason: string }).statusReason, new RegExp(`^${NO_BOARD_DECLARED} \`agent-org\``));
   assert.ok(gh.second().labels.includes("in-progress") && gh.second().labels.includes(`session:${SESSION}`));
-  assert.deepEqual(gh.calls.filter((call) => call.args[0] === "project" || call.args.includes("graphql")), [], "no board call of any kind, so no board of the first tracker's either");
+  assert.deepEqual(gh.calls.filter((call) => call.args[0] === "project" || (call.args.includes("graphql") && readsRowsByLabel(call.args) === null)), [],
+    "no board call of any kind, so no board of the first tracker's either (the claimed rows' by-label read is a graphql call too, #5039, and is not a board)");
   assert.deepEqual(gh.first().labels, ["ready"]);
   assert.ok(said.some((line) => new RegExp(NO_BOARD_DECLARED).test(line)), "and it is said aloud, not only returned");
 });

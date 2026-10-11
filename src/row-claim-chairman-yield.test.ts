@@ -19,6 +19,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./lib/git-env.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 // THE PROJECT THIS RUNS AGAINST IS A RECORDED ONE, as `claimed-region-overlap.test.ts` does it: the host file first, the tool imported after it.
 const SCRATCH = mkdtempSync(join(tmpdir(), "row-claim-chairman-yield-"));
@@ -67,12 +68,13 @@ function fakeGh(world: World, calls: string[][] = []) {
       return JSON.stringify({ number: ASKER, title: "A row", body: bodyOf(SHARED), state: "OPEN", labels: [{ name: "ready" }],
         blockedBy: { nodes: (world.blockedBy ?? []).map((number) => ({ number, state: "OPEN" })) } });
     }
-    if (args[0] === "issue" && args[1] === "list" && args.includes("priority:chairman")) {
-      return JSON.stringify(Object.keys(world.labelled ?? {}).map((number) => ({ number: Number(number), labels: [{ name: "priority:chairman" }] })));
+    const byLabel = readsRowsByLabel(args);
+    if (byLabel?.label === "priority:chairman") {
+      return connectionOf(Object.keys(world.labelled ?? {}).map((number) => ({ number: Number(number), labels: [{ name: "priority:chairman" }] })));
     }
-    if (args[0] === "issue" && args[1] === "list" && args.includes("number,labels,body,blockedBy")) {
+    if (byLabel?.label === "in-progress") {
       if (world.claimedUnreadable) throw new Error("HTTP 502");
-      return JSON.stringify((world.claimed ?? []).map((row) => ({ number: row.number, labels: [{ name: "in-progress" }], body: bodyOf(...row.files),
+      return connectionOf((world.claimed ?? []).map((row) => ({ number: row.number, labels: [{ name: "in-progress" }], body: bodyOf(...row.files),
         blockedBy: { nodes: [] } })));
     }
     if (args[0] === "api") return history(world, args);
@@ -178,10 +180,11 @@ test("(8) with no overlap the claim does not read the chairman's rows at all", (
   const calls: string[][] = [];
   const { reason } = verdict({ labelled: { [ASKER]: CHAIRMAN }, claimed: [{ number: HOLDER, files: ["agent-org:src/elsewhere.ts"] }] }, calls);
   assert.equal(reason, null);
-  assert.deepEqual(calls.filter((args) => args.includes("priority:chairman") || args[0] === "api"), []);
+  // The claimed rows are now an `api graphql` read too (#5039), so it is told apart by the label it asks for: only the chairman's rows and the label history are not wanted.
+  assert.deepEqual(calls.filter((args) => readsRowsByLabel(args)?.label === "priority:chairman" || (args[0] === "api" && readsRowsByLabel(args) === null)), []);
   const overlapping = [] as string[][];
   verdict({ labelled: { [ASKER]: CHAIRMAN }, claimed: [{ number: HOLDER, files: [SHARED] }] }, overlapping);
-  assert.ok(overlapping.some((args) => args.includes("priority:chairman")), "the control: an overlap DOES ask, so the emptiness above is a reading");
+  assert.ok(overlapping.some((args) => readsRowsByLabel(args)?.label === "priority:chairman"), "the control: an overlap DOES ask, so the emptiness above is a reading");
 });
 
 test("(8) `sessionEligibilityReason` is the same verdict as `sessionEligibility`'s reason", () => {

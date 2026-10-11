@@ -6,7 +6,8 @@
  * without taking the label off, and it stood for hours after. `readChairmanBlocked` listed `number,title,updatedAt` and the daily reminder
  * covered the whole set, so an answered row and an unanswered one were indistinguishable.
  *
- * THE FAKE `gh` ANSWERS THE THREE READS THE REAL ONE IS ASKED, in the shape the reader's `--jq` projects them: the label list, the row's
+ * THE FAKE `gh` ANSWERS THE THREE READS THE REAL ONE IS ASKED, in the shape the reader's `--jq` projects them (the label list is a GraphQL connection since
+ * #5050, answered in its page shape): the label list, the row's
  * `labeled` events (one ISO time per line) and its comments (one `{author, at, body}` object per line). Every clock is a fixture, so none of
  * this can pass or fail by the hour it runs.
  *
@@ -16,6 +17,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { decide, readChairmanBlocked, chairmanReadsRefused, CHAIRMAN_LOGINS } from "./work-gate.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 const T0 = "2026-10-03T14:05:56Z"; // #3228 labelled
 const T1 = "2026-10-04T10:17:05Z"; // the chairman's session commented
@@ -31,8 +33,9 @@ type Row = { number: number, labelled: string[], comments: Comment[] };
 function fakeGh(rows: Row[], { refuse = [] as number[], listRefused = false } = {}) {
   return (args: string[]): string => {
     if (listRefused) throw new Error("gh: HTTP 403");
-    if (args[0] === "issue") {
-      return JSON.stringify(rows.map((r) => ({ number: r.number, title: `row ${r.number}`, updatedAt: T1 })));
+    // #5050: the label list is a GraphQL connection read (`readsRowsByLabel`), no longer an `issue list` -- the answer is the connection's page of the same rows.
+    if (readsRowsByLabel(args)?.label === "needs:chairman") {
+      return connectionOf(rows.map((r) => ({ number: r.number, title: `row ${r.number}`, updatedAt: T1 })));
     }
     const number = Number(/issues\/(\d+)\//.exec(args[1])?.[1]);
     if (refuse.includes(number)) throw new Error("gh: HTTP 403");

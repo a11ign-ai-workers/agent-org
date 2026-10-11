@@ -155,11 +155,11 @@ const refusalField = (extra: Record<string, unknown>) => {
 const SCHEDULER_APP = { mode: "github-apps", appId: "123456", keyPath: "/home/h/.config/agent-org/apps/a11ign-scheduler.pem" };
 
 test("#4900: a host that says nothing about `github` is `user-accounts` for every role, and an app on one role leaves the others there", () => {
-  const roles = ["scheduler", "workers", "managers"] as const;
-  assert.deepEqual(roles.map((r) => roleIdentity(parse({}), r).mode), ["user-accounts", "user-accounts", "user-accounts"]);
-  assert.deepEqual(roles.map((r) => roleIdentity(parse({ github: {} }), r).mode), ["user-accounts", "user-accounts", "user-accounts"]);
+  const roles = ["scheduler", "workers", "managers", "reviewer"] as const;
+  assert.deepEqual(roles.map((r) => roleIdentity(parse({}), r).mode), ["user-accounts", "user-accounts", "user-accounts", "user-accounts"]);
+  assert.deepEqual(roles.map((r) => roleIdentity(parse({ github: {} }), r).mode), ["user-accounts", "user-accounts", "user-accounts", "user-accounts"]);
   const mixed = parse({ github: { identity: { scheduler: SCHEDULER_APP, workers: { mode: "user-accounts" } } } });
-  assert.deepEqual(roles.map((r) => roleIdentity(mixed, r).mode), ["github-apps", "user-accounts", "user-accounts"], "the per-role mix");
+  assert.deepEqual(roles.map((r) => roleIdentity(mixed, r).mode), ["github-apps", "user-accounts", "user-accounts", "user-accounts"], "the per-role mix");
   assert.deepEqual(roleIdentity(mixed, "scheduler"), SCHEDULER_APP);
 });
 

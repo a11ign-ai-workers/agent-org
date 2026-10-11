@@ -382,7 +382,7 @@ test("the primary's instance is byte-identical to before: seat, fetch root, ref,
   const prompt = withReviewCheckout({ session: "reviewer-6", prompt: "p" }, { path: "/r/reviewer-6", head: HEAD }, 6).prompt;
   assert.ok(prompt.endsWith("post the verdict as `A11Y_REVIEWER_SESSION=reviewer-6 $HOME/reviewer/bin/pr-review-verdict <n> <convinced|not-convinced> <file>` "
     + "and the verdict line's `by` names you."), "the door line is the one it always was, with nothing after it");
-  assert.deepEqual(Object.keys(reviewerEnvironment("reviewer-6")).sort(), ["A11Y_REVIEWER_SESSION", "GH_CONFIG_DIR", "npm_config_cache"]);
+  assert.deepEqual(Object.keys(reviewerEnvironment("reviewer-6")).sort(), ["A11Y_REVIEWER_SESSION", "AGENT_ORG_GH_ROLE", "GH_CONFIG_DIR", "npm_config_cache"]);
 });
 
 // --- (4) NOBODY OWNS IT -----------------------------------------------------------------------------------------------------------
