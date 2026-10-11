@@ -41,6 +41,7 @@ export { verdictAmong };
 import { waitingOn, fleetWaitingOn, todayIso, describeWaiting, ANSWER_PREFIX, answersOwedBy, bareAnswerLabel, answersGiven, ANSWER_GIVEN_WINDOW_MS }
   from "./waiting-condition.ts";
 import { newestPerName } from "./newest-check-run.ts";
+import { sharedFailureTick, type RedPr } from "./ci-failure-class.ts";
 import { reviewerInstance, subjectIdentity, subjectMention, subjectRef } from "./review-attribution.ts";
 // B4, ASKED EARLY. These are the SAME two functions `row-claim.ts` runs at claim time, imported
 // rather than reimplemented: `region-paths.ts`'s own header records why a second copy of "what
@@ -7811,6 +7812,20 @@ export function githubIncidentOrder(incident: GithubIncident, held: { subject: s
   }];
 }
 
+/** The open PRs with a red Actions check, in the shape `ci-failure-class.ts` reads: `ref` is the order's own subject. */
+function redPrsOf(prs: any[]): RedPr[] {
+  return prs.map((pr) => ({
+    ref: `pr-${subjectRef(pr.repoKey, pr.number)}`, repo: pr.repo ?? repoNow(), number: pr.number,
+    checks: newestPerName(pr.statusCheckRollup ?? []).filter((c: any) => ["FAILURE", "TIMED_OUT"].includes(String(c.conclusion).toUpperCase()) && ACTIONS_JOB_URL.test(String(c.detailsUrl ?? "")))
+      .map((c: any) => ({ name: String(c.name), detailsUrl: String(c.detailsUrl), completedAt: c.completedAt })),
+  })).filter((pr) => pr.checks.length > 0);
+}
+
+/** `ci-failure-class.ts`'s `sharedFailureTick`, on this tick's open PRs. Never throws. */
+function sharedFailuresNow(orders: any[], prs: any[]): any[] {
+  return sharedFailureTick(orders, { prs: redPrsOf(prs), run: defaultRun }).orders;
+}
+
 /**
  * The tick's end of it: collect the reading, say it on stderr (its wall is the cost of the call, per tick), hold what a runner outage holds, and return the
  * signal beside what remains. `required` is the primary's, so only a pull request of the primary's repository is read against it.
@@ -7818,7 +7833,8 @@ export function githubIncidentOrder(incident: GithubIncident, held: { subject: s
 function holdForIncidentNow(status: { settle: () => GithubIncident; }, orders: any[], facts: { prs: any[]; required: string[] | null; }) {
   const incident = status.settle();
   const wall = incident.wallMs === undefined ? "wall not read" : `${incident.wallMs} ms`;
-  const { orders: kept, held } = holdForGithubIncident(orders, incident, facts);
+  const { orders: runnerKept, held } = holdForGithubIncident(orders, incident, facts);
+  const kept = sharedFailuresNow(runnerKept, facts.prs); // a11ign#5008: a failure SHARED by open PRs is one incident row and no wake each; a merged fix refreshes them
   if (incident.state === "unknown") process.stderr.write(`github-status: UNKNOWN (${incident.why}; ${wall}) -- nothing is held, the gate reads as it always did.\n`);
   else if (incident.state === "clear") process.stderr.write(`github-status: operational (call ${wall}).\n`);
   else process.stderr.write(`GITHUB INCIDENT: ${incident.name} (call ${wall}); holding ${held.length} runner-start order(s)${held.map((h) => ` ${h.subject}`).join("")}.\n`);
