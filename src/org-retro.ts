@@ -59,6 +59,8 @@ import { HAIKU_TIER_LABEL } from "./worker-profile.ts";
 // THE "UNDERSPECIFIED" FEEDBACK LOOP (a11ign#5117): a leaf, so the retro stays importable before any install.
 import { underspecifiedLines, underspecifiedReading, underspecifiedStops, type UnderspecifiedReading } from "./spec-lint.ts";
 import { commentsSince } from "./ticket-port/comments-since.ts";
+import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: the claimed rows and the merged list are connections, never a search
+import { asListJson, readMergedPullRequests, SINCE_PAGE_SIZE, WindowCutShort } from "./ticket-port/rows-since.ts";
 
 /** The cause this file feeds (`cause-declaration.ts` declares it), addressed to `ceo`. */
 export const RETRO_CAUSE = "org-retrospective";
@@ -129,10 +131,32 @@ export function mergedStats(merged: { number: number; createdAt: string; mergedA
  */
 export const MERGED_READ_LIMIT = 1000;
 
-/** @param {string} repo @param {number} since @returns {string[]} the `gh` arguments: `-R` NAMES the repository, since a read with none answers for the working directory's alone */
-export function mergedPrsArgs(repo: string, since: number): string[] {
-  return ["pr", "list", "-R", repo, "--state", "merged", "--search", `merged:>=${new Date(since).toISOString()}`, "--limit", String(MERGED_READ_LIMIT), "--json", "number,createdAt,mergedAt"];
+/** What a merged-list read says when the window did not fit {@link MERGED_READ_LIMIT}: the rows past it were not seen, so the count is `unknown` and `limitHit` says why. */
+export const MERGED_LIMIT_HIT = "limit-hit";
+
+/**
+ * One repository's merged pull requests since `since`, as the connection gives them (#5076: `pr list -R repo --search merged:>=` was a GitHub SEARCH). `-R` NAMED the repository
+ * because a read with none answers for the working directory's alone; the connection names it in its variables. {@link MERGED_LIMIT_HIT} for a window of more than the limit.
+ * @param {string} repo @param {number} since @param {(args: string[]) => any} [read] the seam: parsed JSON, `null` when refused
+ */
+export function readMergedSince(repo: string, since: number, read: (args: string[]) => any = ghJson): any[] | null | typeof MERGED_LIMIT_HIT {
+  try {
+    return readMergedPullRequests({ repo, select: "number createdAt", run: runThrough(read), window: { since: new Date(since).toISOString(), maxPages: MERGED_READ_LIMIT / SINCE_PAGE_SIZE } }) as any[];
+  } catch (error) {
+    return error instanceof WindowCutShort ? MERGED_LIMIT_HIT : null; // any other failure is `unknown`: a refused read, a payload that was not a connection
+  }
 }
+
+/**
+ * The connection readers take a `run` that answers text; this file's seam answers parsed JSON and `null` for a refusal, so the text is its re-serialisation and a refusal is a
+ * THROW, the reader's own "could not read" (the cause is not narrated per read, as `ghJson` says).
+ * @param {(args: string[]) => any} read @returns {(args: string[]) => string}
+ */
+const runThrough = (read: (args: string[]) => any) => (args: string[]): string => {
+  const answer = read(args);
+  if (answer === null) throw new Error("the read was refused");
+  return JSON.stringify(answer);
+};
 
 /**
  * THE REPOSITORIES WHOSE MERGES ARE COUNTED: the project's primary plus every `dora` entry, the primary first and once (#3593). The primary leads because the
@@ -148,11 +172,11 @@ export function mergedPopulation({ repo, dora }: { repo: string; dora: { repo: s
  * @param {{ declaration: Parameters<typeof mergedPopulation>[0], since: number, readPrs?: (repo: string, since: number) => any[] | null }} input
  * @returns {{ repo: string, prs: any[] | null, limitHit: boolean }[]}
  */
-export function readMerged({ declaration, since, readPrs = (repo, from) => ghJson(mergedPrsArgs(repo, from)) }: { declaration: Parameters<typeof mergedPopulation>[0]; since: number; readPrs?: (repo: string, since: number) => any[] | null; }): { repo: string; prs: any[] | null; limitHit: boolean; }[] {
+export function readMerged({ declaration, since, readPrs = (repo, from) => readMergedSince(repo, from) }: { declaration: Parameters<typeof mergedPopulation>[0]; since: number; readPrs?: (repo: string, since: number) => any[] | null | typeof MERGED_LIMIT_HIT; }): { repo: string; prs: any[] | null; limitHit: boolean; }[] {
   return mergedPopulation(declaration).map((repo) => {
-    const prs = readPrs(repo, since);
-    const limitHit = prs !== null && prs.length >= MERGED_READ_LIMIT;
-    return { repo, prs: limitHit ? null : prs, limitHit };
+    const read = readPrs(repo, since);
+    const limitHit = read === MERGED_LIMIT_HIT || (read !== null && read.length >= MERGED_READ_LIMIT);
+    return { repo, prs: limitHit ? null : (read as any[] | null), limitHit };
   });
 }
 
@@ -1008,10 +1032,23 @@ function claimedBranchOf(comments: { body?: string }[]): string | null {
 /** An open row of one tracker. `claimedAt` is present only on a row carrying the claim label (#4957): the newest claim record's own time, `null` when it could not be dated. */
 type TrackerRow = OpenRow & { claimedAt?: number | null; };
 
+/**
+ * One tracker's open rows carrying the claim label, each with its comments (the claim record is one): `repository.issues(labels:)`, a connection, because `--label` was sent
+ * as a GitHub SEARCH (#5076). `null` when refused or when the list may be cut short, as {@link listRead} says.
+ */
+function readClaimedWithComments({ repo, read }: { repo: string; read: (args: string[]) => any; }): any[] | null {
+  try {
+    const rows = readRowsByLabel({ label: CLAIM_LABEL, state: "OPEN", repo, select: "number comments(first:100){nodes{body createdAt}}", run: runThrough(read) });
+    return rows.length >= LIST_LIMIT ? null : rows.map(asListJson);
+  } catch {
+    return null; // a refused read is `unknown`, as `ghJson` says
+  }
+}
+
 /** One tracker's open rows, each with its claim record's branch (and, for a claimed one, its claim's time). `null` when either list was refused. */
 function readOpenRows({ repo, read }: { repo: string; read: (args: string[]) => any[] | null; }): TrackerRow[] | null {
   const open = listRead(read, ["issue", "list", "-R", repo, "--state", "open", "--limit", String(LIST_LIMIT), "--json", "number,labels"]);
-  const claimed = listRead(read, ["issue", "list", "-R", repo, "--state", "open", "--label", CLAIM_LABEL, "--limit", String(LIST_LIMIT), "--json", "number,comments"]);
+  const claimed = readClaimedWithComments({ repo, read });
   if (open === null || claimed === null) return null;
   const claims = new Map<number, any[]>(claimed.map((row) => [row.number, row.comments ?? []]));
   return open.map((row) => ({ repo, number: row.number, labels: (row.labels ?? []).map((l: any) => (typeof l === "string" ? l : l?.name)),
@@ -1021,7 +1058,13 @@ function readOpenRows({ repo, read }: { repo: string; read: (args: string[]) => 
 
 /** One code repository's pull requests merged since `since`, with the files each touched (agent-org#839 reads the `.acceptance/` one): the ONE call site of that list. `null` when refused. */
 function readMergedPrs({ repo, since, read }: { repo: string; since: number; read: (args: string[]) => any[] | null; }): any[] | null {
-  return listRead(read, ["pr", "list", "-R", repo, "--state", "merged", "--search", `merged:>=${new Date(since).toISOString()}`, "--limit", String(LIST_LIMIT), "--json", "number,body,headRefName,mergedAt,mergeCommit,files"]);
+  try {
+    const rows = readMergedPullRequests({ repo, select: "number body headRefName mergeCommit{oid} files(first:100){nodes{path}}", run: runThrough(read),
+      window: { since: new Date(since).toISOString(), maxPages: LIST_LIMIT / SINCE_PAGE_SIZE } }); // #5076: a connection read, not `--search merged:>=` (a GitHub SEARCH)
+    return rows.length >= LIST_LIMIT ? null : rows;
+  } catch {
+    return null; // a refused read, or a window the pages did not hold, is `unknown`
+  }
 }
 
 /** One code repository's merged (since the look-back) and open pull requests, tagged with the repository. `null` when either list was refused. */

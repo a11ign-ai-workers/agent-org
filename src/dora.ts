@@ -47,6 +47,8 @@ import { readFileSync, realpathSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { sandboxGitEnv } from "./lib/git-env.ts";
 import { isShipped, noReleaseReason } from "./release-behind-main.ts";
+import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: the regression rows and the merged list are connections, never a search
+import { readMergedPullRequests, SINCE_PAGE_SIZE } from "./ticket-port/rows-since.ts";
 
 /** What an unreadable source prints. Never `0`. */
 export const UNKNOWN = "unknown";
@@ -954,7 +956,9 @@ function run(command: string, args: string[], env?: Record<string, string | unde
 }
 
 /** @param {string[]} args @returns {any} */
-const ghJson = (args: string[]): any => JSON.parse(run("gh", args));
+/** The ONE place this file's `run` is handed `gh` for a list read: the text of the answer. The connection readers of `ticket-port/` take it as their `run`. */
+const ghText = (args: string[]): string => run("gh", args);
+const ghJson = (args: string[]): any => JSON.parse(ghText(args));
 
 /**
  * The ONE parent of every commit this process has read, keyed `repo@sha` (a commit's parents never change, so it is never stale): `null` for a commit with none or with two.
@@ -1101,6 +1105,23 @@ function promotionRecords(repository: Repository & { release: { kind: "npm"; pac
   return promotionRecordsFrom({ releases, latest: latestTag(npmPackage), npmPackage });
 }
 
+/** The most `regression` rows one read returns, as `gh issue list --state all --limit` was. */
+const REGRESSION_ROWS_LIMIT = 200;
+
+/**
+ * The newest {@link REGRESSION_ROWS_LIMIT} rows labelled `regression`, open and closed, in `gh issue list --json` shape. #5076: `--label` was sent as a GitHub SEARCH;
+ * the open and the closed rows are two `repository.issues(labels:)` connection reads, merged and cut at the same newest-created window `--state all --limit` gave.
+ * A read that fails THROWS, which `regressions` already turns into `unknown`.
+ * @param {string} repo @returns {any[]}
+ */
+function regressionRowsOf(repo: string): any[] {
+  const select = "number createdAt closedAt closedByPullRequestsReferences(first:10){nodes{number repository{name owner{login}}}}";
+  const asked = { label: "regression", select, run: ghText, repo };
+  const rows = [...readRowsByLabel({ ...asked, state: "OPEN" }), ...readRowsByLabel({ ...asked, state: "CLOSED", newest: REGRESSION_ROWS_LIMIT })];
+  return rows.sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt)).slice(0, REGRESSION_ROWS_LIMIT)
+    .map((row) => ({ ...row, closedByPullRequestsReferences: row.closedByPullRequestsReferences?.nodes ?? [] }));
+}
+
 /**
  * The `regression` rows of a repository, `[]` for one whose issues are DISABLED (it has no rows and can have none: `gh issue list` refuses it, which would
  * read as `unknown` for every metric of a repository that only exists to hold code, #3171). A failed read of the setting itself throws, and is refused.
@@ -1108,17 +1129,29 @@ function promotionRecords(repository: Repository & { release: { kind: "npm"; pac
  */
 function regressionRows(repo: string, since: string): Regression[] {
   if (ghJson(["repo", "view", repo, "--json", "hasIssuesEnabled"]).hasIssuesEnabled !== true) return [];
-  return ghJson(["issue", "list", "-R", repo, "--label", "regression", "--state", "all", "--limit", "200",
-    "--json", "number,createdAt,closedAt,closedByPullRequestsReferences"]).map((row: any) => ({
+  return regressionRowsOf(repo).map((row: any) => ({
     number: row.number, openedAt: row.createdAt, closedAt: row.closedAt ?? null,
     ...(row.closedAt && row.closedAt >= since ? fixOf(repo, row.closedByPullRequestsReferences ?? []) : { fixCommit: null, fixMergedAt: null }),
   }));
 }
 
+/** The most merged pull requests one read returns, as `gh pr list --limit` was (a window with more is refused; `since: null` is the newest of them). */
+const MERGED_PRS_LIMIT = 1000;
+
+/**
+ * The repository's merged pull requests since `since` (all of them, newest first, when `null`), in `gh pr list --json` shape. #5076: a connection read, not `--search merged:>=`,
+ * which GitHub sends as a SEARCH. A window of more than {@link MERGED_PRS_LIMIT} merges THROWS, so a count is never a quiet undercount.
+ * @param {string} repo @param {string | null} since @returns {any[]}
+ */
+function mergedPullRequestsOf(repo: string, since: string | null): any[] {
+  const select = "number mergeCommit{oid} files(first:100){nodes{path}} body";
+  const asked = { repo, select, run: ghText };
+  return readMergedPullRequests({ ...asked, window: since === null ? { newest: MERGED_PRS_LIMIT } : { since, maxPages: MERGED_PRS_LIMIT / SINCE_PAGE_SIZE } });
+}
+
 export const githubReaders: Readers = {
   releases: (repository, window) => (repository.release.kind === "npm" ? npmReleases((repository as any), window) : tagReleases(repository, window)),
-  mergedPrs: (repository, { since }) => ghJson(["pr", "list", "-R", repository.repo, "--state", "merged", ...(since === null ? [] : ["--search", `merged:>=${since}`]),
-    "--limit", "1000", "--json", "number,mergedAt,mergeCommit,files,body"]).map((pr: any) => ({
+  mergedPrs: (repository, { since }) => mergedPullRequestsOf(repository.repo, since).map((pr: any) => ({
     number: pr.number, mergedAt: pr.mergedAt, mergeCommit: pr.mergeCommit?.oid ?? null, paths: Array.isArray(pr.files) ? pr.files.map((f: any) => f.path) : null, body: pr.body ?? null,
   })),
   regressions: (repository, { since }) => regressionRows(repository.repo, since),

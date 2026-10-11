@@ -25,6 +25,8 @@
 // A LEAF: relative imports of leaves only, like `org-retro.ts`, which imports it and runs before any install.
 import { execFileSync } from "node:child_process";
 import { READY_LABEL } from "./claim-labels.ts";
+import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: the ready list is a connection, never a search
+import { asListJson } from "./ticket-port/rows-since.ts";
 import { HOLD_LABEL_PREFIX } from "./idle-claimant.ts";
 import { LANE_PREFIX, NEEDS_CHAIRMAN_LABEL } from "./project-vocabulary.ts";
 import { HAIKU_TIER_LABEL } from "./worker-profile.ts";
@@ -174,13 +176,15 @@ function gh(args: string[]): string {
 }
 
 /**
- * THE REAL READER of one declared tracker: one issue list of its open `ready` rows, carrying the fields read. A failure throws; `untieredReadyRows` names it.
+ * THE REAL READER of one declared tracker: its open `ready` rows (a connection read, #5076), carrying the fields read. A failure throws; `untieredReadyRows` names it.
  * @param {{ key: string, repo: string }} tracker `repo` is `owner/name` @param {(args: string[]) => string} [run] @returns {TrackerReader}
  */
 export function ghReadyReader({ key, repo }: { key: string; repo: string; }, run: (args: string[]) => string = gh): TrackerReader {
   return {
     key,
     repo,
-    listRows: () => JSON.parse(run(["issue", "list", "--repo", repo, "--state", "open", "--label", READY_LABEL, "--limit", String(ROW_LIST_LIMIT), "--json", "number,title,body,labels,comments"])),
+    // #5076: `repository.issues(labels:)`, a connection -- `gh issue list --label` was sent as a GitHub SEARCH. `asListJson` gives back the `gh issue list --json` shape.
+    listRows: () => readRowsByLabel({ label: READY_LABEL, state: "OPEN", repo, run,
+      select: "number title body labels(first:50){nodes{name}} comments(first:100){nodes{body}}" }).map(asListJson) as ReadyRow[],
   };
 }

@@ -116,6 +116,7 @@ import { refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { CLAIM_LABEL } from "./claim-labels.ts";
 import { labelsToStrip, stripClaimLabelsVia } from "./claim-label-strip.ts";
 import { REPO } from "./project-identity.ts";
+import { readRowsSince } from "./ticket-port/rows-since.ts"; // #5076: the verify-row lookup is a connection read, never a search
 // #2202: `waiting-condition.ts` imports NOTHING, so it is import-safe under this header's no-`pnpm install`/no-build
 // constraint for the same reason `claim-labels.ts` is: it cannot be part of a cycle.
 import { answersOwedBy, ANSWER_PREFIX } from "./waiting-condition.ts";
@@ -784,6 +785,9 @@ function announceBodyPlan(number: string, { basis, declared, unreadable }: { bas
   for (const n of unreadable) console.log(`CLOSE-ROWS: #${n} COULD NOT BE READ -- declared, not closed.`);
 }
 
+/** How many of the newest rows (open and closed) the verify-row lookup reads: two pages of a hundred. */
+const VERIFY_ROW_WINDOW = 200;
+
 /**
  * #4641: THE LIVE EFFECTS OF THE VERIFY ROW, named in one place for the reason `liveClosureEffects` gives. Each is the platform's own act
  * (`gh issue create`, `--add-blocked-by`, the sub-issues API); boarding is `row-file --board=`, which refuses a row with no Region, and that refusal is returned, not hidden.
@@ -794,9 +798,11 @@ export function liveVerifyEffects(repo: string): VerifyEffects {
   const idOf = (n: number) => gh(["api", `repos/${repo}/issues/${n}`, "--jq", ".id"]);
   return {
     findExisting: (build) => {
-      const found: { number: number; title: string; body: string; }[] = JSON.parse(gh(["issue", "list", "--repo", repo, "--state", "all", "--limit", "50",
-        "--search", `"Verify ${build.title}" in:title`, "--json", "number,title,body"]));
-      return found.find((row) => row.body.includes(verifyMarker(build.number)))?.number ?? null;
+      // #5076: the NEWEST rows, open and closed, matched by the build's marker. `--search "Verify <title>" in:title` was sent as a GitHub SEARCH, whose allowance the
+      // installation spent. THE PRICE: a verify row older than the newest VERIFY_ROW_WINDOW rows is not seen; the lookup exists for the re-run of a close
+      // that already filed one, and that row is as new as the merge. A read that fails THROWS, and `filePlan` files nothing on it.
+      const found = readRowsSince({ run: gh, ask: { kind: "issues", states: ["OPEN", "CLOSED"], orderBy: "CREATED_AT", repo, select: "number body", newest: VERIFY_ROW_WINDOW } });
+      return found.find((row) => String(row.body ?? "").includes(verifyMarker(build.number)))?.number ?? null;
     },
     create: (plan) => {
       const labels = plan.labels.flatMap((label) => ["--label", label]);

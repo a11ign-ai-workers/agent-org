@@ -73,6 +73,7 @@ import { closurePlan, planClosesNone, stripClaimLabels, closeRowsExit, LIVE_SETT
   from "./close-rows-for-merged-pr.ts";
 import type { BuildRow, VerifyEffects } from "./verify-row.ts";
 import { settleClosedStatus } from "./settle-closed-status.ts";
+import { readMergedPullRequests } from "./ticket-port/rows-since.ts"; // #5076: the merged list is a connection, never a search
 
 export type Refusal = import("./settle-closed-status.ts").Refusal;
 export type SettleOutcome = import("./settle-closed-status.ts").SettleOutcome;
@@ -87,8 +88,8 @@ const gh = (args: string[]) => execFileSync("gh", args, { encoding: "utf8" }).tr
 const graphqlRead = (gh_: (args: string[]) => string, query: string, jq: string): string => gh_(["api", "graphql", "-f", `query=${query}`, "--jq", jq]);
 
 /**
- * Every PR merged into `main` within the last `windowMinutes`, via GitHub's own search -- never inferred
- * from a commit range. `gh_` is injectable so this is testable without a live repo.
+ * Every PR merged into `main` within the last `windowMinutes`, from GitHub's own list of merged pull requests (a connection read, #5076: `--search merged:>=` was a
+ * GitHub SEARCH, whose allowance the installation spent) -- never inferred from a commit range. `gh_` is injectable so this is testable without a live repo.
  * @param {string} repo
  * @param {number} windowMinutes
  * @param {(args: string[]) => string} [gh_]
@@ -96,9 +97,7 @@ const graphqlRead = (gh_: (args: string[]) => string, query: string, jq: string)
  */
 export function mergedPrsInWindow(repo: string, windowMinutes: number, gh_: (args: string[]) => string = gh): { number: number; }[] {
   const since = new Date(Date.now() - windowMinutes * 60_000).toISOString();
-  const out = gh_(["pr", "list", "--repo", repo, "--state", "merged", "--base", "main", "--limit", "100",
-    "--search", `merged:>=${since}`, "--json", "number"]);
-  return JSON.parse(out);
+  return readMergedPullRequests({ repo, select: "number", run: gh_, base: "main", window: { since } }).map((pr) => ({ number: Number(pr.number) }));
 }
 
 /**

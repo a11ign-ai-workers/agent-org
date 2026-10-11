@@ -154,8 +154,11 @@ const COVERED = [
   "row-claim.ts", "sweep-window.ts", "ci-failure-class.ts",
   // #5050: the gate. `work-gate.ts` is where eleven of them were; the other two list nothing with a flag and stay walked so the first one added is seen.
   "work-gate.ts", "queue-table.ts", "work-tick.ts",
-  // #5074: the tick's wake and the filing tool. The rest of the table in the row (`ready-label-audit.ts`, `board-data.ts`, ...) is the row after it.
+  // #5074: the tick's wake and the filing tool.
   "wake.ts", "row-file.ts",
+  // #5076: the twelve other readers of the table in #5074 (`fleet-gated-nightly.ts`, which lists through `work-gate.ts`'s selector, is its own row).
+  "ready-label-audit.ts", "untiered-ready-rows.ts", "board-snapshot.ts", "board-data.ts", "close-rows-sweep.ts", "close-rows-for-merged-pr.ts", "hand-fix-ledger.ts", "dora.ts",
+  "org-retro.ts", "provider-low-confidence.ts", "messaging/watch.ts", "trace/haiku-tier-report.ts",
   ...readdirSync(join(SRC, "work-gate")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `work-gate/${f}`),
   ...readdirSync(join(SRC, "row-claim")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `row-claim/${f}`),
   ...readdirSync(join(SRC, "ticket-port")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `ticket-port/${f}`),

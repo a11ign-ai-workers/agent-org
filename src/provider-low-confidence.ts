@@ -14,6 +14,7 @@
 // THE PROVIDER IS OPTIONAL (chairman, #4627). With no `jev` provider declared, no key or the question's use switched off, nothing is filed and nothing is asked of `gh`: `uses` is empty and the
 // first thing `fileLowConfidence` does is return. No Jev-specific code lives here beyond the declared provider's name, which `provider-confidence.ts` reads the same way.
 import { readFileSync, realpathSync } from "node:fs";
+import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: the class rows are a connection read, never a search
 import { pathToFileURL } from "node:url";
 import { flagValue, refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { confidenceReading, DEFAULT_WINDOW_MS, formatConfidenceReading, parseWindow, type ConfidenceReading, type ConfidenceRow } from "./provider-confidence.ts";
@@ -154,11 +155,12 @@ type Tracked = { number: number; title: string; state: string; closedAt: string 
 
 const messageOf = (err: unknown): string => String((err as { message?: unknown })?.message ?? err).split("\n")[0].slice(0, 200);
 
-/** The rows of the class, open and closed. A listing that filled `LIST_LIMIT` may have been cut short and is refused, never read as the whole. */
+/** The rows of the class, open and closed. A listing of `LIST_LIMIT` or more is refused, never read as the whole: it is the population the filing's duplicate check may not guess at. */
 function listTracked(run: Gh, repo: string): Tracked[] | { unreadable: string } {
   try {
-    const rows = JSON.parse(run(["issue", "list", "--repo", repo, "--label", CLASS_LABEL, "--state", "all", "--limit", String(LIST_LIMIT), "--json", "number,title,state,closedAt"]));
-    if (!Array.isArray(rows)) return { unreadable: "the tracker's listing was not a list" };
+    // #5076: `repository.issues(labels:)` for each state, a connection -- `--label` was sent as a GitHub SEARCH. `readRowsByLabel` throws for a read that is not a list.
+    const asked = { label: CLASS_LABEL, select: "number title state closedAt", repo, run };
+    const rows = [...readRowsByLabel({ ...asked, state: "OPEN" }), ...readRowsByLabel({ ...asked, state: "CLOSED" })];
     if (rows.length >= LIST_LIMIT) return { unreadable: `the listing filled its ${LIST_LIMIT}-row limit and may be cut short` };
     return rows as Tracked[];
   } catch (err) {
