@@ -983,7 +983,7 @@ function readOpenRows({ repo, read }: { repo: string; read: (args: string[]) => 
 
 /** One code repository's pull requests merged since `since`, with the files each touched (agent-org#839 reads the `.acceptance/` one): the ONE call site of that list. `null` when refused. */
 function readMergedPrs({ repo, since, read }: { repo: string; since: number; read: (args: string[]) => any[] | null; }): any[] | null {
-  return listRead(read, ["pr", "list", "-R", repo, "--state", "merged", "--search", `merged:>=${new Date(since).toISOString()}`, "--limit", String(LIST_LIMIT), "--json", "number,body,headRefName,mergedAt,files"]);
+  return listRead(read, ["pr", "list", "-R", repo, "--state", "merged", "--search", `merged:>=${new Date(since).toISOString()}`, "--limit", String(LIST_LIMIT), "--json", "number,body,headRefName,mergedAt,mergeCommit,files"]);
 }
 
 /** One code repository's merged (since the look-back) and open pull requests, tagged with the repository. `null` when either list was refused. */
@@ -1009,24 +1009,33 @@ export function readMergedRowOpen({ now, declaration = homeProjectDeclaration(),
 }
 
 /** The path a pull request ADDED under `.acceptance/` (ADR 0044): the file CI reads, so a later body edit cannot change what it declared. */
-const ACCEPTANCE_FILE = /^\.acceptance\/[^/]+\.md$/;
+const ACCEPTANCE_FILE = /^\.acceptance\/[A-Za-z0-9_.~-]+\.md$/;
+const COMMIT_OID = /^[0-9a-f]{40}$/;
+
+/**
+ * One file AS THE MERGE LEFT IT: the contents API at the merge commit, so a later pull request that edits or deletes the acceptance file cannot change what an earlier one declared
+ * (agent-org#938 review). It is `lookupConsumerFile`'s optional `ref`, so it adds no `gh` call site. `null` when the commit is absent or malformed, or the file could not be read.
+ */
+function readFileAt({ repo, path, oid, readFile }: { repo: string; path: string; oid: unknown; readFile: (repo: string, path: string, ref?: string) => string | null; }): string | null {
+  return typeof oid === "string" && COMMIT_OID.test(oid) ? readFile(repo, path, oid) : null;
+}
 
 /**
  * THE LIVE READ OF THE OPTIONS A MERGED PULL REQUEST DECLARED AS A CONSUMER'S TO SET (agent-org#839): every declared code repository's merged pull requests of the look-back, each with the
  * text of the `.acceptance/` file it touched, against the consumer's file on its default branch. `null` when a list was refused (`unknown`, never 0). A pull request whose acceptance file
- * could not be read carries `acceptanceText: null`, which the leaf reports as unknown. The pure decision is `inert-option-incident.ts`'s. `read` and `readFile` are the seams (`ghJson` and
+ * could not be read carries `acceptanceText: null`, which the leaf reports as unknown. The pure decision is `inert-option-incident.ts`'s. `read`, `readFile` (the consumer's file on its default branch) and `readAcceptance` (the acceptance file at the merge commit) are the seams (`ghJson` and
  * `lookupConsumerFile`, which is the one reader of a file's text the refusal already uses, so this adds no `gh` call site). `recorded` are the refs the ledger already holds.
  * @param {{ now: number, declaration?: ReturnType<typeof homeProjectDeclaration>, read?: (args: string[]) => any[] | null, readFile?: (repo: string, path: string) => string | null, recorded?: Iterable<string> }} reads
  */
-export function readInertOptions({ now, declaration = homeProjectDeclaration(), read = ghJson, readFile = lookupConsumerFile, recorded = [] }: {
-  now: number; declaration?: ReturnType<typeof homeProjectDeclaration>; read?: (args: string[]) => any[] | null; readFile?: (repo: string, path: string) => string | null; recorded?: Iterable<string>;
+export function readInertOptions({ now, declaration = homeProjectDeclaration(), read = ghJson, readFile = lookupConsumerFile, readAcceptance = readFileAt, recorded = [] }: {
+  now: number; declaration?: ReturnType<typeof homeProjectDeclaration>; read?: (args: string[]) => any[] | null; readFile?: (repo: string, path: string, ref?: string) => string | null; readAcceptance?: typeof readFileAt; recorded?: Iterable<string>;
 }): InertOptionReading | null {
   const lists = declaration.code.map(({ repo }) => ({ repo, merged: readMergedPrs({ repo, since: now - MERGED_ROW_OPEN_LOOKBACK_MS, read }) }));
   if (lists.some(({ merged }) => merged === null)) return null;
   const mergedPrs: MergedOptionPr[] = lists.flatMap(({ repo, merged }) => (merged as any[]).flatMap((pr): MergedOptionPr[] => {
     const paths: string[] = (pr.files ?? []).map((file: any) => String(file?.path)).filter((path: string) => ACCEPTANCE_FILE.test(path));
     if (paths.length === 0) return []; // no acceptance file added: nothing it declared can be read, and none is not unknown
-    const texts = paths.map((path) => readFile(repo, path));
+    const texts = paths.map((path) => readAcceptance({ repo, path, oid: pr.mergeCommit?.oid, readFile }));
     return [{ repo, number: pr.number, mergedAt: pr.mergedAt, body: pr.body, acceptanceText: texts.includes(null) ? null : texts.join("\n") }];
   }));
   return inertOptionIncidents({ mergedPrs, readConsumerFile: readFile, now, recorded });

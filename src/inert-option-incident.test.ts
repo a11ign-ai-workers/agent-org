@@ -131,21 +131,41 @@ test("the summary is null for a read nobody made, and names the file, key, wante
 const declaration = { code: [{ repo: "a11ign/agent-org" }] } as any;
 const listing = (prs: any[]) => (args: string[]) => (args.includes("merged") ? prs : null);
 
-test("the live read pairs each merged pull request with the acceptance file it touched, and reports through the retro", () => {
-  const files: Record<string, string | null> = {
-    [`a11ign/agent-org:.acceptance/agent~x-1.md`]: `Acceptance:\n${LINE}\n`,
-    [`${CONSUMER}:${FILE}`]: JSON.stringify({ traits: [] }),
+test("the live read reads the acceptance file AT THE MERGE COMMIT, never the default branch's current one, and reports through the retro", () => {
+  const OID = "a".repeat(40);
+  const asked: string[] = [];
+  const readAcceptance = ({ repo, path, oid }: { repo: string, path: string, oid: unknown, readFile: unknown }) => {
+    asked.push(`${repo}:${path}@${oid}`);
+    return oid === OID ? `Acceptance:\n${LINE}\n` : null;
   };
-  const readFile = (repo: string, path: string) => files[`${repo}:${path}`] ?? null;
+  // the default branch's file is DIFFERENT now (a later pull request rewrote it): the consumer reader must never be asked for the acceptance path
+  const readFile = (repo: string, path: string) => (repo === CONSUMER && path === FILE ? JSON.stringify({ traits: [] }) : "Acceptance:\nnothing now\n");
   const prs = [
-    { number: 782, body: "Closes: none -- the switch is #4904", mergedAt: ago(200), files: [{ path: "src/a.ts" }, { path: ".acceptance/agent~x-1.md" }] },
-    { number: 783, body: "", mergedAt: ago(200), files: [{ path: "src/b.ts" }] },
+    { number: 782, body: "Closes: none -- the switch is #4904", mergedAt: ago(200), mergeCommit: { oid: OID }, files: [{ path: "src/a.ts" }, { path: ".acceptance/agent~x-1.md" }] },
+    { number: 783, body: "", mergedAt: ago(200), mergeCommit: { oid: "b".repeat(40) }, files: [{ path: "src/b.ts" }] },
   ];
-  const reading = readInertOptions({ now: NOW, declaration, read: listing(prs), readFile });
+  const reading = readInertOptions({ now: NOW, declaration, read: listing(prs), readFile, readAcceptance });
+  assert.deepEqual(asked, [`a11ign/agent-org:.acceptance/agent~x-1.md@${OID}`]);
   assert.deepEqual(reading?.incidents.map(({ ref }) => ref), ["a11ign/agent-org#782:routing.question"]);
   const report = buildReport({ merged: null, openPrs: null, journal: null, ledger: null, turns: null, handFixes: null, inertOptions: reading }, NOW);
   assert.match(renderReport(report), /Merged options a consumer has not set, more than 120 minutes after the merge: 1/);
   assert.match(renderReport(report), /routing\.question` must be `choice`, absent/);
+});
+
+test("the default acceptance reader asks for the file at the merge commit, and a missing or malformed commit is unknown (null) without asking", () => {
+  const OID = "c".repeat(40);
+  const asked: string[] = [];
+  const readFile = (repo: string, path: string, ref?: string) => {
+    asked.push(`${repo}:${path}@${ref}`);
+    return path.startsWith(".acceptance/") ? `Acceptance:\n${LINE}\n` : JSON.stringify({ traits: [] });
+  };
+  const prs = [{ number: 5, mergedAt: ago(200), mergeCommit: { oid: OID }, files: [{ path: ".acceptance/agent~x-1.md" }] },
+    { number: 6, mergedAt: ago(200), mergeCommit: null, files: [{ path: ".acceptance/agent~y-2.md" }] },
+    { number: 7, mergedAt: ago(200), mergeCommit: { oid: "../x" }, files: [{ path: ".acceptance/agent~z-3.md" }] }];
+  const reading = readInertOptions({ now: NOW, declaration, read: listing(prs), readFile });
+  assert.deepEqual(asked, [`a11ign/agent-org:.acceptance/agent~x-1.md@${OID}`, `${CONSUMER}:${FILE}@undefined`]);
+  assert.deepEqual(reading?.incidents.map(({ ref }) => ref), ["a11ign/agent-org#5:routing.question"]);
+  assert.deepEqual(reading?.unknown.map(({ ref }) => ref), ["a11ign/agent-org#6", "a11ign/agent-org#7"]);
 });
 
 test("a refused list is `unknown` in the report and never 0 (twin: a listed empty window is 0)", () => {
