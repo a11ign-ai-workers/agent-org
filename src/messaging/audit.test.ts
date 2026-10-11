@@ -58,11 +58,22 @@ describe("an announcement that asks the chairman something is flagged", () => {
   });
 
   test("each request marker is flagged on its own, and the control is the text without it", () => {
+    const stall = { key: "stall:no-merge" };
     for (const marker of REQUEST_MARKERS) {
-      assert.deepEqual(halvesOf(announcement({ text: `Row 7 is waiting: ${marker}worker-4` })), [HALF.question], marker);
+      assert.deepEqual(halvesOf(announcement({ ...stall, text: `Row 7 is waiting: ${marker}worker-4` })), [HALF.question], marker);
     }
-    assert.deepEqual(halvesOf(announcement({ text: "Reply with yes to switch it on" })), [HALF.question], "a request to reply");
-    assert.deepEqual(halvesOf(announcement({ text: "Row 7 is waiting on worker-4" })), [], "the twin: none of the markers");
+    assert.deepEqual(halvesOf(announcement({ ...stall, text: "Reply with yes to switch it on" })), [HALF.question], "a request to reply");
+    assert.deepEqual(halvesOf(announcement({ ...stall, text: "Row 7 is waiting on worker-4" })), [], "the twin: none of the markers");
+  });
+
+  test("a release that quotes a label name is not flagged; a question in one still is", () => {
+    const releaseOf0133 = "agent-org 0.133.14 is out: A stuck-cause row the tick filed in the primary's tracker is closed, with a comment naming the cause key, once its answer:ceo is removed (a11ign/agent-org#622).\nhttps://github.com/a11ign/agent-org/releases/tag/v0.133.14";
+    const releaseOf0156 = "agent-org 0.156.13 is out: worker:state blocked <row> --on <n> <reason> writes a native blockedBy edge from <row> to <n> and posts the reason, with no answer: label, because no answer is owed (a11ign/agent-org#921).\nhttps://github.com/a11ign/agent-org/releases/tag/v0.156.13";
+    assert.deepEqual(halvesOf(announcement({ key: "release:a11ign/agent-org@v0.133.14", providerMessageId: "4", text: releaseOf0133 })), [], "the first false flag, ledger line 4");
+    assert.deepEqual(halvesOf(announcement({ key: "release:a11ign/agent-org@v0.156.13", providerMessageId: "140", text: releaseOf0156 })), [], "the second false flag, ledger line 140");
+    assert.deepEqual(halvesOf(announcement({ key: "release:a11ign/agent-org@v0.156.13", text: "Shipped. Shall I tell the fleet?" })), [HALF.question], "positive control: a release's `?` is still a question");
+    assert.deepEqual(halvesOf(announcement({ key: "release:a11ign/agent-org@v0.156.13", text: "Shipped. Reply with yes to tell the fleet" })), [HALF.question], "a release's request to reply is still a question");
+    assert.equal(asksSomething("once its answer:ceo is removed", []), false, "no markers: a label name alone asks nothing");
   });
 
   test("the SAME question in an ask is not this half's: an ask may ask", () => {
