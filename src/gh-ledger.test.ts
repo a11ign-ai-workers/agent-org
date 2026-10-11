@@ -12,11 +12,11 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, readdirSync, writeFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpDir, tmpDirForFile } from "./lib/tmp-fixture.ts";
 import {
-  ALARM_FRACTION, POOL_POINTS, QUEUED_EXIT, QUEUE_DIR, alarmLine, attachFollowUps, dueCalls, ghQueueTick, parseLedger, poolAlarms, readQueue,
-  recordPoolAlarms, refusalKind, retryDue, type QueuedCall, type RunQueued,
+  ALARM_FRACTION, NO_CALLER, POOL_POINTS, QUEUED_EXIT, QUEUE_DIR, alarmLine, attachFollowUps, callerScript, dueCalls, ghQueueTick, parseLedger, parseRollup,
+  perHour, perHourCallers, poolAlarms, readQueue, recordPoolAlarms, refusalKind, retryDue, rollupPathOf, type QueuedCall, type RunQueued,
 } from "./gh-ledger.ts";
 
 const WRAPPER_TEXT = readFileSync(fileURLToPath(new URL("../host/gh", import.meta.url)), "utf8");
@@ -58,10 +58,14 @@ const host = ({ reply = "", status = 0, headers = "" }: { reply?: string; status
     if (next.reply !== undefined || next.status !== undefined) writeFileSync(mode, `${next.status ?? status}\n${next.reply ?? reply}\n`);
     if (next.headers !== undefined) writeFileSync(join(root, "headers"), next.headers);
   };
-  return { root, cfg, run, set, queue: join(cfg, QUEUE_DIR), calls: () => (existsSync(calls) ? readFileSync(calls, "utf8") : ""), stub };
+  return { root, cfg, env, run, set, ledger: env.A11Y_GH_LEDGER, queue: join(cfg, QUEUE_DIR), calls: () => (existsSync(calls) ? readFileSync(calls, "utf8") : ""), stub };
 };
 
 const inOneHour = () => Math.floor(Date.now() / 1000) + 1800;
+
+// (a11ign/a11ign#4148 residual) WHO SPENT THE POOL, PER HOUR. Two claims, in the last section of this file: the caller reaches the ledger WITH its script's
+// name (the unit's `--import` preload is taken out before the 160-character cut), and the hourly rollup carries that script, so `--per-hour --top` can say
+// which caller spent an hour the raw ledger no longer holds.
 
 // ---- 1. a refused write is queued, not failed -----------------------------------------------------------------------------
 
@@ -386,3 +390,95 @@ function appendLine(path: string, _line: string, at: number) {
   const existing = readFileSync(path, "utf8");
   writeFileSync(path, `${existing}${[time, "a11ign-ai-workers", "graphql", 3600, 0, "pr list", "w1", "node /x/src/work-gate.ts", "-"].join("\t")}\n`);
 }
+
+// ---- 4. (#4148 residual) the ledger names WHO spent the pool, and the hourly rollup keeps the name --------------------------------------
+
+const LEDGER_CLI = fileURLToPath(new URL("./gh-ledger.ts", import.meta.url));
+const ACCOUNT = "a11ign-ai-workers";
+
+/** One ledger line as `host/gh` writes it (nine fields), for a hand-made ledger. */
+const written = (time: string, caller: string, over: { resource?: string; cost?: number | ""; command?: string } = {}) =>
+  [time, ACCOUNT, over.resource ?? "graphql?", over.cost ?? "", "0", over.command ?? "pr list", "-", caller, "-"].join("\t");
+
+/** `gh-ledger.ts <ledger> --per-hour [--top n]` as a person runs it. */
+const readHours = (ledger: string, ...flags: string[]) => {
+  const r = spawnSync(process.execPath, [LEDGER_CLI, ledger, "--per-hour", ...flags], { encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  return r.stdout;
+};
+
+test("#4148 residual: a unit started under the crash-exit preload arrives at the ledger WITH its script's name, though preload and path are over 160 characters", () => {
+  const h = host();
+  // The real shape of a unit: `node --import file:///.../src/lib/crash-exit.ts src/work-gate.ts`. The directory is padded to 110 characters so the
+  // preload alone pushes the script's name past the 160th wherever the suite's temp directory is, as the ~100 characters of preload do ahead of the
+  // script on the host; the script is named relative to the unit's directory, so that WITHOUT the preload the whole line stays under the cut.
+  const base = join(h.root, "units");
+  const dir = join(base, "u".repeat(Math.max(1, 110 - base.length - 1)));
+  mkdirSync(join(dir, "src", "lib"), { recursive: true });
+  const preload = join(dir, "src", "lib", "crash-exit.ts");
+  writeFileSync(preload, "export {};\n");
+  writeFileSync(join(dir, "src", "work-gate.ts"), 'import { spawnSync } from "node:child_process";\nconst r = spawnSync("sh", [process.env.WRAPPER_UNDER_TEST ?? "", "pr", "list"], { stdio: "ignore" });\nprocess.exit(r.status ?? 1);\n');
+  const argv = [process.execPath, "--import", pathToFileURL(preload).href, "src/work-gate.ts"];
+  const whole = argv.join(" ");
+  const bare = [process.execPath, "src/work-gate.ts"].join(" ");
+  assert.ok(whole.length > 160 && whole.indexOf("work-gate.ts") >= 160, `POSITIVE CONTROL: the preload must push the name past the cut, or this proves nothing (${whole.indexOf("work-gate.ts")} of ${whole.length})`);
+  assert.ok(bare.length < 160, "POSITIVE CONTROL: without its preload the same unit fits, so the preload is what lost the name");
+  const r = spawnSync(argv[0], argv.slice(1), { cwd: dir, env: { ...h.env, WRAPPER_UNDER_TEST: WRAPPER }, encoding: "utf8" });
+  assert.equal(r.status, 0, r.stderr);
+  const [entry, ...rest] = parseLedger(readFileSync(h.ledger, "utf8"));
+  assert.equal(rest.length, 0, "one call, one line");
+  assert.ok(entry.caller.length <= 160, "the cut is still there");
+  assert.doesNotMatch(entry.caller, /--import/, "the preload is not what the ledger keeps");
+  assert.equal(callerScript(entry.caller), "work-gate.ts", `the script's name reached the reader (caller: ${entry.caller})`);
+});
+
+/** Callers of every shape the host sees, read by `callerScript` and, in awk, by the wrapper's rollup: the two must name the same script for each. */
+const CALLERS = [
+  "/home/agent/.local/opt/node-v24.21.0-linux-x64/bin/node --import file:///home/agent/repos/agent-org/src/lib/crash-exit.ts /home/agent/repos/agent-org/src/work-gate.ts --json",
+  "/home/agent/.local/bin/node --import=./src/lib/crash-exit.ts src/work-tick.ts",
+  "/home/agent/.local/bin/node  /home/agent/repos/agent-org/src/work-gate.ts",
+  "/usr/bin/node -e /* work-gate.ts runBatch */ const { execFile } = require(\"node:child_process\");",
+  "/usr/bin/node --import /home/agent/repos/x/register.ts --test /x/src/foo.test.ts",
+  "zsh -c source /home/agent/.claude/shell-snapshots/snapshot-zsh-1760000000000-ab12cd.sh && gh pr list",
+  "node /x/data.json /x/y/run.mjs", "bash /x/y/deploy.sh now", "python3 /x/tool.py --x", "node scripts/ci-health.ts", "node /x/a.test.ts.bak",
+  "herdr server", "claude --model sonnet --effort high", "node", "",
+];
+
+test("#4148 residual: the rollup the wrapper writes carries each caller's SCRIPT, the one `callerScript` names, and `--per-hour --top` reads it", () => {
+  const h = host();
+  const hour = "2026-10-10T18";
+  writeFileSync(h.ledger, `${CALLERS.map((c, i) => written(`${hour}:${String(i).padStart(2, "0")}:00Z`, c)).join("\n")}\n`);
+  // A bound of one byte drops EVERY line into the rollup, the one this call writes among them.
+  const r = h.run({ A11Y_GH_LEDGER_MAX_BYTES: "1", A11Y_GH_LEDGER_NOW: `${hour}:59:00Z`, LEDGER_CALLER: "node /x/src/trigger.ts" }, "", "pr", "list");
+  assert.equal(r.status, 0, r.stderr);
+  assert.equal(readFileSync(h.ledger, "utf8"), "", "POSITIVE CONTROL: the trim dropped every line, so the rollup is the only place the callers are");
+  const rollup = parseRollup(readFileSync(rollupPathOf(h.ledger), "utf8"));
+  const expected = new Map<string, number>();
+  for (const c of [...CALLERS, "node /x/src/trigger.ts"]) expected.set(callerScript(c), (expected.get(callerScript(c)) ?? 0) + 1);
+  assert.deepEqual(new Map(rollup.map((row) => [row.caller, row.calls])), expected, "awk and `callerScript` name the same script for every shape of caller");
+  assert.ok(rollup.every((row) => row.hour === hour && row.account === ACCOUNT && row.resource === "graphql" && row.floor === row.calls && row.read === 0));
+  assert.equal(expected.get("work-gate.ts"), 3, "CONTROL: the shapes that carry the gate's name (past a preload, double-spaced, in an inline program) all land on it");
+  const said = readHours(h.ledger, "--top", "2");
+  assert.match(said, new RegExp(`^${hour}Z +${CALLERS.length + 1} calls +0 points read +${CALLERS.length + 1} floor points$`, "m"));
+  assert.match(said, /^ +3 floor points \( +0 read\) +3 calls +work-gate\.ts$/m);
+  assert.equal(said.split("\n").filter((l) => /^ {4}/.test(l)).length, 2, "--top 2 names two callers for the hour");
+  assert.doesNotMatch(readHours(h.ledger), /work-gate/, "without --top the reading is the one it always was");
+});
+
+test("#4148 residual: a six-field rollup line is read as it always was, kept six fields by the next trim, and named for what it is: a caller nobody recorded", () => {
+  const h = host();
+  const old = `2026-10-10T17\t${ACCOUNT}\tgraphql\t400\t0\t400\n2026-10-10T17\t${ACCOUNT}\tcore\t7\t0\t0\n`;
+  writeFileSync(rollupPathOf(h.ledger), `${old}2026-10-10T17\t${ACCOUNT}\tgraphql\t40\t0\t40\twork-tick.ts\n`);
+  assert.deepEqual(parseRollup(readFileSync(rollupPathOf(h.ledger), "utf8")).map((r) => r.caller), [undefined, undefined, "work-tick.ts"]);
+  writeFileSync(h.ledger, `${written("2026-10-10T17:30:00Z", "node /x/src/work-tick.ts")}\n${written("2026-10-10T17:31:00Z", "node /x/src/work-tick.ts")}\n`);
+  const r = h.run({ A11Y_GH_LEDGER_MAX_BYTES: "1", A11Y_GH_LEDGER_NOW: "2026-10-10T17:40:00Z", LEDGER_CALLER: "node /x/src/work-tick.ts" }, "", "pr", "list");
+  assert.equal(r.status, 0, r.stderr);
+  const lines = readFileSync(rollupPathOf(h.ledger), "utf8").split("\n").filter(Boolean).map((l) => l.split("\t"));
+  assert.deepEqual(lines.filter((f) => f.length === 6).map((f) => f.slice(2).join(" ")).sort(), ["core 7 0 0", "graphql 400 0 400"], "the six-field lines are kept as they were");
+  assert.deepEqual(lines.filter((f) => f.length === 7).map((f) => f.slice(2).join(" ")), ["graphql 43 0 43 work-tick.ts"], "and the caller's own row adds to its own row only");
+  const rollup = parseRollup(readFileSync(rollupPathOf(h.ledger), "utf8"));
+  const [hour] = perHourCallers([], rollup, { account: ACCOUNT, resource: "graphql" });
+  assert.deepEqual(hour.callers.map((c) => [c.caller, c.calls]), [[NO_CALLER, 400], ["work-tick.ts", 43]]);
+  assert.deepEqual(perHour([], rollup, { account: ACCOUNT, resource: "graphql" }), [{ hour: "2026-10-10T17", calls: 443, read: 0, floor: 443 }], "the hour's total never depended on the caller");
+  assert.match(readHours(h.ledger, "--account", ACCOUNT, "--resource", "graphql", "--top", "5"), /^ +400 floor points \( +0 read\) +400 calls +\(caller not recorded\)$/m);
+});

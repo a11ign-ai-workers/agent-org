@@ -71,6 +71,11 @@ fi
 # ledger is never mixed across accounts): time, account, resource, cost, exit status, `argv[1] argv[2]`, workspace,
 # the CALLING process's command line and, LAST, the id of the session that made the call. `src/gh-ledger.ts` reads and reports it.
 #
+#   - THE CALLER IS CUT TO 160 CHARACTERS AFTER ITS `--import` PRELOAD IS TAKEN OUT (a11ign/a11ign#4148 residual). A unit's node is started
+#     `node --import file:///.../src/lib/crash-exit.ts /.../src/work-gate.ts`, and the preload alone is about 100 of the 160, so a cut made
+#     first kept `work-g` or a bare `node` for 28% of one afternoon's list calls and the script's name never reached the reader.
+#     `gh-ledger.ts` `callerScript` takes the same preload out when it reads, which is why a line written before this still reads.
+#
 #   - THE SESSION ID is `CLAUDE_CODE_SESSION_ID` (a Claude Code session's environment; it is the file name of its transcript,
 #     `~/.claude/projects/<dir>/<id>.jsonl`), else `CODEX_THREAD_ID` (a Codex session's; measured 2026-10-05 in `~/.codex/sessions` rollouts: a value a tool
 #     shell printed is the id in its rollout's own file name). `-` when neither is set, which is what a unit or script outside any session writes.
@@ -115,7 +120,7 @@ ledger_record() { # status stdout-copy first-arg second-arg
       awk '{ s += $1; n++ } END { if (n) print s }')
   fi
   account=${app_account:-$(sed -n 's/^ *user: *//p' "$cfg/hosts.yml" | head -n 1)}
-  caller=${LEDGER_CALLER:-$(tr '\0\t\n' '   ' < "/proc/$PPID/cmdline" | cut -c1-160)}
+  caller=${LEDGER_CALLER:-$(tr '\0\t\n' '   ' < "/proc/$PPID/cmdline" | sed -E 's/--import(=|[[:space:]]+)[^[:space:]]+//g' | cut -c1-160)}
   session=$(session_id)
   now=${A11Y_GH_LEDGER_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
   printf '%s\t%s\t%s\t%s\t%s\t%s %s\t%s\t%s\t%s\n' "$now" "${account:-unknown}" "$resource" "$cost" "$1" "$3" "$4" \
@@ -129,20 +134,35 @@ ledger_record() { # status stdout-copy first-arg second-arg
 
 # --- #4148: THE HOURLY ROLLUP -- a reading for any hour, though the ledger keeps only the newest half -------------
 #
-# What the trim is about to drop is counted FIRST, per UTC hour, account and resource, into `<ledger>.hourly` (one TAB line:
-# hour, account, resource, calls, points READ, floor points; the same two numbers `gh-ledger.ts` reads off a ledger line, so a
-# reading adds the two files and never double-counts: a line is in the ledger or in the rollup, never both). Merged on every trim
-# so the file holds one line per hour x account x resource and not one per trim. If the rollup cannot be written the trim does NOT
-# go ahead (the caller's `&&`): a kept ledger past its bound is a diagnostic's lesser harm than a lost hour. Two calls trimming at
-# once can count a span twice, which is the race the trim above already accepts.
+# What the trim is about to drop is counted FIRST, per UTC hour, account, resource AND CALLER SCRIPT, into `<ledger>.hourly` (one TAB line:
+# hour, account, resource, calls, points READ, floor points and, 7th, the script that made the calls; the same numbers `gh-ledger.ts`
+# reads off a ledger line, so a reading adds the two files and never double-counts: a line is in the ledger or in the rollup, never both).
+# A six-field line, from before the caller was kept, is READ as it always was and kept as six fields: its calls have no caller to name and
+# are never given one. Merged on every trim so the file holds one line per hour x account x resource x caller and not one per trim. If
+# the rollup cannot be written the trim does NOT go ahead (the caller's `&&`): a kept ledger past its bound is a diagnostic's lesser
+# harm than a lost hour. Two calls trimming at once can count a span twice, which is the race the trim above already accepts.
+#
+# `script()` is `gh-ledger.ts` `callerScript` in awk, and `gh-ledger.test.ts` feeds both the same callers so they cannot drift apart
+# unseen: a session's shell, else the first `name.ext` of the command line past any `--import` preload, else its first word.
 rollup_dropped() { # ledger-file dropped-bytes
   { cat "$1.hourly" 2>/dev/null; head -c "$2" "$1"; } | awk -F'\t' '
-    NF == 6 { k = $1 "\t" $2 "\t" $3; calls[k] += $4; read[k] += $5; floor[k] += $6 }
+    function script(c,   u, w) {
+      if (c ~ "/shell-snapshots/snapshot-") return "(a session\047s shell)"
+      u = c; gsub("--import(=| +)[^ ]+", "", u)
+      if (match(u " ", "[^/ ]+\\.(mjs|cjs|js|ts|sh|py)[^A-Za-z0-9_]")) return substr(u, RSTART, RLENGTH - 1)
+      sub("^ +", "", u); split(u, w, / +/)
+      return w[1] != "" ? w[1] : "unknown"
+    }
+    NF == 6 || NF == 7 { k = $1 "\t" $2 "\t" $3 "\t" (NF == 7 ? $7 : ""); calls[k] += $4; read[k] += $5; floor[k] += $6 }
     NF >= 8 && $1 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]/ {
-      res = $3; sub(/\?$/, "", res); k = substr($1, 1, 13) "\t" $2 "\t" res
+      res = $3; sub(/\?$/, "", res); k = substr($1, 1, 13) "\t" $2 "\t" res "\t" script($8)
       calls[k] += 1; if ($4 != "") read[k] += $4
       floor[k] += ($4 != "" ? $4 : (res == "graphql" ? 1 : 0)) }
-    END { for (k in calls) printf "%s\t%d\t%d\t%d\n", k, calls[k], read[k], floor[k] }' | sort > "$1.hourly.$$" &&
+    END { for (k in calls) {
+      split(k, p, "\t")
+      printf "%s\t%s\t%s\t%d\t%d\t%d", p[1], p[2], p[3], calls[k], read[k], floor[k]
+      if (p[4] != "") printf "\t%s", p[4]
+      printf "\n" } }' | sort > "$1.hourly.$$" &&
     mv "$1.hourly.$$" "$1.hourly"
 }
 
