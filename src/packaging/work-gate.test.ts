@@ -4871,6 +4871,7 @@ const DECLARED_HISTORY_POPULATION: Declaration[] = [
   { name: "host-install-agent-org-launcher.test.ts", reason: "#3532: imports `host-units.ts` for the owned list, the installer and `hostUnitDrift`, the same edge `host-units.test.ts` has; its pull request declares `History: full`" },
   { name: "host-project-paths.test.ts", reason: "#2620: imports `host-units.ts` for the rendered unit texts, the same edge `host-units.test.ts` has; its pull request declares `History: full` (#497)" },
   { name: "host-tool-install.test.ts", reason: "#2793: imports `host-units.ts` for the rendered `work-tick` unit, the same edge; its pull request declares `History: full`" },
+  { name: "host-units-event-receiver.test.ts", reason: "#980: imports `host-units.ts` for `shippedUnits` and the installer, the same edge `host-units.test.ts` has; its pull request declares `History: full`" },
   { name: "host-units.test.ts", reason: "tests `host-units.ts`, which calls `git log --all`: the edge every other entry here shares" },
   { name: "persistent-seat-running.test.ts", reason: "#3539: imports `host-units.ts` for `persistentSeatDrift` and the report, the same edge `host-units.test.ts` has; its pull request declares `History: full`" },
   { name: "reviewer-door-install.test.ts", reason: "#3316: imports `host-units.ts` for `hostUnitDrift` and the door install, the same edge `host-units.test.ts` has; its pull request declares `History: full`" },

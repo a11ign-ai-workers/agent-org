@@ -45,7 +45,7 @@ function drive(body: string, { trackers, branch = BRANCH, wired = true }: { trac
   const code = main(["create", "--draft", "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`], {
     run: (args: string[]) => { if (!args.includes("--add-label")) sent.push(args); },
     git: (args: string[]) => {
-      if (args[0] === "diff") return (args.includes("--diff-filter=A") ? [ACCEPTANCE_FILE] : ["src/pr-open.ts"]).join("\0");
+      if (args[0] === "diff") return (args.includes("--diff-filter=A") ? [ACCEPTANCE_FILE] : ["src/row-file.ts"]).join("\0");
       if (args[0] === "remote") return `git@github.com:${REPO}.git`;
       if (args.includes("--abbrev-ref")) return branch;
       if (args.includes("--short")) return "abc1234";

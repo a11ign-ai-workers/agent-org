@@ -284,7 +284,7 @@ test("#2417 WIRING: the shipped entry hands `main` the real row reader, and `mai
 // --- #3083: a row that STATES its repository is read in that repository's tree -------------------------------------
 
 /** The row #3078 and #3083 were filed as: the Region spelled bare, and a sentence saying whose root the paths are relative to. */
-const AGENT_ORG_ROW_PATHS = ["src/pr-open.ts", "src/packaging/pr-open-region.test.ts"];
+const AGENT_ORG_ROW_PATHS = ["src/row-file.ts", "src/packaging/pr-open-region.test.ts"];
 const agentOrgRow = (stated: string) => `The repository is **\`${stated}\`**; paths are relative to its root.\n\n${regionBody(AGENT_ORG_ROW_PATHS)}`;
 const CLOSES_3083 = prBody("Closes a11ign/a11ign#3083");
 const inAgentOrg = (body: string) => ["create", "--draft", "--repo", "a11ign/agent-org", "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`];
@@ -296,10 +296,10 @@ test("#3083 done-when 1: a PR opened in agent-org whose diff is exactly the path
 });
 
 test("#3083 done-when 1: a path the row does NOT name is still refused, and it is the only one", () => {
-  const r = drive(inAgentOrg(CLOSES_3083), { rows: { 3083: agentOrgRow("a11ign/agent-org") }, changed: [...AGENT_ORG_ROW_PATHS, "src/wake.ts"] });
+  const r = drive(inAgentOrg(CLOSES_3083), { rows: { 3083: agentOrgRow("a11ign/agent-org") }, changed: [...AGENT_ORG_ROW_PATHS, "src/board.ts"] });
   assert.equal(r.code, EXIT_NOTHING_SENT);
-  assert.match(r.err, /^ {2}src\/wake\.ts$/m);
-  assert.doesNotMatch(r.err, /^ {2}src\/pr-open\.ts$/m, "a path the row names is not listed as an offender");
+  assert.match(r.err, /^ {2}src\/board\.ts$/m);
+  assert.doesNotMatch(r.err, /^ {2}src\/row-file\.ts$/m, "a path the row names is not listed as an offender");
   assert.match(r.err, /1 path\(s\) changed outside/);
 });
 
@@ -331,10 +331,10 @@ test("#3083 WIRING: the sentence is read by the one `statedRepository` in row-fi
 // --- #3149: the refusal names `--repo` when this checkout is another repository of the project, and `(new)` is a note ----------------
 
 const AGENT_ORG_ORIGINS = ["https://github.com/a11ign/agent-org", "https://github.com/a11ign/agent-org.git", "git@github.com:a11ign/agent-org.git\n"];
-const PREFIXED_PATHS = ["agent-org:src/pr-open.ts", "agent-org:src/packaging/pr-open-region.test.ts"];
+const PREFIXED_PATHS = ["agent-org:src/row-file.ts", "agent-org:src/packaging/pr-open-region.test.ts"];
 const PREFIXED_ROW = regionBody(PREFIXED_PATHS);
 const CLOSES_3149 = prBody("Closes a11ign/a11ign#3149");
-const FILE_PATHS = ["src/pr-open.ts", "src/packaging/pr-open-region.test.ts"];
+const FILE_PATHS = ["src/row-file.ts", "src/packaging/pr-open-region.test.ts"];
 
 for (const origin of AGENT_ORG_ORIGINS) {
   test(`#3149 done-when 1: from an agent-org checkout (origin ${JSON.stringify(origin)}) WITHOUT --repo, the refusal names \`--repo a11ign/agent-org\``, () => {
@@ -348,7 +348,7 @@ for (const origin of AGENT_ORG_ORIGINS) {
 test("#3149 done-when 1: the hint is for a checkout that LEFT THE FLAG OFF -- with --repo passed, the same diff passes and prints none", () => {
   const r = drive(inAgentOrg(prBody("Closes a11ign/a11ign#3149")), { rows: { 3149: PREFIXED_ROW }, changed: FILE_PATHS, origin: AGENT_ORG_ORIGINS[0] });
   assert.equal(r.code, 0, r.err);
-  const refused = drive(inAgentOrg(CLOSES_3149), { rows: { 3149: PREFIXED_ROW }, changed: [...FILE_PATHS, "src/wake.ts"], origin: AGENT_ORG_ORIGINS[0] });
+  const refused = drive(inAgentOrg(CLOSES_3149), { rows: { 3149: PREFIXED_ROW }, changed: [...FILE_PATHS, "src/board.ts"], origin: AGENT_ORG_ORIGINS[0] });
   assert.equal(refused.code, EXIT_NOTHING_SENT);
   assert.doesNotMatch(refused.err, /--repo was not passed|`--repo` was not passed/, "the flag WAS passed, so it is not claimed missing");
 });
@@ -376,7 +376,9 @@ test("#3149 done-when 2: the row #3134 was filed with is read whole -- its `(new
   const row = regionBody(["agent-org:.github/workflows/release.yml", "agent-org:src/packaging/release-safety.test.ts",
     "agent-org:src/packaging/release-triggers-itself.test.ts (new)"]);
   const changed = [".github/workflows/release.yml", "src/packaging/release-safety.test.ts", "src/packaging/release-triggers-itself.test.ts"];
-  const r = drive(inAgentOrg(prBody("Closes a11ign/a11ign#3134")), { rows: { 3134: row }, changed });
+  // release.yml IS machinery (a11ign#5100), so the body carries its three lines: this test is about the Region, and the declaration is whole.
+  const declared = "Closes a11ign/a11ign#3134\n\nFlag: none -- a test of the Region, not of a flag\nHealth-signals: release-failures\nRevert: revert this pull request";
+  const r = drive(inAgentOrg(prBody(declared)), { rows: { 3134: row }, changed });
   assert.equal(r.code, 0, r.err);
   assert.match(r.out, /3 inside, 0 exempt, 0 cleared/);
 });

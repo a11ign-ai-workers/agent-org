@@ -1,11 +1,11 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 102,
+    "files": 103,
     "spawns": 137,
-    "calls": 405,
+    "calls": 411,
     "shapes": {
-      "api rest": 154,
+      "api rest": 159,
       "api graphql": 41,
       "issue view": 34,
       "pr list": 30,
@@ -14,9 +14,9 @@
       "pr view": 17,
       "issue edit": 16,
       "label create": 12,
+      "issue create": 6,
       "pr merge": 6,
       "project item-edit": 6,
-      "issue create": 5,
       "pr comment": 4,
       "run list": 4,
       "run view": 4,
@@ -428,7 +428,7 @@
         "$HOLD_PREFIX",
         "$SESSION_PREFIX"
       ],
-      "parsesCloses": false
+      "parsesCloses": true
     },
     "src/merge-guard/armed-race-rule.ts": {
       "spawns": 0,
@@ -907,6 +907,14 @@
       ],
       "parsesCloses": false
     },
+    "src/ticket-port/tests-first-reads.ts": {
+      "spawns": 0,
+      "calls": {
+        "api rest": 5
+      },
+      "labels": [],
+      "parsesCloses": false
+    },
     "src/trace/freshness.ts": {
       "spawns": 1,
       "calls": {
@@ -1071,7 +1079,7 @@
         "api graphql": 4,
         "api rest": 17,
         "issue comment": 2,
-        "issue create": 1,
+        "issue create": 2,
         "issue edit": 1,
         "issue list": 1,
         "label create": 1,
@@ -1106,7 +1114,8 @@
         "$RESOLVER_DEFECT_LABEL",
         "$ROW_LABELS",
         "$SESSION_PREFIX",
-        "fleet-gated"
+        "fleet-gated",
+        "incident"
       ],
       "parsesCloses": false
     },

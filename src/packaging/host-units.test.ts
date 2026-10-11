@@ -37,7 +37,7 @@ import { shippedUnits, unitState, unitDrift, driftReport, hostUnitsInstall, syst
   programCandidates, hostIdentityDrift, hostIdentityNotes, hostIdentityInstall, ownedIdentityFiles, reviewerDoorInstall, compileCacheNotes,
   WORKERS_README, HUMAN_ACCOUNT_ALLOWED, compileCacheDrift, declaredCompileCache, PROJECT_UNITS_DIR, shippedUnitText,
   shippedScriptText, leadsListText, modelEffortDrift, sessionModelDrift, sessionModelNotes, lastModelIn,
-  liveClaudeSessions, codexTrustDrift, codexTrustedProjects, OPTIONAL_UNITS, TOOL_ENTRIES, toolForm, LONG_RUNNING_TEMPLATES, unclassifiedEntries, declaredProjectKeys, windowEnd, windowEndNotes, workTickToolForm,
+  liveClaudeSessions, codexTrustDrift, codexTrustedProjects, OPTIONAL_UNITS, HOST_OPTIONAL_UNITS, TOOL_ENTRIES, toolForm, LONG_RUNNING_TEMPLATES, unclassifiedEntries, declaredProjectKeys, windowEnd, windowEndNotes, workTickToolForm,
   autoMemorySeatLabels, seatWrapperNotes, hostVariableAsRun } from "../host-units.ts";
 import { DECLARED_CLAUDE_MODELS, PROFILES, CLAUDE_EFFORTS, HAIKU_MODEL_ID, HAIKU_TIER_LABEL } from "../worker-profile.ts";
 import { HostConfigRefusal, homeHostConfig, parseBeforeTick, parseHostConfig, readUnitsDeclaration, renderTemplate, renderedName, templateValues } from "../host-config.ts";
@@ -601,8 +601,8 @@ test("#2458: every shipped service puts the compile cache under a home's .cache"
   // THE POPULATION, NAMED: emptiness below is worth what this says about its input. The directory is read
   // two ways (a plain listing, and `shippedUnits`, which is what `compileCacheDrift` walks) and they must
   // agree on a non-empty list; the positive control for "a unit lacking the line is a finding" is the next test.
-  // An OPTIONAL template (#2901) is not shipped unless the project asks, so it is not this population; its own test is below.
-  const listed = [...readdirSync(SHIPPED_DIR).filter((f) => f.endsWith(".service.in") && !Object.hasOwn(OPTIONAL_UNITS, f)).map((f) => `a11ign-${f.slice(0, -".in".length)}`),
+  // An OPTIONAL template (#2901) is not shipped unless the project asks, and a HOST-optional one (agent-org#980) not unless the host does, so neither is this population; their own tests are below.
+  const listed = [...readdirSync(SHIPPED_DIR).filter((f) => f.endsWith(".service.in") && !Object.hasOwn(OPTIONAL_UNITS, f) && !Object.hasOwn(HOST_OPTIONAL_UNITS, f)).map((f) => `a11ign-${f.slice(0, -".in".length)}`),
     ...readdirSync(PROJECT_UNITS_DIR).filter((f) => f.endsWith(".service"))].sort();
   const services = listed;
   assert.deepEqual(services, shippedUnits(SHIPPED_DIR, { declaredKeys: WITHOUT_MESSAGING }).filter((unit) => unit.endsWith(".service")));
@@ -2754,7 +2754,7 @@ function withListenerHome(body: (home: { shippedDir: string, installedDir: strin
 test("#3025: the listener's template is classified as the tool's and optional on `messaging`, so it is never UNCLASSIFIED", () => {
   assert.ok(TOOL_ENTRIES.includes("chairman-listen.service.in"));
   assert.equal(OPTIONAL_UNITS["chairman-listen.service.in"], "messaging");
-  assert.deepEqual(LONG_RUNNING_TEMPLATES, ["chairman-listen.service.in", "otel-receiver.service.in"]);
+  assert.deepEqual(LONG_RUNNING_TEMPLATES, ["chairman-listen.service.in", "otel-receiver.service.in", "event-receiver.service.in"]);
   withListenerHome(({ shippedDir }) => {
     assert.deepEqual(unclassifiedEntries({ shippedDir, projectUnitsDir: null }), []);
     writeFileSync(join(shippedDir, "stray-listener.service.in"), LISTENER_TEMPLATE);
@@ -2982,6 +2982,8 @@ test("#3443 (5): `toolVersion` is `latest` or one release tag, every other value
 /** The fixture host moved into tool form: the same machine, with the tool installed beside the project. */
 const toolHost3443 = () => hostWith({ tool: TOOL_3443 });
 const plainHost3443 = () => hostWith({});
+// agent-org#980: the property below walks EVERY template in the directory, and the event receiver's renders only for a host that declares `webhook`, so its host does.
+const webhookToolHost3443 = () => hostWith({ tool: TOOL_3443, events: { source: "webhook", receiver: { port: 8787, secretPath: "/etc/a11ign/webhook-secret", tunnel: "cloudflare" } } });
 
 test("#3443 (6): the chairman listener and watcher render `node <tool>/src/...` with AGENT_ORG_HOST in tool form, and today's bytes without a tool", () => {
   const units = readUnitsDeclaration();
@@ -3013,10 +3015,10 @@ test("#3443 + #3464: THE PROPERTY -- every shipped service in tool form runs age
   const { beforeTick } = JSON.parse(readFileSync(join(PROJECT_ROOT, ".agent-org/project.json"), "utf8")) as { beforeTick: string };
   assert.equal(beforeTick, "agent-org primary:update", "POSITIVE CONTROL: the project declares a TOOL command, not `pnpm run`, so there is a beforeTick for the walk to reach");
   const templates = readdirSync(SHIPPED_DIR).filter((name: string) => name.endsWith(".service.in"));
-  assert.ok(templates.includes("chairman-listen.service.in") && templates.includes("work-tick.service.in"), `POSITIVE CONTROL: the walk sees the services (${templates.join(", ")})`);
+  assert.ok(templates.includes("chairman-listen.service.in") && templates.includes("work-tick.service.in") && templates.includes("event-receiver.service.in"), `POSITIVE CONTROL: the walk sees the services (${templates.join(", ")})`);
   for (const template of templates) {
     const unit = renderedName(template, units.prefix);
-    const installed = shippedUnitText(unit, { host: toolHost3443() }) ?? "";
+    const installed = shippedUnitText(unit, { host: webhookToolHost3443() }) ?? "";
     assert.ok(hasLine(installed, `WorkingDirectory=${TOOL_3443}`), `${unit} runs from the tool checkout`);
     assert.ok(hasLine(installed, `Environment=AGENT_ORG_HOST=${PROJECT_ROOT}/.agent-org/host.json`), `${unit} resolves its project from the host's declaration`);
     for (const command of execCommands(installed).map(IN_PROJECT_CHECKOUT)) {
