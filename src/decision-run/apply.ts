@@ -10,7 +10,7 @@
 //
 // THIS MODULE DOES NOT DECIDE WHAT AN ANSWER MEANS: the caller (a class) supplies `actions`, and nothing here names a cause. An event whose time cannot
 // be read is treated as newer than the brief, because absence of a time is "could not determine" and must not be written through.
-import { mkdirSync, readFileSync, renameSync, unlinkSync, writeFileSync } from "node:fs";
+import { mkdirSync, readFileSync, renameSync, statSync, unlinkSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import type { ItemRef, StateChange, TicketPort } from "../ticket-port/port.ts";
 
@@ -55,13 +55,45 @@ export function leaseItem(stateDir: string, ref: ItemRef, runId: string, nowMs: 
   } catch (error) {
     if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
   }
-  const existing = readLease(path);
-  if (existing && existing.runId !== runId && Math.abs(nowMs - existing.at) < LEASE_MS) return { held: true, by: existing.runId };
-  // Stale, unreadable or our own: replace it. The rename is atomic, so a reader never sees half a lease.
-  const tmp = `${path}.${process.pid}.tmp`;
-  writeFileSync(tmp, body);
-  renameSync(tmp, path);
-  return { held: false, leaseId: runId };
+  // The lease is stale, unreadable or our own. Replacing it is read-then-write, so two takers that read the same stale file could both rename and
+  // both report success. The replacement is therefore made under an exclusive `.lock` file and the lease is READ AGAIN inside it: the taker that
+  // comes second sees the first's fresh lease and answers `held`. The lock is held for two synchronous calls and removed in `finally`; one left
+  // by a crash is broken once it is older than LEASE_MS (by its mtime), which is the only window in which the exclusion is not exact.
+  const lock = `${path}.lock`;
+  if (!takeLock(lock, nowMs)) return { held: true, by: readLease(path)?.runId ?? "takeover-in-progress" };
+  try {
+    const current = readLease(path);
+    if (current && current.runId !== runId && Math.abs(nowMs - current.at) < LEASE_MS) return { held: true, by: current.runId };
+    const tmp = `${path}.${process.pid}.tmp`;
+    writeFileSync(tmp, body);
+    renameSync(tmp, path);
+    return { held: false, leaseId: runId };
+  } finally {
+    try {
+      unlinkSync(lock);
+    } catch {
+      // already gone: nothing to release.
+    }
+  }
+}
+
+/** Creates `lock` exclusively; a lock older than LEASE_MS is a crashed taker's and is removed once before trying again. */
+function takeLock(lock: string, nowMs: number): boolean {
+  for (let attempt = 0; attempt < 2; attempt++) {
+    try {
+      writeFileSync(lock, String(nowMs), { flag: "wx" });
+      return true;
+    } catch (error) {
+      if ((error as NodeJS.ErrnoException).code !== "EEXIST") throw error;
+    }
+    try {
+      if (nowMs - statSync(lock).mtimeMs < LEASE_MS) return false;
+      unlinkSync(lock);
+    } catch {
+      // the holder released it between our two calls: try again.
+    }
+  }
+  return false;
 }
 
 /** Removes the lease only when `runId` holds it. Returns whether a lease was removed. */

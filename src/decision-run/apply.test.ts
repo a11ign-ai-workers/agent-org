@@ -134,6 +134,22 @@ function writeBroken(path: string): void {
   writeFileSync(path, "{half");
 }
 
+test("NEGATIVE CONTROL: a stale lease being taken by another run (its lock is held) is not also taken; a finished take leaves no lock", () => {
+  const dir = leaseDir();
+  const now = Date.parse(SINCE);
+  leaseItem(dir, REF, "run-1", now);
+  const lock = `${leasePath(dir, REF)}.lock`;
+  writeFileSync(lock, String(now + LEASE_MS));
+  const r = leaseItem(dir, REF, "run-2", now + LEASE_MS);
+  assert.equal(r.held, true);
+  assert.equal(JSON.parse(readFileSync(leasePath(dir, REF), "utf8")).runId, "run-1");
+  rmSync(lock);
+  assert.deepEqual(leaseItem(dir, REF, "run-2", now + LEASE_MS), { held: false, leaseId: "run-2" });
+  assert.equal(existsSync(lock), false);
+  // the second taker of the same stale file sees the first's fresh lease
+  assert.deepEqual(leaseItem(dir, REF, "run-3", now + LEASE_MS), { held: true, by: "run-2" });
+});
+
 test("releaseItem by a run that does not hold the lease removes nothing; by the holder removes it", () => {
   const dir = leaseDir();
   leaseItem(dir, REF, "run-1", 1_000);
