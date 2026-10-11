@@ -17,6 +17,7 @@ import { test } from "node:test";
 import { DECISION_USES, decisionSwitchesPath, decisionLogPathFrom, type DecisionDeps } from "./decision-provider.ts";
 import { FAILURE_LEDGER_FILE, parseFailureLedger } from "./failure-ledger.ts";
 import { parseHostConfig, SHADOW_COPY_MARKER, SHADOW_STATE_DIR_ENV } from "./host-config.ts";
+import { sandboxGitEnv } from "./lib/git-env.ts";
 import { tmpDir } from "./lib/tmp-fixture.ts";
 import {
   SPEC_LINT_REFUSED_KIND, promoteAndReviewRow, promoteRefusalReason, promoteRow, readSpecLintFlag, recordSpecLintRefusals, reviewPromotedSpec, specLintDeps,
@@ -193,7 +194,7 @@ test("1. MUTATION TARGET: a Region prefix with no root on this machine is unchec
 
 test("1. MUTATION TARGET: file existence is read from origin/main, not the working tree (a stale checkout must not refuse a file that exists)", () => {
   const root = tmpDir("spec-lint-origin-");
-  const git = (...args: string[]) => execFileSync("git", ["-C", root, "-c", "user.email=t@t", "-c", "user.name=t", ...args], { encoding: "utf8" });
+  const git = (...args: string[]) => execFileSync("git", ["-C", root, "-c", "user.email=t@t", "-c", "user.name=t", ...args], { encoding: "utf8", env: sandboxGitEnv() });
   git("init", "-q", "-b", "main");
   mkdirSync(join(root, "src"));
   writeFileSync(join(root, "src", "on-main.ts"), "export {};\n");
