@@ -831,7 +831,15 @@ export function shelvedCircleReading({ circles }: { circles: ShelvedCircle[] | n
 /**
  * One declared copy: where it came from and where it sits (both relative to the checkout), how many lines its own header says it changed (`null` when the header says none), the original's text (`null` when it could not be read) and the copy's text.
  */
-export type CopyPair = { original: string, copy: string, allowedLines: number | null, originalText: string | null, copyText: string };
+export type CopyPair = { original: string, copy: string, allowedLines: number | null, originalText: string | null, copyText: string, comparedIn?: string | null };
+
+/**
+ * An original that moved into an installed package is named by its specifier (`@a11ign/toolchain/lib/<stem>`), never by a path of the
+ * checkout. The package ships COMPILED output, so no line of it is a line of the copy: it is compared by a test that reads names and
+ * behaviour, which the copy's header names (`COMPARED IN`).
+ */
+const isInstalledOriginal = (original: string): boolean => original.startsWith("@");
+const COPY_COMPARED_IN = /^\/\/ COMPARED IN `([^`]+)`/;
 
 /**
  * SIGNAL (#3533): A RUNNER OF `agent-org` THAT IS NOT ON THE NEWEST RELEASE FOR LONGER THAN ONE RELEASE CYCLE, whichever of the three kinds it is (the tool checkout, a worktree's resolved
@@ -1063,6 +1071,10 @@ function linesWithoutCounterpart(lines: string[], against: string[]): number {
  */
 function judgePair(pair: CopyPair): { verdict: "same" | "drifted" | "unknown"; why: string; } {
   if (pair.originalText === null) return { verdict: "unknown", why: `${pair.original} could not be read` };
+  if (isInstalledOriginal(pair.original)) {
+    return pair.comparedIn ? { verdict: "same", why: "" }
+      : { verdict: "unknown", why: `${pair.original} is installed compiled and no test that is still reading this stem is named by its header, so nothing compares it` };
+  }
   const { body, complete } = withoutCopyHeader(pair.copyText);
   if (!complete) return { verdict: "drifted", why: "the copy has no complete header" };
   if (pair.allowedLines === null) return { verdict: "unknown", why: "its header does not say how many lines it changed" };
@@ -1097,6 +1109,39 @@ export function copyDriftReading({ pairs }: { pairs: CopyPair[] | null; }): Read
     detail: `${drifted.length} declared cop${drifted.length === 1 ? "y" : "ies"} drifted from the original: ${named.join("; ")}${more}` };
 }
 
+/**
+ * WHERE AN INSTALLED ORIGINAL IS: `<root>/node_modules/<package>/` plus what the package's own `exports` map gives for the subpath, so the
+ * module counts as present only where the package says it ships it. `null` for anything that cannot be read, a package that is not
+ * installed and a subpath it no longer exports alike.
+ */
+function readInstalledOriginal(read: (path: string) => string, root: string, specifier: string): string | null {
+  const [scope, name, ...subpath] = specifier.split("/");
+  if (name === undefined) return null;
+  const dir = `${root}/node_modules/${scope}/${name}`;
+  const manifest = readOrNull(read, `${dir}/package.json`);
+  if (manifest === null) return null;
+  try {
+    const entry = JSON.parse(manifest).exports?.[`./${subpath.join("/")}`];
+    const target = typeof entry === "string" ? entry : entry?.default;
+    return typeof target === "string" ? readOrNull(read, `${dir}/${target.replace(/^\.\//, "")}`) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * THE TEST A COPY SAYS COMPARES IT, or `null`: the header names it (`COMPARED IN`), the file must be readable in the tool, and it must still
+ * name the copy's stem as a key (`"<stem>":`), so a test that stopped probing this copy, or a header naming a file that is gone, is not "compared".
+ */
+function comparerOf(read: (path: string) => string, toolRoot: string, copy: string, copyText: string): string | null {
+  const lines = copyText.split("\n");
+  const named = lines.slice(0, Math.max(lines.indexOf(COPY_HEADER_END), 0)).map((line) => COPY_COMPARED_IN.exec(line)?.[1]).find(Boolean);
+  if (named === undefined) return null;
+  const stem = copy.split("/").pop()?.replace(/\.[^.]+$/, "");
+  const text = readOrNull(read, `${toolRoot}/${named}`);
+  return text !== null && text.includes(`"${stem}":`) ? named : null;
+}
+
 /** @returns the text, or `null` for a file that cannot be read: absent is not empty */
 function readOrNull(read: (path: string) => string, path: string): string | null {
   try {
@@ -1109,7 +1154,8 @@ function readOrNull(read: (path: string) => string, path: string): string | null
 /**
  * THE DECLARED COPIES OF A CHECKOUT, discovered from the headers: every file in `COPIES_DIR` whose header names its original. `null`
  * when the directory cannot be listed. Each pair's original is read here and is `null` in the pair when it cannot be.
- * `root` is the PROJECT, where each copy's original is read; `toolRoot` is where the copies themselves are.
+ * `root` is the PROJECT, where each copy's original is read (an original named by package specifier is read from the package installed
+ * under it); `toolRoot` is where the copies themselves are.
  */
 export function readDeclaredCopies({ root = DEFAULT_ROOT, toolRoot = TOOL_ROOT, list = (dir) => readdirSync(dir), read = (path) => readFileSync(path, "utf8") }: { root?: string; toolRoot?: string; list?: (dir: string) => string[]; read?: (path: string) => string; } = {}): CopyPair[] | null {
   let names;
@@ -1130,7 +1176,9 @@ export function readDeclaredCopies({ root = DEFAULT_ROOT, toolRoot = TOOL_ROOT, 
     const original = copyText.split("\n").map((line) => COPY_HEADER_START.exec(line)?.[1]).find(Boolean);
     if (original === undefined) continue;
     const changed = COPY_HEADER_CHANGES.exec(copyText);
-    pairs.push({ original, copy, originalText: readOrNull(read, `${root}/${original}`), copyText, allowedLines: changed === null ? null : Number(changed[1] ?? (/ONE LINE/.test(changed[0]) ? 1 : 0)) });
+    const installed = isInstalledOriginal(original);
+    pairs.push({ original, copy, originalText: installed ? readInstalledOriginal(read, root, original) : readOrNull(read, `${root}/${original}`), copyText,
+      ...(installed ? { comparedIn: comparerOf(read, toolRoot, copy, copyText) } : {}), allowedLines: changed === null ? null : Number(changed[1] ?? (/ONE LINE/.test(changed[0]) ? 1 : 0)) });
   }
   return pairs;
 }
