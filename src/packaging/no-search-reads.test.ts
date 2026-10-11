@@ -29,8 +29,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { lookupClaimedRegions } from "../row-claim/file-overlap-rule.ts";
-import { readChairmanBlocked, readClaimedRowComments, readClosedAnswerRows, readClosedClaimLabelRows, readPromotableRows, readReadyRows, readRecentlyClosed }
-  from "../work-gate.ts";
+import { readChairmanBlocked, readClaimedRowComments, readClosedAnswerRows, readClosedClaimLabelRows, readPromotableRows, readReadyRows, readRecentlyClosed,
+  readTrackerLanes } from "../work-gate.ts";
 import { forgetRefusedReads, readClaimedRows } from "../ticket-port/rows-by-label.ts";
 import { closedAnswerConnection, connectionOf, readsClosedAnswerRows, readsRecentlyClosed, readsRowsByLabel, recentlyClosedConnection } from "./rows-by-label-fixtures.ts";
 
@@ -156,7 +156,7 @@ const COVERED = [
   ...readdirSync(join(SRC, "ticket-port")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `ticket-port/${f}`),
 ];
 
-test("NEGATIVE CONTROL (source): no file the claim reads through builds a list argv carrying `--label` or `--search`", () => {
+test("NEGATIVE CONTROL (source): no file the claim or the gate reads through builds a list argv carrying `--label` or `--search`", () => {
   assert.ok(COVERED.includes("row-claim/file-overlap-rule.ts") && COVERED.includes("ticket-port/rows-by-label.ts"),
     "the walk sees the files this row converted: an empty walk would pass for the wrong reason");
   assert.ok(["work-gate.ts", "queue-table.ts", "work-tick.ts", "work-gate/org-health.ts"].every((file) => COVERED.includes(file)), "and the gate's own files (#5050)");
@@ -279,4 +279,43 @@ test("the closed answer reads are under the SAME memory as the by-label ones: a 
     process.stderr.write = quiet;
   }
   assert.ok(refused, "control: the closed read was the one that was refused");
+});
+
+// --- the fold, at the edge of one connection page --------------------------------------------------------------------------------------
+
+/** A backlog row as the open list gives it (`gh issue list --json`). */
+const backlogRow = (number: number) => ({ number, title: `row ${number}`, createdAt: "2026-10-01T00:00:00Z", updatedAt: "2026-10-02T00:00:00Z", body: "", milestone: null,
+  labels: [{ name: "backlog" }], blockedBy: { nodes: [] }, subIssuesSummary: { total: 0, completed: 0 } });
+
+/** A GitHub that answers the whole open list and the by-label connection (paged, 100 a page), and counts the by-label reads it was SENT. */
+function trackerWithBacklog(count: number) {
+  const open = Array.from({ length: count }, (_, at) => backlogRow(count - at));
+  const sent: string[][] = [];
+  const answer = (args: string[]): string => {
+    if (args[0] === "issue" && args[1] === "list") return JSON.stringify(open);
+    const asked = readsRowsByLabel(args);
+    if (asked === null) throw new Error(`unexpected call: ${args.join(" ")}`);
+    sent.push(args);
+    if (asked.label !== "backlog") return connectionOf([]);
+    const after = args.find((arg) => arg.startsWith("after="));
+    const page = after === undefined ? open.slice(0, 100) : open.slice(100);
+    return connectionOf(page, { hasNextPage: after === undefined && open.length > 100 });
+  };
+  const run = (args: string[]): string => answer(args);
+  const batch = (calls: { args: string[]; }[]) => calls.map(({ args }) => ({ stdout: answer(args) }));
+  return { run, batch, sent };
+}
+
+test("the fold answers a label from the open list when it fits ONE page of the connection: the by-label read is not sent (POSITIVE CONTROL)", () => {
+  const { run, batch, sent } = trackerWithBacklog(40);
+  const lanes = readTrackerLanes(run, batch as never);
+  assert.equal(lanes.promotableRows?.length, 40, "all forty backlog rows came back");
+  assert.deepEqual(sent.filter((args) => readsRowsByLabel(args)?.label === "backlog"), [], "and the connection was never asked: they were made from the open list");
+});
+
+test("a label with MORE rows than one page of the connection is NOT answered from the open list: it is asked, and no row past the first page is lost", () => {
+  const { run, batch, sent } = trackerWithBacklog(150);
+  const lanes = readTrackerLanes(run, batch as never);
+  assert.equal(lanes.promotableRows?.length, 150, "the hundred and fifty rows: a first page folded and called whole would have returned 100");
+  assert.ok(sent.some((args) => readsRowsByLabel(args)?.label === "backlog"), "the connection WAS asked, because the open list cannot say there is no second page");
 });
