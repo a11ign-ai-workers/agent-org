@@ -960,10 +960,10 @@ export function whyNoHost(env: Record<string, string>, isFile: (path: string) =>
  * Why a pane started now would be sent to read a brief that is not there, or `null` (#869, `ceo`'s addition 2 on #850). The pane is
  * told to read {@link ENGINEER_BRIEF_ABSOLUTE} before anything else; a path that is not a file leaves it idle on a read that
  * cannot succeed, so the spawn is refused before the claim, with the path named.
- * @param [exists] a parameter so a test can hand it a fixture
+ * @param [isFile] a parameter so a test can hand it a fixture; a DIRECTORY at the path is not a brief, as it is not a host declaration ({@link whyNoHost})
  */
-export function whyNoBrief(exists: (path: string) => boolean = existsSync): string | null {
-  return exists(ENGINEER_BRIEF_ABSOLUTE) ? null : `the engineer brief is not at ${ENGINEER_BRIEF_ABSOLUTE}`;
+export function whyNoBrief(isFile: (path: string) => boolean = isRegularFile): string | null {
+  return isFile(ENGINEER_BRIEF_ABSOLUTE) ? null : `the engineer brief is not at ${ENGINEER_BRIEF_ABSOLUTE}`;
 }
 
 /**
@@ -1011,7 +1011,7 @@ function spawnWorker(order: { session: string; causeKey: string; cause?: string;
   if (unspawnable !== null) return { refusal: `no spawn: ${unspawnable}` };
   const unhosted = whyNoHost(env, isFile);
   if (unhosted !== null) return { refusal: `no spawn: ${unhosted}` };
-  const unbriefed = whyNoBrief(exists);
+  const unbriefed = whyNoBrief(isFile);
   if (unbriefed !== null) return { refusal: `no spawn: ${unbriefed}` };
   const claimed = claimer?.claim(order, role.role, env);
   if (claimed !== undefined && "refusal" in claimed) {

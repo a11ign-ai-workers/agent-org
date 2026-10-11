@@ -5,14 +5,14 @@
  * #867 sends a spawned pane to read `<home project>/.agent-org/roles/engineer.md`. A pane started when that file is absent is told to read a path that is
  * not there and sits idle on it, so `spawnWorker` says `no spawn: the engineer brief is not at <path>` after the memory and claim prechecks and before
  * the claim: no row is claimed and no pane is opened. WHAT IS PINNED: the refusal through `deliver` (the production entry), with the same spawn and the
- * file present as the POSITIVE CONTROL in the same process; the `exists` seam of `whyNoBrief`; and, read from a copy of `wake.ts`'s text, that the check
+ * file present as the POSITIVE CONTROL in the same process; the `isFile` seam of `whyNoBrief` (a directory at the path is no brief); and, read from a copy of `wake.ts`'s text, that the check
  * sits before the claim and that a copy without it is named.
  *
  * The project is the overlap rule's recorded one with NO `engineer.md`, which `wake-spawn-worktree.test.ts` adds for its own spawns.
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -119,13 +119,28 @@ test("`whyNoBrief` asks the seam it is handed, naming the path it was asked abou
   assert.deepEqual(asked, [BRIEF], "one read, of the brief's absolute path and nothing relative to a worktree");
 });
 
+test("a DIRECTORY at the brief's path is no brief: the default seam asks for a file, as `whyNoHost` does", () => {
+  mkdirSync(BRIEF);
+  try {
+    assert.equal(whyNoBrief(), `the engineer brief is not at ${BRIEF}`);
+  } finally {
+    rmSync(BRIEF, { recursive: true, force: true });
+  }
+  writeFileSync(BRIEF, "# a file\n");
+  try {
+    assert.equal(whyNoBrief(), null, "POSITIVE CONTROL: a file at the same path is a brief");
+  } finally {
+    rmSync(BRIEF, { force: true });
+  }
+});
+
 /** What `wake.ts` must still do, read from a copy of its text; the problems found, none when it holds. */
 function spawnProblems(source: string): string[] {
   const problems: string[] = [];
   const worker = source.slice(source.indexOf("function spawnWorker("));
-  const check = worker.indexOf("whyNoBrief(exists)");
+  const check = worker.indexOf("whyNoBrief(isFile)");
   const claim = worker.indexOf("claimer?.claim(");
-  const refusal = /whyNoBrief\(exists\);\s*if \(unbriefed !== null\) return \{ refusal: `no spawn: \$\{unbriefed\}` \}/;
+  const refusal = /whyNoBrief\(isFile\);\s*if \(unbriefed !== null\) return \{ refusal: `no spawn: \$\{unbriefed\}` \}/;
   if (check === -1 || !refusal.test(worker)) problems.push("spawnWorker no longer refuses a spawn whose engineer brief is absent");
   else if (claim === -1 || check > claim) problems.push("the brief check is no longer before the claim");
   if (!/the engineer brief is not at \$\{ENGINEER_BRIEF_ABSOLUTE\}/.test(source)) problems.push("the refusal no longer names the brief's absolute path");
@@ -135,10 +150,10 @@ function spawnProblems(source: string): string[] {
 test("MUTATION: a wake.ts that drops the check, or runs it after the claim, is named by its own problem", () => {
   const source = readFileSync(fileURLToPath(new URL("./wake.ts", import.meta.url)), "utf8");
   assert.deepEqual(spawnProblems(source), [], "the real text holds");
-  const dropped = source.replace(/  const unbriefed = whyNoBrief\(exists\);\n  if \(unbriefed !== null\) return \{ refusal: `no spawn: \$\{unbriefed\}` \};\n/, "");
+  const dropped = source.replace(/  const unbriefed = whyNoBrief\(isFile\);\n  if \(unbriefed !== null\) return \{ refusal: `no spawn: \$\{unbriefed\}` \};\n/, "");
   assert.ok(dropped !== source, "the mutation applied");
   assert.deepEqual(spawnProblems(dropped), ["spawnWorker no longer refuses a spawn whose engineer brief is absent"]);
-  const late = source.replace(/(  const unbriefed = whyNoBrief\(exists\);\n  if \(unbriefed !== null\) return \{ refusal: `no spawn: \$\{unbriefed\}` \};\n)(  const claimed = claimer\?\.claim\(order, role\.role, env\);\n)/, "$2$1");
+  const late = source.replace(/(  const unbriefed = whyNoBrief\(isFile\);\n  if \(unbriefed !== null\) return \{ refusal: `no spawn: \$\{unbriefed\}` \};\n)(  const claimed = claimer\?\.claim\(order, role\.role, env\);\n)/, "$2$1");
   assert.ok(late !== source, "the mutation applied");
   assert.deepEqual(spawnProblems(late), ["the brief check is no longer before the claim"]);
 });
