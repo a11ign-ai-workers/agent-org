@@ -266,6 +266,39 @@ test("#4900: ROUTING BY ROLE: no workspace is the scheduler, a workspace is a wo
   assert.equal(h.mints(), 0, "every token was served from the file: no process was started");
 });
 
+/** A third config directory standing for the reviewer's own (`/home/agent/reviewer/gh`): its account is `a11ign-bot`, its ledger is its own. */
+function reviewerConfig(h: { root: string }) {
+  const dir = join(h.root, "reviewer", "gh");
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(join(dir, "hosts.yml"), "github.com:\n    user: a11ign-bot\n    oauth_token: not-a-token\n");
+  return dir;
+}
+
+test("#817: an explicit GH_CONFIG_DIR that is neither the workers' nor the leads' gets NO app: a reviewer acts as its own account", () => {
+  const h = host();
+  h.seed("workers", "ghs_workers"); h.seed("managers", "ghs_managers");
+  const reviewer = reviewerConfig(h);
+  const asWorkers = h.run({ HERDR_WORKSPACE_ID: "w3", GH_CONFIG_DIR: WORKERS_CFG(h) }, "pr", "view");
+  const asLeads = h.run({ HERDR_WORKSPACE_ID: "w3", GH_CONFIG_DIR: LEADS_CFG(h) }, "pr", "view");
+  const asReviewer = h.run({ HERDR_WORKSPACE_ID: "w3", GH_CONFIG_DIR: reviewer }, "pr", "view");
+  assert.deepEqual([asWorkers, asLeads].map((r) => tokenOf(r.stdout)), ["ghs_workers", "ghs_managers"],
+    "POSITIVE CONTROL: the two directories the wrapper names still get their app, so the third's `none` is the rule and not a dead app");
+  assert.equal(tokenOf(asReviewer.stdout), "none", "a reviewer given the workers' token is the author of the PR it reviews, and GitHub refuses its approval");
+  assert.equal(h.mints(), 0, "no process was started for any of the three");
+  const reviewerLines = readFileSync(join(reviewer, "gh-calls.tsv"), "utf8").split("\n").filter(Boolean);
+  assert.deepEqual(reviewerLines.map((l) => parseLine(l)?.account), ["a11ign-bot"], "the ledger names the account the call went out as, and no `app:` role");
+});
+
+test("#817: `AGENT_ORG_GH_ROLE` still wins over a config of its own, and a unit's own config with no workspace is no app either", () => {
+  const h = host();
+  h.seed("scheduler", "ghs_scheduler"); h.seed("workers", "ghs_workers");
+  const own = reviewerConfig(h);
+  assert.equal(tokenOf(h.run({ HERDR_WORKSPACE_ID: "w3", GH_CONFIG_DIR: own, AGENT_ORG_GH_ROLE: "scheduler" }, "pr", "list").stdout), "ghs_scheduler",
+    "a caller that declares its role is not second-guessed by its directory");
+  assert.equal(tokenOf(h.run({ GH_CONFIG_DIR: own }, "pr", "list").stdout), "none", "no workspace and a directory of its own: the account the directory names");
+  assert.equal(tokenOf(h.run({ GH_CONFIG_DIR: WORKERS_CFG(h) }, "pr", "list").stdout), "ghs_scheduler", "no workspace and the workers' directory is still the scheduler");
+});
+
 test("#4900: a role a caller declares (`AGENT_ORG_GH_ROLE`) outranks the workspace, and an unknown value is ignored", () => {
   const h = host();
   h.seed("scheduler", "ghs_scheduler"); h.seed("workers", "ghs_workers");
