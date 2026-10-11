@@ -118,7 +118,7 @@ test("`due` uses the reconcile interval in place of MAX_UNCHANGED_SECONDS while 
   const due = refreshTickSnapshot({ repos: REPOS, homeRepo: HOME_REPO, configDir: dir, run, nowMs: T0 + RECONCILE_SECONDS * SEC, events: healthy() });
   assert.deepEqual([counter(dir, HOME_REPO), counter(dir, OTHER)], [2, 2], "the reconcile interval is up: every repository is re-read");
   assert.match(due[0], /CHANGED \(no event; re-read due\) generation 2$/);
-  assert.deepEqual(calls, [], "and re-reading is a bump of the counter, not a probe");
+  assert.equal(calls.length, 4, "and the reconcile is the one place a probe runs while events answer: the pair, once per repository (agent-org#982, the drift check)");
   const dead = recordingGh();
   refreshTickSnapshot({ repos: REPOS, homeRepo: HOME_REPO, configDir: dir, run: dead.run, nowMs: T0 + (RECONCILE_SECONDS + MAX_UNCHANGED_SECONDS) * SEC, events: { ...healthy(), healthy: false } });
   assert.equal(dead.calls.length, 4, "an unhealthy receiver is the poll path, which asks");

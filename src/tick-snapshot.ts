@@ -23,10 +23,12 @@
 // IN `webhook` MODE (agent-org#981, a11ign/a11ign#5043) THE ANSWER COMES FROM THE EVENT QUEUE, NOT FROM A PROBE: `refreshTickSnapshot` is handed `events`, and while the receiver is `healthy` a
 // repository named by an event bumps its generation and every other keeps its counter, with NO `gh` call at all. Not `healthy`, it runs the probes above exactly as before: a dead receiver
 // costs the old polling, never a silent org. Without `events` nothing here changes.
+// A repository DUE for its reconcile in that mode is probed once (agent-org#982): a probe that moved with no event behind it is DRIFT and is filed once (`event-drift.ts` says what it can and cannot mean).
 
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { driftOf, fileDrift, type FileDrift } from "./event-drift.ts";
 
 /** A repository is re-read at least this often even when every probe says unchanged: what a probe cannot see (a non-Actions status) is bounded by it. */
 export const MAX_UNCHANGED_SECONDS = 300;
@@ -62,6 +64,13 @@ export function parseAnswer(stdout: string): Answer {
 const ghRun: GhRun = (args) => {
   const r = spawnSync("gh", args, { encoding: "utf8", timeout: PROBE_TIMEOUT_MS, maxBuffer: 64 * 1024 * 1024 });
   return { stdout: r.stdout ?? "", status: r.status };
+};
+
+/** A `GhRun` as the `Run` `recordIncident` takes: the output, and a throw on a refusal (it catches that and the caller retries). */
+const asRun = (run: GhRun) => (args: string[]): string => {
+  const { stdout, status } = run(args);
+  if (status !== 0) throw new Error(`gh ${args.slice(0, 2).join(" ")} exited ${status ?? "without a status"}`);
+  return stdout;
 };
 
 /**
@@ -124,7 +133,7 @@ function writeWhole(path: string, text: string) {
  * `events` absent is the poll path, unchanged. With `events.healthy` no probe runs: a repository in `events.changed` (compared without case, as GitHub spells `full_name` its own way)
  * is bumped, one that is not keeps its counter, and its `verified-at` still moves, because a live receiver is what vouches for it. Not healthy, the probes run as they always did.
  */
-export function refreshTickSnapshot({ repos, homeRepo, configDir, run = ghRun, nowMs = Date.now(), events }: { repos: string[]; homeRepo: string; configDir: string; run?: GhRun; nowMs?: number; events?: TickEvents; }) {
+export function refreshTickSnapshot({ repos, homeRepo, configDir, run = ghRun, nowMs = Date.now(), events, fileDrift: file = (drift) => fileDrift(drift, { run: asRun(run) }) }: { repos: string[]; homeRepo: string; configDir: string; run?: GhRun; nowMs?: number; events?: TickEvents; fileDrift?: FileDrift; }) {
   const viaEvents = events !== undefined && events.healthy;
   if (viaEvents && !(Number.isFinite(events.reconcileEverySeconds) && events.reconcileEverySeconds > 0)) {
     throw new Error(`reconcileEverySeconds must be a positive number of seconds, not ${events.reconcileEverySeconds}: a repository would never be re-read`);
@@ -139,17 +148,24 @@ export function refreshTickSnapshot({ repos, homeRepo, configDir, run = ghRun, n
   const lines = [];
   for (const repo of repos) {
     const held = tags[repo] ?? { tags: {}, bumpedAt: 0 };
-    const probes = viaEvents ? [] : probePaths(repo).map((path) => ({ path, ...probeOnce({ path, held: held.tags[path], run }) }));
     const before = readGeneration(join(root, "gen", slugOf(repo)));
-    const changed = viaEvents ? named.has(repo.toLowerCase()) : probes.some((p) => p.changed);
     const due = before === null || nowS - held.bumpedAt >= reconcileSeconds;
+    const eventNamed = named.has(repo.toLowerCase());
+    // Poll: the probes are the answer. Events: none, except ONCE when the repository is due, as the safety net for a delivery the receiver never got (agent-org#982).
+    const probes = !viaEvents || due ? probePaths(repo).map((path) => ({ path, held: held.tags[path], ...probeOnce({ path, held: held.tags[path], run }) })) : [];
+    const drift = viaEvents && due ? driftOf({ repo, probes, named: eventNamed, windowStartS: held.bumpedAt, nowS }) : null;
+    // A refused filing leaves the window and the held tags as they were, so the next tick is due and the same probe says CHANGED again: retried, not lost.
+    const filed = drift === null ? null : file(drift);
+    const unfiled = drift !== null && !filed;
+    const changed = (viaEvents && eventNamed) || probes.some((p) => p.changed);
     const counter = changed || due ? (before?.counter ?? 0) + 1 : (before?.counter ?? 1);
-    // Held tags are kept as they are while events answer: they are what the probes compare against on the tick the receiver is found dead, where a difference reads as a change.
-    const kept = viaEvents ? held.tags : Object.fromEntries(probes.flatMap((p) => (p.etag === undefined ? [] : [[p.path, p.etag]])));
-    tags[repo] = { tags: kept, bumpedAt: changed || due ? nowS : held.bumpedAt };
+    // While events answer, tags are kept as they are except at a reconcile that filed (or found nothing): they are what the probes compare against on the tick the receiver is found dead, where a difference reads as a change.
+    const kept = viaEvents && (!due || unfiled) ? held.tags : Object.fromEntries(probes.flatMap((p) => (p.etag === undefined ? [] : [[p.path, p.etag]])));
+    tags[repo] = { tags: kept, bumpedAt: unfiled ? held.bumpedAt : changed || due ? nowS : held.bumpedAt };
     for (const slug of repo === homeRepo ? [slugOf(repo), slugOf("")] : [slugOf(repo)]) writeWhole(join(root, "gen", slug), `${counter} ${nowS}\n`);
-    const why = viaEvents ? (changed ? "event" : "no event") : probes.map((p) => p.why).join(", ");
-    lines.push(`${repo}: ${changed || due ? "CHANGED" : "unchanged"} (${why}${due && !changed ? "; re-read due" : ""}) generation ${counter}`);
+    const driftNote = drift === null ? "" : `; MISSED DELIVERY inferred from the ${drift.probe} probe, ${filed ? "incident filed" : "incident NOT filed, retried next tick"}`;
+    const why = viaEvents ? (eventNamed ? "event" : "no event") : probes.map((p) => p.why).join(", ");
+    lines.push(`${repo}: ${changed || due ? "CHANGED" : "unchanged"} (${why}${due && !changed ? "; re-read due" : ""}${driftNote}) generation ${counter}`);
   }
   writeWhole(tagsPath, JSON.stringify(tags));
   return lines;
