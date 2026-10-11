@@ -1,3 +1,4 @@
+// no-token: builtInCheckoutOf -- the child reads a scratch host.json and productRegionsOf is a pure filter over its lists; no gh call runs
 // POSITIVE CONTROL: this file's refusal must fire on the row's own clone before any negative case means anything. The first test below
 // asserts the refusal on a `cd` into the built-in clone, and the population assertions carry their own non-empty control.
 /**
