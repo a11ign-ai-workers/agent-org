@@ -42,6 +42,8 @@ import { ANSWER_PREFIX, BACKLOG_LABEL, LANE_ANY_LABEL, LANE_PREFIX, NEEDS_CHAIRM
 import { readAgents, listingIsComplete } from "./herdr-agents.ts";
 import { homeProjectDeclaration } from "./project-config.ts";
 import { declaredRegionFiles } from "./region-paths.ts";
+import { TRACKER, githubTicketAdapter } from "./ticket-port/github-adapter.ts";
+import type { TicketItem } from "./ticket-port/port.ts";
 
 export const QUESTIONS = Object.freeze({
   EPIC_DONE: "epic-all-closed",
@@ -153,8 +155,8 @@ const CHAIRMAN_LOGIN = "DanBeckDev";
 const CHAIRMAN_RULING_LINE = /^[ \t]*Chairman-ruling:[ \t]*(\S+)/gim;
 /** A comment's own URL, as the chairman's ruling line names it: `https://github.com/<owner>/<repo>/issues/<n>#issuecomment-<id>`. */
 const COMMENT_URL = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:issues|pull)\/\d+#issuecomment-(\d+)$/;
-/** The children read per epic: GraphQL's page, and a count above it is a read that is refused rather than a short list. */
-const CHILDREN_ASKED = 100;
+/** The sub-issues the ticket port's item read asks (`ITEM_QUERY`, `subIssues(first: 50)`), with no total. A list of exactly this many may be cut short, so it is UNREAD. */
+const PORT_CHILDREN_CAP = 50;
 
 /** The URLs on a row's `Chairman-ruling:` lines. @param {string | undefined} body @returns {string[]} */
 export function rulingUrlsOf(body: string | undefined): string[] {
@@ -756,24 +758,30 @@ function readRoadmaps(repo: string, openRows: BoardRow[], run: (args: string[]) 
 }
 
 /**
- * THE CHILDREN OF EACH OPEN EPIC WHOSE CHILDREN ARE ALL CLOSED (a11ign/agent-org#881): ONE GraphQL request per such epic, its children's title, body and state, and one `gh api` read per
- * `Chairman-ruling:` URL that a non-build child carries, for its author. Nothing is read for an epic that is not all closed, or for a build row's ruling lines (no question asks them).
- * A refused read, or a child list cut short, THROWS inside and is `null` (UNREAD): an empty list would say the outcome agrees with its children, and a ruling that could not be read is not a
- * ruling that is missing.
+ * THE CHILDREN OF EACH OPEN EPIC WHOSE CHILDREN ARE ALL CLOSED (a11ign/agent-org#881), read through the ticket port (ADR 0046): one `readItem` for the epic, one per child for its title,
+ * body and state (`done` is a closed child), and one `gh api` read per `Chairman-ruling:` URL that a non-build child carries, for its author. Nothing is read for an epic that is not all
+ * closed, or for a build row's ruling lines (no question asks them). A refused read, or a child list of exactly the port's cap (it may be cut short), THROWS inside and is `null` (UNREAD):
+ * an empty list would say the outcome agrees with its children, and a ruling that could not be read is not a ruling that is missing.
  * @param {string} repo `owner/name` @param {BoardRow[]} openRows @param {(args: string[]) => string} run @returns {EpicChildren | null}
  */
 function readEpicChildren(repo: string, openRows: BoardRow[], run: (args: string[]) => string): EpicChildren | null {
-  const [owner, name] = repo.split("/");
+  const port = githubTicketAdapter({ run, scope: repo });
   const byEpic: Record<number, BoardRow[]> = {};
   const rulings: Record<string, string | null> = {};
   try {
     for (const epic of openRows.filter(epicAllClosed)) {
-      const query = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { issue(number: ${epic.number}) { subIssues(first: ${CHILDREN_ASKED}) { totalCount nodes { number title body state } } } } }`;
-      const subIssues = JSON.parse(run(["api", "graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`]))?.data?.repository?.issue?.subIssues;
-      if (!Array.isArray(subIssues?.nodes) || (subIssues.totalCount ?? subIssues.nodes.length) > subIssues.nodes.length) {
+      const parent = port.readItem({ tracker: TRACKER, scope: repo, id: epic.number });
+      if (parent === null || parent.relations.children.length >= PORT_CHILDREN_CAP) {
         throw new Error(`epic children: #${epic.number} came back without all of its children`);
       }
-      const closed: BoardRow[] = subIssues.nodes.filter((child: BoardRow) => child.state === "CLOSED");
+      const items: TicketItem[] = [];
+      for (const ref of parent.relations.children) {
+        const item = port.readItem(ref);
+        if (item === null) throw new Error(`epic children: a child of #${epic.number} could not be read`);
+        items.push(item);
+      }
+      const closed: BoardRow[] = items.filter((item) => item.state === "done")
+        .map((item) => ({ number: item.ref.id, title: item.title, body: item.body, state: "CLOSED" }));
       byEpic[epic.number] = closed;
       for (const child of closed.filter((c) => nonBuildKindOf(c) !== null)) {
         for (const url of rulingUrlsOf(child.body)) rulings[url] ??= authorOfComment(url, run);

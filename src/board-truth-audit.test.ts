@@ -689,11 +689,22 @@ test("#881 (5) an epic not asked is not judged, and a failed read is UNREAD, nev
   assert.deepEqual(failed.findings.filter((f) => f.question === CHILD_QUESTIONS.OUTCOME_CLOSED), []);
 });
 
-/** A `gh` fake for the children read: the epic's children answer the one GraphQL query per epic, a comment answers its author, and anything else is the roadmap read. */
+/** An item's node as the ticket port's item query answers it: its sub-issues are `subIssues`, and every other field the adapter reads is empty. */
+const itemNode881 = (item: any, subIssues: any[]) => ({
+  number: item.number, title: item.title, body: item.body, state: item.state, createdAt: "2026-10-01T00:00:00Z",
+  labels: { nodes: [] }, projectItems: { nodes: [] }, parent: null, blockedBy: { nodes: [] }, closedByPullRequestsReferences: { nodes: [] }, timelineItems: { nodes: [] },
+  subIssues: { nodes: subIssues.map((c) => ({ number: c.number, repository: { nameWithOwner: "a/b" } })) },
+});
+/** A `gh` fake for the children read through the ticket port: EPIC_881's item answers its children as sub-issues, each child answers its own node, a comment answers its author, and anything else is the roadmap read. */
 const epicRun881 = (children: any[], authors: Record<string, string> = {}, asked: string[] = []) => (args: string[]) => {
   asked.push(args.join(" "));
   const query = String(args.find((a) => a.startsWith("query=")) ?? "");
-  if (/ issue\(number: \d+\) \{ subIssues/.test(query)) return JSON.stringify({ data: { repository: { issue: { subIssues: { totalCount: children.length, nodes: children } } } } });
+  const number = Number(args.find((a) => a.startsWith("number="))?.slice("number=".length));
+  if (query.includes("subIssues(first: 50)")) {
+    if (number === EPIC_881.number) return JSON.stringify({ data: { repository: { issue: itemNode881(EPIC_881, children) } } });
+    const child = children.find((c) => c.number === number);
+    return JSON.stringify({ data: { repository: { issue: child === undefined ? null : itemNode881(child, []) } } });
+  }
   const comment = /^repos\/a\/b\/issues\/comments\/(\d+)$/.exec(args[1] ?? "");
   if (args[0] === "api" && comment) return `${authors[comment[1]] ?? ""}\n`;
   if (args[0] === "issue" || args[0] === "pr") return "[]";
@@ -718,9 +729,9 @@ test("#881 (7) the reader asks only an all-closed open epic, and a refused or cu
   assert.ok(!asked.some((a) => a.includes("subIssues")), "an epic with an open child is not read");
   const refused = (args: string[]) => { if (String(args.find((a) => a.startsWith("query="))).includes("subIssues")) throw new Error("HTTP 502"); return epicRun881([])(args); };
   assert.equal(readBoardFacts("a/b", { run: refused, agents: () => ORG_SEATS, now: NOW, trackers: [HOME_TRACKER], openRows: [EPIC_881], waitFacts: { items: {} } }).epicChildren, null);
-  const cut = (args: string[]) => (String(args.find((a) => a.startsWith("query="))).includes("subIssues")
-    ? JSON.stringify({ data: { repository: { issue: { subIssues: { totalCount: 101, nodes: [SPIKE_881] } } } } }) : epicRun881([])(args));
-  assert.equal(readBoardFacts("a/b", { run: cut, agents: () => ORG_SEATS, now: NOW, trackers: [HOME_TRACKER], openRows: [EPIC_881], waitFacts: { items: {} } }).epicChildren, null);
+  const fifty = Array.from({ length: 50 }, (_, i) => row(1000 + i, [], { title: "Build the rest", state: "CLOSED", body: "" }));
+  assert.equal(readEpics881(fifty), null, "a list of exactly the port's cap may be cut short, so it is UNREAD");
+  assert.notEqual(readEpics881(fifty.slice(0, 49)), null, "one fewer than the cap is a whole list");
   const ruledSpike = { ...SPIKE_881, body: `Chairman-ruling: ${COMMENT_881(901)}` };
   const noAuthor = (args: string[]) => {
     if (args[0] === "api" && args[1]?.startsWith("repos/a/b/issues/comments/")) throw new Error("HTTP 404");
