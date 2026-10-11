@@ -52,8 +52,12 @@ export const SUBCOMMANDS_KEPT = 10;
  * `git rev-parse HEAD` is `rev-parse` and its argument is not part of the name. A `node` is named by its script, in `slowest`.
  */
 const SUBCOMMAND_WORDS = { gh: 2, git: 1, herdr: 2 };
-/** Options of those programs that take their value as the NEXT word, which is therefore not a subcommand: git's `-C` and `-c`, gh's `-R`. */
-const VALUE_OPTIONS = new Set(["-C", "-c", "-R", "--repo"]);
+/**
+ * Options of those programs that take their value as the NEXT word, which is therefore not a subcommand: git's `-C` and `-c`, gh's `-R`, herdr's `--session`.
+ * `--session org` is on all 75 of a tick's `herdr` calls, and without it the value `org` was read as the first subcommand word: every call was named
+ * `herdr org agent`, which filed `agent start` (30 s each) beside `agent list` and `agent read` (agent-org#1025).
+ */
+const VALUE_OPTIONS = new Set(["-C", "-c", "-R", "--repo", "--session"]);
 
 /** One argument and one command line are cut here: an order's prompt is an argument and has no business in a cost record. */
 const ARG_CHARS = 40;
