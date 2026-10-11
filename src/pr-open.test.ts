@@ -313,3 +313,19 @@ test("#952 THROUGH sendToGitHub: the arm and the label of a `--repo` create reac
     ["pr", "edit", "agent/x", "--repo", REPO_952, "--add-label", "session:ceo"],
   ]);
 });
+
+test("#952 (READ ONCE): the tree's branch is read once per create, and the arm and the label name that one read", () => {
+  // Each read answers with a new branch, so a second read would make the arm and the label disagree.
+  const ran: string[][] = [];
+  let reads = 0;
+  const git = (a: string[]) => (a.includes("--abbrev-ref") ? `agent/${++reads}` : "abc1234");
+  const code = sendToGitHub("create", ["--repo", REPO_952, "--title", "t", "--body", "b"], {
+    run: (a) => { ran.push(a); }, git, err: () => {}, owner: () => "ceo", labelExists: () => true,
+  });
+  assert.equal(code, 0);
+  assert.equal(reads, 1);
+  assert.deepEqual(ran.slice(1), [
+    ["pr", "merge", "--auto", "--merge", "agent/1", "--repo", REPO_952],
+    ["pr", "edit", "agent/1", "--repo", REPO_952, "--add-label", "session:ceo"],
+  ]);
+});
