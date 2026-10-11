@@ -329,3 +329,15 @@ test("#952 (READ ONCE): the tree's branch is read once per create, and the arm a
     ["pr", "edit", "agent/1", "--repo", REPO_952, "--add-label", "session:ceo"],
   ]);
 });
+
+test("#952 (NO READ OUTSIDE CREATE): an edit reads no branch at all, so the happy path pays no git subprocess it does not use", () => {
+  let reads = 0;
+  const git = (a: string[]) => { if (a.includes("--abbrev-ref")) reads++; return "abc1234"; };
+  const ran: string[][] = [];
+  const code = sendToGitHub("edit", ["42", "--repo", REPO_952, "--title", "t"], {
+    run: (a) => { ran.push(a); }, git, err: () => {}, owner: () => "ceo", labelExists: () => true,
+  });
+  assert.equal(code, 0);
+  assert.equal(reads, 0);
+  assert.deepEqual(ran, [["pr", "edit", "42", "--repo", REPO_952, "--title", "t"]]);
+});

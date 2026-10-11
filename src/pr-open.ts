@@ -703,13 +703,19 @@ export function sendToGitHub(mode: string, rest: string[],
   const fact: (args: string[], fallback: string) => string = (args, fallback): string => { try { return git(args) || fallback; } catch { return fallback; } };
   const head = () => fact(["rev-parse", "--short", "HEAD"], "(unknown)");
   const head8 = () => fact(["rev-parse", "--short=8", "HEAD"], "(unknown)");
-  // Read ONCE per create: the arm and the label must name the same branch even if the checkout moves mid-call.
-  const branch = ((): string | null => { const b = fact(["rev-parse", "--abbrev-ref", "HEAD"], ""); return b === "" || b === "HEAD" ? null : b; })();
+  // Read ONCE per create, and only after the create has been attempted: the arm and the label must name the same branch even
+  // if the checkout moves mid-call, and no other mode pays a git read it never uses.
+  let branchRead: { value: string | null } | null = null;
+  const branch = (): string | null => {
+    if (mode !== "create") return null;
+    if (branchRead === null) { const b = fact(["rev-parse", "--abbrev-ref", "HEAD"], ""); branchRead = { value: b === "" || b === "HEAD" ? null : b }; }
+    return branchRead.value;
+  };
   try {
     run(["pr", mode, ...rest]);
   } catch (error) {
     if ((error as { status?: number })?.status === EXIT_QUEUED) {
-      const steps = mode === "create" ? [...armAfterCreate(mode, rest, branch), ...labelStepsAfterCreate(mode, rest, { owner: owner(), labelExists, branch })] : [];
+      const steps = mode === "create" ? [...armAfterCreate(mode, rest, branch()), ...labelStepsAfterCreate(mode, rest, { owner: owner(), labelExists, branch: branch() })] : [];
       const entry = queued(); // read once: reading it consumes the file the wrapper left
       err(heldLine({ mode, branch: branchName(fact), head: head(), entry, attached: attachSteps(steps, { entry, attach }) }));
       return EXIT_QUEUED;
@@ -720,7 +726,7 @@ export function sendToGitHub(mode: string, rest: string[],
   // `armAfterCreate` returns a WHOLE `gh` argv (`["pr", "merge", ...]`) and `run` is `gh` with its args as
   // given -- `args.slice(1)` stripped `pr` and spawned `gh merge`, an unknown command, after every ready
   // create since #1277, so the wrapper exited 1 on a PR that already existed.
-  for (const args of armAfterCreate(mode, rest, branch)) {
+  for (const args of armAfterCreate(mode, rest, branch())) {
     // #1479: the create has LANDED by here, so a failure is a partial success with its own code.
     try {
       run(args);
@@ -730,7 +736,7 @@ export function sendToGitHub(mode: string, rest: string[],
       return EXIT_LANDED_THEN_FAILED;
     }
   }
-  labelCreatedPr(mode, rest, { run, err, owner: owner(), labelExists, branch });
+  labelCreatedPr(mode, rest, { run, err, owner: owner(), labelExists, branch: branch() });
   // #2929: only a create that LANDED and was armed -- the failed create and the failed arm returned above with their
   // own line, and this one never stands in for either. Last, so it is the line still on screen when the turn ends.
   if (mode === "create") err(ciPendingLine({ head: head8() }));
