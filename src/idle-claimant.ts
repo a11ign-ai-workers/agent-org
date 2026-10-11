@@ -33,8 +33,12 @@ const MINUTE_MS = 60_000;
  *   RESULT      a holder that is going to move has moved inside 42 minutes; one tick (about 2 minutes) of margin makes 44, rounded to 45.
  * WHAT THIS DOES NOT PROVE: that 45 is right for a slower regime, and that those holders were `idle` throughout -- `herdr` keeps no status
  * history, so the gap is the proxy and an idle session's real gap is at least as long. The sizing is therefore on the low side of "idle".
+ *
+ * THE FIGURE IS NOW THE CHAIRMAN'S, NOT THE DERIVATION'S (2026-10-11, a11ign#4957 cause 3, agent-org#860): "idle 30 minutes with no PR, no declaration and
+ * no wake is nudged". Twelve agent-org holders sat idle on claimed rows for up to 10 hours at 45, and the same figure is the length of the second idle
+ * period after which an unanswered nudge is an incident (`claim-stall.ts`'s `idleAgain`), so lowering it moves both.
  */
-export const IDLE_CLAIMANT_MINUTES = 45;
+export const IDLE_CLAIMANT_MINUTES = 30;
 export const IDLE_CLAIMANT_MS = IDLE_CLAIMANT_MINUTES * MINUTE_MS;
 
 /**
@@ -147,6 +151,16 @@ export type IdleReading = { kind: "unknown", why: string } | { kind: "not-idle",
 export const INFERRED_PR_KINDS = Object.freeze(["review-requested", "checks-pending", "review-approved"]);
 
 /**
+ * THE IDLE PERIOD THAT APPLIES TO ONE HOLDER, in ms: M for a holder under the declaration regime or one that stopped with no pull request, N otherwise.
+ * ONE DEFINITION, because the reading and the "idle again after its nudge" incident (`claim-stall.ts`) both ask how long a period is.
+ * @param {{ built?: boolean, prs?: IdlePr[], declared?: DeclarationReading }} facts @returns {number}
+ */
+export function idleLimitMs(facts: { built?: boolean; prs?: IdlePr[]; declared?: DeclarationReading; }): number {
+  const regime = facts.declared !== undefined && facts.built === true;
+  return regime || isStoppedHolder({ built: facts.built, prs: facts.prs }) ? STOPPED_CLAIMANT_MS : IDLE_CLAIMANT_MS;
+}
+
+/**
  * IS THIS HOLDER AN IDLE CLAIMANT WITH NO DECLARED WAIT?
  *
  * ORDER IS THE DESIGN. A listing that is not the whole org PROVES NOTHING (#2465, `listingIsComplete`), and it is `unknown` even when it
@@ -178,7 +192,7 @@ export function idleClaimantReading(facts: { session: string | null; waitKinds?:
   const since = ctx.idleSince ?? ctx.now;
   const idleMs = ctx.now - since;
   // TWO CONSECUTIVE TICKS IS BUILT IN: `idleSince` is the first idle tick, so that tick reads `idleMs` 0 and a stall needs a later one.
-  const limit = regime || isStoppedHolder({ built: facts.built, prs: facts.prs }) ? STOPPED_CLAIMANT_MS : IDLE_CLAIMANT_MS;
+  const limit = idleLimitMs(facts);
   if (idleMs < limit) return { kind: "watching", since, idleMs };
   return regime ? { kind: "stall", since, idleMs, declared: facts.declared } : { kind: "stall", since, idleMs };
 }

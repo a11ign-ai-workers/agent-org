@@ -60,10 +60,10 @@ function nudgedAt(f: ReturnType<typeof fixture>, until = 60): number[] {
   return at;
 }
 
-test("the figure is the row's: measured, at most 10 minutes, below the 45-minute idle clock, which stays beside the 120-minute no-progress clock", () => {
+test("the figure is the row's: measured, at most 10 minutes, below the 30-minute idle clock, which stays beside the 120-minute no-progress clock", () => {
   assert.equal(M, 10);
   assert.ok(M <= 10 && M < IDLE_CLAIMANT_MINUTES);
-  assert.equal(IDLE_CLAIMANT_MINUTES, 45, "N is untouched");
+  assert.equal(IDLE_CLAIMANT_MINUTES, 30, "N is the chairman's 30 (a11ign#4957 cause 3, agent-org#860)");
   assert.equal(STALL_INTERVAL_MS, 120 * MIN, "and so is the no-progress clock");
 });
 
@@ -213,7 +213,7 @@ test("two unanswered nudges for different rows read back as ONE repeat of the cl
   assert.deepEqual(repeatsIn(entries.slice(0, 1), { windowMs: 24 * 60 * MIN }), [], "the control: one unanswered nudge is an event and not a repeat");
 }));
 
-test("a holder with an open pull request is nudged by the 45-minute clock and NEVER released (#2999), so it is no event; a `working` worker is not nudged at all", () => withDir((dir) => {
+test("a holder with an open pull request is nudged by the idle clock and NEVER released (#2999), and a nudge that was never delivered is no event (a delivered one is, once idle again: work-gate-idle-again-incident.test.ts); a `working` worker is not nudged at all", () => withDir((dir) => {
   const memory: Record<string, unknown> = {};
   const pr = fixture({ stateDir: dir, prs: [prOf(4001)] });
   const nudges = new Set<string>(); // one episode is one `causeKey`, offered again on every tick of its window
