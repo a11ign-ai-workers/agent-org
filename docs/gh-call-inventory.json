@@ -3,20 +3,20 @@
   "summary": {
     "files": 98,
     "spawns": 137,
-    "calls": 397,
+    "calls": 408,
     "shapes": {
-      "api rest": 139,
-      "issue list": 42,
+      "api rest": 145,
+      "issue list": 43,
       "api graphql": 38,
       "issue view": 34,
       "pr list": 31,
       "issue comment": 27,
       "pr view": 17,
-      "issue edit": 13,
-      "label create": 11,
+      "issue edit": 15,
+      "label create": 12,
       "pr merge": 6,
       "project item-edit": 6,
-      "issue create": 4,
+      "issue create": 5,
       "pr comment": 4,
       "run list": 4,
       "run view": 4,
@@ -217,9 +217,15 @@
     "src/ci-failure-class.ts": {
       "spawns": 0,
       "calls": {
-        "api rest": 2
+        "api rest": 8,
+        "issue create": 1,
+        "issue edit": 2,
+        "issue list": 1,
+        "label create": 1
       },
-      "labels": [],
+      "labels": [
+        "$SHARED_FAILURE_LABEL"
+      ],
       "parsesCloses": false
     },
     "src/ci-health-liveness.ts": {
@@ -1201,6 +1207,7 @@
     "pr-checks-failing": {
       "group": "ACTION",
       "namedIn": [
+        "src/ci-failure-class.ts",
         "src/claim-stall.ts",
         "src/wake.ts",
         "src/work-gate.ts"

@@ -28,6 +28,7 @@ import { swimlane } from "./swimlane.ts";
 import { conditionalReader, readValidators, saveValidators } from "./publish.ts";
 import type { Ask, Validated } from "./publish.ts";
 import { renderWakeCache, wakeCache } from "./wake-cache.ts";
+import { isManagerSpend, mainManagerSpend } from "./manager-spend.ts";
 import { eventsOfCodexSession } from "./codex-turns.ts";
 import { ghCallLines, ghIngestLines, ingestGhCalls } from "./gh-calls.ts";
 import { countingGh, readGithubEvents } from "./github-events.ts";
@@ -1329,6 +1330,7 @@ async function mainWakeOutcomes() {
 async function main() {
   if (isDuplicates(process.argv.slice(2))) return mainDuplicates();
   if (isCost(process.argv.slice(2))) return mainCost();
+  if (isManagerSpend(process.argv.slice(2))) return mainManagerSpend(process.argv.slice(2));
   if (isCompactStore(process.argv.slice(2))) return void compactStore(parseCompactStoreArgs(process.argv.slice(2))).forEach((line) => console.log(line));
   if (isIngest(process.argv.slice(2))) return mainIngest();
   if (isFreshness(process.argv.slice(2))) return mainFreshness();
