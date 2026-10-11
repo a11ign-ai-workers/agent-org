@@ -11,13 +11,16 @@
  *   - wave 3 (`readOpenRowFollowUps`): the claimed rows' comments, the closed-answer `label list` and the closings arrive in one batch, and a quiet
  *     tracker asks for NO MORE than it did (the conditional reads stay conditional: the rehearsal asks only what the rows in hand ask for);
  *   - a refusal in one lane is that lane's `null` and nobody else's (#1286: "could not ask" is never "nothing there");
- *   - what a batch cannot foresee (a chairman row's events, the closed-answer search that follows its label list) still runs one at a time, through `run`;
+ *   - what a batch cannot foresee (a chairman row's events, the closed-answer reads that follow its label list) still runs one at a time, through `run`;
+ *   - #5050: the label lists are by-label CONNECTION reads over `gh api graphql` (no search), and the fakes below answer that shape; a `gh issue list --label` is
+ *     no longer asked, so the fake refuses one;
  *   - the wiring: `main` calls both waves, because a helper nothing calls is the most recorded shape here.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { readOpenRowFollowUps, readTrackerLanes } from "./work-gate.ts";
+import { closedAnswerConnection, connectionOfSelected, readsClosedAnswerRows, readsRecentlyClosed, readsRowsByLabel, recentlyClosedConnection } from "./packaging/rows-by-label-fixtures.ts";
 
 type Call = { args: string[], repo: string | undefined };
 type Answer = { stdout: string } | { failed: true, stdout: string, stderr: string, status: number | null, code?: string };
@@ -27,21 +30,27 @@ const CLAIMED = { number: 42, title: "claimed", labels: [{ name: "in-progress" }
 const QUIET = OPEN_ROWS;
 const CLAIMED_ROWS = [...OPEN_ROWS, CLAIMED];
 
-const has = (args: string[], ...words: string[]) => words.every((word) => args.includes(word));
+/** Does the call carry each word, as an argument or as the by-label read's `label=<word>`? (#5050: a label travels as `-F label=X`, not as `--label X`.) */
+const has = (args: string[], ...words: string[]) => words.every((word) => args.includes(word) || args.includes(`label=${word}`));
 const refused = (): never => { throw Object.assign(new Error("Command failed: gh"), { status: 1, stderr: "HTTP 502", stdout: "" }); };
 
-/** What `gh` answers, by argv. An `api` call (a chairman row's events) is refused, so the row says so by `chairmanReadRefused`. */
+/**
+ * What `gh` answers, by argv. An `api` call it does not know (a chairman row's events) is refused, so the row says so by `chairmanReadRefused`. A call that would be a SEARCH
+ * (`--label`, `--search`) or a list nobody asks any more (`pr list`, `issue list --state closed`) THROWS rather than answering: the gate sends none of them (#5050).
+ */
 function ghAnswer(args: string[], { chairmanRows = [] as unknown[], refuse = [] as string[], open = OPEN_ROWS as unknown[] } = {}): string {
   if (refuse.some((word) => has(args, word))) return refused();
+  const byLabel = readsRowsByLabel(args);
+  if (byLabel?.label === "needs:chairman") return connectionOfSelected(chairmanRows as never, args);
+  if (byLabel?.label === "backlog") return connectionOfSelected((open as any[]).filter((row) => row.labels.some((l: { name: string }) => l.name === "backlog")), args);
+  if (byLabel?.label === "in-progress") return connectionOfSelected([{ number: 42, comments: [] }], args);
+  if (byLabel !== null) throw new Error(`unexpected by-label read: ${byLabel.state} rows labelled ${byLabel.label}`);
+  if (readsClosedAnswerRows(args) !== null) return closedAnswerConnection([]);
+  if (readsRecentlyClosed(args)) return recentlyClosedConnection([{ number: 9, closedAt: "2026-10-06T04:00:00Z", updatedAt: "2026-10-06T04:00:00Z" }]);
   if (args[0] === "api") return refused();
-  if (has(args, "--label", "needs:chairman")) return JSON.stringify(chairmanRows);
-  if (has(args, "--label", "backlog")) return "[]";
-  if (has(args, "--label", "in-progress")) return JSON.stringify([{ number: 42, comments: [] }]);
   if (args[0] === "label") return JSON.stringify([{ name: "answer:product-manager" }]);
-  if (has(args, "--state", "closed") && has(args, "--search", "sort:updated-desc")) return JSON.stringify([{ number: 9, closedAt: "2026-10-06T04:00:00Z", updatedAt: "2026-10-06T04:00:00Z" }]);
-  if (has(args, "--state", "closed")) return "[]";
-  if (args[0] === "pr") return "[]";
-  return JSON.stringify(open);
+  if (args[0] === "issue" && args.includes("--state") && args.includes("open") && !args.includes("--label") && !args.includes("--search")) return JSON.stringify(open);
+  throw new Error(`unexpected call: gh ${args.join(" ")}`);
 }
 
 /** The `run` a test hands the gate: one call at a time, noted, answering by argv. */
@@ -62,12 +71,20 @@ function fakeBatch(batches: Call[][], options: { chairmanRows?: unknown[], refus
 /** 500 open rows: the page that may have been cut, which nothing is made from (#4899). */
 const FULL_PAGE = Array.from({ length: 500 }, (_, at) => ({ ...OPEN_ROWS[0], number: 1000 + at }));
 
-const shape = (call: Call) => call.args.slice(0, 2).join(" ") + (call.args.includes("--label") ? ` ${call.args[call.args.indexOf("--label") + 1]}` : "");
+/** A call by what it ASKS, not by the `api graphql` every connection read travels as (#5050). */
+function shape({ args }: Call): string {
+  const byLabel = readsRowsByLabel(args);
+  if (byLabel !== null) return `rows labelled ${byLabel.label}`;
+  const closedAnswer = readsClosedAnswerRows(args);
+  if (closedAnswer !== null) return `closed ${closedAnswer.kind}`;
+  if (readsRecentlyClosed(args)) return "recently closed";
+  return args.slice(0, 2).join(" ");
+}
 
 test("POSITIVE CONTROL: the one-at-a-time wave 2 reads backlog, chairman and open in today's order, so the assertions below compare something", () => {
   const seen: Call[] = [];
   const lanes = readTrackerLanes(sequentialRun(seen) as never);
-  assert.deepEqual(seen.map(shape), ["issue list backlog", "issue list needs:chairman", "issue list"]);
+  assert.deepEqual(seen.map(shape), ["rows labelled backlog", "rows labelled needs:chairman", "issue list"]);
   assert.deepEqual(lanes.openRowsRead, OPEN_ROWS, "the open rows came from the open list, not from another lane's answer");
   assert.deepEqual(lanes.chairmanBlocked, []);
 });
@@ -88,6 +105,7 @@ test("wave 2: open arrives alone in the batch and backlog and needs:chairman are
   assert.deepEqual(batches[0].map(shape), ["issue list"], "the open list alone: the two label lists are not asked");
   assert.deepEqual(seen, [], "and nothing is left over to read one at a time");
   assert.deepEqual(together.promotableRows?.map((row: { number: number }) => row.number), [43], "POSITIVE CONTROL: the backlog lane is not empty, so equal means made from the list");
+  assert.deepEqual(together, readTrackerLanes(sequentialRun([], { open }) as never), "the same lanes as the one-at-a-time by-label reads give (the fake answers backlog from the open rows)");
 });
 
 test("a FULL open page is not folded: the two label lists are asked, together in ONE more batch, and the lanes are the one-at-a-time read's", () => {
@@ -96,7 +114,7 @@ test("a FULL open page is not folded: the two label lists are asked, together in
   const together = readTrackerLanes(sequentialRun(seen, { open: FULL_PAGE }) as never, fakeBatch(batches, { open: FULL_PAGE }));
   assert.equal(batches.length, 2, "the open list, then the lists it could not answer");
   assert.deepEqual(batches[0].map(shape), ["issue list"]);
-  assert.deepEqual(batches[1].map(shape).sort(), ["issue list backlog", "issue list needs:chairman"]);
+  assert.deepEqual(batches[1].map(shape).sort(), ["rows labelled backlog", "rows labelled needs:chairman"]);
   assert.deepEqual(seen, [], "nothing left over to read one at a time");
   assert.deepEqual(together, readTrackerLanes(sequentialRun([], { open: FULL_PAGE }) as never), "the same lanes");
 });
@@ -121,7 +139,7 @@ test("#4899: a refused OPEN list is its null, and the label lanes it would have 
   assert.equal(together.openRowsRead, null, "refused is null");
   assert.notEqual(together.promotableRows, null, "the backlog lane was asked, and answered");
   assert.notEqual(together.chairmanBlocked, null, "and so was the chairman lane");
-  assert.deepEqual(batches[1].map(shape).sort(), ["issue list backlog", "issue list needs:chairman"], "asked together, as the fold's fall-through");
+  assert.deepEqual(batches[1].map(shape).sort(), ["rows labelled backlog", "rows labelled needs:chairman"], "asked together, as the fold's fall-through");
   assert.deepEqual(seen, [], "and not one by one");
 });
 
@@ -151,10 +169,10 @@ test("wave 3: a claimed row with a cleared blocker asks comments, the closed-ans
   const seen: Call[] = [];
   const together = readOpenRowFollowUps(CLAIMED_ROWS, sequentialRun(seen) as never, fakeBatch(batches));
   assert.equal(batches.length, 1);
-  assert.deepEqual(batches[0].map(shape).sort(), ["issue list in-progress", "issue list", "label list"].sort());
+  assert.deepEqual(batches[0].map(shape).sort(), ["rows labelled in-progress", "recently closed", "label list"].sort());
   assert.deepEqual(together.claimedComments, [{ number: 42, comments: [] }]);
   assert.ok(together.closings instanceof Map && together.closings.get(9) !== undefined, "the closings are the closings read, keyed by row");
-  assert.deepEqual(seen.map(shape), ["issue list", "pr list"], "the closed-answer searches follow the label list, so they run one at a time, as they did");
+  assert.deepEqual(seen.map(shape), ["closed issues", "closed pullRequests"], "the closed-answer reads follow the label list, so they run one at a time, as they did");
   assert.deepEqual(together, readOpenRowFollowUps(CLAIMED_ROWS, sequentialRun([]) as never), "the same follow-ups");
 });
 

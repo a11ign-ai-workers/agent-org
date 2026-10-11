@@ -27,6 +27,11 @@ import {
   unansweredRefusal, disputeAtHead, lookupOpenPrReviewHealth, escalateDisputeToCeo, OPEN_PR_LIMIT,
   authorCommitsSinceRefusal,
 } from "../row-claim/own-pr-health-rule.ts";
+import { connectionOf, readsRowsByLabel } from "./rows-by-label-fixtures.ts";
+
+/** #5039: the claimed rows, as the connection answers them, each carrying the claim label and `session:<name>` -- the session's own rows are told apart client-side. */
+const heldBy = (session: string, ...numbers: number[]) => connectionOf(
+  numbers.map((number) => ({ number, labels: ["in-progress", `session:${session}`] })));
 
 /** A row owed a commit: held, declaring files, no sub-rows, no PR. Each test changes ONE fact from this. */
 const inBuild = { number: 989, declaresPaths: true, subIssues: 0, closingPr: undefined };
@@ -126,17 +131,29 @@ test("#989: isInBuild is the whole predicate, and each clause is load-bearing", 
 // --- THE LOOKUPS: what each clause is READ from ------------------------------------------------------
 
 test("#989: the held population is this session's own rows -- another session's do not count", () => {
-  // `lookupOtherHeldIssues` filters on `session:<name>`, and this guards that from widening later, which is
-  // the failure nobody notices.
+  // #5039: `lookupOtherHeldIssues` reads ALL the `in-progress` rows once (the one list the claim already reads, so
+  // it is never a search) and filters on `session:<name>` CLIENT-SIDE. This guards that filter from widening later,
+  // which is the failure nobody notices: a row of another session is in the answer and must NOT come out of it.
   const calls: string[][] = [];
-  const run = (args: string[]) => { calls.push(args); return "[]"; };
-  lookupOtherHeldIssues("worker-judge", 989, { run });
-  assert.deepEqual(calls[0].filter((a) => a.startsWith("session:")), ["session:worker-judge"]);
-  assert.ok(calls[0].includes("in-progress"));
+  const run = (args: string[]) => {
+    calls.push(args);
+    return connectionOf([
+      { number: 908, labels: ["in-progress", "session:worker-judge"] },
+      { number: 912, labels: ["in-progress", "session:worker-capture"] },
+      { number: 915, labels: ["in-progress"] },
+    ]);
+  };
+  assert.deepEqual(lookupOtherHeldIssues("worker-judge", 989, { run }), [908],
+    "another session's row and a row no session holds are in the answer and are not this session's");
+  assert.equal(calls.length, 1, "one read of the claimed rows, not one per session");
+  assert.ok(calls[0].includes("label=in-progress"), "the read asked for the claimed rows");
+  assert.equal(readsRowsByLabel(calls[0])?.label, "in-progress");
+  assert.equal(calls[0].some((a) => a.includes("session:")), false,
+    "the session is NOT part of the request -- it is told apart in the answer, which is what keeps the read off search");
 });
 
 test("#989: the row being claimed is never checked against itself", () => {
-  const run = () => JSON.stringify([{ number: 989 }, { number: 908 }]);
+  const run = () => heldBy("worker-judge", 989, 908);
   assert.deepEqual(lookupOtherHeldIssues("worker-judge", 989, { run }), [908]);
 });
 
@@ -522,7 +539,8 @@ const fleet = (opts: { closingPr?: string; region: string;
   const delivery = oneDelivery(opts.timelineNodes ?? [], opts.filePaths ?? {});
   const run = (args: string[]) => {
     const joined = args.join(" ");
-    if (args[0] === "issue" && args[1] === "list") { seen.push("held"); return JSON.stringify([{ number: 2000 }]); }
+    if (readsRowsByLabel(args) !== null) { seen.push("held"); return heldBy("worker-capture", 2000); }
+    if (args[0] === "issue" && args[1] === "list") return "[]";
     if (joined.includes("closedByPullRequestsReferences")) {
       seen.push("closing");
       const nodes = opts.closingPr ? [{ number: 2011, state: opts.closingPr, headRefOid: "abc" }] : [];
@@ -618,7 +636,8 @@ test("#2026: the remedy is printed only in the refusal, and mutating it out goes
  */
 test("#2026: a FAILED delivery lookup leaves the row IN BUILD — the clause fails to not clearing", () => {
   const run = (args: string[]) => {
-    if (args[0] === "issue" && args[1] === "list") return JSON.stringify([{ number: 2000 }]);
+    if (readsRowsByLabel(args) !== null) return heldBy("worker-capture", 2000);
+    if (args[0] === "issue" && args[1] === "list") return "[]";
     if (args.join(" ").includes("timelineItems")) throw new Error("gh: GraphQL 502");
     if (args[0] === "api" && args[1] === "graphql") {
       return JSON.stringify({ data: { repository: { issue: { closedByPullRequestsReferences: { nodes: [] } } } } });
@@ -1001,7 +1020,8 @@ test("#2316: a read GitHub REFUSES is REPORTED with GitHub's reason, and a healt
 test("#2316: through the claim path, the failure reaches the log and B2 still refuses nothing", () => {
   const lines: string[] = [];
   const run = (args: string[]) => {
-    if (args[0] === "issue" && args[1] === "list") return JSON.stringify([{ number: 2083 }]);
+    if (readsRowsByLabel(args) !== null) return heldBy("worker-tooling", 2083);
+    if (args[0] === "issue" && args[1] === "list") return "[]";
     if (args[0] === "pr" && args[1] === "list") throw new Error(NODE_LIMIT);
     if (args[0] === "api" && args[1] === "graphql") {
       return JSON.stringify({ data: { repository: { issue: { closedByPullRequestsReferences: {
@@ -1032,7 +1052,8 @@ test("#2126: `gh pr list`'s own default of THIRTY is overridden, or the window w
 test("#2126: a FAILED review-health read refuses nothing -- the clause fails to not refusing", () => {
   assert.equal(lookupOpenPrReviewHealth({ run: () => { throw new Error("gh: 502"); }, log: () => {} }), null);
   const run = (args: string[]) => {
-    if (args[0] === "issue" && args[1] === "list") return JSON.stringify([{ number: 2083 }]);
+    if (readsRowsByLabel(args) !== null) return heldBy("worker-tooling", 2083);
+    if (args[0] === "issue" && args[1] === "list") return "[]";
     if (args[0] === "pr" && args[1] === "list") throw new Error("gh: 502");
     if (args[0] === "api" && args[1] === "graphql") {
       return JSON.stringify({ data: { repository: { issue: { closedByPullRequestsReferences: {
@@ -1054,7 +1075,8 @@ test("#2126: no held row has an open pull request -- the review-health call is n
   let prListAsked = false;
   const run = (args: string[]) => {
     if (args[0] === "pr" && args[1] === "list") prListAsked = true;
-    if (args[0] === "issue" && args[1] === "list") return JSON.stringify([{ number: 2083 }]);
+    if (readsRowsByLabel(args) !== null) return heldBy("worker-tooling", 2083);
+    if (args[0] === "issue" && args[1] === "list") return "[]";
     if (args[0] === "api" && args[1] === "graphql") {
       return JSON.stringify({ data: { repository: { issue: {
         closedByPullRequestsReferences: { nodes: [] } } } } });
@@ -1068,7 +1090,8 @@ test("#2126: no held row has an open pull request -- the review-health call is n
 
 test("#2126: the open pull request's NUMBER is carried, and only while it is OPEN", () => {
   const run = (state: string) => (args: string[]) => {
-    if (args[0] === "issue" && args[1] === "list") return JSON.stringify([{ number: 2083 }]);
+    if (readsRowsByLabel(args) !== null) return heldBy("worker-tooling", 2083);
+    if (args[0] === "issue" && args[1] === "list") return "[]";
     if (args[0] === "pr" && args[1] === "list") {
       return JSON.stringify([{ number: 2107, headRefOid: REFUSED_HEAD,
         reviewDecision: "CHANGES_REQUESTED", reviews: [] }]);
@@ -1304,7 +1327,8 @@ test("#2241: the lookup carries body, labels and blockedBy on the SAME `issue vi
     labels: [{ name: "in-progress" }], blockedBy: { nodes: [], totalCount: 0 } };
   const run = (args: string[]) => {
     seen.push(args);
-    if (args[0] === "issue" && args[1] === "list") return JSON.stringify([{ number: 1926 }]);
+    if (readsRowsByLabel(args) !== null) return heldBy("worker-tooling", 1926);
+    if (args[0] === "issue" && args[1] === "list") return "[]";
     if (args[0] === "api" && args[1] === "graphql") {
       return JSON.stringify({ data: { repository: { issue: { closedByPullRequestsReferences: { nodes: [] } } } } });
     }
@@ -1323,7 +1347,8 @@ test("#2241: the lookup carries body, labels and blockedBy on the SAME `issue vi
 
 test("#2241: a lookup that carried a Region but NO wait fields leaves the row in build -- fail closed, end to end", () => {
   const withView = (view: object) => (args: string[]) => {
-    if (args[0] === "issue" && args[1] === "list") return JSON.stringify([{ number: 1926 }]);
+    if (readsRowsByLabel(args) !== null) return heldBy("worker-tooling", 1926);
+    if (args[0] === "issue" && args[1] === "list") return "[]";
     if (args[0] === "api" && args[1] === "graphql") {
       return JSON.stringify({ data: { repository: { issue: { closedByPullRequestsReferences: { nodes: [] } } } } });
     }

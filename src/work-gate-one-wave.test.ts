@@ -18,6 +18,7 @@ import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { homeProjectDeclaration } from "./project-config.ts";
 import { readLanesAfterOutageCheck, readOtherScopes, readTrackerLanes, scopesOf } from "./work-gate.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 type Lane = ReturnType<typeof readOtherScopes>[number];
 type Call = { args: string[], repo: string | undefined };
@@ -31,6 +32,8 @@ const isRepositoryCall = ({ args, repo }: Call) => args[0] === "pr" && repo !== 
 function answerOf({ args, repo }: Call): string {
   if (args[0] === "pr") return JSON.stringify([{ number: (repo ?? "primary").length, isDraft: false, headRefOid: "abc", statusCheckRollup: [],
     author: { login: "x" }, comments: [], labels: [], files: [], changedFiles: 0, body: "", reviewDecision: "" }]);
+  // #5050: a label list is a GraphQL connection now; an empty one, as the plain `issue list` answers `[]`
+  if (readsRowsByLabel(args) !== null) return connectionOf([]);
   return "[]";
 }
 

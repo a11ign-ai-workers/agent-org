@@ -20,7 +20,7 @@
  * AND THE POSITIVES ARE NOT OPTIONAL, for `review-verdict.test.ts`'s reason one level up: a `decide` that
  * returned `[]` for everything satisfies every "no order" case perfectly and would wake nobody, ever.
  */
-import { test } from "node:test";
+import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, readdirSync, mkdtempSync, realpathSync,
   existsSync, writeFileSync, cpSync, rmSync } from "node:fs";
@@ -59,6 +59,10 @@ import { MAX_ROW_ORDERS_PER_TICK, readCommitShas, readPatchId, withPatchIds, dec
   pipelineCodeownerReviewMissing, bareAnswerLabelOrders, readRowTimeline }
   from "../work-gate.ts";
 import { SESSION_PREFIX } from "../project-vocabulary.ts";
+import { forgetRefusedReads } from "../ticket-port/rows-by-label.ts";
+// #5050: the gate remembers a rate-limit refusal for the PROCESS, and a test here fakes one (`rate limited`), so without this every later list read answers `null`
+// with no call made -- a failure far from its cause.
+beforeEach(() => forgetRefusedReads());
 // #2182: the SHIPPED reader that decides whether a delivered cause is still live, imported so this file
 // can assert what the membership BUYS rather than only that the name is in the list. `wake.ts` runs
 // nothing on import (its `main()` is behind an `import.meta.url` guard) and these three are pure, so this
@@ -74,6 +78,9 @@ import { primaryLaunchRefusal, launchCheckoutOf }
 // without one is dropped, and the gate would read every PR as having no checks at all.
 import { closesUnresolvedOrders, closesUnresolvedPrs, primaryStaleOrders, withStalePrimaryNotice } from "../work-gate.ts";
 import { tmpDir } from "../lib/tmp-fixture.ts";
+// #5050: the gate's label lists are GraphQL connections, not `issue list`, so a fake answers them in the connection's shape (`rows-by-label-fixtures.ts`).
+import { connectionOf, readsClosedAnswerRows, closedAnswerConnection, readsRecentlyClosed, recentlyClosedConnection, readsRowsByLabel,
+  type FakeRow } from "./rows-by-label-fixtures.ts";
 const GREEN = [{ name: "ci", status: "COMPLETED", conclusion: "SUCCESS" }];
 const RED = [{ name: "ci", status: "COMPLETED", conclusion: "FAILURE" }];
 const PENDING = [{ name: "ci", status: "IN_PROGRESS", conclusion: null }];
@@ -307,7 +314,7 @@ test("#1286: a refused read returns null, an empty one returns [] -- and they ar
   // THE POSITIVE CONTROL: an ACTUALLY empty queue still parses to [], and [] still means quiet. A reader
   // that answered `refused` whenever unsure would block every quiet morning, which is worse.
   assert.deepEqual(readPrs(() => "[]"), [], "an empty queue is [] and means quiet");
-  assert.deepEqual(readReadyRows(() => "[]"), []);
+  assert.deepEqual(readReadyRows(() => connectionOf([])), []);
 
   // A non-array payload is a read that did not answer the question -- null, not a crash.
   assert.equal(readPrs(() => '{"message":"Bad credentials"}'), null);
@@ -852,7 +859,7 @@ test("#3674 a refused second read is null, never the first page standing in for 
 });
 
 test("#3674 the census states the narrow open list, the widening and the per-repository `pr list` reads, and the unconditional count has not moved", () => {
-  assert.equal(GH_READS.unconditional.length, 13, "the widening is conditional, so no unconditional read was added");
+  assert.equal(GH_READS.unconditional.length, 14, "the widening is conditional, so no unconditional read was added");
   assert.ok(GH_READS.unconditional[0].includes("--limit 20"), "the first unconditional read is the narrow open list");
   assert.match(GH_READS.conditionalOnFullOpenPage, /--limit 100.*first page/);
   assert.match(GH_READS.perOtherCodeRepositoryOpenList, /readLanes/);
@@ -1934,7 +1941,7 @@ test("routing says WHOSE the work is, never that it can start", () => {
   // promotable" -- so the helper asserts it got a list before asking what is in it, rather than letting
   // a null slide through as an empty one. That distinction is the whole point of the return type.
   const read = (rows: unknown[]) => {
-    const got = readPromotableRows(() => JSON.stringify(rows));
+    const got = readPromotableRows(() => connectionOf(rows as FakeRow[]));
     assert.ok(got !== null, "the fixture read must not be refused");
     return got;
   };
@@ -1972,7 +1979,7 @@ test("a backlog+meta row is not promotable (#1804): #20 stopped re-asking a sett
   // correctly removed on 2026-09-20 -- and `meta` alone did not exclude it, so `ready-queue-empty` fired
   // on the same settled judgment every time the shelf emptied.
   const read = (rows: unknown[]) => {
-    const got = readPromotableRows(() => JSON.stringify(rows));
+    const got = readPromotableRows(() => connectionOf(rows as FakeRow[]));
     assert.ok(got !== null, "the fixture read must not be refused");
     return got;
   };
@@ -1985,7 +1992,7 @@ test("a backlog row carrying needs:chairman is not promotable (#2604): nobody bu
   // empty-shelf order read 3 where the truthful reading was 2. #2585 fixed `unclaimedClearings`; this is
   // the second reader of the same gap.
   const read = (rows: unknown[]) => {
-    const got = readPromotableRows(() => JSON.stringify(rows));
+    const got = readPromotableRows(() => connectionOf(rows as FakeRow[]));
     assert.ok(got !== null, "the fixture read must not be refused");
     return got.map((r: { number: number }) => r.number);
   };
@@ -2004,7 +2011,7 @@ test("a backlog row carrying parked is not promotable (#2653): `ceo` schedules i
   // the two consumers of its list (`laneBacklogOrders`, `decide`'s pool count) inherit the skip; the row-by-row
   // pins for those consumers are below.
   const read = (rows: unknown[]) => {
-    const got = readPromotableRows(() => JSON.stringify(rows));
+    const got = readPromotableRows(() => connectionOf(rows as FakeRow[]));
     assert.ok(got !== null, "the fixture read must not be refused");
     return got.map((r: { number: number }) => r.number);
   };
@@ -2019,7 +2026,7 @@ test("a backlog row carrying parked is not promotable (#2653): `ceo` schedules i
   // END TO END, the two consumers of that list: a lane owner's `lane-backlog-unpromoted` and the pool's
   // `ready-queue-empty`, each fed through the real reader.
   const causes = (rows: unknown[]) => decide({ prs: [], readyRows: [],
-    promotableRows: readPromotableRows(() => JSON.stringify(rows)) ?? [] })
+    promotableRows: readPromotableRows(() => connectionOf(rows as FakeRow[])) ?? [] })
     .map((o: { cause: string }) => o.cause);
   const parkedCeo = { number: 9003, labels: [{ name: "backlog" }, { name: "lane:ceo" }, { name: PARKED_LABEL }] };
   const unparkedCeo = { ...parkedCeo, labels: [{ name: "backlog" }, { name: "lane:ceo" }] };
@@ -2041,7 +2048,7 @@ test("a backlog row carrying parked is not promotable (#2653): `ceo` schedules i
 test("a row carrying answer:<session> is not promotable (#1899): it is already routed to whoever owes "
   + "the answer, not unpickable and not unlaned", () => {
   const read = (rows: unknown[]) => {
-    const got = readPromotableRows(() => JSON.stringify(rows));
+    const got = readPromotableRows(() => connectionOf(rows as FakeRow[]));
     assert.ok(got !== null, "the fixture read must not be refused");
     return got;
   };
@@ -2114,6 +2121,7 @@ test("a SUPERSEDED red run does not wake anyone -- the newest run per name is wh
  * sentence. This test is why the next person inherits a checked number.
  */
 test("the gate's read count is counted, not remembered", () => {
+  // FOURTEEN since #4405 added the open-incident read (`readFleetBuildIncidents`: one REST call, core pool) that `org-health.ts`'s fleet-build-mixed-over-4h signal needs.
   // THIRTEEN since #4126 added the closed-row class read (`readClassRepeat`: one REST call, core pool) that `org-health.ts`'s class-repeat signal needs.
   // TWELVE since #4001 added the release read (`readReleaseRuns`: one REST call, core pool) that `org-health.ts`'s release-run-failed signal needs.
   // ELEVEN since #2936 added the last-merge read (`readLastMergedAt`: one REST call, core pool) that `org-health.ts`'s no-merge signal needs.
@@ -2125,7 +2133,7 @@ test("the gate's read count is counted, not remembered", () => {
   // `answer-owed` landed. This pin caught that read within a minute of it being added, which
   // is exactly why it exists: the number it replaced ("two `gh` calls") had been wrong for months
   // because three readers arrived and nobody re-counted.
-  assert.equal(GH_READS.unconditional.length, 13,
+  assert.equal(GH_READS.unconditional.length, 14,
     "if you add or remove an unconditional read, this number and every comment quoting it move together");
   // #1938 REMOVED THE SILENCE-CONDITIONAL READ ENTIRELY: the dead man's switch now derives its
   // answer from the rows the unconditional read already fetched. The key is GONE rather than empty,
@@ -2174,7 +2182,7 @@ test("a row waiting on an OPEN blocker leaves its owner's backlog, and returns w
   const open = [waitingRow(5, { blockedBy: { nodes: [{ number: 1772, state: "OPEN" }] } })];
   const closed = [waitingRow(5, { blockedBy: { nodes: [{ number: 1772, state: "CLOSED" }] } })];
   const read = (rows: unknown[]) => {
-    const got = readPromotableRows(() => JSON.stringify(rows));
+    const got = readPromotableRows(() => connectionOf(rows as FakeRow[]));
     assert.ok(got !== null, "a fixture read is never refused -- `?? []` here would hide a real refusal");
     return got;
   };
@@ -2199,7 +2207,7 @@ test("a row waiting on a DATE stops re-prompting its owner until that date", () 
     const orig = Date.now;
     Date.now = () => new Date(`${today}T12:00:00Z`).getTime();
     try {
-      const got = readPromotableRows(() => JSON.stringify(row));
+      const got = readPromotableRows(() => connectionOf(row));
       assert.ok(got !== null, "a fixture read is never refused");
       return got;
     } finally { Date.now = orig; }
@@ -3454,7 +3462,7 @@ test("#2161: decide() hands the cause the pull requests it already read", () => 
 });
 
 test("#2161: the narrowing spends no `gh` call -- it reads what `draftOrder` already has", () => {
-  assert.equal(GH_READS.unconditional.length, 13, "#2161 adds no unconditional read (8 since #2202, 9 since #2075, 10 since #2641, 11 since #2936, 12 since #4001, 13 since #4126)");
+  assert.equal(GH_READS.unconditional.length, 14, "#2161 adds no unconditional read (8 since #2202, 9 since #2075, 10 since #2641, 11 since #2936, 12 since #4001, 13 since #4126, 14 since #4405)");
   const gate = readFileSync(new URL("../work-gate.ts", import.meta.url), "utf8");
   const body = gate.slice(gate.indexOf("function rowsWithOpenPr"), gate.indexOf("export function blockerClearedOrders"));
   assert.ok(body.length > 0 && !/\brun\(|spawnSync|defaultRun/.test(body),
@@ -3858,9 +3866,16 @@ test("#2286: a refused closing-time read FAILS OPEN to the unstaged ask, never t
   assert.deepEqual(askKeys([clearedRow(2161)], T0 + 3 * HOUR, null), [FIRST_KEY],
     "it is today's behaviour, TTL and all -- degraded, not dropped");
   assert.equal(readRecentlyClosed(() => { throw new Error("rate limited"); }), null, "a refusal is null");
+  // #5050: a limit refusal is remembered for the process, so the good read below would be answered `null` with no call. A new tick forgets it.
+  forgetRefusedReads();
   assert.equal(readRecentlyClosed(() => "{}"), null, "so is a body that is not a list");
-  const read = readRecentlyClosed(() => JSON.stringify([{ number: 2139, closedAt: "2026-09-23T22:00:00Z" },
-    { number: 7, closedAt: "not a date" }]));
+  // #5050: the rows come from the `issues(states:CLOSED, orderBy: UPDATED_AT)` connection, and the read is no `--search`.
+  const asked: string[][] = [];
+  const read = readRecentlyClosed((args) => {
+    asked.push(args);
+    return recentlyClosedConnection([{ number: 2139, closedAt: "2026-09-23T22:00:00Z" }, { number: 7, closedAt: "not a date" }]);
+  });
+  assert.ok(asked.length === 1 && readsRecentlyClosed(asked[0]) && !asked[0].includes("--search"), "ONE connection read, never a search");
   assert.deepEqual([...(read ?? [])], [[2139, T0]], "POSITIVE CONTROL: a good read maps number to epoch ms, "
     + "and a row with no usable stamp is left out rather than read as the epoch");
 });
@@ -4158,12 +4173,14 @@ test("#2110: the claimed-row read is ONE call, filtered server-side, and refuses
   const calls: string[][] = [];
   const rows = readClaimedRowComments((args: string[]) => {
     calls.push(args);
-    return JSON.stringify([{ number: 2099, comments: [CLAIM_RECORD] }]);
+    return connectionOf([{ number: 2099, comments: [CLAIM_RECORD] }]);
   });
   assert.equal(calls.length, 1, "one call for the whole claimed population -- never one per row");
-  assert.deepEqual(calls[0], ["issue", "list", "--state", "open", "--label", "in-progress",
-    "--limit", "200", "--json", "number,comments"]);
+  // #5050: still filtered server-side, by `issues(states:OPEN, labels:[in-progress])` -- a connection, which is not the search `issue list --label` was sent as.
+  assert.deepEqual(readsRowsByLabel(calls[0]), { label: "in-progress", state: "OPEN" });
+  assert.match(calls[0].join(" "), /comments\(first:\d+\)\{nodes\{id body createdAt author\{login\}\}\}/, "and it asks for the comments, which is the whole point of the read");
   assert.equal(rows?.length, 1);
+  assert.deepEqual(rows?.[0].comments, [CLAIM_RECORD], "the comments come back as the array the comparisons read, not as a `{ nodes }` connection");
   assert.equal(readClaimedRowComments(() => { throw new Error("HTTP 403"); }), null,
     "#1286's rule: a refused read is `null` and never `[]` -- a refusal that reads as an empty page "
     + "reports every claimed row as unamended");
@@ -4179,7 +4196,7 @@ test("#2110: main pays for it only when something is actually claimed", () => {
     "exactly one call site, and it is inside the condition below -- a second is a second price");
   assert.match(gate, /const held = openRows\.some\(\(r\) => labelsOf\(r\)\.includes\(CLAIM_LABEL\)\);\s*\n\s*return held \? readClaimedRowComments\(run\) : null;/,
     "the condition is answered from rows already in hand, so asking it costs no call of its own");
-  assert.equal(GH_READS.unconditional.length, 13,
+  assert.equal(GH_READS.unconditional.length, 14,
     "#2110 adds no UNCONDITIONAL read -- the comment page is conditional on a claim existing");
 });
 
@@ -4366,7 +4383,7 @@ test("#2003: the pool reading has ONE definition, and the gate pays for it only 
 
   // AND THE READ COUNT IS UNCHANGED, which is the other half of done-when 2: this row adds no
   // unconditional read, and `GH_READS` is the pin that would catch it if it ever did.
-  assert.equal(GH_READS.unconditional.length, 13,
+  assert.equal(GH_READS.unconditional.length, 14,
     "#2003 must not add an unconditional read -- the refusal path is where the extra call lives");
 
   // A SECOND COPY OF "HOW TO READ A POOL" IS REFUSED (#2003's Region says so). The header name is the
@@ -4450,7 +4467,7 @@ test("#2005: the OFFER path and the PROMOTION path now answer from one reader, s
   // with a filter local to that function, so ONE of the two questions about a row knew and the other did
   // not. Asserting both refuse the SAME fixture is what would catch a future reader added to one path.
   const row = { number: 2002, labels: [{ name: "backlog" }, { name: `${ANSWER_PREFIX}ceo` }] };
-  const promotable = readPromotableRows(() => JSON.stringify([row]));
+  const promotable = readPromotableRows(() => connectionOf([row]));
   assert.deepEqual(promotable, [], "not promotable -- done-when 1");
   assert.deepEqual(partitionUnclaimed([{ ...row, labels: [{ name: "ready" }, { name: `${ANSWER_PREFIX}ceo` }] }],
     []).offerable, [], "and not offerable -- done-when 2, from the same predicate");
@@ -4620,7 +4637,7 @@ test("#2031: the detection makes NO `gh` call -- the pool is gone in the outage 
     + "the exhausted-pool outage that produces the staleness it detects");
   assert.deepEqual(found, [{ branch: BRANCH_2000, head: SHA_2000, row: 2000 }],
     "`main` is not a row branch: the trailing `-<digits>` is the whole match");
-  assert.equal(GH_READS.unconditional.length, 13, "#2031 adds NO gh read -- it is a local git call");
+  assert.equal(GH_READS.unconditional.length, 14, "#2031 adds NO gh read -- it is a local git call");
   assert.ok(GIT_READS.unconditional.some((r: string) => r.includes("ls-remote")),
     "and the free read is COUNTED rather than left out because it is free -- `GH_READS`'s own header "
     + "records what happened last time a read went unwritten-down");
@@ -5686,14 +5703,24 @@ test("#2202: readClosedAnswerRows asks for the CLOSED rows carrying the repo's o
   const run = (args: string[]) => {
     calls.push(args);
     if (args[0] === "label") return JSON.stringify([{ name: "answer:ceo" }, { name: "answer:orchestrator" }, { name: "answered" }]);
-    if (args[0] === "pr") return "[]"; // #2641: the pull-request half has its own file, `closed-pr-answer-owed.test.ts`
-    return JSON.stringify([closedOwedRow(1936, "orchestrator"), { number: 8, state: "CLOSED", labels: [{ name: "backlog" }] }]);
+    // #2641: the pull-request half has its own file, `closed-pr-answer-owed.test.ts`. #5050: both halves are connection reads over `gh api graphql`, told apart by the connection asked of.
+    if (readsClosedAnswerRows(args)?.kind === "pullRequests") return closedAnswerConnection([]);
+    if (readsClosedAnswerRows(args)?.kind === "issues") {
+      return closedAnswerConnection([closedOwedRow(1936, "orchestrator"), { number: 8, state: "CLOSED", labels: [{ name: "backlog" }] }]);
+    }
+    throw new Error(`unexpected call: ${args.join(" ")}`);
   };
   const rows = readClosedAnswerRows(run);
   assert.deepEqual(rows?.map((r: { number: number }) => r.number), [1936], "only the row that carries an answer: label");
-  const search = calls[1][calls[1].indexOf("--search") + 1];
-  assert.equal(search, 'label:"answer:ceo","answer:orchestrator"', "a label that merely starts with `answer` is not asked for");
-  assert.ok(calls[1].includes("closed"), "and it is the CLOSED population -- the open read already has the rest");
+  // #5050: a search's `label:"a","b"` was an OR; the connection's `labels:[a,b]` is an AND, so each label is asked on an alias of its own and a row on two is kept once.
+  const issues = readsClosedAnswerRows(calls[1]);
+  assert.deepEqual(issues, { kind: "issues", names: ["answer:ceo", "answer:orchestrator"] }, "a label that merely starts with `answer` is not asked for");
+  assert.match(calls[1].join(" "), /states: CLOSED,/, "and it is the CLOSED population -- the open read already has the rest");
+  assert.deepEqual(readsClosedAnswerRows(calls[2]), { kind: "pullRequests", names: ["answer:ceo", "answer:orchestrator"] }, "the pull requests ask for the same labels");
+  assert.match(calls[2].join(" "), /states: \[CLOSED, MERGED\],/, "and for the closed AND merged ones (the old `-is:open`)");
+  assert.equal(calls.length, 3, "the label list, then one read of each kind -- not one per label");
+  // `label list --search answer:` is the first call and is GraphQL `labels(query:)`, not a search of rows; the two row reads after it are the question.
+  assert.ok(!calls.slice(1).some((args) => args.includes("--search") || args[0] === "issue" || args[0] === "pr"), "neither row read is a SEARCH (#5050)");
 });
 
 test("#2202: readClosedAnswerRows refuses rather than reporting nobody owes anything, and asks nothing with no labels", () => {
@@ -5702,7 +5729,11 @@ test("#2202: readClosedAnswerRows refuses rather than reporting nobody owes anyt
   assert.deepEqual(readClosedAnswerRows((args) => { if (args[0] === "label") return "[]"; throw new Error("no search with no labels"); }),
     [], "no answer: label exists, so nothing can owe -- and no search is made");
   const refusedSearch = (args: string[]) => { if (args[0] === "label") return JSON.stringify([{ name: "answer:ceo" }]); return "{}"; };
-  assert.equal(readClosedAnswerRows(refusedSearch), null, "a search answering a non-list is a refusal, never an empty tracker");
+  assert.equal(readClosedAnswerRows(refusedSearch), null, "a read answering something that is not the connection is a refusal, never an empty tracker");
+  // #5050: `errors` beside `data` is a partial answer, and a partial answer of "who owes" is refused rather than read as the whole.
+  const partial = (args: string[]) => (args[0] === "label" ? JSON.stringify([{ name: "answer:ceo" }])
+    : JSON.stringify({ ...JSON.parse(closedAnswerConnection([closedOwedRow(1, "ceo")])), errors: [{ message: "timeout" }] }));
+  assert.equal(readClosedAnswerRows(partial), null, "a connection that came back with `errors` is not the whole list");
 });
 
 test("#2202: main feeds the closed-row read into `answerOwed` beside the open one, through the helper that SAYS a refusal", () => {
@@ -6099,8 +6130,11 @@ test("#2791: the shelved row is SHELVED with its reason, and a row whose body wa
 
 test("#2791: readReadyRows asks for `body`, so the gate reads the same field the claim does", () => {
   const calls: string[][] = [];
-  readReadyRows((args: string[]) => { calls.push(args); return "[]"; });
-  assert.ok(String(calls[0][calls[0].indexOf("--json") + 1]).split(",").includes("body"));
+  readReadyRows((args: string[]) => { calls.push(args); return connectionOf([]); });
+  // #5050: the fields are the connection's node selection now, not an `--json` list; `body` is asked on the row itself, not on a nested selection.
+  assert.deepEqual(readsRowsByLabel(calls[0]), { label: "ready", state: "OPEN" });
+  const selection = /nodes\{(.*)\}\}\}\}$/.exec(String(calls[0].find((arg) => arg.startsWith("query="))))?.[1] ?? "";
+  assert.match(selection, /(^| )body( |$)/);
 });
 
 // ---- #2823: THE REPO-WIDE CLOSES CONDITION IS A GATE CAUSE ----

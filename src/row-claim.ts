@@ -82,6 +82,7 @@ import { inBuildReason, lookupHeldRows, lookupOtherHeldIssues } from "./row-clai
 import { resolveBlockedByOverride, blockedByExceptionNote } from "./row-claim/blocked-by-rule.ts";
 import { blockedByEdgeReason, lookupBlockedByEdge } from "./row-claim/blocked-by-edge-rule.ts";
 import { claimedRegionOverlapReason, fileOverlapReason, lookupClaimedRegions, lookupMyRegionFiles, lookupOpenPrFiles } from "./row-claim/file-overlap-rule.ts";
+import { isRowsByLabelRead, readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5039: label reads without SEARCH
 import { readSweepWindows, sweepFreezeAtClaim, sweepFreezeOf, type SweepRow } from "./sweep-window.ts"; // #4603: a declared sweep freezes its Region for its window
 import { templateFieldsReason, lookupIssueBody } from "./row-claim/template-fields-rule.ts";
 import { scopeHash, claimedScopeOf, CLAIM_RECORD_SCOPE } from "./claim-scope.ts"; // #4759: the leaf the tick compares the record with the live row from
@@ -307,7 +308,8 @@ const defaultRun: (cmd: string, args: string[]) => string = (cmd, args): string 
 function readsOnce(run: typeof defaultRun): typeof defaultRun {
   const answers: Map<string, string> = new Map();
   return (cmd, args) => {
-    const isRowRead = cmd === "gh" && args[0] === "issue" && (args[1] === "view" || args[1] === "list");
+    // #5039: the claimed rows are a connection read now, not an `issue list`, and the claim asks for them from three places (B4, B2 and the sweep freeze).
+    const isRowRead = cmd === "gh" && ((args[0] === "issue" && (args[1] === "view" || args[1] === "list")) || isRowsByLabelRead(args));
     if (!isRowRead) return run(cmd, args);
     const key = JSON.stringify(args);
     const known = answers.get(key);
@@ -803,8 +805,6 @@ export function walkedPastNote(issueNumber: number, walked: WalkedPast[]): strin
     + "Two chairman rows still exclude each other, and every other check stood.";
 }
 
-const CHAIRMAN_ROWS_LIMIT = 100;
-
 /**
  * The open rows the CHAIRMAN labelled `priority:chairman`, or `null` when that could not be read (which every caller reads as NOT a chairman row). It is the
  * gate's `readChairmanPriority` over the tracker's own list, so the claim and the offer cannot disagree about whose a row is: the same logins, the same newest
@@ -815,10 +815,9 @@ const CHAIRMAN_ROWS_LIMIT = 100;
  */
 function lookupChairmanRows({ run, repo }: { run: (args: string[]) => string; repo: string; }): ReadonlySet<number> | null {
   return lookup(() => {
-    const listed = JSON.parse(run(["issue", "list", "--repo", repo, "--state", "open", "--label", CHAIRMAN_PRIORITY_LABEL,
-      "--limit", String(CHAIRMAN_ROWS_LIMIT), "--json", "number,labels"]));
-    // A FULL PAGE MAY BE A CUT-SHORT ONE, and a chairman row missing from it would read as not the chairman's.
-    if (!Array.isArray(listed) || listed.length >= CHAIRMAN_ROWS_LIMIT) throw new Error("the chairman's rows could not be listed whole");
+    // #5039: WITHOUT SEARCH (see rows-by-label.ts). A list that cannot be held whole THROWS: a chairman row missing from it would read as not the chairman's.
+    const listed = readRowsByLabel({ label: CHAIRMAN_PRIORITY_LABEL, state: "OPEN", select: "number labels(first:50){nodes{name}}", run, repo })
+      .map((row) => ({ number: Number(row.number), labels: (row.labels?.nodes ?? []).map((label: { name: string; }) => ({ name: String(label.name) })) }));
     const inThisTracker = (args: string[]) => run(args.map((arg) => arg.replace("repos/{owner}/{repo}/", `repos/${repo}/`)));
     return readChairmanPriority(listed, inThisTracker).chairmanRows;
   });

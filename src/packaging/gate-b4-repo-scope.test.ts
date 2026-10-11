@@ -20,6 +20,7 @@ import { scopesOf, readLanes, scopeTick, readOtherScopes, pullRequestsOfOthers, 
 import { fileOverlapReason, lookupOpenPrFiles } from "../row-claim/file-overlap-rule.ts";
 import { homeProjectDeclaration } from "../project-config.ts";
 import { declaredRegionFiles } from "../region-paths.ts";
+import { connectionOf, readsRowsByLabel, type FakeRow } from "./rows-by-label-fixtures.ts";
 
 type Code = { key: string, repo: string };
 const DECLARED_CODE: readonly Code[] = homeProjectDeclaration().code;
@@ -52,7 +53,8 @@ function fakeGh(rows: unknown[], prs: PrsByRepo) {
       if (answer instanceof Error) throw answer;
       return JSON.stringify(answer);
     }
-    if (args.includes("--label") && args.includes("ready")) return JSON.stringify(repo === PRIMARY.repo ? rows : []);
+    // #5050: the Ready list is a connection read (`issues(labels:)` over `gh api graphql`), not `issue list --label ready`, which `gh` sent as a SEARCH.
+    if (readsRowsByLabel(args)?.label === "ready") return connectionOf((repo === PRIMARY.repo ? rows : []) as FakeRow[]);
     return "[]";
   };
 }

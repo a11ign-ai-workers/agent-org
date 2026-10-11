@@ -46,6 +46,8 @@ export const APP_ROLE_LANE_OWNER: Readonly<Record<string, string | null>> = Obje
   scheduler: null,
   workers: null,
   managers: "ceo",
+  // A reviewer App only reviews: it authors no pull request, so it owns no review-only lane (a11ign/a11ign#5044).
+  reviewer: null,
 });
 
 /**

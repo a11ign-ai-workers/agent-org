@@ -14,6 +14,7 @@ import {
   type BlastReads, type OpenPr, type OpenRow,
 } from "./blast-radius.ts";
 import { createIssue } from "./row-file.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 const regionOf = (...entries: string[]) => `## What it is\nx\n\n## Region\n\n\`\`\`\n${entries.join("\n")}\n\`\`\`\n\n## Acceptance\n\n\`\`\`\nnpx rstest run src/x.test.ts\n\`\`\`\n\n## Open-check\n\nn/a\n`;
 const treeOf = (count: number, under = "src/") => Array.from({ length: count }, (_, i) => `${under}file-${i}.ts`);
@@ -190,6 +191,7 @@ const FILING_BODY = (extra = "") => `## Region\n\n\`\`\`\nagent-org:src/\n\`\`\`
 /** `run` for a whole filing: the tree is `treeSize` files, no row or pull request is open, everything else answers the way `afterRun` does. */
 function filingRun(treeSize: number, body: string) {
   return (_cmd: string, args: string[]) => {
+    if (readsRowsByLabel(args) !== null) return connectionOf([]); // #5039: the claimed rows' by-label read -- none held
     if (args[0] === "api") return treeOf(treeSize).join("\n");
     if (args[0] === "issue" && args[1] === "list") return "[]";
     if (args[0] === "pr" && args[1] === "list") return "[]";

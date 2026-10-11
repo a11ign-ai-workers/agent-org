@@ -21,6 +21,7 @@ import { existsSync, readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claimRow, CLAIM_LABEL } from "./row-claim.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 type Call = { args: string[], repo: string | undefined };
 type Answer = { stdout: string } | { failed: true, stdout: string, stderr: string, status: number | null, code?: string };
@@ -46,6 +47,7 @@ function ghAnswer(args: string[], options: Options = {}): string {
     if (fieldsOf(args).split(",").includes("body")) return JSON.stringify({ body: options.body ?? NO_REGION, labels: (options.labels ?? []) });
     return JSON.stringify({ number: 3566, title: "A row", labels: options.labels ?? [], state: "OPEN" });
   }
+  if (readsRowsByLabel(args) !== null) return connectionOf([]);
   if (isWrite(args)) return "";
   return "[]";
 }
@@ -85,7 +87,7 @@ test("POSITIVE CONTROL: the one-at-a-time claim reads the body, the edge, the he
   const reads = beforeFirstWrite(seen).map(shape);
   assert.ok(reads.some((read) => read.startsWith("issue view") && read.split(" ").pop()?.split(",").includes("body")), "the body is read");
   assert.ok(reads.some((read) => read.endsWith("blockedBy")), "the edge is read");
-  assert.ok(reads.some((read) => read.startsWith("issue list")), "the held rows are listed");
+  assert.ok(beforeFirstWrite(seen).some((call) => readsRowsByLabel(call.args)?.label === CLAIM_LABEL), "the held rows are listed");
   assert.ok(reads.filter((read) => read.startsWith("pr list")).length >= 1, "each declared repository's pull requests are listed");
   assert.ok(isWrite(seen[beforeFirstWrite(seen).length].args), "the write follows the reads");
 });
@@ -124,16 +126,19 @@ test("NOTHING FROM THE FIRST WRITE ON IS BATCHED: the label reads either side of
   assert.equal(left[0].args.includes("number,title,labels,state"), true, "the first thing the claim asks is still the labels, on its own");
 });
 
-test("what the rehearsal cannot foresee still runs on its own: the claimed-rows list waits for a Region that names a file", () => {
+// #5039: THE CLAIMED ROWS ARE ONE READ NOW. B2's held rows used to be their own search (`--label in-progress --label session:<me>`), and B4's Regions
+// the list with bodies; both are `repository.issues(labels: in-progress)` now (the held rows are told apart by their `session:` label after the read), so
+// the rehearsal sees the read at B2 -- which names no Region -- and B4's comparison, which waits for a Region that names a file, is answered from it.
+test("the claimed-rows list is ONE read in the first wave: B2's held rows ask it, and B4's Regions are compared from that same answer", () => {
   const batches: Call[][] = [];
   const left: Call[] = [];
   const sequential: Call[] = [];
   claim({ run: sequentialRun(sequential, { body: WITH_REGION }) });
   claim({ run: sequentialRun(left, { body: WITH_REGION }), batch: fakeBatch(batches, { body: WITH_REGION }) });
-  const claimedList = (call: Call) => has(call.args, "issue", "list", CLAIM_LABEL) && fieldsOf(call.args).includes("body");
-  assert.equal(sequential.filter(claimedList).length, 1, "today's claim asks the claimed rows' Regions");
-  assert.deepEqual(batches[0].filter(claimedList), [], "the rehearsal's empty body names no file, so it did not foresee that read");
-  assert.equal(left.filter(claimedList).length, 1, "it ran through `run`, once, as before");
+  const claimedList = (call: Call) => readsRowsByLabel(call.args)?.label === CLAIM_LABEL;
+  assert.equal(sequential.filter(claimedList).length, 1, "today's claim asks the claimed rows once, for B2 and B4 together");
+  assert.equal(batches[0].filter(claimedList).length, 1, "the rehearsal foresaw it at B2, whose read needs no Region");
+  assert.deepEqual(left.filter(claimedList), [], "so B4's comparison was answered from it and nothing was asked again");
   assert.deepEqual([...batches[0], ...beforeFirstWrite(left)].map(keyOf).sort(), beforeFirstWrite(sequential).map(keyOf).sort(),
     "every read of the one-at-a-time claim still happens exactly once");
 });

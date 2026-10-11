@@ -23,6 +23,7 @@ import { adopterRowKind, adopterFacingDeclared, milestoneClockFact } from "../wo
 import { milestoneClockReading } from "../org-health.ts";
 import { parseProjectDeclaration } from "../project-config.ts";
 import { declaredRegionFiles } from "../region-paths.ts";
+import { connectionOf, readsRowsByLabel } from "./rows-by-label-fixtures.ts";
 
 const PRIMARY = "v3 — Ready for a first outside adopter";
 const SESSION = "product-manager";
@@ -81,6 +82,7 @@ function filing(argv: string[], declaration: never, { titles = [PRIMARY] as stri
     },
     // the read-back asks for the body (Filed-by) and the milestone of the row it just made
     run: (_cmd: string, args: string[]) => {
+      if (readsRowsByLabel(args) !== null) return connectionOf([]); // #5039: the claimed rows' by-label read -- none held
       if (args[0] === "issue" && args[1] === "list") return "[]";
       if (args.includes("milestone")) return filed.milestone;
       return args.includes("body") ? appendFiledBy(filed.body, SESSION) : "";

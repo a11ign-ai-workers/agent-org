@@ -135,7 +135,9 @@ const TODAYS_TEXT = {
 // a11ign/a11ign#4148 residual (agent-org#741) MOVED IT AGAIN, deliberately: the caller is cut to 160 characters AFTER its `--import` preload is taken out, and the hourly rollup gains a seventh field, the caller's script. Same staleness, same remedy.
 // agent-org#791 MOVED IT AGAIN, deliberately: `gh api user` (bare, or `--jq .login`) under a role whose App declares a `slug` is answered `<slug>[bot]` from the declaration and not sent to GitHub, which refuses an installation token `GET /user`; `app_declared()` gains `app_slug`. For the recorded host, which declares no app, the new block is inert. Same staleness, same remedy.
 // agent-org#742 MOVED IT AGAIN, deliberately: each read the wrapper makes is ledgered with a tenth field, the cache verdict (`hit-`/`miss-<why>:<argv digest>:<key digest>:<repo>`), so a read that missed can be told from one that could never hit. Same staleness, same remedy.
-const TODAYS_GH_WRAPPER = "a7599e359409aef006c50c80e83888fcab0aaab47d0f3c27a2156e8a52c8d54f";
+// a11ign/a11ign#5044 step 1 (agent-org#955) MOVED IT AGAIN, deliberately: `AGENT_ORG_GH_ROLE=reviewer` is a role `app_role` names, so a host that declares the reviewer
+// a `github-apps` identity sends a reviewer instance's call out on that App; for the recorded host, which declares none, `reviewer` is not in `@@appRoles@@` and the call is unchanged. Same staleness, same remedy.
+const TODAYS_GH_WRAPPER = "a7f56f9c3f05ef369f0636bb5caa50221724fe4e381445467e09eb4e74dd9e56";
 // #2896 MOVED THIS ONE, deliberately: the recorded host's header says `pnpm run host:install` / `pnpm run host:check` where it said `npm run`.
 const TODAYS_LEADS_LIST = "dbca070c4bb7934ff1e9cdc9505f9edee638d98fcff10963b18d5d3a743770a2";
 

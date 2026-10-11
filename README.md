@@ -26,8 +26,8 @@ The tool reads `.agent-org/project.json` of the project it serves, and never ans
 
 ## Which GitHub account each role calls as
 
-`gh` calls are made by three roles: the **scheduler** (the gate, the tick and the `host:*` scripts: a process outside any agent workspace), the **workers** (engineer sessions) and the
-**managers** (the standing leads). `host.json`'s `github.identity` sets, per role, how that role authenticates:
+`gh` calls are made by four roles: the **scheduler** (the gate, the tick and the `host:*` scripts: a process outside any agent workspace), the **workers** (engineer sessions), the
+**managers** (the standing leads) and the **reviewer** (the pull-request review instances, `a11ign-bot` today; a process that sets `AGENT_ORG_GH_ROLE=reviewer`). `host.json`'s `github.identity` sets, per role, how that role authenticates:
 
 ```json
 {
@@ -46,8 +46,8 @@ The tool reads `.agent-org/project.json` of the project it serves, and never ans
 | `github-apps` | `<app>[bot]`, with a one-hour installation token minted from the app's private key and cached | `appId` and an absolute `keyPath` (a mode-600 `.pem`); `installationId` only when the app is installed in more than one place; `slug` (the app's name in `github.com/apps/<slug>`, without `[bot]`) for `gh api user` to be answered |
 
 The roles are chosen one at a time, so a host can move the scheduler first and leave the rest (`scheduler` is the role whose shared pool starved: the gate hit GitHub's secondary
-limit as the workers' account). A role that is not one of the three, a `github-apps` role without `appId` and `keyPath`, and a `user-accounts` role that names an app are refused by
-field name when `host.json` is read. A role outside any agent workspace is the scheduler; `AGENT_ORG_GH_ROLE=scheduler|workers|managers` states the role when that guess is wrong.
+limit as the workers' account). A role that is not one of the four, a `github-apps` role without `appId` and `keyPath`, and a `user-accounts` role that names an app are refused by
+field name when `host.json` is read. A role outside any agent workspace is the scheduler; `AGENT_ORG_GH_ROLE=scheduler|workers|managers|reviewer` states the role when that guess is wrong, and is the only way the `reviewer` is named (its own config directory names none).
 
 How it behaves:
 

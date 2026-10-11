@@ -9,6 +9,7 @@
 //
 // THE CALLER IS `wake.ts` (#4888), NOT THE GATE: `work-gate.ts` is synchronous end to end and a provider call is not, so the gate's order is classified at the one async seam the tick has,
 // beside `routesForStarts`, just before delivery. {@link readCiFailure} reads the facts there; they are CODE's reading of GitHub (REST, the core pool) and never the provider's.
+import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5039
 import { decide, MAX_STATE_BYTES, type DecisionDeps, type Question } from "./decision-provider.ts";
 
 export const CI_FAILURE_CLASSES = Object.freeze(["own-defect", "flaky", "another-repository-changed", "infrastructure"] as const);
@@ -335,14 +336,15 @@ const CHECK_LINE = /^Check: (.*)$/m;
 const listOf = (body: string, line: RegExp): string[] => (line.exec(body)?.[1] ?? "").split(",").map((s) => s.trim()).filter((s) => s !== "");
 
 type IncidentRow = { number: number; body: string; state?: string; closedByPullRequestsReferences?: { number: number; repository?: { nameWithOwner?: string } }[] };
-const readRows = (run: Run, state: "open" | "closed"): IncidentRow[] => {
-  try {
-    const rows = JSON.parse(run(["issue", "list", "--label", SHARED_FAILURE_LABEL, "--state", state, "--limit", String(MAX_INCIDENT_ROWS), "--json", "number,body,closedByPullRequestsReferences"]));
-    return Array.isArray(rows) ? rows : [];
-  } catch {
-    return [];
-  }
-};
+/**
+ * #5039: THE INCIDENT ROWS, READ WITHOUT SEARCH (see rows-by-label.ts), and a FAILED READ THROWS: it used to answer `[]`, which read as "no
+ * incident row", so a tick that could not list them filed a second row for the same failure. The two callers that file or join catch it.
+ */
+const readRows = (run: Run, state: "open" | "closed"): IncidentRow[] =>
+  readRowsByLabel({ label: SHARED_FAILURE_LABEL, state: state === "open" ? "OPEN" : "CLOSED", newest: MAX_INCIDENT_ROWS, run,
+    select: "number body closedByPullRequestsReferences(first:10){nodes{number repository{nameWithOwner}}}" })
+    .map((row) => ({ number: Number(row.number), body: String(row.body ?? ""),
+      closedByPullRequestsReferences: row.closedByPullRequestsReferences?.nodes ?? [] }));
 
 const bodyOf = (group: SharedGroup, prs: readonly string[]): string => [
   `A failure shared by ${prs.length} open pull request(s), found by the gate: one incident, and the workers of these PRs are not woken for it.`, "",

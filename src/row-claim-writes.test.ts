@@ -19,6 +19,7 @@ import { readFileSync } from "node:fs";
 import { dirname, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { claimRow, claimWithWorktree, moveProjectStatus } from "./row-claim.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 type Call = { args: string[], repo: string | undefined };
 type Answer = { stdout: string } | { failed: true, stdout: string, stderr: string, status: number | null, code?: string };
@@ -36,6 +37,7 @@ const isLabelRead = (args: string[]) => args[0] === "issue" && args[1] === "view
 /** What `gh` answers, by argv: a ready row nothing stands in the way of. `refuse` throws for a call naming one of the words. */
 function ghAnswer(args: string[], refuse: string[] = []): string {
   if (refuse.some((word) => args.includes(word))) throw Object.assign(new Error("Command failed: gh"), { status: 1, stderr: "HTTP 502", stdout: "" });
+  if (readsRowsByLabel(args) !== null) return connectionOf([]);
   if (args[0] === "issue" && args[1] === "view") {
     if (fieldsOf(args) === "blockedBy") return JSON.stringify({ blockedBy: { nodes: [] } });
     if (fieldsOf(args) === "body") return JSON.stringify({ body: BODY });
@@ -158,6 +160,7 @@ function twoRepos() {
   const answer = (args: string[]): string => {
     const repo = repoOf(args);
     calls.push({ args, repo });
+    if (readsRowsByLabel(args) !== null) return connectionOf([]);
     if (args[0] === "issue" && args[1] === "view") {
       if (fieldsOf(args) === "blockedBy") return JSON.stringify({ blockedBy: { nodes: [] } });
       if (fieldsOf(args) === "body") return JSON.stringify({ body: BODY });
@@ -229,7 +232,8 @@ test("a11ign/a11ign#4737: a DECLARED board moves THAT board's card (its own owne
   const result = claimRow(481, KEYED_SESSION, { tracker: { key: "agent-org", repo: KEYED_REPO } as never, run: none.run, drained: [], instance: { spare: false, rows: [] },
     persistent: false, moveStatus: (n: number, status: string, opts?: object) => moveProjectStatus(n, status, { ...(opts ?? {}), log: (line: string) => said.push(line) }) } as never);
   assert.equal(result.claimed, true, "the labels are the claim");
-  assert.deepEqual(none.calls.filter((c) => c.args[0] === "project" || c.args.includes("graphql")), [], "no board of any kind is touched, the first tracker's included");
+  assert.deepEqual(none.calls.filter((c) => c.args[0] === "project" || (c.args.includes("graphql") && readsRowsByLabel(c.args) === null)), [],
+    "no board of any kind is touched, the first tracker's included (the claimed rows' by-label read is a graphql call too, #5039, and is not a board)");
   assert.match((result as { statusReason: string }).statusReason, /^no board declared for tracker `agent-org`/);
   assert.ok((none.labels.get(`${KEYED_REPO}#481`) ?? []).includes("in-progress"));
   assert.deepEqual(none.labels.get(`${PRIMARY_REPO}#481`), ["ready"]);
