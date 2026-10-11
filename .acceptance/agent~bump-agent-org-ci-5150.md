@@ -6,12 +6,14 @@
 Acceptance:
 
 ```bash
-bash -c 'cd ~/repos/agent-org && git fetch -q origin && git show origin/main:.github/workflows/ci.yml | grep -q "54947391eb36ccf84ff7365e6530f13d180980de"'
+git grep -qE "^  PROJECT_REF: 54947391eb36ccf84ff7365e6530f13d180980de$" -- .github/workflows/ci.yml
 ```
 
-This command reads agent-org's `origin/main`, so it exits 1 until this PR merges and 0 after; it was run at the base before the change and printed exit 1, which is the Open-check's FALSE side. The same grep on this branch's file reads `1` line for the new pin and `0` for the old full sha.
+This is the row's command (`git show origin/main:.github/workflows/ci.yml | grep -q <sha>`, run from `~/repos/agent-org`) turned to read the PR's own tree, because CI's acceptance job runs before the merge and the row's form reads `origin/main`, so it exits 1 until the merge and 0 after (run at the base it printed exit 1, the Open-check's FALSE side). The row's form is the post-merge reading and stays the done-when's.
 
-Measured, and how:
+Measured: the command above printed exit 0 at this head, and exit 1 at the base `1924bdb9` (`git grep` of the same pattern at `origin/main`); the old full sha `eaebb69cd37fa053b78e2fee2fe152a545fe8ae7` appears 0 times in the file now and 1 time before.
+
+How the rest was read:
 - a11ign `54947391e` is a11ign/a11ign `main` at the time of writing (`git rev-parse origin/main` in the a11ign worktree), committed 2026-10-11T21:07:04Z.
 - The row asks for a green a11ign gate at that commit. Read from the commit's check-runs (`gh api repos/a11ign/a11ign/commits/<sha>/check-runs`): `trunkGate` and `trunkBuildTest / run` are `success`. Two other runs on that sha are `failure` and are not the gate: `e2e` (workflow `auth0-e2e`, "the repository secret AUTH0_DOMAIN is not set") and `install` (workflow `registry-consumer-gate`, `[duplicate-copy] @a11ign/evidence`, a published-package reading); both are `workflow_run` watchers that read the registry or a secret, not the tree at the sha.
 - `node --test src/ci-pins-the-project.test.ts`: 3 pass, 0 fail (the pin is a full 40-character sha and the checkout reads it).
