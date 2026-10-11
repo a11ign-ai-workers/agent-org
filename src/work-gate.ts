@@ -141,6 +141,7 @@ import { labJobFinishedOrders, readLabJobRecords, readDispatchedLabJobs } from "
 // #2898: THE ORG-HEALTH FACTS AND ORDERS live in `work-gate/org-health.ts`, which imports the shared reads BACK from this file (the cycle `pr-orders.ts` above describes);
 // every name it exported is re-exported here, so no caller of `work-gate.ts` changes.
 import { orgHealthNow, rulingOrdersNow, readWaitFacts, boardTruthNow, waitTickFacts } from "./work-gate/org-health.ts";
+import { recordRouteOutcomesOnHost } from "./work-gate/route-outcome-pass.ts";
 import { quietOrgHealth, classAndKeyOf as orgHealthClassAndKey } from "./work-gate/org-health-suppression.ts"; // #4065
 import { TABLE_ROW as STANDING_ROW } from "./board-truth-audit.ts"; // agent-org#491: the row every org-health prompt already says to write on (#928)
 import { unparkingWaits } from "./unpark-satisfied.ts"; // #4050: a parked row whose every condition is true is un-parked where the tick reads the waits
@@ -8371,6 +8372,7 @@ function main() {
   const allOpen = promotedWhenUnblocked(openRowsRead ?? []); // #4064: BEFORE any cause reads the rows, so a row promoted here is not offered to `product-manager` as unpromoted
   const { claimedComments, closedRows, closings, closedClaims, closedClaimLabels, agents: herdrListing } = readOpenRowFollowUps(allOpen); // #3566: asked together, each still conditional on the rows in hand
   const strippedClosedClaims = stripClosedClaims(closedClaimLabels); // #3883: the closed rows whose holder herdr does not list lose their claim labels, in the tick that read them
+  recordRouteOutcomesOnHost(closedClaimLabels !== null, { gh: defaultRun }); // agent-org#752: the outcome of each closed routed row, written here because the log is on this host and the close script runs on a runner
   // #2031: A LOCAL git CALL, NOT AN API ONE -- it adds nothing to `GH_READS` and cannot be refused by an
   // exhausted pool, which is the whole reason the detection can exist. `GIT_READS` counts it.
   const offerHierarchy = offerHierarchyNow(rows, allOpen); // #4524: who the chairman's rows are, from the tracker's history, and the declared milestone ranking
