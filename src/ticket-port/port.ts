@@ -6,7 +6,7 @@
 // source test beside it (`ticket-port.test.ts`) holds both properties: no import of an adapter, and no spawn of the tracker's CLI.
 //
 // FOUR OPERATIONS, NO MORE (decision 1). A fifth needs a ruling from `ceo`. `TicketPort` below is exactly those four. What is NOT one of
-// them is `OpenItemsReader`, at the foot of this file, and it says why it is separate.
+// them is `OpenItemsReader` or `BlockerWriter`, at the foot of this file; each says why it is separate.
 //
 // THE CODE HOST IS A SEPARATE PORT (decision 3). `CodeHostPort` is declared here as a TYPE only; its adapter is built by the first row that
 // calls it (agent-org#488). Neither port refers to the other: a ticket holds a `ChangeRef`, and that is all it knows of a change.
@@ -136,4 +136,17 @@ export type OpenItemSummary = Readonly<{ ref: ItemRef; title: string; openedAtMs
  */
 export interface OpenItemsReader {
   readOpenItems(options?: { onBudget?: (budget: ApiBudget) => void }): OpenItemSummary[] | null;
+}
+
+/**
+ * RECORDS A NATIVE `blockedBy` EDGE, and it is deliberately NOT a method of `TicketPort`, for the same reason as `OpenItemsReader`.
+ *
+ * The four operations move labels and the board Status, or post a comment; none of them says "this item waits on that one". `worker:state
+ * blocked --on` is the one caller. WHETHER THIS IS A FIFTH OPERATION IS `ceo`'S TO RULE (agent-org#484), and until then it is apart.
+ *
+ * `blocker` may live in another repository, so each side is addressed by its own `ItemRef`. Throws when the edge was not written, and an edge
+ * that was not written is never reported as one: the caller falls back to a label.
+ */
+export interface BlockerWriter {
+  addBlocker(ref: ItemRef, blocker: ItemRef): void;
 }
