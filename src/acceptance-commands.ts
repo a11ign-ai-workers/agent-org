@@ -1653,7 +1653,7 @@ export function declaredNewFiles(body: string): string[] {
  */
 export function acceptancePathsReason(body: string, tool: string, deps: {
     exists?: (path: string) => boolean; trackedDirs?: string[]; regionEntries?: string[]; trackedFiles?: string[];
-    primaryCheckout?: string | null;
+    primaryCheckout?: string | null; builtInCheckout?: string | null;
 } = {}): string | null {
   const primary = primaryCheckoutCdReason(body, tool, deps);
   if (primary) return primary;
@@ -1710,19 +1710,30 @@ function primaryCheckoutOfHost(): string | null {
  * DECLARES `Hand-run:` keeps that declaration's meaning: a human runs it and chose the directory. The refusal is for the undeclared line.
  *
  *  @param tool the CLI to name in the refusal
- * @param [deps] a test names the checkout; `null` is "cannot tell" and skips the check
+ * @param [deps] a test names the checkouts; `null` is "cannot tell" and skips that check. `builtInCheckout` is #852's: the caller passes
+ *   `builtInCheckoutOf` (`built-in-checkout.ts`), since this file cannot read the row's tracker without a cycle; `null` is "cannot tell"
  */
-export function primaryCheckoutCdReason(body: string, tool: string, { primaryCheckout = primaryCheckoutOfHost() }: { primaryCheckout?: string | null; } = {}): string | null {
+export function primaryCheckoutCdReason(body: string, tool: string, { primaryCheckout = primaryCheckoutOfHost(), builtInCheckout = null }: { primaryCheckout?: string | null; builtInCheckout?: string | null; } = {}): string | null {
   const section = extractAcceptanceSection(body);
-  if (primaryCheckout === null || section.kind !== "commands" || handRunDeclaration(body) !== null) return null;
-  const hits = section.commands.filter((command) => cdIntoCheckout(command, primaryCheckout) !== null);
-  if (hits.length === 0) return null;
-  return `${tool}: REFUSING -- the Acceptance \`cd\`s into this project's own primary checkout (${primaryCheckout}): `
-    + `${hits.map((command) => `\`${command}\``).join(", ")}. CI has no such path, so the \`acceptance\` job dies on `
-    + "`No such file or directory` (#4318 did, three times), and on the host the line reads the PRIMARY checkout, which "
-    + "carries the change only after the merge -- it would pass or fail for the wrong tree. Drop the `cd` and run the "
-    + "command from the repository root, the way every row that works does. A `cd` into ANOTHER repository's checkout is not "
-    + "refused here, and a command a human is meant to run takes a `Hand-run: <who runs it and why>` line.";
+  if (section.kind !== "commands" || handRunDeclaration(body) !== null) return null;
+  const hitsIn = (checkout: string | null) => (checkout === null ? [] : section.commands.filter((command) => cdIntoCheckout(command, checkout) !== null));
+  const hits = hitsIn(primaryCheckout);
+  if (hits.length > 0) {
+    return `${tool}: REFUSING -- the Acceptance \`cd\`s into this project's own primary checkout (${primaryCheckout}): `
+      + `${hits.map((command) => `\`${command}\``).join(", ")}. CI has no such path, so the \`acceptance\` job dies on `
+      + "`No such file or directory` (#4318 did, three times), and on the host the line reads the PRIMARY checkout, which "
+      + "carries the change only after the merge -- it would pass or fail for the wrong tree. Drop the `cd` and run the "
+      + "command from the repository root, the way every row that works does. A `cd` into ANOTHER repository's checkout is not "
+      + "refused here, and a command a human is meant to run takes a `Hand-run: <who runs it and why>` line.";
+  }
+  const builtHits = hitsIn(builtInCheckout);
+  if (builtInCheckout === null || builtHits.length === 0) return null;
+  return `${tool}: REFUSING -- the Acceptance \`cd\`s into the clone of the repository this row is built in (${builtInCheckout}): `
+    + `${builtHits.map((command) => `\`${command}\``).join(", ")}. The row's tracker is a second tracker, so its pull request lands in `
+    + "that repository, and the line would run in that clone's PRIMARY checkout, which carries the change only after the merge -- it "
+    + "would pass or fail for the wrong tree, and CI has no such path. Run the command from the worktree root, the way every row that "
+    + "works does. A `cd` into a repository this row is not built in is not refused here, and a command a human is meant to run takes "
+    + "a `Hand-run: <who runs it and why>` line.";
 }
 
 function absentPathsRefusal(absent: { path: string; command: string; }[], tool: string) {

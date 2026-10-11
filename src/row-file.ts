@@ -110,6 +110,7 @@ import { DEFECT_LABEL } from "./defect-class-line.ts"; // #4123
 import { declaredRegionFiles, declaresNoCommit, directoryReservations, extractLabeledSection, slashlessDirectoryEntries, splitRegionEntry, unrecognisedRegionPaths } from "./region-paths.ts";
 import { homeProjectDeclaration } from "./project-config.ts";
 import { rowTracker, trackerNamed } from "./row-tracker.ts"; // #4078
+import { builtInCheckoutOf } from "./built-in-checkout.ts"; // #852
 import { adopterFacingDeclared, adopterRowKind } from "./work-gate/org-health.ts"; // #4378
 import { PRIMARY_MILESTONE_LINE } from "./org-health.ts"; // #4378
 import { parseWaits, umbrellaEdge } from "./wait-condition.ts";
@@ -740,7 +741,7 @@ export function fileRefusalReason(body: string | null): string | null {
   // standing in, available here for the cost of a `stat`, and measured twice in one day (#1939, #1936)
   // as the thing nothing asked. Last, because a whole-suite command names no path and must be refused
   // for what it is rather than for naming nothing.
-  const paths = acceptancePathsReason(body, "row-file");
+  const paths = acceptancePathsReason(body, "row-file", { builtInCheckout: builtInCheckoutOf(body) }); // #852
   if (paths) return paths;
   // #1973: AND THE PATHS THAT EXIST BUT ARE THE WRONG ONES. The check above asks whether a named file is
   // there; this asks whether a row that fetches an artifact then reads it named the LAB's copy instead of
