@@ -52,7 +52,7 @@ import { claimedRegionOverlapReason, claimedRegionsOf, declaredClosedRows, fileO
 // #1959: THE ONE READER OF `docs/lane-ownership.json`, imported rather than re-parsed -- a lane's `paths`
 // and `except` are `ceo`'s to move, and a second copy here would drift the way #939's nine spellings did.
 // Leaf-shaped and relative, so the gate keeps the property its own header states.
-import { loadLanes, inLane } from "./lane-ownership.ts";
+import { loadLanes, inLane, MANAGERS_APP_LOGINS } from "./lane-ownership.ts";
 // #2031, AND IMPORTED FOR THE SAME REASON THE TWO LINES ABOVE ARE. The trailing-`-<n>` rule is #2014's,
 // already exercised through `row-claim.ts`'s own refusal; a second copy here is the drift that row's
 // filing named in so many words. `row-branch-rule.ts` imports NOTHING, and `git-env.ts` imports nothing
@@ -127,7 +127,7 @@ import { recordEmergencyPriority, recordIgnoredChairmanLabels, recordTickFailure
 // #2163: FREE BYTES AND FREE INODES. Imports only `node:*`, so the gate keeps the property its own header states.
 import { diskHeadroom, MIN_FREE_FRACTION } from "./disk-headroom.ts";
 // #2470: A CLAIM THAT DOES NOT MOVE. A leaf, like every import above, so the gate keeps the property its own header states.
-import { KEPT_CLAIMS_FILE, readJsonObject, writeJsonObject } from "./claim-stall.ts";
+import { KEPT_CLAIMS_FILE, decidedBy, readJsonObject, writeJsonObject } from "./claim-stall.ts";
 import { WORKER_STATE_DIR, readDeclarations } from "./worker-state.ts";
 // #2845: WHO STAMPED A WORKTREE -- the reading a refused claim names. Imports only `node:*` and `lib/`, like the rest.
 import { worktreeOwner } from "./worktree-owner.ts";
@@ -4655,7 +4655,7 @@ export function pipelineCodeownerReviewMissing(prs: any[], prFiles: { number: nu
   return prs
     .filter((pr) => pr.author?.login !== login)
     .filter((pr) => touchesOwnedLanePath(filesByRef.get(subjectRef(pr.repoKey, pr.number)) ?? [], lane))
-    .filter((pr) => !ownerHasReviewed(pr, login))
+    .filter((pr) => !ownerHasReviewed(pr, login, lane.owner))
     .map((pr) => ({ number: Number(pr.number), ...subjectIdentity(pr), session: sessionOf(pr) }))
     .sort((a, b) => a.number - b.number);
 }
@@ -4665,6 +4665,23 @@ export function pipelineCodeownerReviewMissing(prs: any[], prFiles: { number: nu
  * the revert; unset (the ordinary case) a refusal on the pull request's current head settles the cause too.
  */
 export const CODEOWNER_REVIEW_APPROVED_ONLY_ENV = "AGENT_ORG_CODEOWNER_REVIEW_APPROVED_ONLY";
+
+/**
+ * #796 (`ceo`'s ruling on the row): A REVIEW COUNTS AS THE OWNER'S WHEN ITS AUTHOR IS THE OWNER'S LOGIN, OR IS THE MANAGERS APP AND ITS BODY'S
+ * `decided-by` MARKER NAMES THE OWNER'S SEAT. A manager's review is authored by `a11ign-managers[bot]` since #4911's flip, which no comparison
+ * with `a11ign-ai-leads` can match, so the cause re-fired on a head `ceo` had approved. The App is shared by `ceo`, `product-manager` and
+ * `orchestrator`, so its login alone must NOT clear the cause (a `product-manager` approval is not the code owner's): the marker is the only
+ * thing that names the seat, and `decidedBy` reads its LAST one, the line `host/gh` appends, so a quoted marker earlier in the body does not
+ * speak for the review. `seat` is the lane's role ("ceo").
+ *
+ * AUTHORSHIP IS NOT EXTENDED, and `pipelineCodeownerReviewMissing`'s own-PR exemption still compares with `login` alone: the App authors for
+ * every manager, so a PR it authored is not "the owner's own".
+ */
+function isOwnersReview(review: any, login: string, seat: string): boolean {
+  const author = review?.author?.login;
+  if (author === login) return true;
+  return MANAGERS_APP_LOGINS.includes(author) && decidedBy(review?.body) === seat;
+}
 
 /**
  * Has the code owner already given this pull request the review CODEOWNERS asks for? `APPROVED` or `CHANGES_REQUESTED` on the head the
@@ -4677,11 +4694,11 @@ export const CODEOWNER_REVIEW_APPROVED_ONLY_ENV = "AGENT_ORG_CODEOWNER_REVIEW_AP
  * before this row (`#1959 (c)` pins it), and a `CHANGES_REQUESTED` there does not, because it is the NEW settling state and is counted
  * only on evidence that it is on the head the pull request has.
  */
-function ownerHasReviewed(pr: any, login: string): boolean {
+function ownerHasReviewed(pr: any, login: string, seat: string): boolean {
   const approvedOnly = process.env[CODEOWNER_REVIEW_APPROVED_ONLY_ENV] === "1";
   const head = typeof pr.headRefOid === "string" ? pr.headRefOid : "";
   return (pr.reviews ?? []).some((r: any) => {
-    if (r?.author?.login !== login) return false;
+    if (!isOwnersReview(r, login, seat)) return false;
     if (approvedOnly) return r?.state === "APPROVED";
     const at = typeof r?.commit?.oid === "string" ? r.commit.oid : "";
     if (at !== "" && head !== "") return (r?.state === "APPROVED" || r?.state === "CHANGES_REQUESTED") && at === head;
