@@ -30,8 +30,8 @@ test("a Dependabot pull request is named an owner by the ladder, and is not an o
   assert.deepEqual(unresolvedOwnerEvents([pr], ownerOfPr, "a11ign/a11ign"), []);
 });
 
-test("POSITIVE CONTROL: the same shape by a person reaches ceo's rung and IS recorded", () => {
-  const pr = owned(dependabotPr({ number: 9, author: { login: "DanBeckDev" }, headRefName: "bump-axe-core" }));
+test("POSITIVE CONTROL: the same shape by the worker account reaches ceo's rung and IS recorded", () => {
+  const pr = owned(dependabotPr({ number: 9, author: { login: "a11ign-ai-workers" }, headRefName: "bump-axe-core" }));
   assert.equal(ownerOfPr(pr).source, "ceo");
   assert.deepEqual(unresolvedOwnerEvents([pr], ownerOfPr, "a11ign/a11ign"), [{ classKey: "owner-unresolved", ref: "a11ign/a11ign#9" }]);
 });

@@ -34,7 +34,7 @@ export { DEPENDENCY_BOT_LOGIN } from "../dependency-bot-login.ts";
 import { SESSION_PREFIX, BLOCKED_LABEL } from "../project-vocabulary.ts";
 import { labelsOf, sessionOf, conflictStateOf, CONFLICT_STATE, reviewStateOf, BLOCKING_REVIEW_STATES, checksSettledGreen, conclusionOf, stillRunning, anyChecksRed, requiredCheckNames,
   blockingChecks, reviewableHead, reviewWait, verdictAmong, awaitingEvidence, AWAITING_EVIDENCE_LABEL,
-  AWAITING_EVIDENCE_QUIET_HOURS, AWAITING_EVIDENCE_QUIET_MS, HOUR_MS, REVIEW_STATE } from "../work-gate.ts";
+  AWAITING_EVIDENCE_QUIET_HOURS, AWAITING_EVIDENCE_QUIET_MS, HOUR_MS, REVIEW_STATE, CHAIRMAN_LOGINS } from "../work-gate.ts";
 
 /**
  * The verdict door as an order must spell it (#3316): `~/reviewer/bin` is on no PATH, so the bare name was `command not found`. Not
@@ -380,6 +380,7 @@ function ownershipOf(pr: any, source: string, task: string) {
   if (source === "label") return `It carries your session label, so the ${task} is yours.`;
   if (source === "dependency-bot") return `A dependency bot opened it and no session works such a pull request, so the ${task} is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR), or close it.`;
   if (source === "owner-gone") return `Its \`${SESSION_PREFIX}\` label names \`${sessionOf(pr)}\`, which has ENDED, and ${deadOwnerRowClause(pr)}, so the ${task} is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR), or close it.`;
+  if (source === "chairman-author") return `The chairman opened it and no session works it, so the ${task} is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR), or close it.`;
   return `The ${task} is yours: ${notConvincedBasis(pr, source)}.`;
 }
 
@@ -718,6 +719,15 @@ export function isDependencyBotPr(pr: any): boolean {
 }
 
 /**
+ * Whether the chairman opened `pr` (agent-org#950). A chairman's pull request is no session's work, so no claim, label or stamp names one; `ceo` is
+ * its reader, and `ownerOfPr` says so rather than reaching its last rung by falling off the ladder. An exact login, as every other read of
+ * `CHAIRMAN_LOGINS` is: it names one person's account, never "any human" and never the shared worker account.
+ */
+export function isChairmanAuthoredPr(pr: any): boolean {
+  return CHAIRMAN_LOGINS.includes(String(pr?.author?.login ?? ""));
+}
+
+/**
  * WHERE A RED PULL REQUEST GOES WHEN ITS OWNER'S SESSION NO LONGER EXISTS (#3078). `ownerOfPr`'s `label` rung never outranks, so a
  * label naming a released session kept addressing the order to a workspace that was not there: `route` refused it on every tick
  * (30 ticks, 63 minutes, three PRs) and the PR it blocked held other rows out of the pool. `product-manager`, because the way out
@@ -755,16 +765,21 @@ function deadOwnerRowClause(pr: any) {
  *   7. `owner-gone`   a pull request whose label names an ENDED session AND whose named rows nobody holds: all CLOSED (#4644) or OPEN and UNCLAIMED (#4808).
  *                     Rungs 2-5 each need a LIVE session holding an OPEN claimed row, so both failed all four. a11ign#4626 (label `session:worker-4624`, row
  *                     #4624 closed while it stayed open) and a11ign#4805 (label `session:worker-4804`, row #4804 back in `backlog` with no claim) landed on
- *                     rung 8 as "nobody could be named" when somebody could: the owner is known, and gone.
+ *                     the `ceo` rung as "nobody could be named" when somebody could: the owner is known, and gone.
  *                     `product-manager` owns it (`DEAD_OWNER_FALLBACK`): the way out is process -- reclaim the row, re-label the PR to a session that can
  *                     act, or close it -- and the ladder SAYS so, which keeps it out of `owner-unresolved`. `withClosingRowOwners` sets
  *                     `closingRowsClosed` / `closingRowsUnheld` ONLY on a PR carrying `labelEnded`, so a label that stands, a row held by a live session,
  *                     an unreadable (empty) rows list, a PR naming no row, or no label at all is unchanged.
- *   8. `ceo`          nobody could be named. Never `product-manager` for a PR with no dead owner to name.
+ *   8. `chairman-author` a pull request the chairman opened (agent-org#950), with nothing above naming a session. Not a pull request nobody could
+ *                     name: its reader is `ceo`, who holds the chairman's pull requests and the outage briefs, and a11ign/a11ign#5041 (the chairman's own
+ *                     outage mitigation, branch `agent/scheduler-search-mitigation`, no label) reached rung 9 and was recorded as `owner-unresolved`, the
+ *                     seventh time, for an address that was right. A label naming an ENDED session does not stop it: `ceo` is the chairman's reader
+ *                     either way. Only `CHAIRMAN_LOGINS` -- never another person, never the worker account, so an unlabelled agent PR still falls to 9.
+ *   9. `ceo`          nobody could be named. Never `product-manager` for a PR with no dead owner to name.
  * "Live" in rungs 2-5 is the same test #2912 made: the session still HOLDS A CLAIM on an open row. `isLiveSession`
  * is not asked, so a live session holding NO claim is answered by `ceo`, which can act.
  */
-export function ownerOfPr(pr: any): { session: string; source: "label" | "closing-row" | "branch-row" | "branch-name" | "stamp" | "dependency-bot" | "owner-gone" | "ceo"; } {
+export function ownerOfPr(pr: any): { session: string; source: "label" | "closing-row" | "branch-row" | "branch-name" | "stamp" | "dependency-bot" | "owner-gone" | "chairman-author" | "ceo"; } {
   const label = sessionOf(pr);
   if (label && !pr?.labelEnded) return { session: label, source: "label" };
   if (pr?.rowOwner) return { session: pr.rowOwner.session, source: pr.rowOwner.source === "branch" ? "branch-row" : "closing-row" };
@@ -772,6 +787,7 @@ export function ownerOfPr(pr: any): { session: string; source: "label" | "closin
   if (pr?.stampOwner) return { session: pr.stampOwner.session, source: "stamp" };
   if (isDependencyBotPr(pr)) return { session: UNOWNED_PR_SESSION, source: "dependency-bot" };
   if (pr?.closingRowsClosed || pr?.closingRowsUnheld) return { session: DEAD_OWNER_FALLBACK, source: "owner-gone" };
+  if (isChairmanAuthoredPr(pr)) return { session: UNOWNED_PR_SESSION, source: "chairman-author" };
   return { session: UNOWNED_PR_SESSION, source: "ceo" };
 }
 
@@ -798,6 +814,7 @@ function ownershipSentence(pr: any, { blocking, nowMs }: { blocking: any[]; nowM
     stamp: `It carries no session label and closes no row you hold, but the worktree its branch ${branch} is checked out in was stamped by you, so it is yours to fix.`,
     "dependency-bot": "A dependency bot opened it and no session works such a pull request, so it is yours to route: re-lane it to a session that should fix it, or close it.",
     "owner-gone": `Its \`${SESSION_PREFIX}\` label names \`${sessionOf(pr)}\`, which has ENDED, and ${deadOwnerRowClause(pr)}, so it is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR) to a session that can fix it, or close it.`,
+    "chairman-author": "The chairman opened it and no session works it, so it is yours to route: re-lane it (`" + SESSION_PREFIX + "<name>` on the PR) to a session that should fix it, or close it.",
     ceo: unownedSentence(pr, { blocking, nowMs }),
   };
   return sentences[source];
@@ -1000,6 +1017,7 @@ function notConvincedBasis(pr: any, source: string) {
   if (source === "branch-name") return `its branch \`${pr.headRefName}\` names you`;
   if (source === "dependency-bot") return "a dependency bot opened it and no session works such a pull request";
   if (source === "owner-gone") return `its \`${SESSION_PREFIX}\` label names \`${sessionOf(pr)}\`, which has ENDED, and ${deadOwnerRowClause(pr)}`;
+  if (source === "chairman-author") return "the chairman opened it and no session works it";
   return `the worktree its branch \`${pr.headRefName}\` is checked out in was stamped by you`;
 }
 
