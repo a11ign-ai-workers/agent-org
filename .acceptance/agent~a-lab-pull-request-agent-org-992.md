@@ -11,7 +11,8 @@ bash -c 'cd /home/agent/repos/wt-agent-org-992 && AGENT_ORG_HOST=/home/agent/rep
 
 The row's third command says `cd ~/repos/agent-org`, the host's checkout (detached at the last release), which does not hold this branch; it is run in this branch's worktree, as a11ign/agent-org#620's and #955's were. Printed `VERDICT pass: 20 tests in 1 file`.
 
-Mutation (each applied to a copy of the one line, the test file run, the file restored from the copy and compared byte-identical):
+Mutation:
+Each applied to a copy of the one line, the test file run, the file restored from the copy and compared byte-identical.
 - Never fires, the empty difference assumed (`if (added.length === 0)` made `if (true)`): 13 of 20 red, every case that expects a refusal, through both doors; every NEGATIVE CONTROL stays green.
 - Always fires, the trunk's red not subtracted (`const added = own.files`): 3 of 20 red, the INHERITED, SOME-OF-trunk's-files and arm-pr's door control; the POSITIVE CONTROL stays green.
 - A CLOSED row read as a declaration: 2 red (the decider's refusal table, and arm-pr's closed-row control).
