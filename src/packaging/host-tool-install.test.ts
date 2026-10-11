@@ -36,7 +36,8 @@ import { sandboxGitEnv, withGitSandbox } from "@a11ign/toolchain/lib/git-sandbox
 const sha256 = (text: string) => createHash("sha256").update(text).digest("hex");
 
 /** The digest of the `work-tick` unit the host runs today: the one `host-project-paths.test.ts` pins as `TODAYS_TEXT`, restated so this file's claim is checkable alone. */
-const TODAYS_WORK_TICK_SHA = "6f128077955f11e824ec1956fc377ed1944f85590a70e387672c7756c56c68b9";
+// #920 MOVED THIS ONE, deliberately: the unit declares `CPUWeight=400`.
+const TODAYS_WORK_TICK_SHA = "1b1e446961eda27b22f54163c9c52370119a722b5093d3aebb396661551be6f9";
 
 /**
  * a11ign's host with its `tool` taken out. #2974 (cut-over 3 of 6) SET `tool` in a11ign's `host.json`, so the real host now renders the tool
