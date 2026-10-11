@@ -16,6 +16,7 @@ The gate half (the `ready-row-incomplete` checks in `work-gate.ts`, `cause-decla
 
 - `node --test src/ready-region-repo.test.ts` (with `AGENT_ORG_HOST` unset): 10 tests, 10 pass. The file sets its own hermetic host and project from recorded fixtures; every read it makes is injected, so no test runs git against a real checkout.
 - `git grep -q "POSITIVE CONTROL" -- src/ready-region-repo.test.ts`: exit 0 (the file is tracked; `git grep` does not see untracked files).
+- No-token probe (the file declares `// no-token: row-file.ts` on line 1, so this is checked, not asserted): a scratch PATH holding only symlinks to `node`, `sh`, `env`, `cat`, `git`, `tail`; `GH_TOKEN` and `GITHUB_TOKEN` unset; run as `env -i PATH=<scratch> HOME=$HOME sh -c 'command -v gh ...; node --test src/ready-region-repo.test.ts'`. Output: `gh: ABSENT from PATH`, `GH_TOKEN=unset GITHUB_TOKEN=unset`, `node --test exit=0`, `tests 10`, `pass 10`, `fail 0`.
 - `pnpm run typecheck` (`tsc --noEmit`): exit 0.
 - The eight row-file suites (`src/packaging/row-file.test.ts`, `src/row-file-board.test.ts`, `src/row-file-roadmap.test.ts`, `src/packaging/row-file-bare-rstest-run.test.ts`, `src/packaging/row-file-refuses-duplicate-title.test.ts`, `src/packaging/row-file-refuses-unreadable-wait.test.ts`, `src/row-tracker.test.ts`, `src/packaging/pr-open-region.test.ts`), run with the same fixture host on HEAD and on this change: 221 pass on both, and the set of failing test names is identical. The failures come from the fixture host, not from this change; I did not fix them.
 
@@ -27,6 +28,7 @@ Mutation: `const checkout = checkoutOf(key);` → `checkoutOf("")` (three tests 
 
 ## Anything a reviewer should be sceptical of
 
+- The `// no-token: row-file.ts` declaration names the module, not a function, because the refusal named the module as the first hop. The test calls `absentRegionTopDirReason` from it. The claim is that no gh-using function of `row-file.ts` (`readBlocker`, about line 866) is reached; the no-token probe above verifies that for this run. The classifier only checks that the file does not call `row-file.ts(`, so the probe is the evidence, not the classifier.
 - Undeclared clones are not checked. A keyed row whose clone is absent from this host's `clones` passes this check. That keeps the 2623 hosts filing, but it means the check is weaker on those hosts; it is the first thing to tighten once every host has its clones declared.
 - Bare prose with a slash in a Region (`and/or`, `I/O`) is read as a path, and its first segment is treated as a directory. Such a Region is refused unless the first segment exists in the repository. I did not check existing rows for this, and it is the most likely false refusal.
 - The keyed-aware token reader is a second Region parser in `row-file.ts`, which the file's own comment says not to have. It is there because `region-paths.ts` cannot read keyed tokens; the fix belongs in `region-paths.ts`.

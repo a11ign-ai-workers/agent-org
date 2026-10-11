@@ -1,3 +1,4 @@
+// no-token: row-file.ts -- this file calls only absentRegionTopDirReason; every read it makes is an injected seam or the recorded host fixture, and no gh-using function of row-file.ts (readBlocker, ~line 866) is reached; 10/10 pass with gh off PATH and no token
 // #855: a `--ready` row whose `## Region` names a top-level directory its repository does not have is refused at filing.
 //
 // Every read is injected (`code`, `checkoutOf`, `hasTopLevel`, `trackerRepo`), so no test spawns git or reads a host declaration.
