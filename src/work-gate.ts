@@ -7935,8 +7935,8 @@ export const CHAIN_WAIT_MINUTES = 30;
 export const CHAIN_WAIT_ESCALATION_SESSION = "orchestrator";
 const CHAIN_WAIT_MS = CHAIN_WAIT_MINUTES * 60 * 1000;
 
-/** One holder waiting on one blocked pull request, as the tick read it. `session` is the holder's `session:` label, `null` when it carries none. */
-export type ChainWait = { key: string; holder: string; holderKind: "pull request" | "row"; session: string | null; target: string; reason: string };
+/** One holder waiting on one blocked pull request, as the tick read it. `session` is the holder's `session:` label, `null` when it carries none. `target` is how a person is told (`owner/repo#n`), `targetRef` the ledger spelling (`n`, or `key#n`, {@link subjectRef}). */
+export type ChainWait = { key: string; holder: string; holderKind: "pull request" | "row"; session: string | null; target: string; targetRef: string; reason: string };
 /** A chain standing across ticks: when it was first read, when its holder was woken (`null` for not yet), and whether it was escalated. */
 export type ChainEpisode = { since: number; woke: number | null; escalated: boolean };
 export type ChainMove = { kind: "wake-holder"; wait: ChainWait; since: number } | { kind: "escalate"; wait: ChainWait; since: number; woken: boolean };
@@ -7974,7 +7974,7 @@ export function chainWaitsOf({ prs, rows }: { prs: readonly any[]; rows: readonl
       const key = `${session ?? `${kind}:${refOf(raw)}`}->${refOf(target.raw)}`;
       if (found.has(key)) continue;
       const display = (item: any) => `${repoOf(item) === "" ? "" : repoOf(item)}#${Number(item.number)}`;
-      found.set(key, { key, holder: display(raw), holderKind: kind === "pr" ? "pull request" : "row", session, target: display(target.raw), reason: target.reason });
+      found.set(key, { key, holder: display(raw), holderKind: kind === "pr" ? "pull request" : "row", session, target: display(target.raw), targetRef: subjectRef(target.raw.repoKey, target.raw.number), reason: target.reason });
     }
   }
   return [...found.values()];
@@ -8029,7 +8029,7 @@ export function chainWaitOrder(move: ChainMove, now: number): BlockingOrder {
   const { wait, since } = move;
   const minutes = Math.max(0, Math.round((now - since) / 60000));
   const slug = `${wait.key.replace(/[^\w.-]+/g, "-")}-${since}`;
-  const subject = `pr-${wait.target.replace(/[^\w.-]+/g, "-")}`;
+  const subject = `pr-${wait.targetRef}`; // the established spelling (`pr-1014`, `pr-agent-org#1037`), which the ledger's subject parser reads
   if (move.kind === "wake-holder") {
     const session = wait.session as string;
     return { session, cause: "ready-row-unclaimable", subject, discriminator: slug, prompt: chainWaitWakeText(wait, minutes), causeKey: `${session}/chain-wait/${slug}` };

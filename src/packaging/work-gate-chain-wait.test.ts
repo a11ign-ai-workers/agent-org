@@ -161,6 +161,16 @@ test("a wait in another repository names that repository's pull request, not the
   assert.deepEqual(chainWaitsOf({ prs: [away, clean(56, { labels: [{ name: "session:worker-2" }], body: "Waiting-for: merged #1014\n" })], rows: [] }), [], "a bare #1014 is the home repository's, which was not listed");
 });
 
+test("the order's subject is the established `pr-<ref>` spelling: `pr-1014` for the home repository, `pr-agent-org#1014` for a keyed one, never a slug of the display name", () => {
+  const home = ordersOf(run({ prs: [BLOCKED_1014, HOLDER_1016], stateDir: dir(), through: 60 }));
+  assert.deepEqual(home.map(({ order }) => order.subject), ["pr-1014", "pr-1014"], "the wake and the escalation both name the blocked pull request");
+  const away = { ...clean(1014, { reviewDecision: "CHANGES_REQUESTED" }), repoKey: "agent-org", repo: "a11ign/agent-org" };
+  const holder = clean(55, { labels: [{ name: "session:worker-2" }], body: "Waiting-for: merged a11ign/agent-org#1014\n" });
+  const keyed = ordersOf(run({ prs: [away, holder], stateDir: dir(), through: 30 }));
+  assert.deepEqual(keyed.map(({ order }) => order.subject), ["pr-agent-org#1014"]);
+  assert.doesNotMatch(String(keyed[0].order.subject), /pr--|a11ign/, "the display name's `#` and `/` are not slugged into the subject");
+});
+
 // --- the moves -----------------------------------------------------------------------------------------------------------------------------
 
 test("a holder no session is known for goes straight to the escalation, because nobody could take the choice", () => {
