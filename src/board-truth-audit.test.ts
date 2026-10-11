@@ -72,6 +72,20 @@ test("(1) an epic whose children are all closed is found (#2899, 13 of 13); one 
   assert.deepEqual(found({ openRows: [row(2, ["ready"], { subIssuesSummary: { total: 2, completed: 2 } })] }, QUESTIONS.EPIC_DONE), []);
 });
 
+test("(1b) an epic left open by a wait that is not yet true is not found (a11ign/agent-org#840, a11ign#4425); an already-true wait, a passed date, no line and an unread condition still are", () => {
+  const epic = (body: string) => row(4425, ["epic", "out-of-release", "lane:any"], { subIssuesSummary: { total: 18, completed: 18 }, body });
+  const waitOn = (state: string): any => ({ items: { "#50": { state, labels: [], resolvedAt: NOW, changedAt: NOW } } });
+  // the epic left open on purpose: its one wait stands, by a condition and by a date
+  assert.deepEqual(found({ openRows: [epic("Waiting-for: closed #50")], waitFacts: waitOn("open") }, QUESTIONS.EPIC_DONE), [], "the wait still stands");
+  assert.deepEqual(found({ openRows: [epic("Not-before: 2026-10-15")] }, QUESTIONS.EPIC_DONE), [], "the date is still ahead");
+  // the controls: each differs from the held epic by one fact, so a rule that never fires, or always fires, is red here
+  assert.deepEqual(found({ openRows: [epic("Waiting-for: closed #50")], waitFacts: waitOn("closed") }, QUESTIONS.EPIC_DONE), [4425], "the wait came true, so the epic is flagged again");
+  assert.deepEqual(found({ openRows: [epic("Not-before: 2026-10-07")] }, QUESTIONS.EPIC_DONE), [4425], "the date has passed");
+  assert.deepEqual(found({ openRows: [epic("no wait line here")] }, QUESTIONS.EPIC_DONE), [4425], "no line at all");
+  assert.deepEqual(found({ openRows: [epic("Waiting-for: closed #50")], waitFacts: null }, QUESTIONS.EPIC_DONE), [4425], "a condition nobody read is not held, so it is never silence");
+  assert.deepEqual(found({ openRows: [epic("Waiting-for: closed #50")], waitFacts: { items: {} } }, QUESTIONS.EPIC_DONE), [4425], "a reference the facts do not hold is unknown, not held");
+});
+
 test("(2) an open row a merged PR closes is found; one a PR names with `Closes: none`, an unmerged-PR-free row, and a cross-repo reference are not", () => {
   assert.deepEqual(found({ openRows: [row(10, ["ready"])], mergedPrs: [{ number: 900, body: "Closes #10" }] }, QUESTIONS.CLOSER_MERGED), [10]);
   assert.deepEqual(found({ openRows: [row(10, ["ready"])], mergedPrs: [{ number: 900, body: "Closes: none -- a docs change" }] }, QUESTIONS.CLOSER_MERGED), []);
