@@ -1397,6 +1397,18 @@
       "group": "JUDGMENT",
       "namedIn": []
     },
+    "machinery-canary": {
+      "group": "JUDGMENT",
+      "namedIn": [
+        "src/org-health.ts"
+      ]
+    },
+    "suppression-expired": {
+      "group": "JUDGMENT",
+      "namedIn": [
+        "src/org-health.ts"
+      ]
+    },
     "repeating-log-line": {
       "group": "JUDGMENT",
       "namedIn": []
