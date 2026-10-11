@@ -1,4 +1,4 @@
-The gh call ledger names WHY a read missed the read cache (a11ign/agent-org#742, residual of a11ign#4148). **The gap:** the ledger holds the subcommand and never the arguments, so a11ign#4765's reading ("the cache answers only an identical read repeated within 20 s and these callers repeat once per tick") could not be tested: "the same key asked again" and "a different key every tick" print the same line. This change adds the measurement; the reduction the row asks for is NOT in it (see Closes).
+The gh call ledger names WHY a read missed the read cache (a11ign/agent-org#742, residual of a11ign#4148). **The gap:** the ledger holds the subcommand and never the arguments, so a11ign#4765's reading ("the cache answers only an identical read repeated within 20 s and these callers repeat once per tick") could not be tested: "the same key asked again" and "a different key every tick" print the same line. This change adds the measurement; the reduction the row asks for is NOT in it (see Not done).
 
 **What changes (`host/gh`).**
 - *The 10th ledger field* is the cache's verdict for a read it looked at, `<hit|miss>-<why>:<argument digest>:<key digest>:<repository slug>` (`-` for any other call). `why` is `read_cache_fresh`'s: `absent`, `no-snapshot`, `no-generation`, `generation-moved`, `generation-old` (misses), `ttl` and `snapshot` (hits). The argument digest is the same under two keys when PWD, GH_REPO or the branch moved, and two digests are two questions: that is the test the row named.
@@ -11,11 +11,11 @@ Mutation: three, each red in its own test and no other, each restore byte-identi
 
 Evidence: `src/packaging/gh-read-cache.test.ts` and `src/packaging/gh-call-ledger.test.ts` 24 of 24 (the original 22 and two new). The ledger pin of #3589 (nine fields, the id last) is moved to ten fields with the id the 9th, in the same change. `tsc --noEmit` clean. The wrapper-reading suites (`gh-ledger`, `tick-snapshot`, `gh-ledger-per-hour`, `app-role-silent`, `gh-identity`, `app-token`, `gh-comment-attribution`, `gh-identity-declared`, `org-health-app-spender`) 121 of 121 under `node --test`.
 
-Not done: the reduction (Done-when 2 of #742: the three callers' lines sum to at most 700 for a UTC hour). Its measured causes lie in `src/wake.ts` and `src/tick-snapshot.ts`, outside the row's Region, and the Acceptance command names `--account a11ign-ai-workers`, which the ledger no longer carries for these callers (they are `app:scheduler`): on the current ledger the command prints no `work-gate`/`work-tick` line. Both are on the row.
+Not done, and filed as its own rows (one deliverable per row): the reduction to 700 points an hour (Done-when 2 of #742). Its measured causes lie in `src/wake.ts` and `src/tick-snapshot.ts`, outside this row's Region. a11ign/agent-org#942 takes the tick's own 12.5 `issue list` a tick (`tearDownSpares`, one per live spare); a11ign/agent-org#944 reads the new field so the gate's ~57 reads a tick can be named by argument digest. #742's Acceptance command also names `--account a11ign-ai-workers`, which the ledger no longer carries for these callers (they are `app:scheduler`), and the ledger is a 2 MiB ring holding about 46 minutes, so "one complete UTC hour" cannot be read from it: both are in #942's text.
 
 Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/gh-read-cache.test.ts src/packaging/gh-call-ledger.test.ts`
 
-Closes: none -- #742's Done-when 2 is a reduction this change does not make; the row stays open.
+Closes a11ign/agent-org#742
 
 Outside-Region: src/packaging/gh-read-cache.test.ts -- the wrapper's cache tests, where the verdict is pinned.
 Outside-Region: src/packaging/gh-call-ledger.test.ts -- pins the ledger's field count; ten, with the session id the 9th.
