@@ -72,6 +72,7 @@ import { HOME_CHECKOUT, PROJECT_DECLARATION_PATH } from "./project-config.ts";
 import { SESSION_PREFIX } from "./project-vocabulary.ts";
 
 import { reasonKind } from "./merge-guard/reason-kind.ts";
+import { testsFirstReadsOf, type TestsFirstFacts } from "./ticket-port/tests-first-reads.ts";
 import { gh, lookup, lookupRequiredContexts, lookupBranchTip, lookupCheckRuns, lookupClosingIssues,
   lookupApprovalFacts }
   from "./merge-guard/lookups.ts";
@@ -128,17 +129,7 @@ const TEST_NAMED = /(^|[._-])(test|tests|spec)([._-]|$)/i;
 const TEST_DIRECTORY = /(^|\/)(tests?|__tests__)\//;
 const CLOSING_LIST = /\b(?:close[sd]?|fix(?:e[sd])?|resolve[sd]?)\b:?\s+((?:[\w.-]+\/[\w.-]+)?#\d+(?:\s*,\s*(?:[\w.-]+\/[\w.-]+)?#\d+)*)/gi;
 
-/** The facts the guard needs about a PR that closes a Tests-first row, every list of repository-relative paths. */
-export type TestsFirstFacts = {
-  /** The test files the closed rows name. */
-  paths: string[];
-  /** Files the PR's FIRST commit touches. */
-  firstCommitFiles: string[];
-  /** Files that differ between the first commit and the head. */
-  changedSinceFirst: string[];
-  /** Reviewers, other than the author, who approved with the line AND read what will merge. */
-  approvedBy: string[];
-};
+export type { TestsFirstFacts };
 
 function testFilePath(token: string): string | null {
   const bare = token.replace(/^[-*>\s`'"(]+|[`'",;.)]+$/g, "").replace(/^[a-z0-9][\w-]*:(?=[^/])/i, "");
@@ -223,30 +214,6 @@ export function testsFirstEditReasons(number: number | string, facts: TestsFirst
   ];
 }
 
-function jsonArrays(output: string): string[] {
-  return output.split("\n").filter(Boolean).flatMap((line) => JSON.parse(line) as string[]);
-}
-
-/** Files that differ between `base` and `head`, one array per page of the compare. */
-function filesBetween({ repo, base, head, run }: { repo: string; base: string; head: string; run: (args: string[]) => string; }): string[] {
-  if (base === head) return [];
-  return jsonArrays(run(["api", `repos/${repo}/compare/${base}...${head}`, "--paginate", "--jq", "[.files[]?.filename]"]));
-}
-
-/** Who approved WITH the line, not being the author, and with nothing named moved since -- what they read is what will merge. */
-function approversOf({ repo, number, head, author, paths }: { repo: string; number: number; head: string; author: string | null; paths: string[]; },
-  run: (args: string[]) => string): string[] {
-  const reviews: { reviewer: string; state: string; body: string | null; commitId: string; }[] =
-    run(["api", `repos/${repo}/pulls/${number}/reviews`, "--paginate", "--jq",
-      ".[] | {reviewer: .user.login, state, body, commitId: .commit_id}"])
-      .split("\n").filter(Boolean).map((line) => JSON.parse(line));
-  const approvers = reviews.filter((review) => review.state === "APPROVED" && review.reviewer !== author
-    && TESTS_FIRST_APPROVAL.test(review.body ?? ""));
-  const read = approvers.filter((review) =>
-    !filesBetween({ repo, base: review.commitId, head, run }).some((file) => paths.includes(file)));
-  return [...new Set(read.map((review) => review.reviewer))];
-}
-
 /**
  * The facts for PR `number`, or `undefined` when there is nothing to ask (flag off, no closed row names a test) -- never `[]` for
  * that -- or `null` when a read failed, which is INCONCLUSIVE and never "the tests are where they were".
@@ -259,17 +226,10 @@ export function lookupTestsFirstFacts(
   if (!enabled) return undefined;
   const rows = closedRowsOf(pr.body ?? "", repo);
   if (rows.length === 0) return undefined;
-  return lookup(() => {
-    const paths = [...new Set(rows.flatMap((row) =>
-      testsFirstOf(JSON.parse(run(["api", `repos/${row.repo}/issues/${row.number}`])).body ?? "").paths))];
-    if (paths.length === 0) return undefined;
-    const first = run(["api", `repos/${repo}/pulls/${pr.number}/commits?per_page=1`, "--jq", ".[0].sha"]).trim();
-    if (!first) throw new Error("the PR has no first commit to read");
-    const firstCommitFiles = jsonArrays(run(["api", `repos/${repo}/commits/${first}`, "--paginate", "--jq", "[.files[]?.filename]"]));
-    const changedSinceFirst = filesBetween({ repo, base: first, head: pr.head, run });
-    const approvedBy = approversOf({ repo, number: pr.number, head: pr.head, author: pr.author, paths }, run);
-    return { paths, firstCommitFiles, changedSinceFirst, approvedBy };
-  });
+  return lookup(() => testsFirstReadsOf({
+    repo, number: pr.number, head: pr.head, author: pr.author, rows,
+    pathsOf: (rowBody) => testsFirstOf(rowBody).paths, isApproval: (reviewBody) => TESTS_FIRST_APPROVAL.test(reviewBody),
+  }, run));
 }
 
 /**

@@ -1,11 +1,11 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 101,
+    "files": 102,
     "spawns": 137,
-    "calls": 404,
+    "calls": 409,
     "shapes": {
-      "api rest": 153,
+      "api rest": 158,
       "api graphql": 41,
       "issue view": 34,
       "pr list": 30,
@@ -428,7 +428,7 @@
         "$HOLD_PREFIX",
         "$SESSION_PREFIX"
       ],
-      "parsesCloses": false
+      "parsesCloses": true
     },
     "src/merge-guard/armed-race-rule.ts": {
       "spawns": 0,
@@ -897,6 +897,14 @@
       "labels": [
         "$CLAIM_LABEL"
       ],
+      "parsesCloses": false
+    },
+    "src/ticket-port/tests-first-reads.ts": {
+      "spawns": 0,
+      "calls": {
+        "api rest": 5
+      },
+      "labels": [],
       "parsesCloses": false
     },
     "src/trace/freshness.ts": {
