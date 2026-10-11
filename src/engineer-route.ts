@@ -58,7 +58,7 @@ export type Routed = { route: Route; via: Via;
   /** Why the provider did not decide this route (a fallback), or which questions' probabilities it did not give (a `jev` route held to what the rest compose); absent when it decided it. */ reason?: string;
   /** Only in `choice` mode (#4904): what the one route question said and why the route is the one that ran. Absent in `traits` mode, whose lines are unchanged. */ picked?: Picked };
 /** The reason a route was taken, in `choice` mode: the {@link Via}s, plus the two ways a provider's pick is not taken. */
-export type Because = Via | "low-confidence" | "invalid-option";
+export type Because = Via | "low-confidence" | "invalid-option" | "haiku-default";
 /** WHAT THE `route` QUESTION SAID (#4904): the pick (`null` for an answer that was not a configured route, or none asked), EVERY route's probability as given (`null` when none was), the reason, and the call's milliseconds. */
 export type Picked = { pick: string | null; because: Because; probabilities: Readonly<Record<string, number>> | null; ms: number };
 /** One answer per question; `null` is an answer that was not given: malformed, or under the confidence floor. The WINDOW reads these ({@link adjustWindow}); the route reads {@link Readings}. */
@@ -435,6 +435,19 @@ export const SMALLER_SCORE = 2;
 export const WINDOW_SWITCH = "model-routing-window";
 const TOKENS_PER_K = 1_000;
 
+// --- HAIKU BY DEFAULT, SONNET ON EVIDENCE (a11ign#5110, the chairman's direction of 2026-10-11) ---
+//
+// THE SPEC DECIDES MORE THAN THE MODEL (the chairman's notes: Haiku 0/15 without a written spec, 7/9 with one; 3/12 one-shot to 11/12 with a suite it may run), so a row that carries a test
+// is Haiku's by default and the provider becomes a VETO: Sonnet only when it picks a Sonnet route at P >= {@link SONNET_VETO_MIN_P}. This inverts `cheaperMinP`/`dearerMinP`, where
+// Haiku needed 0.5 against a fallback and only 16 of 70 picks reached it. The move UP is not here: it is a fresh Sonnet start on evidence (`wake.ts`, {@link HAIKU_DEFAULT_CI_FAILURES}).
+// Behind `routing.haikuDefault` in `.agent-org/decisions.json`, so the revert is that key off.
+/** The key in `.agent-org/decisions.json` that makes a Tests-first row Haiku's unless the provider vetoes. */
+export const HAIKU_DEFAULT_SWITCH = "routing.haikuDefault";
+/** A Sonnet pick must reach this to veto Haiku on a Tests-first row (the row's own number: "P >= 0.7"). */
+export const SONNET_VETO_MIN_P = 0.7;
+/** A Haiku worker is moved to a fresh Sonnet session after this many distinct red heads of its pull request ("tests still failing after 3 fix attempts"); `engineer-escalation.ts`'s own cap is 2. */
+export const HAIKU_DEFAULT_CI_FAILURES = 3;
+
 export const windowLabel = (tokens: number): string => `${Math.round(tokens / TOKENS_PER_K)}k`;
 
 export type RegionSize = { files: number; repositories: number };
@@ -474,6 +487,19 @@ function windowSwitchOn(deps: RouteDeps): boolean {
   const switches = deps.switches ?? (deps.switchesPath === undefined ? {} : readSwitches(deps.switchesPath, { diagnostic: deps.diagnostic ?? printDiagnostic, state: deps.state ?? processState, read: deps.read ?? readFileSync }));
   return (switches as Record<string, boolean | undefined>)[WINDOW_SWITCH] === true;
 }
+
+/** The flag's reading from `.agent-org/decisions.json`; an unreadable file is OFF, which is what the route was before. */
+export function haikuDefaultOn(deps: Pick<RouteDeps, "switches" | "switchesPath" | "diagnostic" | "state" | "read">): boolean {
+  const switches = deps.switches ?? (deps.switchesPath === undefined ? {} : readSwitches(deps.switchesPath, { diagnostic: deps.diagnostic ?? printDiagnostic, state: deps.state ?? processState, read: deps.read ?? readFileSync }));
+  return (switches as Record<string, boolean | undefined>)[HAIKU_DEFAULT_SWITCH] === true;
+}
+
+const TEST_FILE = /(?:\.(?:test|spec)\.[a-z]+$|(?:^|\/)test_[^/]+$|_test\.[a-z]+$)/i;
+/**
+ * A TESTS-FIRST ROW: one whose Region names a test file, so the worker has an oracle it may run (the Acceptance is a command, which {@link whyHeld} already requires of any lowered row).
+ * ASSUMPTION, said so: the companion row that defines "Tests-first" more narrowly has not landed, and this is the reading a Region alone can give.
+ */
+export const isTestsFirst = (row: Pick<RouteRow, "body">): boolean => regionEntries(row.body).some((entry) => TEST_FILE.test(splitRegionEntry(entry).path));
 
 function sizeOf(row: RouteRow, provided: Provided | null, deps: RouteDeps): Sizing {
   const base = fallbackWindow(row.body);
@@ -695,23 +721,41 @@ function takeVerdict(verdict: Verdict, fallback: Route, row: RouteRow, deps: Rou
   return via === "jev" ? routed : withReason(routed, why);
 }
 
+/**
+ * THE VETO, PURE (a11ign#5110): on a Tests-first row Haiku is the route unless the provider picked a CONFIGURED Sonnet route at P >= {@link SONNET_VETO_MIN_P}. A pick that is Haiku, a
+ * Sonnet pick under the bar, and no pick at all are each Haiku, and each says which. `null` is a project that did not configure Haiku: it has nothing to default to.
+ */
+export function haikuDefaultVerdict(answer: Answer | null, routing: Pick<RoutingDeclaration, "routes">): Verdict | null {
+  if (!routing.routes.includes("haiku/high")) return null;
+  const pick = answer?.confidence === undefined ? null : String(answer.value) as Route;
+  const p = pick === null || answer?.probabilities === undefined ? null : Number((answer.probabilities[pick] ?? 0).toFixed(PROBABILITY_PLACES));
+  if (pick !== null && p !== null && pick !== "haiku/high" && routing.routes.includes(pick) && p >= SONNET_VETO_MIN_P) {
+    return { route: pick, via: "jev", because: "jev", why: `the provider vetoed Haiku: it picked ${pick} at P=${showP3(p)} (a veto needs P >= ${SONNET_VETO_MIN_P})` };
+  }
+  const said = pick === null ? "the provider gave no usable pick" : `the provider picked ${pick}${p === null ? " with no probabilities" : ` at P=${showP3(p)}`}`;
+  return { route: "haiku/high", via: "jev", because: "haiku-default", why: `a Tests-first row is Haiku's unless the provider picks Sonnet at P >= ${SONNET_VETO_MIN_P}; ${said}` };
+}
+
 async function routeByChoice(row: RouteRow, routing: RoutingDeclaration, deps: RouteDeps): Promise<Chosen> {
   const fallback = fallbackRoute(row);
   const clock = deps.now ?? Date.now;
   const started = clock();
+  const defaulting = haikuDefaultOn(deps) && isTestsFirst(row);
   const questions = { ...QUESTIONS, route: routeQuestion(routing, fallback) };
   const { decision, reused } = await decideOnce(row, questions, deps);
   const ms = Math.max(0, clock() - started);
-  if (decision.via === "none") {
+  const answer = decision.via === "none" ? null : decision.answers.route;
+  const defaulted = defaulting ? haikuDefaultVerdict(answer, routing) : null;
+  if (decision.via === "none" && defaulted === null) {
     const routed = withReason(profiled(fallback, "fallback", row, deps.haikuSwitchPath), decision.reason ?? "the provider gave no answer and no reason");
     return alone({ ...routed, picked: { pick: null, because: "fallback", probabilities: null, ms } });
   }
-  const answer = decision.answers.route;
-  const verdict = acceptPick(answer, fallback, routing);
+  const verdict = defaulted ?? acceptPick(answer as Answer, fallback, routing);
   const taken = takeVerdict(verdict, fallback, row, deps);
-  const pick = verdict.because === "invalid-option" ? null : String(answer.value);
+  const pick = answer === null || verdict.because === "invalid-option" ? null : String(answer.value);
   const because = taken.route === verdict.route ? verdict.because : "fallback";
-  return { routed: { ...taken, picked: { pick, because, probabilities: answer.probabilities ?? null, ms } }, provided: windowAnswers(decision.answers), reused };
+  const provided = decision.via === "none" ? null : windowAnswers(decision.answers);
+  return { routed: { ...taken, picked: { pick, because, probabilities: answer?.probabilities ?? null, ms } }, provided, reused };
 }
 
 /** A `choice` decision's line always says why: the reasons that asked nobody (a label, a refusal, no provider) are the `via` itself, with nothing picked and nothing spent. */

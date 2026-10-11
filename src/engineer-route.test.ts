@@ -9,14 +9,14 @@ import { decide, decisionLogPathFrom, decisionSwitchesPath, MAX_STATE_BYTES, typ
 import {
   composeRoute, HAIKU_MAX_P_DEBUGGING, HAIKU_MAX_P_SUBSYSTEMS, HAIKU_MIN_P_MECHANICAL, HAIKU_MIN_P_SCORE, HAIKU_MIN_P_SMALL, MEDIUM_MAX_P_SUBSYSTEMS, MEDIUM_MIN_P_SCORE, scoreAtMost, type Readings, fallbackRoute, fallbackWindow, GUARD_DECISIONS, isWindowTooSmall, LARGE_ROW_FILES, LARGEST_ROW_FILES, recordRouteOutcome, recordWindowTooSmall, regionSize, routeCostEvents,
   MECHANICAL_DATA, DEBUGGING_DATA, routeCostReading, ROUTE_COSTLIER_THAN_FALLBACK, routeEngineer, routeState, SCORE_LEVEL_DATA, SMALL_ROW_FILES, SUBSYSTEMS_DATA, windowOf, windowReadings, windowReportLines, QUESTIONS,
-  acceptPick, pickedOf, ROUTE_DATA, routeQuestion, type Answers, type Route, type RouteRow,
+  acceptPick, isTestsFirst, pickedOf, ROUTE_DATA, routeQuestion, type Answers, type Route, type RouteRow,
 } from "./engineer-route.ts";
 import { parseHostConfig } from "./host-config.ts";
 import { ABSENT_ROUTING, type RoutingDeclaration } from "./project-config.ts";
 import { confidenceReading } from "./provider-confidence.ts";
 import { tmpDir } from "./lib/tmp-fixture.ts";
 import { freshState } from "./triage-provider.ts";
-import { ROUTE_AHEAD, routesForStarts, spawnClaimer } from "./wake.ts";
+import { escalationsNow, instanceRefused, ROUTE_AHEAD, routesForStarts, spawnClaimer } from "./wake.ts";
 import { AUTOCOMPACT_WINDOW_TOKENS, HAIKU_AUTOCOMPACT_WINDOW_TOKENS, HAIKU_MODEL_ID, LARGE_WINDOW_TOKENS, LARGEST_WINDOW_TOKENS } from "./worker-profile.ts";
 
 const SECRET_BODY_TEXT = "SECRET-BODY-TEXT-never-sent";
@@ -1191,4 +1191,91 @@ test("#4990: a changed label or a changed Region asks again, and a start the pro
   await routeEngineer(rowOf(), failing.deps);
   await routeEngineer(rowOf(), failing.deps);
   assert.equal(failing.calls(), 2, "the control: a call that failed is the fallback, and the next start asks again");
+});
+
+// --- Haiku by default, Sonnet on evidence (a11ign#5110) ---
+
+const DEFAULTING = JSON.stringify({ "model-routing": true, "routing.haikuDefault": true });
+const TESTS_FIRST = (): RouteRow => rowOf({ body: bodyOf({ region: ["src/a.ts", "src/a.test.ts"] }) });
+const NO_TEST_FILE = (): RouteRow => rowOf({ body: bodyOf({ region: ["src/a.ts", "src/b.ts"] }) });
+async function chooseDefaulting(row: RouteRow, body: unknown, over: { switches?: string; routing?: RoutingDeclaration } = {}) {
+  const r = rig({ triage: JEV, switches: over.switches ?? DEFAULTING, body });
+  return { routed: await routeEngineer(row, { ...r.deps, routing: over.routing ?? CHOICE }), r };
+}
+
+test("#5110 DONE-WHEN 1: a Tests-first row with P(sonnet/high)=0.6 routes Haiku, and with 0.75 it routes Sonnet -- the veto bar is 0.7, with the flag on", async () => {
+  const under = await chooseDefaulting(TESTS_FIRST(), routeReply(at("sonnet/high", 0.6)));
+  assert.deepEqual([under.routed.route, under.routed.profile?.model, under.routed.picked?.because], ["haiku/high", HAIKU_MODEL_ID, "haiku-default"]);
+  assert.equal((await chooseDefaulting(TESTS_FIRST(), routeReply(at("sonnet/high", 0.69)))).routed.route, "haiku/high", "the boundary: 0.69 is under it");
+  const over = await chooseDefaulting(TESTS_FIRST(), routeReply(at("sonnet/high", 0.75)));
+  assert.deepEqual([over.routed.route, over.routed.via, over.routed.picked?.because], ["sonnet/high", "jev", "jev"]);
+  assert.equal((await chooseDefaulting(TESTS_FIRST(), routeReply(at("sonnet/high", 0.7)))).routed.route, "sonnet/high", "0.7 vetoes");
+  assert.equal((await chooseDefaulting(TESTS_FIRST(), routeReply(at("sonnet/medium", 0.8)))).routed.route, "sonnet/medium", "any Sonnet route vetoes, not only the dearest");
+});
+
+test("#5110 DONE-WHEN 1: a Tests-first row with no usable pick routes Haiku -- the provider failed, answered off-list, or gave no probabilities", async () => {
+  const failed = rig({ triage: JEV, switches: DEFAULTING, throws: true });
+  assert.equal((await routeEngineer(TESTS_FIRST(), { ...failed.deps, routing: CHOICE })).route, "haiku/high");
+  const off = await chooseDefaulting(TESTS_FIRST(), { answers: { ...reply({}).answers, route: { type: "choice", choice: "opus/max", confidence: 0.99, probabilities: { "opus/max": 0.99 } } } });
+  assert.equal(off.routed.route, "haiku/high");
+  const none = rig({ switches: DEFAULTING });
+  assert.equal((await routeEngineer(TESTS_FIRST(), { ...none.deps, routing: CHOICE })).route, "haiku/high", "no provider declared");
+});
+
+test("#5110 the flag OFF is today's route, and a row that is not Tests-first or is refused is never defaulted", async () => {
+  const pick = routeReply(at("sonnet/high", 0.6));
+  const off = await chooseDefaulting(TESTS_FIRST(), pick, { switches: ON });
+  assert.deepEqual([off.routed.route, off.routed.via, off.routed.picked?.because], ["sonnet/medium", "fallback", "low-confidence"], "the control: the same reply with the flag off");
+  assert.equal((await chooseDefaulting(NO_TEST_FILE(), pick)).routed.route, "sonnet/medium", "no test file in the Region is not Tests-first");
+  for (const over of [{ labels: ["lane:ceo"] }, { labels: ["needs:chairman"] }, { body: bodyOf({ region: [".github/workflows/ci.yml", "a.test.ts"] }) }, { body: bodyOf({ region: ["a.test.ts"], acceptance: null }) }]) {
+    const refused = await chooseDefaulting(rowOf(over), pick);
+    assert.deepEqual([refused.routed.route, refused.routed.via], ["sonnet/high", "refused"], JSON.stringify(over));
+  }
+  const noHaiku = { ...CHOICE, routes: ["sonnet/medium", "sonnet/high"] as RoutingDeclaration["routes"] };
+  assert.equal((await chooseDefaulting(TESTS_FIRST(), pick, { routing: noHaiku })).routed.route, "sonnet/medium", "a project without Haiku has nothing to default to");
+});
+
+test("#5110 isTestsFirst reads the Region's files: .test., .spec., test_ and _test names, and not a name that merely contains `test`", () => {
+  const first = (...region: string[]) => isTestsFirst({ body: bodyOf({ region }) });
+  assert.deepEqual([first("a.test.ts"), first("src/x.spec.mjs"), first("tests/test_x.py"), first("x_test.go")], [true, true, true, true]);
+  assert.deepEqual([first("src/testing.ts"), first("src/contest.ts"), first("a.ts")], [false, false, false]);
+});
+
+const armLine = (session: string, row: number) => JSON.stringify({ kind: "arm", at: 1, session, row, model: HAIKU_MODEL_ID });
+const redHead = (row: number, head: string) => JSON.stringify({ kind: "continuation", at: 2, claim: `row-${row}`, cause: "pr-checks-failing", causeKey: `pr-checks-failing/${row}/${head}` });
+
+test("#5110 DONE-WHEN 1: with the flag, three failing heads move a Haiku start to a fresh Sonnet session, and two do not; off, two do", () => {
+  const two = [armLine("worker-1", 1), redHead(1, "a"), redHead(1, "b")].join("\n");
+  const three = [two, redHead(1, "c")].join("\n");
+  assert.deepEqual(escalationsNow(two, ["worker-1"], () => null, { on: true }), [], "two failing heads are not three");
+  const moved = escalationsNow(three, ["worker-1"], () => null, { on: true });
+  assert.deepEqual(moved.map((e) => [e.row, e.session]), [[1, "worker-1"]]);
+  assert.match(moved[0].reason, /failed CI 3 times \(the cap is 3\)/);
+  assert.equal(escalationsNow(two, ["worker-1"], () => null).length, 1, "the control: with the flag off the cap stays 2");
+});
+
+test("#5110 DONE-WHEN 1: with the flag, a refusal moves a Haiku start at once, once per row, and never a Sonnet one", () => {
+  const record = armLine("worker-1", 1);
+  const refused = () => true;
+  assert.match(escalationsNow(record, ["worker-1"], () => null, { on: true, refused })[0].reason, /refused/);
+  assert.deepEqual(escalationsNow(record, ["worker-1"], () => null, { on: false, refused }), [], "off, a refusal is not evidence");
+  assert.deepEqual(escalationsNow(record, ["worker-1"], () => null, { on: true, refused: () => false }), []);
+  const done = [record, JSON.stringify({ kind: "escalation", at: 3, row: 1, session: "worker-1", reason: "x" })].join("\n");
+  assert.deepEqual(escalationsNow(done, ["worker-1"], () => null, { on: true, refused }), [], "once per row");
+  const sonnet = JSON.stringify({ kind: "arm", at: 1, session: "worker-2", row: 2, model: "claude-sonnet-5-5" });
+  assert.deepEqual(escalationsNow(sonnet, ["worker-2"], () => null, { on: true, refused }), []);
+});
+
+test("#5110 instanceRefused reads the named session's stop_reason: a refusal is true, an ordinary end is false, and another session's refusal is not this one's", () => {
+  const dir = tmpDir("refused-");
+  const project = join(dir, "p");
+  mkdirSync(project);
+  const turn = (stop: string) => JSON.stringify({ type: "assistant", message: { id: "m1", role: "assistant", stop_reason: stop, usage: { input_tokens: 1, output_tokens: 1 } } });
+  const transcript = (who: string, stop: string) => `${JSON.stringify({ type: "user", message: { role: "user", content: `You are \`${who}\`` } })}\n${turn(stop)}\n`;
+  const reader = { readText: (file: string) => readFileSync(file, "utf8"), readHead: (file: string) => readFileSync(file, "utf8") };
+  writeFileSync(join(project, "a.jsonl"), transcript("worker-77", "refusal"));
+  writeFileSync(join(project, "b.jsonl"), transcript("worker-78", "end_turn"));
+  assert.equal(instanceRefused("worker-77", dir, reader), true);
+  assert.equal(instanceRefused("worker-78", dir, reader), false, "the control: an ordinary end of turn");
+  assert.equal(instanceRefused("worker-none", dir, reader), false, "no transcript names it");
 });
