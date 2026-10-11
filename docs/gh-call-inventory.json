@@ -1,16 +1,16 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 103,
+    "files": 104,
     "spawns": 137,
-    "calls": 411,
+    "calls": 417,
     "shapes": {
-      "api rest": 159,
-      "api graphql": 41,
+      "api rest": 162,
+      "api graphql": 42,
       "issue view": 34,
-      "pr list": 30,
+      "pr list": 31,
+      "issue comment": 28,
       "issue list": 28,
-      "issue comment": 27,
       "pr view": 17,
       "issue edit": 16,
       "label create": 12,
@@ -847,6 +847,17 @@
       "spawns": 0,
       "calls": {
         "api rest": 2
+      },
+      "labels": [],
+      "parsesCloses": false
+    },
+    "src/ticket-port/approved-unqueued-reads.ts": {
+      "spawns": 0,
+      "calls": {
+        "api graphql": 1,
+        "api rest": 3,
+        "issue comment": 1,
+        "pr list": 1
       },
       "labels": [],
       "parsesCloses": false

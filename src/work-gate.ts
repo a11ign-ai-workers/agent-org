@@ -144,6 +144,7 @@ import { labJobFinishedOrders, readLabJobRecords, readDispatchedLabJobs } from "
 // #2898: THE ORG-HEALTH FACTS AND ORDERS live in `work-gate/org-health.ts`, which imports the shared reads BACK from this file (the cycle `pr-orders.ts` above describes);
 // every name it exported is re-exported here, so no caller of `work-gate.ts` changes.
 import { orgHealthNow, rulingOrdersNow, readWaitFacts, boardTruthNow, waitTickFacts } from "./work-gate/org-health.ts";
+import { approvedUnqueuedNow } from "./approved-unqueued.ts";
 import { recordRouteOutcomesOnHost } from "./work-gate/route-outcome-pass.ts";
 import { quietOrgHealth, classAndKeyOf as orgHealthClassAndKey } from "./work-gate/org-health-suppression.ts"; // #4065
 import { TABLE_ROW as STANDING_ROW } from "./board-truth-audit.ts"; // agent-org#491: the row every org-health prompt already says to write on (#928)
@@ -8932,6 +8933,7 @@ function main() {
     ...rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() }), ...chairmanAsksNow(openRowsRead),
     ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
   orders.push(...machineryCanaryNow({ unread: unreadLanes({ prs, readyRows, others }), unarmed: armingSplit === null ? null : armingSplit.unarmed, releaseRuns: releaseSeen.runs ?? null, suppressions: incident.suppressions })); // a11ign#5100
+  approvedUnqueuedNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)], repos: homeProjectDeclaration().tracker.map((t) => t.repo), repo: repoNow(), stateDir: REVIEWER_STATE_DIR, run: defaultRun }); // agent-org#893: the daily reading on #928; never throws, adds no order
   // FIRST OF ALL, AND ON PURPOSE (#2163): `wake` delivers in this order and records each delivery with a write, so
   // on a full disk the tick can end partway. The order that says the disk is full must not be the one behind it.
   orders.unshift(...diskOrders);
