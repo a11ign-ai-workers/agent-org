@@ -21,6 +21,9 @@
  *   4. (#5050) EVERY LIST THE GATE READS answers through a `run` that refuses any search argv (POSITIVE CONTROL: the same fake answers the connection), and a read the
  *      limit refused is NOT asked again by ANY other list read of the tick, whichever kind;
  *   5. (#5050) SOURCE, widened: the gate's own files (`work-gate.ts`, `queue-table.ts`, `work-tick.ts`, `work-gate/`) are walked by the same guard.
+ *   6. (#5074) SOURCE, widened again: the two other MEASURED spenders, `wake.ts` (the tick's three lists, run in-process) and `row-file.ts` (the filing's duplicate-title
+ *      check), are walked, and each still lists something (a plain list), so the walk reads a file that lists. Their behaviour is pinned in
+ *      `stuck-row-reask-filed.test.ts` (a search argv is refused there) and `row-file-board.test.ts`.
  */
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -151,6 +154,8 @@ const COVERED = [
   "row-claim.ts", "sweep-window.ts", "ci-failure-class.ts",
   // #5050: the gate. `work-gate.ts` is where eleven of them were; the other two list nothing with a flag and stay walked so the first one added is seen.
   "work-gate.ts", "queue-table.ts", "work-tick.ts",
+  // #5074: the tick's wake and the filing tool. The rest of the table in the row (`ready-label-audit.ts`, `board-data.ts`, ...) is the row after it.
+  "wake.ts", "row-file.ts",
   ...readdirSync(join(SRC, "work-gate")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `work-gate/${f}`),
   ...readdirSync(join(SRC, "row-claim")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `row-claim/${f}`),
   ...readdirSync(join(SRC, "ticket-port")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `ticket-port/${f}`),
@@ -161,6 +166,13 @@ test("NEGATIVE CONTROL (source): no file the claim or the gate reads through bui
     "the walk sees the files this row converted: an empty walk would pass for the wrong reason");
   assert.ok(["work-gate.ts", "queue-table.ts", "work-tick.ts", "work-gate/org-health.ts"].every((file) => COVERED.includes(file)), "and the gate's own files (#5050)");
   for (const file of COVERED) assert.deepEqual(searchBackedLists(readFileSync(join(SRC, file), "utf8")), [], `${file} lists rows through a SEARCH`);
+});
+
+test("POSITIVE CONTROL (source, #5074): `wake.ts` and `row-file.ts` are walked, and each still lists rows -- with a plain list, which is no search", () => {
+  assert.ok(COVERED.includes("wake.ts") && COVERED.includes("row-file.ts"), "the walk sees the two files this row converted");
+  for (const file of ["wake.ts", "row-file.ts"]) {
+    assert.match(readFileSync(join(SRC, file), "utf8"), /\["issue", "list", /, `${file} still names an \`issue list\`, so the guard is looking at a file that lists`);
+  }
 });
 
 test("POSITIVE CONTROL (source, #5050): the gate's list reads are SEEN by the walk -- `work-gate.ts` still names `issue list`, so the walk is reading a file that lists", () => {
