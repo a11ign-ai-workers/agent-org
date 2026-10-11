@@ -7,7 +7,7 @@
  *
  * THE ORDER (`ownerOfPr`): label, the live session holding the row it closes, the live session holding the row its branch suffix
  * names, a live session the head ref names, a live session that stamped its worktree, else -- #4644 -- `product-manager` for a PR whose
- * label names an ENDED session and whose every row is closed or open and UNCLAIMED -- #4808 (`owner-gone`), else `ceo`. The ORACLE below is written
+ * label names an ENDED session and whose every row is closed or open and UNCLAIMED -- #4808, or that closes no row at all -- #5115 (`owner-gone`), else `ceo`. The ORACLE below is written
  * out here, from that sentence, and not derived from the implementation -- a grid compared with the code it tests agrees by
  * construction.
  *
@@ -79,12 +79,13 @@ function expectedOwner({ label, closing, branch, stamp }: Cell): string {
 /**
  * A dead owner whose PR names at least one row and NO named row is held (#4644, #4808): the closing row `13` (closed), or -- when it closes none --
  * the number a branch ends in, which `rowsNamedBy` reads as a row whether or not the branch was a row's (`agent/worker-99` names row 99, closed;
- * `agent/some-slug-15` names row 15, open and unclaimed). A split names two HELD rows, so it is nobody's to flag, and a plain branch names none.
+ * `agent/some-slug-15` names row 15, open and unclaimed). A split names two HELD rows, so it is nobody's to flag. A plain branch names none, and
+ * a PR that closes none with a plain branch is the no-row shape (#5115): its owner is still known and gone, so it is product-manager's too.
  * (A branch ending in `14` names a HELD row, which answers before this is asked.)
  */
 function deadOwnersPr({ label, closing, branch }: Pick<Cell, "label" | "closing" | "branch">): boolean {
   if (label !== "ended" || closing === "split" || closing === "live") return false;
-  return closing === "closed" || branch === "sessionRetired" || branch === "suffixReleased";
+  return closing === "closed" || branch === "sessionRetired" || branch === "suffixReleased" || (closing === "none" && branch === "plain");
 }
 
 const pullRequestFor = (cell: Cell, over: Fixture = {}) => prOf(BRANCHES[cell.branch], {
