@@ -20,14 +20,12 @@ import { APP_ROLE_LANE_OWNER } from "../lane-ownership.ts";
 import { parseLine } from "../gh-ledger.ts";
 import { tmpDir, tmpDirForFile } from "../lib/tmp-fixture.ts";
 
-// `host-config.ts` resolves the project's checkout from `$AGENT_ORG_HOST` or the working directory AT IMPORT, so the host file is named first
-// and the modules that read it are imported after (`app-token.test.ts` carries the same note); `??=` leaves a host a caller named alone.
-const SETUP = tmpDirForFile("reviewer-app-role-setup-");
-writeFileSync(join(SETUP, "host.json"), JSON.stringify({ projects: [{ id: "p", checkout: SETUP }], primary: "p" }));
-process.env.AGENT_ORG_HOST ??= join(SETUP, "host.json");
-const { HostConfigRefusal, parseHostConfig, renderTemplate, roleIdentity, templateValues } = await import("../host-config.ts");
-const { SUPPORTED_SCHEMA } = await import("../project-config.ts");
-const { reviewerEnvironment } = await import("../wake.ts");
+// No `$AGENT_ORG_HOST` of this file's own: `wake.ts` reads the host through `work-gate.ts` at import, a host file this file wrote would have to be a
+// whole valid one (CI, where the variable is unset and the project is found from the working directory, refused the bare one it first wrote), and
+// `wake-reviewer-instance.test.ts` imports the same modules as they are. The host here is what the run was given.
+import { HostConfigRefusal, parseHostConfig, renderTemplate, roleIdentity, templateValues } from "../host-config.ts";
+import { SUPPORTED_SCHEMA } from "../project-config.ts";
+import { reviewerEnvironment } from "../wake.ts";
 
 const HOST = {
   schema: SUPPORTED_SCHEMA, home: "/home/h", binDir: "/home/h/bin", primary: "p", projects: [{ id: "p", checkout: "/home/h/p" }],
