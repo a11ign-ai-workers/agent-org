@@ -16,6 +16,7 @@ import assert from "node:assert/strict";
 import { claimRecordComment } from "../row-claim.ts";
 import { claimFactsFrom, readClaim, claimStalledOrders } from "../claim-stall.ts";
 import { readClaimedRowComments, ISSUE_LIST_COMMENT_CAP } from "../work-gate.ts";
+import { connectionOf, readsRowsByLabel } from "./rows-by-label-fixtures.ts";
 
 const ROW = 3566;
 const SESSION = "worker-3566";
@@ -35,12 +36,16 @@ const commentsOf = (total: number, claimsAt: number[]) => Array.from({ length: t
 /** agent-org#302's stand-in: merged after the 50th comment and before the 108th, owned by the claimant by its branch. */
 const MERGED = [{ number: 302, headRefName: BRANCH, mergedAt: at(60), title: "the work", labels: [] }];
 
-/** A `gh` that answers like the real one: `issue list` the FIRST 100 comments of each row, GraphQL the LAST 100 of the rows it is asked about. */
+/**
+ * A `gh` that answers like the real one: the by-label connection read (#5050: it was `issue list --label`, a search) the FIRST 100 comments of each row, and the batched GraphQL
+ * read the LAST 100 of the rows it is asked about. `graphqlCalls` is the second kind only: the by-label read is `api graphql` too and is counted apart in `listCalls`.
+ */
 function fakeGh(rows: Record<number, object[]>, { graphql = "answer" }: { graphql?: "answer" | "refuse" | "errors" } = {}) {
   const calls: string[][] = [];
   const run = (args: string[]) => {
     calls.push(args);
-    if (args[0] === "issue") return JSON.stringify(Object.entries(rows).map(([number, comments]) => ({ number: Number(number), comments: comments.slice(0, ISSUE_LIST_COMMENT_CAP) })));
+    if (readsRowsByLabel(args) !== null) return connectionOf(Object.entries(rows).map(([number, comments]) => ({ number: Number(number), comments: comments.slice(0, ISSUE_LIST_COMMENT_CAP) })));
+    if (args[0] === "issue") throw new Error(`unexpected call: ${args.join(" ")} (the claimed rows are a connection read, never \`issue list --label\`)`);
     if (graphql === "refuse") throw new Error("HTTP 502");
     if (graphql === "errors") return JSON.stringify({ errors: [{ message: "rate limited" }], data: null });
     const query = String(args.find((a) => a.startsWith("query=")));
@@ -48,7 +53,7 @@ function fakeGh(rows: Record<number, object[]>, { graphql = "answer" }: { graphq
       [alias, { number: Number(number), comments: { nodes: (rows[Number(number)] ?? []).slice(-ISSUE_LIST_COMMENT_CAP) } }]));
     return JSON.stringify({ data: { repository } });
   };
-  return { run, calls, graphqlCalls: () => calls.filter((a) => a[0] === "api") };
+  return { run, calls, listCalls: () => calls.filter((a) => readsRowsByLabel(a) !== null), graphqlCalls: () => calls.filter((a) => a[0] === "api" && readsRowsByLabel(a) === null) };
 }
 
 const io = { git: () => ({ status: 0, out: "" }), exists: () => false, mtime: () => null };
@@ -84,10 +89,11 @@ test("#3821 the 112-comment row: the claim made at the 108th is HELD, because th
 
 test("#3821 the same fixture with 99 comments is HELD before and after (the control for the cap itself), and makes no second call", () => {
   const rows = { [ROW]: commentsOf(99, [10, 98]) };
-  const { run, graphqlCalls } = fakeGh(rows);
+  const { run, graphqlCalls, listCalls } = fakeGh(rows);
   assert.equal(verdictOn(oldPage(rows)).verdict, "held");
   assert.equal(verdictOn(readClaimedRowComments(run)!).verdict, "held");
-  assert.equal(graphqlCalls().length, 0, "a row under the cap is read whole, so a healthy tick pays nothing beyond the one `issue list`");
+  assert.equal(listCalls().length, 1, "#5050: the one by-label connection read is the list, and a connection is not `issue list --label`");
+  assert.equal(graphqlCalls().length, 0, "a row under the cap is read whole, so a healthy tick pays nothing beyond the one list read");
 });
 
 test("#3821 a live claim that PRECEDES the merge is released by BOTH readings (the control that 'held' is not what every row with a merged pull request gets)", () => {
@@ -106,7 +112,7 @@ test("#3821 a refused or erroring GraphQL read leaves the capped row OUT of the 
   }
 });
 
-test("#3821 a refused `issue list` is still `null`, never `[]` (#1286)", () => {
+test("#3821 a refused list read (#5050: the by-label connection) is still `null`, never `[]` (#1286)", () => {
   assert.equal(readClaimedRowComments(() => { throw new Error("HTTP 403"); }), null);
 });
 

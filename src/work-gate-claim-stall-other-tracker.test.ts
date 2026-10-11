@@ -15,6 +15,7 @@ import { claimRecordComment } from "./row-claim.ts";
 import { STALL_INTERVAL_MS } from "./claim-stall.ts";
 import { STOPPED_CLAIMANT_MINUTES } from "./idle-claimant.ts";
 import { ledgerLine } from "./wake.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 const MIN = 60_000;
 const T0 = Date.parse("2026-10-11T09:00:00Z");
@@ -214,7 +215,12 @@ const scopeOf = (key: string, repo: string | null, openRows: object[] | null): {
 
 test("`otherTrackerClaims` asks each tracker's own repository for the comments of its claimed rows, and only a tracker that holds one", () => {
   const asked: { repo: string | undefined; args: string[] }[] = [];
-  const run = (args: string[], repo?: string) => { asked.push({ repo, args }); return JSON.stringify([{ number: 476, comments: [] }]); };
+  // #5050: the claimed rows' comments are the by-label connection read, no longer `issue list --label in-progress`; anything else is not what this read asks.
+  const run = (args: string[], repo?: string) => {
+    asked.push({ repo, args });
+    if (readsRowsByLabel(args) === null) throw new Error(`unexpected call: ${args.join(" ")}`);
+    return connectionOf([{ number: 476, comments: [] }]);
+  };
   const trackers = otherTrackerClaims([
     scopeOf("agent-org", "a11ign/agent-org", [rowOf(476, "worker-agent-org-476")]),
     scopeOf("quiet", "a11ign/quiet", [rowOf(1, "worker-1", { claim: false })]),
@@ -225,18 +231,20 @@ test("`otherTrackerClaims` asks each tracker's own repository for the comments o
     [["agent-org", "a11ign/agent-org", 1, 1], ["quiet", "a11ign/quiet", 1, null], ["refused", "a11ign/refused", null, null]],
     "a scope with no tracker has no rows; a refused lane is `rows: null` and is never an empty one");
   assert.deepEqual(asked.map((a) => a.repo), ["a11ign/agent-org"], "ONE read, of the one tracker with a claimed row, aimed at that tracker");
-  assert.ok(asked[0].args.includes("in-progress"));
+  assert.deepEqual(readsRowsByLabel(asked[0].args), { label: "in-progress", state: "OPEN" }, "and it is the open `in-progress` rows it asked for");
 });
 
 test("the capped re-read of a second tracker's comments names THAT repository in its query (twin: the home one by default)", () => {
   const cap = Array.from({ length: 100 }, (_, i) => ({ id: `c${i}`, body: "x", createdAt: "2026-10-10T00:00:00Z" }));
   const queries: string[] = [];
   const run = (args: string[]) => {
+    // #5050: both the list and the re-read are `api graphql` now, so the list is told apart by `readsRowsByLabel`
+    if (readsRowsByLabel(args) !== null) return connectionOf([{ number: 476, comments: cap }]);
     if (args[0] === "api") {
       queries.push(args.join(" "));
       return JSON.stringify({ data: { repository: { r476: { number: 476, comments: { nodes: [{ id: "newest", body: "y", createdAt: "2026-10-11T00:00:00Z" }] } } } } });
     }
-    return JSON.stringify([{ number: 476, comments: cap }]);
+    throw new Error(`unexpected call: ${args.join(" ")}`);
   };
   const rows = readClaimedRowComments(run, "a11ign/agent-org");
   assert.equal(rows?.[0].comments[0].id, "newest", "the newest page replaced the capped one");
@@ -265,7 +273,10 @@ test("THE GATE'S OWN WIRING: `claimStallsWithFacts` evaluates the declared track
   const evaluated: string[] = [];
   const tick = ((input: { trackers?: TrackerClaims[] }) => { evaluated.push(...(input.trackers ?? []).map((t) => `${t.key}:${t.rows?.length}:${t.claimedComments?.length}`)); return []; }) as never;
   const stubs = { tick, merged: () => [], elsewhere: () => ({ open: [], merged: [] }), log: () => undefined,
-    run: () => JSON.stringify([{ number: 476, comments: [] }]) };
+    run: (args: string[]) => {
+      if (readsRowsByLabel(args) === null) throw new Error(`unexpected call: ${args.join(" ")}`);
+      return connectionOf([{ number: 476, comments: [] }]);
+    } };
   const lanes = [scopeOf("agent-org", "a11ign/agent-org", [rowOf(476, "worker-agent-org-476")])] as never;
   claimStallsWithFacts([], [], [], lanes, stubs);
   assert.deepEqual(evaluated, ["agent-org:1:1"], "the tracker's rows and the comments of its claimed one reach the pass");

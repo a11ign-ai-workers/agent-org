@@ -4,10 +4,11 @@
  *
  * The call ledger of the hour to 2026-10-10 20:40Z held 8,374 calls, 3,204 of them GraphQL, and the gate's tick asks the same open rows three ways: every open row
  * (`readOpenRows`, 500), and beside it the `backlog`, `needs:chairman` (and, for another repository's tracker, `ready`) rows, each a GraphQL read of rows the first
- * already carries. Two halves, each pinned where it lives:
+ * already carries. #5050 made those three label reads CONNECTION reads (`repository.issues(labels:)` over `gh api graphql`, no search); the fold is the same and its fakes
+ * answer that shape. Two halves, each pinned where it lives:
  *
  *   (1) THE WAVE (`readWithFirstWaveTogether`, `foldIntoOpenRows`): a label's list is made from the open list when the open list is COMPLETE and names every field
- *       the label's read asked for. The control is shown first: the folded readers' answers equal the answers a server-side `--label` filter gives, row for row,
+ *       the label's read asked for. The control is shown first: the folded readers' answers equal the answers a server-side by-label read gives, row for row,
  *       and the number of calls a wave sends is counted, not remembered. A full open list (it may have been cut) is NOT folded, and a row beyond the cut is still found.
  *   (2) THE WRAPPER (`host/gh`, `etag_eligible`/`etag_settle`): a plain `gh api <path>` GET past its 20 s entry is asked with `If-None-Match`; a 304 is replayed
  *       from the stored body with exit 0, nothing on stderr and a `etag` line in the ledger (which spends no point). A second identical read INSIDE the 20 s is
@@ -23,6 +24,8 @@ import { tmpDir, tmpDirForFile } from "./lib/tmp-fixture.ts";
 import { OPEN_ROWS_LIMIT, readChairmanBlocked, readOpenRows, readPromotableRows, readReadyRows, readTrackerLanes, readWithFirstWaveTogether } from "./work-gate.ts";
 import { READY_LABEL } from "./claim-labels.ts";
 import { BACKLOG_LABEL, NEEDS_CHAIRMAN_LABEL } from "./project-vocabulary.ts";
+import { connectionOfSelected, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
+import { readRowsByLabel } from "./ticket-port/rows-by-label.ts";
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------
 // (1) THE WAVE
@@ -37,15 +40,23 @@ const row = (number: number, labels: string[]) => ({
 /** Open rows, newest first, as `gh issue list` orders them. */
 const FIXTURE = [row(9, [READY_LABEL]), row(8, [BACKLOG_LABEL]), row(7, [NEEDS_CHAIRMAN_LABEL]), row(6, []), row(5, [BACKLOG_LABEL, "lane:any"]), row(4, [READY_LABEL, BACKLOG_LABEL]), row(3, [])];
 
-/** `gh issue list --state open [--label L] --limit N --json F` as the SERVER answers it: the filter, the page size and the fields are GitHub's. */
+/**
+ * The server's two answers: `gh issue list --state open --limit N --json F` (the whole list; the page size and the fields are GitHub's) and, since #5050, the by-label
+ * CONNECTION read (`repository.issues(labels:)`, which is no search) cut to the fields it selected. `gh issue list --label` is not answered: the gate no longer sends one.
+ */
 function serverSide(open: ReturnType<typeof row>[]) {
   return (args: string[]): string => {
+    const byLabel = readsRowsByLabel(args);
+    if (byLabel !== null) {
+      assert.equal(byLabel.state, "OPEN", `an unexpected by-label read: gh ${args.join(" ")}`);
+      return connectionOfSelected(open.filter((r) => r.labels.some((l) => l.name === byLabel.label)) as never, args);
+    }
     if (args[0] === "api") return args.some((a) => a.endsWith("/events")) ? "2026-10-10T11:00:00Z\n" : "";
     assert.deepEqual(args.slice(0, 2), ["issue", "list"], `an unexpected call: gh ${args.join(" ")}`);
+    assert.ok(!args.includes("--label") && !args.includes("--search"), `a SEARCH-backed list is no longer asked (#5050): gh ${args.join(" ")}`);
     const at = (flag: string) => args[args.indexOf(flag) + 1];
-    const label = args.includes("--label") ? at("--label") : null;
     const fields = at("--json").split(",");
-    const rows = open.filter((r) => label === null || r.labels.some((l) => l.name === label)).slice(0, Number(at("--limit")));
+    const rows = open.slice(0, Number(at("--limit")));
     return JSON.stringify(rows.map((r) => Object.fromEntries(fields.map((f) => [f, (r as any)[f]]))));
   };
 }
@@ -76,6 +87,7 @@ test("(1a) THE CONTROL: the folded lanes are the server-side lanes, row for row,
   assert.equal(asked.length, 1, `one call for three lanes: ${asked.map((a) => a.slice(0, 5).join(" ")).join(" | ")}`);
   assert.deepEqual(asked[0].slice(0, 4), ["issue", "list", "--state", "open"]);
   assert.ok(!asked[0].includes("--label"), "the one call is the whole open list");
+  assert.deepEqual(asked.filter((a) => readsRowsByLabel(a) !== null), [], "and no by-label connection read was sent beside it: all three are made from it (#5050)");
 });
 
 test("(1b) a FULL open list may have been cut, so nothing is made from it: the label reads are asked as they were (together, in a second batch), and a row beyond the cut is found", () => {
@@ -92,21 +104,28 @@ test("(1b) a FULL open list may have been cut, so nothing is made from it: the l
   const folded = readWithFirstWaveTogether((read) => ({ promotableRows: readPromotableRows(read), chairmanBlocked: readChairmanBlocked(read), openRowsRead: readOpenRows(read) }), answeringAlone, batch);
   assert.deepEqual(folded, unfolded);
   assert.ok((folded.promotableRows ?? []).some((r: any) => r.number === 2000), "the backlog row beyond the 500 is in the lane");
-  assert.ok(!asked[0].includes("--label"), "the batch sent the whole list first");
-  assert.deepEqual(asked.slice(1).map((a) => a[a.indexOf("--label") + 1]).sort(), [BACKLOG_LABEL, NEEDS_CHAIRMAN_LABEL].sort(), "and then the two label reads, together, as they were asked before the fold");
-  assert.equal(direct.filter((a) => a[0] === "issue").length, 0, "none of them one by one");
+  assert.equal(readsRowsByLabel(asked[0]), null, "the batch sent the whole list first");
+  assert.deepEqual(asked.slice(1).map((a) => readsRowsByLabel(a)?.label).sort(), [BACKLOG_LABEL, NEEDS_CHAIRMAN_LABEL].sort(), "and then the two by-label reads, together, as they were asked before the fold");
+  assert.equal(direct.filter((a) => a[0] === "issue" || readsRowsByLabel(a) !== null).length, 0, "none of them one by one");
 });
 
 test("(1c) a read that asks for a field the open list does not carry is not folded", () => {
   const server = serverSide(FIXTURE.map((r) => ({ ...r, assignees: [] })) as any);
   const { asked, batch } = countingBatch(server);
+  // as the gate's own readers: the rehearsal answers `[]`, which is no connection, and a reader turns that into `null` and not into a crash
+  const byLabel = (select: string, read: (args: string[]) => string) => {
+    try { return readRowsByLabel({ label: BACKLOG_LABEL, state: "OPEN", select, run: read }); } catch { return null; }
+  };
   const wave = (read: (args: string[]) => string) => ({
     open: read(["issue", "list", "--state", "open", "--limit", String(OPEN_ROWS_LIMIT), "--json", "number,labels"]),
-    narrower: read(["issue", "list", "--state", "open", "--label", BACKLOG_LABEL, "--limit", "100", "--json", "number,assignees"]),
-    same: read(["issue", "list", "--state", "open", "--label", BACKLOG_LABEL, "--limit", "100", "--json", "number"]),
+    narrower: byLabel("number assignees", read),
+    same: byLabel("number", read),
   });
-  readWithFirstWaveTogether(wave, server, batch);
-  assert.equal(asked.length, 2, `the open list and the read with the extra field; \`--json number\` is made from the list: ${asked.map((a) => a.join(" ")).join(" | ")}`);
+  const answered = readWithFirstWaveTogether(wave, server, batch);
+  assert.equal(asked.length, 2, `the open list and the read with the extra field; the read of \`number\` alone is made from the list: ${asked.map((a) => a.join(" ")).join(" | ")}`);
+  assert.deepEqual(asked.map((a) => readsRowsByLabel(a) !== null), [false, true], "the one by-label read sent is the one the list could not answer");
+  assert.ok((answered.narrower ?? []).length > 0 && answered.narrower!.every((r: any) => Array.isArray(r.assignees)), "POSITIVE CONTROL: the sent read has the field the list lacks");
+  assert.deepEqual(answered.same, [{ number: 8 }, { number: 5 }, { number: 4 }], "and the folded one is the list's backlog rows, newest first");
 });
 
 test("(1d) each repository's tracker is folded into its OWN open list: two trackers, two calls where it was eight", () => {
@@ -127,6 +146,7 @@ test("(1d) each repository's tracker is folded into its OWN open list: two track
   const unfolded = lanes(run);
   assert.deepEqual(folded, unfolded);
   assert.deepEqual(asked.map((c) => c.repo).sort(), ["o/a", "o/b"], "one call per repository");
+  assert.ok(asked.every((c) => readsRowsByLabel(c.args) === null && c.args[0] === "issue"), "and each is the whole open list, with no by-label read beside it (#5050)");
   assert.ok(unfolded[1].readyRows!.length === 1 && unfolded[1].promotableRows!.length === 1, "POSITIVE CONTROL: the second repository's lanes are not empty, so a lane made from the FIRST repository's list would differ");
 });
 
