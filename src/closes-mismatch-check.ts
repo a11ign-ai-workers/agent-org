@@ -486,11 +486,12 @@ export function consumerDeclarationVerdict(report: ConsumerDeclarationReport): {
  * THE ONE DIRECT CALL THIS DIRECTION ADDS (agent-org#873, `ceo` ruling on agent-org#838, option 1: the gh-call baseline of this file rises 2 -> 3): ONE
  * file of the consumer's default branch, with no `ref` so GitHub answers from the default branch, raw. It moves into the code-host port when its adapter
  * is built; it is not a fifth ticket operation (ADR 0046 decision 3). The parser's closed character set for `repo` and `path` is what lets them into
- * the URL. `null` on any failure: "could not read" is never "read, and it held it".
+ * the URL. `ref` (agent-org#839) names a commit; absent is the default branch. `null` on any failure: "could not read" is never "read, and it held it".
  * @param {string} repo @param {string} path @returns {string | null}
  */
-export function lookupConsumerFile(repo: string, path: string): string | null {
-  return lookup(() => gh(["api", `repos/${repo}/contents/${path}`, "-H", "Accept: application/vnd.github.raw"]));
+export function lookupConsumerFile(repo: string, path: string, ref?: string): string | null {
+  const at = ref === undefined ? "" : `?ref=${ref}`; // agent-org#839: the detector reads a file AS A MERGE LEFT IT; a caller's `ref` is a validated commit oid
+  return lookup(() => gh(["api", `repos/${repo}/contents/${path}${at}`, "-H", "Accept: application/vnd.github.raw"]));
 }
 
 /**

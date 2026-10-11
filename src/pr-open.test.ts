@@ -10,7 +10,8 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "./lib/tmp-fixture.ts";
-import { armAfterCreate, EXIT_NOTHING_SENT, EXIT_QUEUED, readQueuedEntry, sendToGitHub } from "./pr-open.ts";
+import { armAfterCreate, checkRegion, EXIT_NOTHING_SENT, EXIT_QUEUED, main, readQueuedEntry, sendToGitHub } from "./pr-open.ts";
+import { REPO } from "./project-identity.ts";
 import { QUEUED_EXIT } from "./gh-ledger.ts";
 
 const HELD = { dir: "/q", id: "1790000000-42", resetAt: Date.parse("2026-10-10T23:15:07Z") / 1000 };
@@ -146,4 +147,94 @@ test("#4968: edit never arms, draft or not", () => {
   assert.deepEqual(r.ran.map((a) => a[1]), ["edit"]);
   assert.deepEqual(armAfterCreate("edit", ["--head", "agent/x"]), []);
   assert.equal(armAfterCreate("create", ["--head", "agent/x"]).length, 1, "positive control: a plain create does arm");
+});
+
+// agent-org#923: a `Closes` of a row whose Region spans two repositories is refused while another repository's open pull request names that row,
+// because that half is still open. `checkRegion` is pure over its seams, so the cases drive it directly; the last one drives `main`, which is where
+// `openPulls` is wired (for `create` only), so a refusal there is the wiring working and not just the check.
+const SECOND = "a11ign/second-half";
+const CODE = [{ key: "agent-org", repo: REPO }, { key: "second", repo: SECOND }];
+const ROW = `${REPO}#923`;
+const regionRow = (paths: string[]) => `## What it is\n\nx\n\n## Region\n\n\`\`\`\n${paths.join("\n")}\n\`\`\`\n\n## Acceptance\n\nx\n`;
+const SPANS = regionRow(["agent-org:src/pr-open.ts", "second:src/other.ts"]);
+const ONE_REPO = regionRow(["agent-org:src/pr-open.ts"]);
+const ACCEPTANCE_FILE_923 = ".acceptance/agent~pr-open-refuses-a-agent-org-923.md";
+type Pull = { number: number; body: string; };
+const openIn = (repo: string, pulls: Pull[]) => (asked: string): Pull[] | null => (asked === repo ? pulls : []);
+const SECOND_NAMES_ROW: Pull[] = [{ number: 4969, body: `Closes ${ROW}\n` }];
+
+/** A `git` that answers what the Region check and `main` ask: the diff (`changed`), the added Acceptance file, and the head reads. */
+const gitFor923 = (changed: string[]) => (args: string[]) => {
+  if (args[0] === "diff") return (args.includes("--diff-filter=A") ? [ACCEPTANCE_FILE_923] : changed).join("\0");
+  if (args[0] === "remote") return "deadbeef";
+  if (args.includes("--abbrev-ref")) return "agent/pr-open-refuses-a-agent-org-923";
+  if (args.includes("--short")) return "abc1234";
+  return "deadbeef";
+};
+
+const checkWith = (openPulls: (repo: string) => Pull[] | null, { body = SPANS, changed = ["src/pr-open.ts"] } = {}) =>
+  checkRegion("Closes #923\n", ["--repo", REPO], { git: gitFor923(changed), rowBody: () => body, rootFiles: new Set(), code: CODE, openPulls });
+
+test("#923 done-when 1 (POSITIVE CONTROL): a Closes of a two-repository row, with an open pull request in the other repository naming the row, is REFUSED, "
+  + "and the refusal names that pull request and the `Closes: none -- first half of` spelling", () => {
+  const r = checkWith(openIn(SECOND, SECOND_NAMES_ROW));
+  assert.ok(r.refusal !== null, "refused");
+  assert.equal(r.note, null);
+  assert.ok(r.refusal.includes(`${SECOND}#4969`), "the pull request that holds the other half is named");
+  assert.ok(r.refusal.includes(`Closes: none -- first half of ${ROW}`), "the spelling for this pull request is named");
+});
+
+test("#923 POSITIVE CONTROL (Refs): a `Refs` line in the other half's open pull request names the row too, and refuses", () => {
+  const r = checkWith(openIn(SECOND, [{ number: 4970, body: `Refs ${ROW}\n` }]));
+  assert.ok(r.refusal !== null && r.refusal.includes(`${SECOND}#4970`));
+});
+
+test("#923 done-when 2 (NEGATIVE CONTROL): the same row with NO other open pull request passes", () => {
+  const r = checkWith(openIn(SECOND, []));
+  assert.equal(r.refusal, null, "nothing names the row, so the Closes stands");
+  assert.notEqual(r.note, null, "and the pass says what it read");
+});
+
+test("#923 done-when 2 (NEGATIVE CONTROL): a single-repository row passes, even with an open pull request in the other repository naming it", () => {
+  const r = checkWith(openIn(SECOND, SECOND_NAMES_ROW), { body: ONE_REPO });
+  assert.equal(r.refusal, null, "one repository's Region has no other half to be open");
+});
+
+test("#923 done-when 2 (NEGATIVE CONTROL): an open pull request that names ANOTHER row does not refuse", () => {
+  const r = checkWith(openIn(SECOND, [{ number: 4971, body: `Closes ${REPO}#924\n` }]));
+  assert.equal(r.refusal, null);
+});
+
+test("#923 done-when 2 (NEGATIVE CONTROL): an unreadable open-pull list REFUSES, naming the repository whose list it could not read", () => {
+  const r = checkWith(() => null);
+  assert.ok(r.refusal !== null, "refused, not passed as an empty list");
+  assert.ok(r.refusal.includes(SECOND), "the repository is named");
+  assert.match(r.refusal, /could not be read/);
+});
+
+test("#923 POSITIVE CONTROL (main): `create` of that Closes is refused by pr-open before anything is sent, and the Acceptance does not run", () => {
+  const body = `## Acceptance\n\nnode -e "process.exit(0)"\n\nCloses #923\nMutation: none -- these tests drive the Region check\n`;
+  const argv = ["create", "--draft", "--repo", REPO, "--body", body];
+  const sent: string[][] = [];
+  const err: string[] = [];
+  let acceptance = 0;
+  const code = main(argv, {
+    run: (args: string[]) => { sent.push(args); },
+    git: gitFor923(["src/pr-open.ts"]),
+    prHead: () => ({ ref: "agent/pr-open-refuses-a-agent-org-923", oid: "deadbeef" }),
+    runAcceptance: () => { acceptance += 1; return 0; },
+    readFile: () => body,
+    rowBody: () => SPANS,
+    rootFiles: new Set(),
+    code: CODE,
+    owner: () => "ceo",
+    login: () => "a11ign-ai-workers",
+    openPulls: openIn(SECOND, SECOND_NAMES_ROW),
+    out: () => {},
+    err: (line: string) => { err.push(line); },
+  });
+  assert.equal(code, EXIT_NOTHING_SENT);
+  assert.deepEqual(sent, [], "nothing was sent to GitHub");
+  assert.equal(acceptance, 0, "refused before the Acceptance ran");
+  assert.ok(err.join("").includes(`Closes: none -- first half of ${ROW}`));
 });
