@@ -9,13 +9,15 @@ The org records a keyed-tracker worker's row as the bare number (`worker-agent-o
 
 ## Acceptance
 ```bash
-bash -c 'cd /home/agent/repos/agent-org && node --import tsx --test src/wakes-per-row.test.ts'
+node --import tsx --test src/wakes-per-row.test.ts
 ```
 
 ## Evidence
 - `src/wakes-per-row.test.ts` with AGENT_ORG_HOST set: 45 pass, 0 fail. Without it, 5 command/`gh`-reading tests fail on the sandbox environment, not on this change.
 - The new test builds merged rows of both trackers with one instance each and asserts zero UNMEASURED among them; a row with no instance is still UNMEASURED (positive control).
 - Mutation: disabling the keying fails exactly the two new keying tests; restored byte-identical.
+
+Mutation: made `keyInstanceRows` return every instance unchanged; the two new keying tests went red and nothing else did; restored byte-identical.
 
 ## Open
 Done-when 2 (live count after release) cannot be quoted before the release. Command: `agent-org wakes:per-row --from 2026-10-10T00:11:12Z --to 2026-10-11T00:11:12Z --repos a11ign/a11ign,a11ign/agent-org --json 1`
