@@ -1106,7 +1106,7 @@ export function main(argv: string[] = process.argv.slice(2),
   // #1344: BEFORE checkBody, because checkBody RUNS the Acceptance -- in this working tree, whatever --head says.
   // #2939: and a `Hand-fix:` line the ledger could not read, which it would silently not count. Pure, like the heads.
   const headRefused = headTreeRefusal(mode, rest, { git, crossRepo, branchHead }) ?? editTreeRefusal(mode, rest, { git, prHead })
-    ?? declarationRefusal(body) ?? authorshipRefusal(mode, rest, { git, login, lanes });
+    ?? declarationRefusal(body) ?? draftRefusal(mode, rest, body) ?? authorshipRefusal(mode, rest, { git, login, lanes });
   if (headRefused) {
     err(`${headRefused}\n`);
     return EXIT_NOTHING_SENT;
@@ -1446,6 +1446,25 @@ export function editTreeRefusal(mode: string, rest: string[], { git = defaultGit
       + `head it never tested. Run pr-open from a worktree on \`${head.ref}\` at that commit. ${nothingRan}`;
   }
   return null;
+}
+
+/**
+ * a11ign#5036: A DRAFT IS OPENED ONLY WITH A REASON, IN THE BODY. An approved draft is a wait with no purpose: `auto-arm.yml` ignored drafts,
+ * so a draft sat until a worker turn marked it ready (19-34 minutes on 10-10 night), and #4968 made READY the default without stopping a worker
+ * passing `--draft` itself ("I opened it as a draft because it is control-plane product code"; a11ign#5035, agent-org#949, control#51-#54 were
+ * open drafts at 12:40Z on 10-11). The reviewer and the merge queue are the gate, so "this is product code" is not a reason to wait. A real
+ * "not now" costs one line, `Draft-because: <reason>` (for example `work in progress, do not review`), which the reviewer then reads.
+ * A body-line and never an override flag: it is a declaration a reader can argue with, like `Closes: none -- <reason>`. Pure; `create`
+ * only, because `gh pr edit` has no `--draft`. `null` is "go on".
+ * @param {string} mode @param {string[]} rest @param {string} body
+ * @returns {string | null}
+ */
+export function draftRefusal(mode: string, rest: string[], body: string): string | null {
+  if (mode !== "create" || !rest.includes("--draft")) return null;
+  if (/^Draft-because:[ \t]*\S/m.test(body)) return null;
+  return "pr-open: REFUSED -- `--draft` without a reason. An approved draft is a wait with no purpose, and the reviewer and the merge queue are "
+    + "the gate, so open it READY (drop `--draft`). If it genuinely must not be reviewed yet, add a line to the body: "
+    + "`Draft-because: <reason>`, for example `Draft-because: work in progress, do not review`. Nothing was sent (a11ign#5036).";
 }
 
 /**

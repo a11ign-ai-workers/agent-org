@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "./lib/tmp-fixture.ts";
-import { armAfterCreate, checkRegion, EXIT_NOTHING_SENT, EXIT_QUEUED, main, readQueuedEntry, sendToGitHub } from "./pr-open.ts";
+import { armAfterCreate, checkRegion, draftRefusal, EXIT_NOTHING_SENT, EXIT_QUEUED, main, readQueuedEntry, sendToGitHub } from "./pr-open.ts";
 import { REPO } from "./project-identity.ts";
 import { QUEUED_EXIT } from "./gh-ledger.ts";
 
@@ -213,7 +213,7 @@ test("#923 done-when 2 (NEGATIVE CONTROL): an unreadable open-pull list REFUSES,
 });
 
 test("#923 POSITIVE CONTROL (main): `create` of that Closes is refused by pr-open before anything is sent, and the Acceptance does not run", () => {
-  const body = `## Acceptance\n\nnode -e "process.exit(0)"\n\nCloses #923\nMutation: none -- these tests drive the Region check\n`;
+  const body = `## Acceptance\n\nnode -e "process.exit(0)"\n\nCloses #923\nMutation: none -- these tests drive the Region check\nDraft-because: the Region check is under test, not a review\n`;
   const argv = ["create", "--draft", "--repo", REPO, "--body", body];
   const sent: string[][] = [];
   const err: string[] = [];
@@ -237,4 +237,38 @@ test("#923 POSITIVE CONTROL (main): `create` of that Closes is refused by pr-ope
   assert.deepEqual(sent, [], "nothing was sent to GitHub");
   assert.equal(acceptance, 0, "refused before the Acceptance ran");
   assert.ok(err.join("").includes(`Closes: none -- first half of ${ROW}`));
+});
+
+// a11ign#5036: `--draft` is refused unless the body says why. `main` is driven with the real body check mocked out of the way by refusing
+// BEFORE it: the refusal comes ahead of the Acceptance and of anything sent, so no acceptance runner or `gh` is reachable on the refused path.
+const draftMain = (argv: string[]) => {
+  const sent: string[][] = [];
+  const err: string[] = [];
+  let acceptance = 0;
+  const code = main(argv, {
+    run: (args: string[]) => { sent.push(args); }, git: () => "", runAcceptance: () => { acceptance += 1; return 0; },
+    readFile: () => "", owner: () => "ceo", login: () => "a11ign-ai-workers", out: () => {}, err: (line: string) => { err.push(line); },
+  });
+  return { code, sent, acceptance, said: err.join("") };
+};
+
+test("a11ign#5036: `--draft` with no Draft-because line is REFUSED before anything is sent or run, and the remedy is named", () => {
+  const r = draftMain(["create", "--draft", "--repo", REPO, "--title", "t", "--body", "## Acceptance\n\ntrue\n\nCloses #1\n"]);
+  assert.equal(r.code, EXIT_NOTHING_SENT);
+  assert.deepEqual(r.sent, [], "nothing was sent to GitHub");
+  assert.equal(r.acceptance, 0, "refused before the Acceptance ran");
+  assert.match(r.said, /--draft` without a reason/);
+  assert.match(r.said, /Draft-because: <reason>/);
+});
+
+test("a11ign#5036: a Draft-because line with a reason lets `--draft` through, and an EMPTY one does not", () => {
+  const body = (line: string) => `## Acceptance\n\ntrue\n\nCloses #1\n${line}\n`;
+  assert.equal(draftRefusal("create", ["--draft"], body("Draft-because: work in progress, do not review")), null);
+  assert.equal(draftRefusal("create", ["--draft"], body("Draft-because:   ")) === null, false, "a label with no reason is not a reason");
+  assert.equal(draftRefusal("create", ["--draft"], body("not a Draft-because: line in prose")) === null, false, "the line starts the line");
+});
+
+test("a11ign#5036 (NEGATIVE CONTROL): a create without --draft, and an edit, are never refused for a missing reason", () => {
+  assert.equal(draftRefusal("create", ["--head", "agent/x"], "no reason, and no draft"), null);
+  assert.equal(draftRefusal("edit", ["--draft"], "an edit has no --draft to explain"), null);
 });
