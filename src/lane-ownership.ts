@@ -26,6 +26,14 @@ const REPO = HOME_CHECKOUT;
 export type Lane = {lane: string, owner: string, branchPrefixes: string[], paths: string[], why: string, except?: string[], exceptWhy?: string, reviewOnly?: boolean};
 
 /**
+ * The managers App's login in the three spellings a reader meets (#796): `a11ign-managers[bot]` (REST, and GraphQL `viewer`), `a11ign-managers` (a
+ * GraphQL `Bot` author) and `app/a11ign-managers` (`gh pr list`'s spelling, as `dependabot` is in `dependency-bot-login.ts`). ONE App serves
+ * `ceo`, `product-manager` and `orchestrator`, so the login alone never names which of them acted: a reader that must know takes the seat from
+ * the body's `decided-by` marker (`work-gate.ts`'s `ownerHasReviewed`), and one that cannot (authorship) takes the App as `ceo`'s, as #816 ruled.
+ */
+export const MANAGERS_APP_LOGINS: readonly string[] = Object.freeze(["a11ign-managers[bot]", "a11ign-managers", "app/a11ign-managers"]);
+
+/**
  * A lane's role-name owner, spelled as the GitHub login that authors that role's pull requests.
  * `docs/lane-ownership.json` names the ROLE and never the account, so the mapping lives here; `work-gate.ts` and
  * `codeowners-lane-sync.test.ts` each re-assert their own copy (#3254 files the work-gate one).
@@ -35,7 +43,7 @@ export const ROLE_LOGIN: Readonly<Record<string, readonly string[]>> = Object.fr
   // viewer` and REST print, `a11ign-managers` what a GraphQL `Bot` author prints (`gh pr view --json author`, read by `arm-pr`
   // and the sweep). One App serves `ceo`, `product-manager` and `orchestrator`, so the bot cannot tell them apart; that matches
   // the ruling's own population, which shares `a11ign-ai-leads` today.
-  ceo: Object.freeze(["a11ign-ai-leads", "a11ign-managers[bot]", "a11ign-managers"]),
+  ceo: Object.freeze(["a11ign-ai-leads", ...MANAGERS_APP_LOGINS]),
 });
 
 /**
@@ -116,8 +124,12 @@ export function reviewOnlyPathsIn(files: readonly string[], lanes: { lanes: Lane
  * @param {string | null | undefined} author @param {{lanes: Lane[]} | null} lanes
  */
 export function ownsReviewOnlyLane(author: string | null | undefined, lanes: { lanes: Lane[]; } | null) {
+  // #796: `app:<role>` is the ledger's spelling of an App the `gh` wrapper routed a call as, for a caller that knows the ROLE and could not read
+  // the login (`pr-open.ts`'s `loginThrough`): it owns the lane its role's App is declared to (`APP_ROLE_LANE_OWNER`), as that App's bot login does.
+  const role = author?.startsWith("app:") ? author.slice("app:".length) : null;
+  const roleOwner = role !== null && Object.hasOwn(APP_ROLE_LANE_OWNER, role) ? APP_ROLE_LANE_OWNER[role] : null;
   return Boolean(author) && Boolean(lanes?.lanes.some(
-    (lane) => lane.reviewOnly === true && ROLE_LOGIN[lane.owner]?.includes(author as string)));
+    (lane) => lane.reviewOnly === true && (ROLE_LOGIN[lane.owner]?.includes(author as string) || roleOwner === lane.owner)));
 }
 
 /**
