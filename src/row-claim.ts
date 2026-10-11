@@ -88,6 +88,8 @@ import { readSweepWindows, sweepFreezeAtClaim, sweepFreezeOf, type SweepRow } fr
 import { templateFieldsReason, lookupIssueBody } from "./row-claim/template-fields-rule.ts";
 import { scopeHash, claimedScopeOf, CLAIM_RECORD_SCOPE } from "./claim-scope.ts"; // #4759: the leaf the tick compares the record with the live row from
 import { staleRuleReason } from "./row-claim/stale-rule-guard.ts";
+import { stateEntryPath } from "./host-config.ts";
+import { CLAIM_REFUSED_KIND, FAILURE_LEDGER_FILE, recordFailure } from "./failure-ledger.ts"; // #972: a refusal is a line of the ledger the storm signal reads
 // #2031 EXTRACTED THE RULE THIS FILE DEFINED, and the extraction is the whole of this file's change.
 // `work-gate.ts` now asks the same question of every Ready row, and #2031's own filing names the reason
 // it may not re-derive it: "both parse a trailing `-<n>` out of an `ls-remote` listing, and #2014's
@@ -1019,6 +1021,22 @@ export function failureReport(error: unknown): { exitCode: number; text: string;
   if (landedWritesOf(error) === null) return { exitCode: 2, text: `COULD NOT DETERMINE: ${message}` };
   return { exitCode: LANDED_WRITE_EXIT, text: `PARTIALLY WRITTEN (exit ${LANDED_WRITE_EXIT}, NOT "could not determine" `
     + `-- the row has changed): ${message}. Read the row by REST before retrying or editing it by hand.` };
+}
+
+/**
+ * #972: EVERY REFUSAL THIS FILE PRINTS (`NOT CLAIMED:` or `COULD NOT DETERMINE:`) IS ALSO ONE `claim-refused` LINE OF THE FAILURE LEDGER, the line `claimRefusalStormReading`
+ * (agent-org#889) counts. The reason is the refusal's FIRST line, with its tabs spaced out, so the line parses. Called AFTER the verdict is printed and never throws into the claim:
+ * an append that is refused is said on stderr by `recordFailure`, and the verdict and exit code are what they were. A landed claim is never passed here.
+ * @param {string} refusal the text after the prefix
+ * @param {{ logPath?: string, now?: number }} [where] the ledger (the host's, by default) and the time (now, by default)
+ */
+export function recordClaimRefusal(refusal: string, { logPath = stateEntryPath(FAILURE_LEDGER_FILE), now = Date.now() }: { logPath?: string; now?: number; } = {}): void {
+  try {
+    const ref = refusal.split("\n")[0].replace(/\t/g, " ").trim() || "no reason given";
+    recordFailure({ logPath, classKey: CLAIM_REFUSED_KIND, ref, now });
+  } catch (cause) {
+    process.stderr.write(`row-claim: could not record a refusal in the failure ledger (${String((cause as Error)?.message ?? cause).split("\n")[0]}) -- the verdict stands.\n`);
+  }
 }
 
 /**
@@ -2820,6 +2838,7 @@ function runStatus(issueNumber: number, trackerKey: string = "") {
   const found = trackerFor(trackerKey);
   if (!found.ok) {
     process.stderr.write(`COULD NOT DETERMINE: ${found.reason}\n`);
+    recordClaimRefusal(found.reason);
     process.exitCode = 2;
     return;
   }
@@ -2840,6 +2859,7 @@ function runStatus(issueNumber: number, trackerKey: string = "") {
     renderStatus(issueNumber, title, claimStatus(labels), { body, recorded });
   } catch (error) {
     process.stderr.write(`COULD NOT DETERMINE: ${(error as Error).message}\n`);
+    recordClaimRefusal((error as Error).message);
     process.exitCode = 2;
   }
 }
@@ -3021,6 +3041,7 @@ function runDeclineOrConflict(mode: "decline" | "conflict", issueNumber: number,
   const refusal = trackerClaimRefusal({ mode, key: trackerKeyOf(rest), number: issueNumber });
   if (refusal) {
     process.stdout.write(`NOT CLAIMED: ${refusal}\n`);
+    recordClaimRefusal(refusal);
     process.exitCode = 1;
     return;
   }
@@ -3123,6 +3144,7 @@ function runDispatchOrClaim(mode: "dispatch" | "claim", issueNumber: number, res
   const trackerRefusal = trackerClaimRefusal({ mode, key: trackerKeyOf(rest), number: issueNumber, session: mySession, worktree });
   if (trackerRefusal) {
     process.stdout.write(`NOT CLAIMED: ${trackerRefusal}\n`);
+    recordClaimRefusal(trackerRefusal);
     process.exitCode = 1;
     return;
   }
@@ -3130,6 +3152,7 @@ function runDispatchOrClaim(mode: "dispatch" | "claim", issueNumber: number, res
   const cloned = claimCloneFor(key, { branch, worktree });
   if (cloned !== null && "refusal" in cloned) {
     process.stdout.write(`NOT CLAIMED: ${cloned.refusal}\n`);
+    recordClaimRefusal(cloned.refusal);
     process.exitCode = 1;
     return;
   }
@@ -3163,12 +3186,15 @@ function runDispatchOrClaim(mode: "dispatch" | "claim", issueNumber: number, res
       }
     } else {
       process.stdout.write(`NOT CLAIMED: ${result.reason}\n`);
+      recordClaimRefusal(result.reason);
       process.exitCode = 1;
     }
   } catch (error) {
     // #1399: a failure after a landed write exits LANDED_WRITE_EXIT and names the writes; otherwise exit 2.
     const report = failureReport(error);
     process.stderr.write(`${report.text}\n`);
+    // #972: only the "could not determine" outcome is a refusal; a partial write is not one, and says so on its own line.
+    if (report.exitCode !== LANDED_WRITE_EXIT) recordClaimRefusal((error as Error).message);
     process.exitCode = report.exitCode;
   }
 }
@@ -3321,6 +3347,7 @@ async function main() {
   const stale = staleRuleReason();
   if (stale) {
     process.stderr.write(`COULD NOT DETERMINE: ${stale}\n`);
+    recordClaimRefusal(stale);
     process.exitCode = 2;
     return;
   }
