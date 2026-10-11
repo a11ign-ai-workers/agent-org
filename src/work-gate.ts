@@ -5262,16 +5262,18 @@ export const CLAIM_REFUSALS_FILE = "claim-refusals.json";
  *
  * A TREE A RELEASE KEPT FOR THIS ROW IS NOT A REFUSAL: the spawner adopts it (`--adopt`, #2470), so the claim lands.
  */
-export function claimRefusalOf(row: { number: number; }, { worktreesDir, kept = {}, exists = existsSync, owner = worktreeOwner }: {
+export function claimRefusalOf(row: { number: number; repoKey?: string; }, { worktreesDir, kept = {}, exists = existsSync, owner = worktreeOwner }: {
         worktreesDir: string; kept?: Record<string, { worktree?: string; }>; exists?: (path: string) => boolean;
         owner?: typeof worktreeOwner;
     }): string | null {
   const keptTree = kept[String(row.number)]?.worktree;
   if (keptTree !== undefined && exists(keptTree)) return null;
-  const path = join(worktreesDir, `wt-${row.number}`);
+  // agent-org#819: a KEYED row is claimed into `wt-<key>-<n>` (`claimNames`, `row-claim.ts`), which this file cannot import; a test pins the two.
+  const tree = `wt-${row.repoKey ? `${row.repoKey}-` : ""}${row.number}`;
+  const path = join(worktreesDir, tree);
   if (!exists(path)) return null;
   const who = owner(path);
-  return `--worktree=../wt-${row.number} ALREADY EXISTS, ${who ? `stamped by \`${who}\`` : "UNSTAMPED (nobody recorded an owner, which is not the same as free)"}. `
+  return `--worktree=../${tree} ALREADY EXISTS, ${who ? `stamped by \`${who}\`` : "UNSTAMPED (nobody recorded an owner, which is not the same as free)"}. `
     + "Refusing before any write: a claim that went on would act inside a tree it did not create.";
 }
 
