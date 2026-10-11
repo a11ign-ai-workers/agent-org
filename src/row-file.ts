@@ -114,6 +114,7 @@ import { sandboxGitEnv } from "./lib/git-env.ts";
 import { rowTracker, trackerNamed } from "./row-tracker.ts"; // #4078
 import { builtInCheckoutOf } from "./built-in-checkout.ts"; // #852
 import { adopterFacingDeclared, adopterRowKind } from "./work-gate/org-health.ts"; // #4378
+import { readUnlessRefused } from "./ticket-port/rows-by-label.ts"; // #5074: one refusal memory for a list read
 import { PRIMARY_MILESTONE_LINE } from "./org-health.ts"; // #4378
 import { parseWaits, umbrellaEdge } from "./wait-condition.ts";
 import { chairmanAskRefusal } from "./work-gate/chairman-ask-orders.ts"; // #4020
@@ -957,19 +958,22 @@ export function titleFromArgv(argv: string[]): string | null {
 /** The comparison form of a title: surrounding space trimmed, inner runs of space collapsed, case folded. @param {string} title @returns {string} */
 const comparableTitle = (title: string): string => title.trim().replace(/\s+/g, " ").toLowerCase();
 
-const OPEN_TITLE_READ_LIMIT = 100;
+const OPEN_TITLE_READ_LIMIT = 200;
 
 /**
  * The OPEN row in `repo` whose title equals `title` (trimmed, case-folded), as `{ number }`; `null` when there is none; `"unreadable"` when GitHub
- * could not be asked. ONE `gh issue list` call per filing: the search narrows to rows whose title holds the phrase, the exact comparison is ours
- * (a search match is fuzzy; a refusal must not be). A CLOSED row is never asked for -- a reopened-and-refiled row is legitimate.
+ * could not be asked. ONE `gh issue list` call per filing, #5074: NOT a search (`--search` is sent as a GitHub SEARCH, whose allowance the installation
+ * spent, 420 calls an hour from this check), so it is the newest {@link OPEN_TITLE_READ_LIMIT} open rows, compared by title here. THE PRICE: a twin of
+ * an open row older than that window is not seen, where the search saw it; the check exists for the second copy of a filing run launched twice, which
+ * is the newest row. A CLOSED row is never asked for -- a reopened-and-refiled row is legitimate.
  * @param {string} title @param {string} repo @param {(cmd: string, args: string[]) => string} run
  * @returns {{ number: number } | null | "unreadable"}
  */
 function openRowTitled(title: string, repo: string, run: (cmd: string, args: string[]) => string): { number: number; } | null | "unreadable" {
   try {
-    const rows = JSON.parse(run("gh", ["issue", "list", "--repo", repo, "--state", "open", "--search", `"${title.trim().replace(/"/g, " ")}" in:title`,
-      "--limit", String(OPEN_TITLE_READ_LIMIT), "--json", "number,title"]));
+    const gh = (args: string[]): string => run("gh", args);
+    const rows = JSON.parse(readUnlessRefused({ what: `the ${OPEN_TITLE_READ_LIMIT} newest open rows of ${repo}`, run: gh,
+      read: () => gh(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(OPEN_TITLE_READ_LIMIT), "--json", "number,title"]) }));
     if (!Array.isArray(rows)) return "unreadable";
     const wanted = comparableTitle(title);
     const hit = rows.find((row) => typeof row?.title === "string" && comparableTitle(row.title) === wanted);

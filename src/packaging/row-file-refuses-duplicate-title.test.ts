@@ -27,8 +27,8 @@ const BODY = "## Region\n\npackages/lab/src/packaging/foo.ts\npackages/cli/src/f
   + "## Acceptance\n\n```\nnpx tsx --test x\n```\n\n"
   + "## Open-check\n\n```\ngh issue view 735 --json state\n```\n";
 const RELEASE = ["--milestone", "CI reset"];
-/** The duplicate-title read's own `--limit` (100). #4601's blast-radius read also lists issues, with another limit, so this test counts its own by it. */
-const DUPLICATE_READ_LIMIT = "100";
+/** The duplicate-title read's own `--limit` (200: the newest open rows, no search, #5074). #4601's blast-radius read also lists issues, with another limit, so this test counts its own by it. */
+const DUPLICATE_READ_LIMIT = "200";
 
 type Row = { number: number; title: string; state: "OPEN" | "CLOSED" };
 
@@ -95,7 +95,7 @@ test("1. THE LAYOUT CASE: the same title filed twice while the first is open is 
   assert.match(second.stderr, /Nothing was filed/);
 });
 
-test("2. POSITIVE CONTROL: a title one word apart is NOT refused, and the tool did ask (one list call, in this tracker, open rows, limit 100)", () => {
+test("2. POSITIVE CONTROL: a title one word apart is NOT refused, and the tool did ask (one list call, in this tracker, open rows, limit 200, no search)", () => {
   const stub = tracker([{ number: 4222, title: TITLE, state: "OPEN" }]);
   const result = filing(file(`${TITLE} again`), stub.deps);
   assert.equal(result.code, 0, result.stderr);
@@ -105,8 +105,8 @@ test("2. POSITIVE CONTROL: a title one word apart is NOT refused, and the tool d
   const [args] = asked;
   assert.equal(args[args.indexOf("--repo") + 1], "a11ign/a11ign");
   assert.equal(args[args.indexOf("--state") + 1], "open");
-  assert.equal(args[args.indexOf("--limit") + 1], "100");
-  assert.match(args[args.indexOf("--search") + 1], /in:title/);
+  assert.equal(args[args.indexOf("--limit") + 1], "200");
+  assert.ok(!args.includes("--search") && !args.includes("--label"), "a plain list, which is no search (#5074)");
 });
 
 test("3. a title equal to a CLOSED row's is not refused (a reopened-and-refiled row is legitimate)", () => {

@@ -13,6 +13,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { escalateStuck, ESCALATION_LABEL, MAX_DELIVERIES, REASK_AFTER_MS } from "./wake.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 const SHA = "0123abcd";
 const MERGED = `worker-3075/trunk-red/pr-agent-org#56/${SHA}`;
@@ -26,7 +27,7 @@ type Hit = { number: number; title: string; state: "OPEN" | "CLOSED"; closedAt: 
 /** The title the tick files for `MERGED`, read off a first escalation so the fixture does not restate its wording. */
 const filedTitle = (() => {
   const calls: string[][] = [];
-  escalateStuck([`${MERGED}: x`], (a: string[]) => { calls.push(a); return a[1] === "list" ? "[]" : a[1] === "create" ? ISSUE_URL : ""; }, () => {}, { repoOf: declared });
+  escalateStuck([`${MERGED}: x`], (a: string[]) => { calls.push(a); return a[0] === "api" ? connectionOf([]) : a[1] === "list" ? "[]" : a[1] === "create" ? ISSUE_URL : ""; }, () => {}, { repoOf: declared });
   const create = calls.find((c) => c[1] === "create") as string[];
   return create[create.indexOf("--title") + 1];
 })();
@@ -34,17 +35,22 @@ const filedTitle = (() => {
 const closedAgo = (ms: number, number = 3101, title = filedTitle): Hit => ({ number, title, state: "CLOSED", closedAt: new Date(NOW - ms).toISOString() });
 const opened = (number = 3102, title = filedTitle): Hit => ({ number, title, state: "OPEN", closedAt: null });
 
-/** One tick over a key already escalated whose cause is still emitted; `hits` is what the title search answers. */
+/**
+ * One tick over a key already escalated whose cause is still emitted; `hits` is what the title's rows are, as the tick reads them WITHOUT a search (#5074):
+ * the closed ones are the CLOSED connection of the parked label, the open ones its OPEN connection. A search argv is refused, so a read that went
+ * back to `--search` fails the tick's fixtures instead of passing on a fake that accepts it.
+ */
 function tick(key: string, hits: Hit[]) {
   const calls: string[][] = [];
   const log: string[] = [];
   const posts: { row: number; body: string }[] = [];
   const run = (args: string[]) => {
     calls.push(args);
+    if (args[1] === "list" && (args.includes("--search") || args.includes("--label"))) throw new Error("HTTP 502: a search-backed list");
+    const asked = readsRowsByLabel(args);
+    if (asked !== null) return connectionOf(hits.filter((hit) => hit.state === asked.state));
     if (args[1] === "create") return ISSUE_URL;
-    if (args[1] !== "list") return "";
-    if (args.includes("--search")) return JSON.stringify(hits);
-    return "[]";
+    return args[1] === "list" ? "[]" : "";
   };
   const ask = { post: (row: number, body: string) => { posts.push({ row, body }); }, stateOf: () => "idle", now: () => NOW };
   const labelled = escalateStuck([`${key}: delivered ${MAX_DELIVERIES} times`], run, (l: string) => log.push(l), { repoOf: declared, escalated: new Set([key]), ask });
@@ -89,18 +95,19 @@ test("a row of another title is not the row, and a title never filed has nothing
 
 test("a label row of the primary is not read here: its re-ask is `reaskCleared`", () => {
   const { calls } = tick(PRIMARY, [closedAgo(2 * REASK_AFTER_MS)]);
-  assert.deepEqual(calls.filter((c) => c.includes("--search")), []);
+  assert.deepEqual(calls.filter((c) => c.includes("--search") || c.includes("--label")), []);
+  assert.deepEqual(calls.filter((c) => readsRowsByLabel(c)?.state === "CLOSED"), [], "and the closed rows of the title were not read for it");
 });
 
 test("a caller with no asker files nothing, as the label row's re-ask does", () => {
   const calls: string[][] = [];
-  escalateStuck([`${MERGED}: x`], (a: string[]) => { calls.push(a); return "[]"; }, () => {}, { repoOf: declared, escalated: new Set([MERGED]) });
-  assert.deepEqual(calls.filter((c) => c.includes("--search") || c[1] === "create"), []);
+  escalateStuck([`${MERGED}: x`], (a: string[]) => { calls.push(a); return a[0] === "api" ? connectionOf([]) : "[]"; }, () => {}, { repoOf: declared, escalated: new Set([MERGED]) });
+  assert.deepEqual(calls.filter((c) => readsRowsByLabel(c)?.state === "CLOSED" || c[1] === "create"), []);
 });
 
 test("a refused `gh` is reported, not thrown, and files nothing", () => {
   const log: string[] = [];
-  const run = (args: string[]) => { if (args.includes("--search")) throw new Error("HTTP 502"); return "[]"; };
+  const run = (args: string[]) => { if (readsRowsByLabel(args)?.state === "CLOSED") throw new Error("HTTP 502"); return args[0] === "api" ? connectionOf([]) : "[]"; };
   const ask = { post: () => {}, stateOf: () => "idle", now: () => NOW };
   escalateStuck([`${MERGED}: x`], run, (l: string) => log.push(l), { repoOf: declared, escalated: new Set([MERGED]), ask });
   assert.match(log.join(""), /COULD NOT ASK AGAIN \(.*\): HTTP 502/);
