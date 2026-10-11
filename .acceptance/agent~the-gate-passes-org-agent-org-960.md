@@ -1,6 +1,6 @@
 The gate passes `orgHealthNow` its fleet build incident, so the 4-hour wake agent-org#943 built can fire (agent-org#960, part of a11ign/a11ign#4405). `orgHealthNow` takes `readFleetBuildIncident` beside `readReleaseRuns`, `undefined` when the caller does not ask (every test), and spreads `fleetBuildIncidentFact(...)` into its facts; the gate's call site passes `() => readFleetBuildIncidents(defaultRun, repoNow())`, and the per-tick call list names the read (the one REST call already lives in the ticket port, so `docs/gh-call-baseline.json` does not move).
 
-Acceptance: `bash -c 'cd ~/repos/agent-org && npx rstest run --config scripts/rstest/rstest.config.ts src/work-gate/org-health-fleet-build-fact.test.ts src/packaging/gh-call-ratchet.test.ts src/packaging/gh-call-inventory.test.ts'`
+Acceptance: `bash -c 'npx rstest run --config scripts/rstest/rstest.config.ts src/work-gate/org-health-fleet-build-fact.test.ts src/packaging/gh-call-ratchet.test.ts src/packaging/gh-call-inventory.test.ts'`
 
 Mutation: five, each run by hand with the file copied aside and diffed byte-identical after: the `fleetBuildIncidentFact` spread dropped (POSITIVE CONTROL red, 2 of 4); the fact always `[]` (2 of 4 red); `null` read as `[]` (the unknown test red, 1 of 4); "does not ask" read as a refused read (the silence assertion red, 1 of 4); the argument dropped at the gate's call site (the wiring test red, 1 of 4). Run against `src/work-gate/org-health-fleet-build-fact.test.ts`; the reverse direction (the remedy applied) is the same file at 4 of 4 green.
 
