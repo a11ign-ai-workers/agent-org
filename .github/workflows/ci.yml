@@ -243,7 +243,9 @@ jobs:
   #
   # THE TOOLS ARE THE RELEASE'S, NOT THIS FILE'S: `PNPM_VERSION`, `CHANGESETS_VERSION` and the Node below repeat `release.yml`'s `pnpm-version`, `changesets-version` and `node-version`, and
   # `src/packaging/release-dry-run.test.ts` fails when they differ, so a dry run is never a pass on a toolchain the release does not use. It versions EVERY changeset in the tree, where the release
-  # versions only those no tag has consumed: a superset, so a failure the release would meet is met here (the release's `plan` step needs the tags, which a depth-2 checkout does not have).
+  # versions only those no tag has consumed: a superset, so a failure the release would meet is met here (the release's `plan` step reads which changesets a tag consumed; this job has no such step and does not need one to reach the same install and `changeset version`).
+  #
+  # THE CHECKOUT AND THE VERSION STEP'S CLONE ARE FULL-DEPTH (ceo review of agent-org#967: the first run hung 29 minutes in the version step). `changeset version` reads git history and DEEPENS a shallow clone, and on a `--depth=1` one it spins; screenreader-fleet#33, screenreader-worker#47 and toolchain#40 fixed the same hang with `fetch-depth: 0` and a clone without `--depth=1`. The consumer's install runs no `changeset`, so its clone keeps `--depth=1`, as a11ign's own does of a tag.
   release-dry-run:
     runs-on: ubuntu-latest
     permissions:
@@ -254,8 +256,9 @@ jobs:
     steps:
       - uses: actions/checkout@v7
         with:
-          # Two commits: HEAD and its first parent, which is all `touched` compares. No credential is kept: nothing here pushes.
-          fetch-depth: 2
+          # The WHOLE history, not two commits: `touched` needs only HEAD and its first parent, but the version step clones this checkout and `changeset version` deepens a shallow clone and hangs (see the job's header).
+          # No credential is kept: nothing here pushes.
+          fetch-depth: 0
           persist-credentials: false
       - name: Does the change touch what the release installs from?
         id: touched
@@ -283,7 +286,7 @@ jobs:
         run: |
           set -euo pipefail
           scratch="$RUNNER_TEMP/release-dry-run"
-          git clone --quiet --depth=1 "file://$GITHUB_WORKSPACE" "$scratch"
+          git clone --quiet "file://$GITHUB_WORKSPACE" "$scratch"
           cd "$scratch"
           if [ -f pnpm-lock.yaml ]; then
             pnpm install --frozen-lockfile

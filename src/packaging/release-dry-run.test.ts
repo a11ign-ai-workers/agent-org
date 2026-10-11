@@ -97,7 +97,11 @@ function commandProblems(w: Workflow): string[] {
   const order = ["pnpm install --frozen-lockfile", "pnpm exec changeset version", "pnpm install --lockfile-only"].map((c) => version.indexOf(c));
   if (order.some((i) => i < 0) || order.join() !== [...order].sort((a, b) => a - b).join()) problems.push(`the version step does not run install --frozen-lockfile, exec changeset version, install --lockfile-only in that order (${order})`);
   if (!/pnpm dlx "@changesets\/cli@\$CHANGESETS_VERSION" version/.test(version)) problems.push("the version step has no `pnpm dlx @changesets/cli@$CHANGESETS_VERSION version` path for a tree with no lockfile");
-  if (!/git clone[^\n]*--depth=1[^\n]*"file:\/\/\$GITHUB_WORKSPACE" "\$scratch"/.test(version)) problems.push("the version step does not run in a scratch clone of the checkout");
+  if (!/git clone[^\n]*"file:\/\/\$GITHUB_WORKSPACE" "\$scratch"/.test(version)) problems.push("the version step does not run in a scratch clone of the checkout");
+  // `changeset version` deepens a shallow clone and hangs (agent-org#967's first run: 29 minutes), so neither the checkout nor the version step's clone may be shallow.
+  if (/git clone[^\n]*--depth/.test(version)) problems.push("the version step's clone is shallow: `changeset version` deepens it and hangs");
+  const checkout = stepsOf(w).find((s) => s.uses?.startsWith("actions/checkout@"));
+  if (checkout?.with?.["fetch-depth"] !== 0) problems.push(`the checkout is not full-depth (fetch-depth ${JSON.stringify(checkout?.with?.["fetch-depth"])}), so the scratch clone is shallow`);
   const consumer = consumerStep(w).run ?? "";
   if (!/npx "pnpm@\$PNPM_VERSION" install --frozen-lockfile --ignore-scripts/.test(consumer)) problems.push("the consumer step does not run `npx pnpm@$PNPM_VERSION install --frozen-lockfile --ignore-scripts`");
   if (!/npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund/.test(consumer)) problems.push("the consumer step has no npm fresh-resolution path for a tree with no lockfile");
@@ -148,6 +152,8 @@ test("each structural property is seen to FAIL on a copy with exactly that thing
   assert.notDeepEqual(toolchainProblems(broke((w) => { stepsOf(w).find((s) => s.uses?.startsWith("actions/setup-node@"))!.with!["node-version"] = "24"; }), releaseCall()), [], "a Node that is not the release's");
   assert.notDeepEqual(toolchainProblems(broke((w) => { stepsOf(w).find((s) => s.uses?.startsWith("pnpm/action-setup@"))!.with!.version = "9"; }), releaseCall()), [], "a pnpm install that ignores PNPM_VERSION");
 
+  assert.notDeepEqual(commandProblems(broke((w) => { versionStep(w).run = versionStep(w).run!.replace("git clone --quiet", "git clone --quiet --depth=1"); })), [], "a shallow scratch clone for `changeset version`");
+  assert.notDeepEqual(commandProblems(broke((w) => { stepsOf(w).find((s) => s.uses?.startsWith("actions/checkout@"))!.with!["fetch-depth"] = 2; })), [], "a shallow checkout");
   assert.notDeepEqual(commandProblems(broke((w) => { versionStep(w).run = versionStep(w).run!.replace("pnpm install --frozen-lockfile", "pnpm install"); })), [], "an install that is not frozen");
   assert.notDeepEqual(commandProblems(broke((w) => { versionStep(w).run = versionStep(w).run!.replace("pnpm exec changeset version", "pnpm dlx changeset version"); })), [], "a changeset version that is not the repository's own");
   assert.notDeepEqual(commandProblems(broke((w) => { consumerStep(w).run = consumerStep(w).run!.replace("--frozen-lockfile --ignore-scripts", "--frozen-lockfile"); })), [], "a consumer install without --ignore-scripts");
