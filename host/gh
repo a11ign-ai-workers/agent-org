@@ -304,7 +304,10 @@ read_cache_store() { # the stdout copy, the generation read BEFORE the call ran
 #     does nothing: no token file is read, no process is started. `A11Y_APP_ROLES` overrides it, as `A11Y_GH_REAL` overrides the exec.
 #   - THE ROLE is read off the same facts the routing above used: `AGENT_ORG_GH_ROLE` when a caller declares one (a unit may), else
 #     no workspace id (a unit or script outside any agent workspace: the gate, the tick, `host:*`) is `scheduler`, the leads config
-#     is `managers`, anything else is `workers`.
+#     is `managers`, anything else is `workers`. (#817) A role is named ONLY for a config that is the role's own, `$WORKERS_DIR/gh` or
+#     `$LEADS_DIR/gh` (a call with `GH_CONFIG_DIR` unset was given one of the two above): any other explicit `GH_CONFIG_DIR`, the
+#     reviewer's `a11ign-bot` or a unit's own, has NO app role and goes out as that config's account, as rule 1 says. Without it the
+#     reviewer was handed the workers App's token, was the author of the PR it reviewed, and GitHub refused the approval.
 #   - AN EXPLICIT `GH_TOKEN` OR `GITHUB_TOKEN` WINS, as an explicit `GH_CONFIG_DIR` does: a runner or a person who named a credential is not re-routed.
 #   - THE TOKEN is read from the cache file `agent-org`'s minter writes (`<expiry epoch> <token>`), in shell and with no process, while it has
 #     more than 5 minutes left; only a stale one starts `app-token.ts`, once an hour per role.
@@ -318,6 +321,8 @@ read_cache_store() { # the stdout copy, the generation read BEFORE the call ran
 app_account=
 app_role() {
   case "${AGENT_ORG_GH_ROLE:-}" in scheduler|workers|managers) printf %s "$AGENT_ORG_GH_ROLE"; return 0 ;; esac
+  # A config of its own (the reviewer's `a11ign-bot`, a unit's) names no role: printing none sends the call out as that account.
+  case "$GH_CONFIG_DIR" in "$WORKERS_DIR/gh"|"$LEADS_DIR/gh") ;; *) return 0 ;; esac
   if [ -z "${HERDR_WORKSPACE_ID:-}" ]; then printf scheduler
   elif [ "$GH_CONFIG_DIR" = "$LEADS_DIR/gh" ]; then printf managers
   else printf workers; fi
@@ -382,7 +387,7 @@ if [ -n "$APP_ROLES" ] && [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; 
   app_who=$(app_role)
   case " $APP_ROLES " in
     *" $app_who "*)
-      if app_tok=$(app_token "$app_who") && [ -n "$app_tok" ]; then
+      if [ -n "$app_who" ] && app_tok=$(app_token "$app_who") && [ -n "$app_tok" ]; then
         GH_TOKEN=$app_tok
         export GH_TOKEN
         app_account=app:$app_who
