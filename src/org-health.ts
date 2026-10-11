@@ -1448,7 +1448,8 @@ export function firstErrorLine(log: string): FirstError {
 function readFirstError(run: (args: string[]) => string, repo: string, job: FailedJob | undefined): FirstError {
   if (job?.id === undefined) return { unread: "the failed job's id was not read" };
   try {
-    return firstErrorLine(run(["api", `repos/${repo}/actions/jobs/${job.id}/logs`]));
+    // `--allow-escape-sequences`: a job's log carries the runner's colour codes and `gh api` refuses to print a response with any (measured against a real agent-org release log, 2026-10-12); `firstErrorLine` strips them
+    return firstErrorLine(run(["api", "--allow-escape-sequences", `repos/${repo}/actions/jobs/${job.id}/logs`]));
   } catch {
     return { unread: "the failed job's log could not be read" };
   }
@@ -1563,7 +1564,9 @@ export function fileReleaseIncidents(failures: ReleaseFailureRead[], { run, trac
     for (const item of open) {
       const named = releaseFailureOf(item.body);
       if (named === null || !released.has(named.repo)) continue;
-      run(["issue", "close", String(item.number), "--comment", `release.yml on ${named.repo}'s main succeeded again, so the failure this was raised for is over.`]);
+      // the REST close, not the CLI's: this closes the gate's own incident item and no row from a merge, and `close-rows-sweep.test.ts` reads every CLI close in a source file as the latter
+      run(["issue", "comment", String(item.number), "--body", `release.yml on ${named.repo}'s main succeeded again, so the failure this was raised for is over.`]);
+      run(["api", "--method", "PATCH", `repos/${tracker}/issues/${item.number}`, "-f", "state=closed", "-f", "state_reason=completed"]);
       out.closed.push(item.number);
     }
     for (const { repo, episode, title, body } of failed) {

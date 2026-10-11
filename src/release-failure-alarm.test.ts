@@ -67,8 +67,9 @@ const LOG = [
   "2026-10-11T08:42:03.1000000Z pnpm install --frozen-lockfile",
   "2026-10-11T08:42:03.2000000Z ##[endgroup]",
   "2026-10-11T08:42:09.0000000Z Done in 5.1s, 0 errors, 0 warnings",
+  "2026-10-11T08:42:09.5000000Z Retrying after a network error (1/3)",
   "2026-10-11T08:42:10.0000000Z ##[group]Run pnpm dlx changeset version  # an error here is not the failure",
-  "2026-10-11T08:42:10.1000000Z pnpm exec changeset version",
+  "2026-10-11T08:42:10.1000000Z pnpm exec changeset version || echo \"error: the version step\"",
   "2026-10-11T08:42:10.2000000Z shell: /usr/bin/bash -e {0}",
   "2026-10-11T08:42:10.3000000Z ##[endgroup]",
   `2026-10-11T08:42:11.0000000Z \u001b[31m ${QUOTE}\u001b[39m`,
@@ -86,7 +87,7 @@ const tripped = (reads: unknown[]) => readings(reads).filter((r) => r.status ===
 
 // --- the first error line ----------------------------------------------------------------------------------------------------------
 
-test("the first error line is the failing step's own, not the `##[error]` marker, not an earlier step's `0 errors`, and not the echoed command", () => {
+test("the first error line is the failing step's own, not the `##[error]` marker, not an earlier step's retry notice, and not the command echoed above its output", () => {
   assert.deepEqual(firstErrorLine(LOG), { line: QUOTE });
 });
 
@@ -221,6 +222,8 @@ test("the reader asks ONE call of a repository that released, and FOUR of one th
   assert.equal(calls.length, 5);
   assert.equal(calls.filter((c) => c.some((a) => a.includes(`repos/${PROJECT_REPO}/`))).length, 1);
   assert.deepEqual(reads[1].firstError, LINE);
+  const logCall = calls.find((c) => c.some((a) => a.endsWith("/logs")))!;
+  assert.ok(logCall.includes("--allow-escape-sequences"), "gh refuses a response with terminal escape sequences, and a job log has them");
   assert.deepEqual(reads[1].runs?.pending, ["a-change.md"]);
   assert.deepEqual(tripped(reads).map((r) => r.discriminator), [`${SIGNAL}@${AGENT_ORG}@5001`]);
   assert.match(tripped(reads)[0].detail, /FAILED 4 times running/);
@@ -247,7 +250,7 @@ type Item = { number: number; title: string; createdAt: string; body: string };
 function fakeTracker({ open = [] as Item[], closed = [] as Item[], refuse = false } = {}) {
   const writes: string[][] = [];
   const gh = (args: string[]) => {
-    if (args[0] === "issue") { writes.push(args); return "https://github.com/x/y/issues/1\n"; }
+    if (args[0] === "issue" || args.includes("PATCH")) { writes.push(args); return "https://github.com/x/y/issues/1\n"; }
     if (refuse) throw new Error("HTTP 502");
     return JSON.stringify(args.includes("state=closed") ? closed : open);
   };
@@ -291,7 +294,8 @@ test("a repository that RELEASES again closes its open incident, and only its ow
   const fixed = [run(AGENT_ORG, 5006, "success", "2026-10-11T09:40:00Z"), ...AGENT_ORG_STREAK];
   const out = fileReleaseIncidents([read(AGENT_ORG, fixed), read(PROJECT_REPO, PROJECT_FAILED, LINE)], { run: gh, tracker: TRACKER, say: quiet([]) });
   assert.deepEqual(out.closed, [41]);
-  assert.deepEqual(writes.map((w) => [w[0], w[1], w[2]]), [["issue", "close", "41"]]);
+  assert.deepEqual(writes.map((w) => w.slice(0, 3)), [["issue", "comment", "41"], ["api", "--method", "PATCH"]]);
+  assert.ok(writes[1].includes(`repos/${TRACKER}/issues/41`) && writes[1].includes("state=closed"), "the item that was closed is the agent-org one, in the tracker");
 });
 
 test("a tracker that cannot be read files and closes NOTHING and says so; a tick with no verdict to act on makes no call at all", () => {
