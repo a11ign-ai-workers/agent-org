@@ -62,6 +62,7 @@ import { boardTruthTable } from "./board-truth-audit.ts";
 // The checkout the tool serves and the project's own words are read from where they are declared (`standalone-roots.test.ts`, `project-vocabulary.test.ts`).
 import { HOME_CHECKOUT } from "./project-config.ts";
 import { ANSWER_PREFIX, BACKLOG_LABEL } from "./project-vocabulary.ts";
+import { openIncidentsOf } from "./ticket-port/open-incidents.ts";
 // A LEAF too (it imports `newest-check-run.ts` and `pr-hold-state.ts`, which import nothing): the ONE decider of what counts as red.
 import { brokenChecks } from "./red-pr.ts";
 // A LEAF too: the closed grammar of what a declared wait is waiting FOR (#2996), and the two ages that bound how long one may stand unexplained.
@@ -1335,10 +1336,9 @@ export type FleetBuildIncident = { number: number; title: string; createdAt: str
  * {@link FLEET_BUILD_INCIDENT_LINE} on a line of its own. A pull request is not an incident and is dropped. `null` is a refused or unparseable list, a stated unknown and never "no incident".
  */
 export function readFleetBuildIncidents(run: (args: string[]) => string, repo: string): FleetBuildIncident[] | null {
-  const issues = tryJson(() => run(["api", "--method", "GET", `repos/${repo}/issues`, "-f", "state=open", "-f", "labels=incident", "-f", "per_page=100",
-    "--jq", "[.[] | select(.pull_request | not) | {number, title, createdAt: .created_at, body}]"]));
-  if (!Array.isArray(issues)) return null;
-  return issues.filter((issue) => typeof issue?.body === "string" && issue.body.split(/\r?\n/).some((line: string) => line.trim() === FLEET_BUILD_INCIDENT_LINE))
+  const issues = openIncidentsOf(repo, run);
+  if (issues === null) return null;
+  return issues.filter((issue) => typeof issue.body === "string" && issue.body.split(/\r?\n/).some((line) => line.trim() === FLEET_BUILD_INCIDENT_LINE))
     .map(({ number, title, createdAt }) => ({ number, title, createdAt }));
 }
 
