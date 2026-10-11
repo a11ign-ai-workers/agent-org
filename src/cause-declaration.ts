@@ -522,25 +522,6 @@ export const TOOL_CAUSE_DECLARATIONS = Object.freeze([
     why: "the tick has already measured itself, or found what a killed one left; the output is a decision about which phase to chase "
       + "and who owns it, over figures the order states",
   }),
-  declareCause("machinery-canary", GROUPS.JUDGMENT, {
-    kind: "claude",
-    model: "sonnet",
-    // MEDIUM (a11ign#5100), and the recipient is `ceo`, a standing decision-holder that is never spawned, so this is the profile a spawned worker would
-    // take if one ever were. The gate has already turned the flag OFF and filed the incident with both readings; the work is reading them and choosing
-    // between fixing the cause forward and leaving the change off, a short judgment over two stated figures.
-    effort: "medium",
-    why: "the gate has already reverted the flag and filed the incident with both readings; the output is a choice between fixing "
-      + "forward and leaving it off, over figures the order states",
-  }),
-  declareCause("suppression-expired", GROUPS.JUDGMENT, {
-    kind: "claude",
-    model: "sonnet",
-    // MEDIUM (a11ign#5100). A suppression kept an order from its holder for 15 minutes with no claimed row working its reason, and the order names the
-    // reason; the work is deciding whether the reason still stands, a short judgment over one stated reason, and the original order (where the
-    // suppressor still held it) is delivered under ITS cause, not this one.
-    effort: "medium",
-    why: "the order states which suppression kept it back and why; the output is whether the reason still stands, a short judgment over one stated reason",
-  }),
   declareCause("repeating-log-line", GROUPS.JUDGMENT, {
     kind: "claude",
     model: "sonnet",

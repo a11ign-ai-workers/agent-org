@@ -88,7 +88,7 @@ test("#5100 (1) DOUBLED CLAIMS REFUSED: a flagged change whose hour doubles `cla
   assert.match(h.filed[0].body, /claims-refused/);
   assert.match(h.filed[0].body, /6 in the hour before/, "the reading BEFORE is in the incident");
   assert.match(h.filed[0].body, /since \(\d+ min\)/, "and the reading AFTER");
-  const order = orders.find((candidate) => candidate.cause === "machinery-canary");
+  const order = orders.find((candidate) => candidate.cause === "org-health" && candidate.subject === "machinery-canary");
   assert.ok(order, "ceo is woken");
   assert.equal(order.session, "ceo");
   assert.match(order.prompt, /9001/, "the order names the incident");
@@ -103,11 +103,11 @@ test("#5100 (1b) A REFUSED INCIDENT FILING IS RETRIED NEXT TICK and the order sa
   const first = machineryCanaryTick({ now: T0 + 10 * MINUTE, facts: facts({ refusalsAt: flood }), dir: "/state", options: OPTIONS, io: refusing.io });
   assert.equal(refusing.state().flags[FLAG].on, false);
   assert.equal(refusing.state().flags[FLAG].incident, "unfiled");
-  assert.match(first.find((order) => order.cause === "machinery-canary")?.prompt, /could not be filed this tick and is retried/);
+  assert.match(first.find((order) => order.cause === "org-health" && order.subject === "machinery-canary")?.prompt, /could not be filed this tick and is retried/);
   assert.match(refusing.logs.join(""), /could not file the incident/);
 
   const second = machineryCanaryTick({ now: T0 + 20 * MINUTE, facts: facts({ refusalsAt: flood }), dir: "/state", options: OPTIONS, io: h.io /* the filer works now */ });
-  assert.equal(second.some((order) => order.cause === "machinery-canary"), true);
+  assert.equal(second.some((order) => order.cause === "org-health" && order.subject === "machinery-canary"), true);
 });
 
 test("#5100 (2) A CLEAN CANARY LEAVES THE FLAG ON: a steady hour is PASSED, and nothing is filed", () => {
@@ -122,7 +122,7 @@ test("#5100 (2) A CLEAN CANARY LEAVES THE FLAG ON: a steady hour is PASSED, and 
   assert.equal(record.on, true, "THE FLAG STAYS ON");
   assert.equal(record.verdict, "passed");
   assert.deepEqual(h.filed, [], "no incident");
-  assert.deepEqual(last.filter((order) => order.cause === "machinery-canary"), [], "and no order to ceo");
+  assert.deepEqual(last.filter((order) => order.cause === "org-health" && order.subject === "machinery-canary"), [], "and no order to ceo");
 });
 
 test("#5100 (2b) A SIGNAL THE TICK COULD NOT READ IS UNKNOWN, NOT CLEAN: a flag that names only an unsourced signal is not PASSED on it", () => {
@@ -177,7 +177,7 @@ test("#5100 (3b) A CLAIMED ROW WORKING THE REASON EXCUSES THE HOLD, however long
 
   const orderless = expireSuppressions({ suppressed: [free], memo: first.memo, now: T0 + 15 * MINUTE, minutes: 15 }).released;
   assert.equal(orderless.length, 1);
-  assert.equal(orderless[0].cause, "suppression-expired", "with no original order held, the holder is still woken with the reason");
+  assert.equal(orderless[0].subject, "suppression-expired", "with no original order held, the holder is still woken with the reason");
   assert.equal(orderless[0].session, "product-manager");
 });
 

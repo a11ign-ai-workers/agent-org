@@ -1976,7 +1976,7 @@ export function canaryIncidentText({ name, record }: { name: string; record: Fla
 /** The order to `ceo` for a flag the gate turned off. Keyed on the flag and the tick it was turned on, so a second revert of the same flag is a second order. */
 export function canaryOrder({ name, record }: { name: string; record: FlagRecord; }) {
   return {
-    session: OFFERED_TO, cause: "machinery-canary", subject: name, discriminator: `${name}@${record.onAt}`, causeKey: `${OFFERED_TO}/machinery-canary/${name}@${record.onAt}`,
+    session: OFFERED_TO, cause: "org-health", subject: "machinery-canary", discriminator: `${name}@${record.onAt}`, causeKey: `${OFFERED_TO}/org-health/machinery-canary/${name}@${record.onAt}`, // an existing cause carries it: no new order kind to profile (githubIncidentOrder's rule)
     prompt: `MACHINERY CANARY: THE GATE TURNED \`${name}\` OFF at ${isoOf(record.decidedAt as number)}. A named health signal degraded in the hour after the flag was turned on:\n${readingsText(record.readings)}\n`
       + `${record.incident === null || record.incident === "unfiled" ? "The incident row could not be filed this tick and is retried." : `Incident: ${record.incident}`}\n`
       + "Nothing here is a decision yet: the flag is off, so the machinery is as it was before the change. Read both readings, then fix the cause forward or leave the change off, and say on #928 which. "
@@ -2002,7 +2002,7 @@ export function expireSuppressions({ suppressed, memo, now, minutes }: { suppres
     const since = seen[`${HELD_PREFIX}${entry.key}`];
     const said = `A ${entry.kind.toUpperCase()} KEPT THIS FROM YOU FOR ${Math.round((now - since) / MS_PER_MINUTE)} MINUTES and nothing claimed was working its reason: ${entry.reason}. THE ORIGINAL ORDER FOLLOWS.\n`;
     if (entry.order !== null) return { ...entry.order, prompt: `${said}${entry.order.prompt ?? ""}` };
-    return { session: entry.holder, cause: "suppression-expired", subject: entry.key, discriminator: entry.key, causeKey: `${entry.holder}/suppression-expired/${entry.key}`, prompt: said };
+    return { session: entry.holder, cause: "org-health", subject: "suppression-expired", discriminator: entry.key, causeKey: `${entry.holder}/org-health/suppression-expired/${entry.key}`, prompt: said };
   });
   return { released, memo: { ...kept, ...seen } };
 }
