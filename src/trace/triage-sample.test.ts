@@ -177,7 +177,7 @@ test("the command prints a sheet from a store file, the same twice, and refuses 
 
 // ---- a11ign/a11ign#4183: the scorer, over the FROZEN #4074 fixture and fake predictions. No model, no `gh`, no store, no sampler.
 import { readFileSync } from "node:fs";
-import { BAR, loadLabels, renderPrompt, renderScore, scoreTriage } from "./triage-sample.ts";
+import { BAR, loadLabels, renderPrompt, renderScore, scoreTriage, WEEK2_BAR } from "./triage-sample.ts";
 
 const { rows: SHEET, definitions: DEFINITIONS } = loadLabels();
 const UNREADABLE = [3, 44, 45, 57, 88, 98];
@@ -306,4 +306,102 @@ test("--score reads the frozen labels and the predictions file, and never the st
   assert.equal(run("--score").status, 1, "--score without a file is refused");
   assert.equal(run("--prompt").stdout, renderPrompt(loadLabels()));
   assert.equal(readFileSync(new URL("./triage-labels-4074.json", import.meta.url), "utf8").includes('"label":"wake"'), true);
+});
+
+// ---- a11ign/a11ign#4187: the week-2 bar, the `--cause` draw, `--labels`, and their refusals. The frozen sheet has 14 readable answer-owed wakes, too few to reach 20,
+// so the week-2 cases build their own sheets: every row a `wake` of one class unless the test says otherwise.
+const sheetOf = (wakeRows: number, cause = "answer-owed") => Array.from({ length: wakeRows }, (_, i) => ({ position: i + 1, session: "ceo", cause, causeKey: `ceo/${cause}/row-${i}`, cost: "0.01", label: "wake", excluded: false }));
+/** The predictions for `rows`, every one right, except that the positions in `wrong` are predicted `digest`. */
+const asAnswered = (rows: { position: number; label: string; }[], wrong: number[] = []) => rows.map((row) => ({ position: row.position, label: wrong.includes(row.position) ? "digest" : row.label }));
+
+test("the week-2 bar: 20 wake rows and no miss pass; ONE miss fails whatever the count; under 20 is not testable, and not a failure", () => {
+  const rows = sheetOf(20);
+  assert.deepEqual(scoreTriage(rows, asAnswered(rows), WEEK2_BAR).classes[0].bar, { passed: true, verdict: "candidate" });
+  assert.deepEqual(scoreTriage(rows, asAnswered(rows, [7]), WEEK2_BAR).classes[0].bar, { passed: false, verdict: "fail: missed a wake" });
+  const short = sheetOf(19);
+  assert.deepEqual(scoreTriage(short, asAnswered(short), WEEK2_BAR).classes[0].bar, { passed: false, verdict: "not testable this window: 19 wake rows, need 20" });
+  assert.deepEqual(scoreTriage(short, asAnswered(short, [7]), WEEK2_BAR).classes[0].bar, { passed: false, verdict: "fail: missed a wake" }, "a miss outranks the count: a short class with a miss is a fail");
+  assert.equal(scoreTriage(short, asAnswered(short)).classes[0].bar.passed, true, "control: the frozen BAR reads the same 19 as a candidate, so the 20 is WEEK2_BAR's and not a side effect");
+  assert.equal(scoreTriage(SHEET, asPredictions()).bar, BAR, "the default bar is the frozen one");
+});
+
+test("the printed bar names the bar it read: the frozen sheet's words are unchanged, and the week-2 bar names its wake rows", () => {
+  assert.match(renderScore(scoreTriage(SHEET, asPredictions())), /per cause class \(>= 5 readable rows and no missed wake; a pass is a candidate, never proved\)/);
+  const rows = sheetOf(20);
+  assert.match(renderScore(scoreTriage(rows, asAnswered(rows), WEEK2_BAR)), /per cause class \(>= 20 wake rows and no missed wake; a pass is a candidate, never proved\)/);
+});
+
+test("--cause restricts the draw to the named classes, and a name no wake carries is refused, not drawn as an empty sample", () => {
+  const named = ["answer-owed", "org-health"];
+  const sample = drawTriageSample({ ...BASE, seed: "4074", causes: named });
+  assert.equal(sample.rows.length, 20);
+  assert.ok(sample.rows.every((row) => named.includes(row.cause)), "every drawn wake is one of the named classes");
+  assert.ok(drawTriageSample({ ...BASE, seed: "4074" }).rows.some((row) => !named.includes(row.cause)), "control: unrestricted, the same seed reaches the other classes");
+  assert.deepEqual(sample.causes, named);
+  assert.throws(() => drawTriageSample({ ...BASE, seed: "4074", causes: ["answer-owd"] }), /no manager wake in the window has cause answer-owd/, "a typo draws nothing, so it must say so");
+});
+
+test("loadLabels refuses a sheet that is not whole: not a sheet, a position labelled twice, a label outside the three, a row with no cause", () => {
+  const dir = mkdtempSync(join(tmpdir(), "triage-labels-"));
+  made.push(dir);
+  const write = (name: string, body: unknown) => { const file = join(dir, name); writeFileSync(file, JSON.stringify(body)); return file; };
+  const first = sheetOf(1)[0];
+  assert.equal(loadLabels(write("whole.json", { definitions: DEFINITIONS, rows: sheetOf(20) })).rows.length, 20, "positive control: a whole sheet loads");
+  assert.throws(() => loadLabels(write("not-a-sheet.json", { rows: [] })), /is not a labelled sheet: it needs "definitions" and "rows"/);
+  assert.throws(() => loadLabels(write("twice.json", { definitions: DEFINITIONS, rows: [...sheetOf(2), first] })), /position 1 is labelled twice/);
+  assert.throws(() => loadLabels(write("maybe.json", { definitions: DEFINITIONS, rows: [{ ...first, label: "maybe" }] })), /label "maybe" is not one of wake \| digest \| drop/);
+  assert.throws(() => loadLabels(write("no-cause.json", { definitions: DEFINITIONS, rows: [{ ...first, cause: "" }] })), /position 1 names no cause/);
+});
+
+test("parseArgs: --cause repeats, a cause with no name is refused, and --labels is read only beside --score", () => {
+  assert.deepEqual(parseArgs(["--seed", "x", "--cause", "a", "--cause", "b"]).causes, ["a", "b"]);
+  assert.deepEqual(parseArgs(["--seed", "x"]).causes, []);
+  assert.throws(() => parseArgs(["--seed", "x", "--cause"]), /--cause takes a cause class name/);
+  assert.equal(parseArgs(["--score", "p.json", "--labels", "l.json"]).labels, "l.json");
+  assert.equal(parseArgs(["--score", "p.json"]).labels, null);
+});
+
+test("the CLI: --labels scores a week-2 sheet against WEEK2_BAR and never reads the store; --labels without --score and --cause with --score are refused", () => {
+  const dir = mkdtempSync(join(tmpdir(), "triage-week2-"));
+  made.push(dir);
+  const rows = sheetOf(20);
+  const [labels, predictions, store] = ["week2.json", "predictions.json", "events.ndjson"].map((name) => join(dir, name));
+  writeFileSync(labels, JSON.stringify({ definitions: DEFINITIONS, rows }));
+  writeFileSync(predictions, JSON.stringify(asAnswered(rows)));
+  writeFileSync(store, "this is not json\n");
+  const script = join(dirname(fileURLToPath(import.meta.url)), "triage-sample.ts");
+  const run = (...args: string[]) => spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+  const scored = run("--score", predictions, "--labels", labels, "--store", store);
+  assert.equal(scored.status, 0, scored.stderr);
+  assert.match(scored.stdout, /per cause class \(>= 20 wake rows and no missed wake/);
+  assert.match(scored.stdout, /answer-owed\s+n 20\s+wake rows 20\s+missed 0\s+candidate/);
+  const frozen = run("--score", predictions, "--store", store);
+  assert.equal(frozen.status, 1, "control: without --labels the frozen 100-row sheet is read, and 20 predictions do not answer it");
+  assert.match(frozen.stderr, /20 predictions for 100 rows/);
+  const orphan = run("--labels", labels, "--seed", "4187", "--store", store);
+  assert.equal(orphan.status, 1);
+  assert.match(orphan.stderr, /--labels reads the labels a score is read against: it needs --score/);
+  const mixed = run("--score", predictions, "--cause", "answer-owed");
+  assert.equal(mixed.status, 1);
+  assert.match(mixed.stderr, /--cause restricts the draw: it has no meaning with --score/);
+});
+
+test("the CLI draws only the named classes and says so in its provenance; an unknown name exits 1 with the usage", () => {
+  const dir = mkdtempSync(join(tmpdir(), "triage-cause-"));
+  made.push(dir);
+  const store = join(dir, "events.ndjson");
+  writeFileSync(store, `${EVENTS.map((one) => JSON.stringify(one)).join("\n")}\n`);
+  const script = join(dirname(fileURLToPath(import.meta.url)), "triage-sample.ts");
+  const run = (...args: string[]) => spawnSync(process.execPath, [script, ...args], { encoding: "utf8" });
+  const draw = ["--seed", "4074", "--store", store, "--from", "2026-10-07T00:00:00Z", "--to", "2026-10-08T00:00:00Z", "--size", "20", "--cause", "answer-owed", "--cause", "org-health"];
+  const json = run(...draw, "--json");
+  assert.equal(json.status, 0, json.stderr);
+  const sample = JSON.parse(json.stdout);
+  assert.equal(sample.rows.length, 20);
+  assert.ok(sample.rows.every((row: { cause: string; }) => ["answer-owed", "org-health"].includes(row.cause)));
+  assert.match(run(...draw).stdout, /manager wakes of cause answer-owed, org-health/);
+  const typo = run("--seed", "4074", "--store", store, "--cause", "answer-owd");
+  assert.equal(typo.status, 1);
+  assert.match(typo.stderr, /no manager wake in the window has cause answer-owd/);
+  assert.match(typo.stderr, /usage: node src\/trace\/triage-sample\.ts --seed/);
 });

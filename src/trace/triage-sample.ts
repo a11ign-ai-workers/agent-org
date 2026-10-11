@@ -142,22 +142,32 @@ function strataOf(wakes: TraceEvent[]): Map<string, TraceEvent[]> {
   return strata;
 }
 
-function checked({ events, seed, size = DEFAULT_SIZE, from, to, sessions = MANAGERS }: { events: TraceEvent[]; seed: string; size?: number; from: number; to: number; sessions?: string[]; }) {
+function checked({ events, seed, size = DEFAULT_SIZE, from, to, sessions = MANAGERS, causes = [] }: { events: TraceEvent[]; seed: string; size?: number; from: number; to: number; sessions?: string[]; causes?: string[]; }) {
   if (typeof seed !== "string" || seed === "") throw new Error("a seed is required: an unseeded draw cannot be reproduced");
   if (!Number.isInteger(size) || size < 1) throw new Error(`size must be a positive integer, got ${size}`);
   if (!(from < to)) throw new Error("the window is empty: `from` must be before `to`");
-  const wakes = managerWakes(events, { from, to, sessions });
-  if (wakes.length === 0) throw new Error("no manager wake in the window: there is nothing to draw, and an empty sample is not a sample of zero causes");
+  const inWindow = managerWakes(events, { from, to, sessions });
+  if (inWindow.length === 0) throw new Error("no manager wake in the window: there is nothing to draw, and an empty sample is not a sample of zero causes");
+  const wakes = restrictedTo(inWindow, causes);
   const strata = strataOf(wakes);
   if (strata.size > size) throw new Error(`${strata.size} causes in the window and only ${size} places: a sample cannot show every cause`);
   return { strata, size, seed, population: wakes.length };
 }
 
 /**
+ * @returns the wakes of the named causes, or all of them when none is named. A name no wake in the window carries is REFUSED: a typo would draw nothing, and an empty draw reads as a pass.
+ */
+function restrictedTo(wakes: TraceEvent[], causes: string[]): TraceEvent[] {
+  const unknown = causes.filter((cause) => !wakes.some((wake) => causeOf(wake) === cause));
+  if (unknown.length > 0) throw new Error(`no manager wake in the window has cause ${unknown.join(", ")}: a typo would draw nothing`);
+  return causes.length === 0 ? wakes : wakes.filter((wake) => causes.includes(causeOf(wake)));
+}
+
+/**
  * Draw the sample.
  * @param input `from` inclusive, `to` exclusive, epoch ms
  */
-export function drawTriageSample(input: { events: TraceEvent[]; seed: string; size?: number; from: number; to: number; sessions?: string[]; }): { rows: Array<{ wakeId: string; n: number; cause: string; causeKey: string | null; session: string; cost: { usd: number | null; state: string; turns: number; }; }>; strata: Array<{ cause: string; wakes: number; drawn: number; }>; population: number; } {
+export function drawTriageSample(input: { events: TraceEvent[]; seed: string; size?: number; from: number; to: number; sessions?: string[]; causes?: string[]; }): { rows: Array<{ wakeId: string; n: number; cause: string; causeKey: string | null; session: string; cost: { usd: number | null; state: string; turns: number; }; }>; strata: Array<{ cause: string; wakes: number; drawn: number; }>; population: number; causes: string[]; } {
   const { strata, size, seed, population } = checked(input);
   const turnsOf = turnsByWake(input.events);
   const counts = new Map([...strata].map(([cause, wakes]) => [cause, wakes.length]));
@@ -167,7 +177,7 @@ export function drawTriageSample(input: { events: TraceEvent[]; seed: string; si
     wakeId: wake.id, n: index + 1, cause: causeOf(wake), causeKey: wake.causeKey, session: wake.session, cost: costOf(wake, turnsOf),
   }));
   const strataReport = [...strata].map(([cause, wakes]) => ({ cause, wakes: wakes.length, drawn: quota.get(cause) ?? 0 })).sort((a, b) => b.wakes - a.wakes || byText(a.cause, b.cause));
-  return { rows, strata: strataReport, population };
+  return { rows, strata: strataReport, population, causes: input.causes ?? [] };
 }
 
 function costText({ usd, state }: { usd: number | null; state: string; }): string {
@@ -190,8 +200,9 @@ export function renderSheet(sample: ReturnType<typeof drawTriageSample>): string
  */
 export function renderProvenance(sample: ReturnType<typeof drawTriageSample>, { seed, from, to }: { seed: string; from: number; to: number; }): string {
   const lines = sample.strata.map((one) => `  ${one.cause}: ${one.drawn} of ${one.wakes}`);
+  const scope = sample.causes.length === 0 ? "manager wakes" : `manager wakes of cause ${sample.causes.join(", ")}`;
   return [
-    `seed ${seed}, window ${new Date(from).toISOString()} to ${new Date(to).toISOString()} (from inclusive, to exclusive), ${sample.rows.length} drawn of ${sample.population} manager wakes (MEASURED from the store).`,
+    `seed ${seed}, window ${new Date(from).toISOString()} to ${new Date(to).toISOString()} (from inclusive, to exclusive), ${sample.rows.length} drawn of ${sample.population} ${scope} (MEASURED from the store).`,
     "stratified by cause: one place each, the rest in proportion, a cause with fewer wakes than its share contributes all of them.",
     ...lines,
   ].join("\n");
@@ -205,7 +216,13 @@ export function renderProvenance(sample: ReturnType<typeof drawTriageSample>, { 
 //
 // THE SIX UNREADABLE ROWS (`excluded`: no ledger line, so no cause) were labelled `wake` so that an event nobody can read is not dropped. They are evidence of nothing, so every figure is given WITH and WITHOUT them,
 // and they belong to no cause class. THE SAMPLE IS STRATIFIED, not proportional: the label shares are not the population's, and nothing here scales them up or prices anything.
-export const BAR = Object.freeze({ minRows: 5 });
+export const BAR = Object.freeze({ minRows: 5, minWakeRows: 0 });
+/**
+ * The bar for the week-2 sheet (a11ign#4187), declared on that row BEFORE its sample was drawn: a class passes only with 20 labelled `wake` rows and no missed wake.
+ * Under 20 is "not testable this window", a result and not a failure. `--labels` selects it; the frozen #4074 sheet keeps `BAR`, which its tests pin.
+ */
+export const WEEK2_BAR = Object.freeze({ minRows: 0, minWakeRows: 20 });
+type Bar = Readonly<{ minRows: number; minWakeRows: number; }>;
 const LABELS_FILE = new URL("./triage-labels-4074.json", import.meta.url);
 const PERCENT = 100;
 const PERCENT_DECIMALS = 1;
@@ -213,9 +230,20 @@ const PERCENT_DECIMALS = 1;
 type LabelRow = { position: number; session: string; cause: string; causeKey: string; cost: string; label: string; excluded: boolean };
 type Figures = { n: number; agree: number; confusion: Record<string, Record<string, number>>; missedWakes: number[] };
 
-/** @returns the frozen #4074 sheet and labels */
-export function loadLabels(file: URL = LABELS_FILE): { definitions: Record<string, string>; rows: LabelRow[]; } {
-  return JSON.parse(readFileSync(file, "utf8"));
+/**
+ * @returns a labelled sheet, the frozen #4074 one by default. REFUSED unless it is whole: a score over a duplicated position, or a row no cause can explain, reads as a score over the sample.
+ */
+export function loadLabels(file: string | URL = LABELS_FILE): { definitions: Record<string, string>; rows: LabelRow[]; } {
+  const sheet = JSON.parse(readFileSync(file, "utf8"));
+  if (!sheet?.definitions || !Array.isArray(sheet.rows)) throw new Error(`${file} is not a labelled sheet: it needs "definitions" and "rows"`);
+  const positions = new Set<number>();
+  for (const row of sheet.rows) {
+    if (positions.has(row.position)) throw new Error(`position ${row.position} is labelled twice`);
+    positions.add(row.position);
+    if (!LABELS.includes(row.label)) throw new Error(`position ${row.position}: label ${JSON.stringify(row.label)} is not one of ${LABELS.join(" | ")}`);
+    if (typeof row.cause !== "string" || row.cause === "") throw new Error(`position ${row.position} names no cause: an unreadable row is "${NO_CAUSE}", never blank`);
+  }
+  return sheet;
 }
 
 /**
@@ -258,28 +286,29 @@ function figuresOf(rows: LabelRow[], predicted: Map<number, string>): Figures {
   return { n: rows.length, agree: LABELS.reduce((sum, label) => sum + confusion[label][label], 0), confusion, missedWakes };
 }
 
-/** @returns the declared bar, applied */
-function barFor({ n, wakeRows, missed }: { n: number; wakeRows: number; missed: number; }): { passed: boolean; verdict: string; } {
+/** @returns the declared bar, applied: a missed wake fails whatever the count; a class too small to read is "not testable", not a failure */
+function barFor({ n, wakeRows, missed }: { n: number; wakeRows: number; missed: number; }, bar: Bar): { passed: boolean; verdict: string; } {
   if (missed > 0) return { passed: false, verdict: "fail: missed a wake" };
-  if (n < BAR.minRows) return { passed: false, verdict: `fail: fewer than ${BAR.minRows} readable rows` };
+  if (n < bar.minRows) return { passed: false, verdict: `fail: fewer than ${bar.minRows} readable rows` };
+  if (wakeRows < bar.minWakeRows) return { passed: false, verdict: `not testable this window: ${wakeRows} wake rows, need ${bar.minWakeRows}` };
   return { passed: true, verdict: wakeRows === 0 ? "candidate (no wake row in the class: the no-miss half is untested)" : "candidate" };
 }
 
-function classesOf(readable: LabelRow[], predicted: Map<number, string>) {
+function classesOf(readable: LabelRow[], predicted: Map<number, string>, bar: Bar) {
   const byCause: Map<string, LabelRow[]> = new Map();
   for (const row of readable) byCause.set(row.cause, [...(byCause.get(row.cause) ?? []), row]);
   return [...byCause].map(([cause, rows]) => {
     const missedWakes = figuresOf(rows, predicted).missedWakes;
     const wakeRows = rows.filter((row) => row.label === "wake").length;
-    return { cause, n: rows.length, wakeRows, missedWakes, bar: barFor({ n: rows.length, wakeRows, missed: missedWakes.length }) };
+    return { cause, n: rows.length, wakeRows, missedWakes, bar: barFor({ n: rows.length, wakeRows, missed: missedWakes.length }, bar) };
   }).sort((a, b) => b.n - a.n || byText(a.cause, b.cause));
 }
 
 /**
  * Score predictions against the labels.
- * @param labels the frozen rows @param predictions `[{ position, label }]`, one per row
+ * @param labels the rows @param predictions `[{ position, label }]`, one per row @param bar the bar the classes are read against
  */
-export function scoreTriage(labels: LabelRow[], predictions: unknown) {
+export function scoreTriage(labels: LabelRow[], predictions: unknown, bar: Bar = BAR) {
   const predicted = predictedBy(labels, predictions);
   const readable = labels.filter((row) => !row.excluded);
   const excluded = labels.filter((row) => row.excluded);
@@ -287,9 +316,15 @@ export function scoreTriage(labels: LabelRow[], predictions: unknown) {
     withExcluded: figuresOf(labels, predicted),
     withoutExcluded: figuresOf(readable, predicted),
     excluded: { positions: excluded.map((row) => row.position), predicted: excluded.map((row) => ({ position: row.position, label: row.label, predicted: predicted.get(row.position) })) },
-    classes: classesOf(readable, predicted),
-    bar: BAR,
+    classes: classesOf(readable, predicted, bar),
+    bar,
   };
+}
+
+/** @returns the bar in words, as the printed score states it */
+function describeBar(bar: Bar): string {
+  const parts = [bar.minRows > 0 ? `${bar.minRows} readable rows` : null, bar.minWakeRows > 0 ? `${bar.minWakeRows} wake rows` : null].filter((part) => part !== null);
+  return `>= ${parts.join(" and >= ")} and no missed wake`;
 }
 
 const percent = (part: number, whole: number): string => `${((PERCENT * part) / whole).toFixed(PERCENT_DECIMALS)}%`;
@@ -308,48 +343,72 @@ export function renderScore(score: ReturnType<typeof scoreTriage>): string {
     "",
     `the six unreadable rows, apart (positions ${score.excluded.positions.join(", ")}):`, ...apart,
     "",
-    `the bar, per cause class (>= ${score.bar.minRows} readable rows and no missed wake; a pass is a candidate, never proved):`, ...classes, "",
+    `the bar, per cause class (${describeBar(score.bar)}; a pass is a candidate, never proved):`, ...classes, "",
   ].join("\n");
 }
 
-export function parseArgs(argv: string[]): { seed: string; size: number; from: number; to: number; store: string; json: boolean; score: string | null; prompt: boolean; } {
-  const flags = new Map();
+/** Flags that take no value; every other flag takes the next argument, and `--cause` may repeat */
+const SWITCHES = new Set(["json", "prompt"]);
+
+export type Args = {
+  seed: string; size: number; from: number; to: number; store: string; json: boolean;
+  score: string | null; labels: string | null; causes: string[]; prompt: boolean;
+};
+
+export function parseArgs(argv: string[]): Args {
+  const flags = new Map<string, string>();
+  const causes: string[] = [];
   for (let i = 0; i < argv.length; i++) {
     const flag = argv[i];
     if (!flag.startsWith("--")) throw new Error(`unexpected argument ${flag}`);
-    const boolean = flag === "--json" || flag === "--prompt";
-    flags.set(flag.slice(2), boolean ? "true" : argv[++i]);
+    const name = flag.slice(2);
+    if (SWITCHES.has(name)) flags.set(name, "true");
+    else if (name === "cause") causes.push(argv[++i] ?? "");
+    else flags.set(name, argv[++i]);
   }
-  const to = flags.has("to") ? Date.parse(flags.get("to")) : Date.now();
-  const from = flags.has("from") ? Date.parse(flags.get("from")) : to - WEEK_DAYS * MS_PER_DAY;
+  const to = flags.has("to") ? Date.parse(flags.get("to") ?? "") : Date.now();
+  const from = flags.has("from") ? Date.parse(flags.get("from") ?? "") : to - WEEK_DAYS * MS_PER_DAY;
   if (Number.isNaN(to) || Number.isNaN(from)) throw new Error("--from and --to take an ISO time, e.g. 2026-10-01T08:40:00Z");
   if (flags.has("score") && !flags.get("score")) throw new Error("--score takes a predictions file");
+  if (flags.has("labels") && !flags.get("labels")) throw new Error("--labels takes a labels file");
+  if (causes.some((cause) => cause === "")) throw new Error("--cause takes a cause class name");
+  if (flags.has("labels") && !flags.has("score")) throw new Error("--labels reads the labels a score is read against: it needs --score");
+  if (causes.length > 0 && flags.has("score")) throw new Error("--cause restricts the draw: it has no meaning with --score");
   return {
     seed: flags.get("seed") ?? "", size: flags.has("size") ? Number(flags.get("size")) : DEFAULT_SIZE, from, to,
     store: flags.get("store") ?? join(homedir(), ".cache", "a11ign", "trace", "events.ndjson"), json: flags.has("json"),
-    score: flags.get("score") ?? null, prompt: flags.has("prompt"),
+    score: flags.get("score") ?? null, labels: flags.get("labels") ?? null, causes, prompt: flags.has("prompt"),
   };
 }
 
 /** @returns the sampler's output: it is the only mode that reads the store */
-function sampled(args: ReturnType<typeof parseArgs>): string {
-  const sample = drawTriageSample({ events: readStore(args.store), seed: args.seed, size: args.size, from: args.from, to: args.to });
+function sampled(args: Args): string {
+  const sample = drawTriageSample({ events: readStore(args.store), seed: args.seed, size: args.size, from: args.from, to: args.to, causes: args.causes });
   return args.json ? `${JSON.stringify(sample, null, 2)}\n` : `${renderProvenance(sample, args)}\n\n${renderSheet(sample)}`;
 }
 
-/** @returns the frozen labels and the predictions file only: no store, no sampler */
-function scored(predictionsPath: string, json: boolean): string {
-  const result = scoreTriage(loadLabels().rows, JSON.parse(readFileSync(predictionsPath, "utf8")));
+/**
+ * @returns the score of a predictions file. With no `--labels` it reads the frozen #4074 sheet against `BAR`; with `--labels` it reads that
+ * sheet against `WEEK2_BAR`. Either way it never reads the store and never draws.
+ */
+function scored({ predictionsPath, labelsPath, json }: { predictionsPath: string; labelsPath: string | null; json: boolean; }): string {
+  const bar = labelsPath === null ? BAR : WEEK2_BAR;
+  const result = scoreTriage(loadLabels(labelsPath ?? undefined).rows, JSON.parse(readFileSync(predictionsPath, "utf8")), bar);
   return json ? `${JSON.stringify(result, null, 2)}\n` : renderScore(result);
 }
+
+const USAGE = `usage: node src/trace/triage-sample.ts --seed <text> [--size 100] [--from <iso>] [--to <iso>] [--store <path>] [--cause <class>]... [--json]
+       node src/trace/triage-sample.ts --score <predictions.json> [--labels <labels.json>] [--json]   (no --labels: the frozen #4074 sheet; never draws)
+       node src/trace/triage-sample.ts --prompt   (what a model is shown)
+`;
 
 async function main() {
   try {
     const args = parseArgs(process.argv.slice(2));
     if (args.prompt) process.stdout.write(renderPrompt(loadLabels()));
-    else process.stdout.write(args.score === null ? sampled(args) : scored(args.score, args.json));
+    else process.stdout.write(args.score === null ? sampled(args) : scored({ predictionsPath: args.score, labelsPath: args.labels, json: args.json }));
   } catch (error) {
-    process.stderr.write(`triage-sample: ${error instanceof Error ? error.message : String(error)}\nusage: node src/trace/triage-sample.ts --seed <text> [--size 100] [--from <iso>] [--to <iso>] [--store <path>] [--json]\n       node src/trace/triage-sample.ts --score <predictions.json> [--json]   (the frozen #4074 labels; never draws)\n       node src/trace/triage-sample.ts --prompt   (what a model is shown)\n`);
+    process.stderr.write(`triage-sample: ${error instanceof Error ? error.message : String(error)}\n${USAGE}`);
     process.exitCode = 1;
   }
 }
