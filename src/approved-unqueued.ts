@@ -25,6 +25,7 @@ import { FAILURE_LEDGER_FILE, recordFailures, type FailureEvent } from "./failur
 import { flagValue, refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { holdersOf } from "./pr-hold-state.ts";
 import { armedFromApi, armedQueryArgs } from "./pr-armed-state.ts";
+import { UNQUEUED_MINUTES } from "./org-health.ts";
 import { isBrokenRed } from "./red-pr.ts";
 import { editComment, keyedCommentsOf, mergedWindowOf, openPullsOf, postRowComment, reviewsOf } from "./ticket-port/approved-unqueued-reads.ts";
 
@@ -32,8 +33,8 @@ const MINUTE_MS = 60_000;
 const DAY_MS = 24 * 60 * MINUTE_MS;
 const P90 = 0.9;
 
-/** How long an approved pull request may stand unarmed before it is listed. THE ROW'S FIGURE; a pull request at exactly this age is not listed. */
-export const UNQUEUED_MINUTES = 15;
+/** How long an approved pull request may stand unarmed before it is listed. THE ROW'S FIGURE, the one `org-health.ts`'s `approved-unqueued` canary signal already counts by; a pull request at exactly this age is not listed. */
+export { UNQUEUED_MINUTES };
 /** The target for approval-to-queue (#4970): the p90 is over it when it is MORE than this. */
 export const P90_TARGET_MINUTES = 5;
 /** How many merged pull requests per repository the p90 is over. */
