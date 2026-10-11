@@ -18,6 +18,7 @@ import { execFileSync } from "node:child_process";
 import { REPO } from "../project-identity.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
 import { assertNoLeakInArgv } from "../lib/leak-patterns.ts";
+import { latestApprovals, type ApprovalFacts } from "./approval-head-rule.ts";
 
 /** @param {string[]} args */
 export const gh = (args: string[]) => {
@@ -109,6 +110,29 @@ export function lookupClosingIssues(number: number, repo: string = REPO): { numb
         number: issue.number, repo: issue.repository?.nameWithOwner, title: issue.title,
         labels: issue.labels.nodes.map((/** @type {{name: string}} */ l: { name: string; }) => l.name),
       }));
+  });
+}
+
+/**
+ * What `approvalHeadReasons` needs for PR `number`: the PR's own commits, and each approver's commits since
+ * the approved one. REST (core pool) like the rest of the required gate. `null` on any failed read.
+ * @param {number} number @param {string} head
+ */
+export function lookupApprovalFacts(number: number, head: string): ApprovalFacts | null {
+  return lookup(() => {
+    const lines = (out: string) => out.split("\n").filter(Boolean).map((l) => JSON.parse(l));
+    const reviews = lines(gh(["api", `repos/${REPO}/pulls/${number}/reviews`, "--paginate", "--jq",
+      ".[] | {reviewer: .user.login, state, commitId: .commit_id, submittedAt: .submitted_at}"]));
+    const commitsOf = (range: string) => lines(gh(["api", `repos/${REPO}/compare/${range}`, "--paginate",
+      "--jq", "{status, commits: [.commits[] | {sha, parents: [.parents[].sha]}]}"]));
+    const own = commitsOf(`main...${head}`).flatMap((page) => page.commits.map((c: { sha: string; }) => c.sha));
+    const approvals = latestApprovals(reviews).map((review) => {
+      const pages = commitsOf(`${review.commitId}...${head}`);
+      const ancestor = ["ahead", "identical"].includes(pages[0]?.status);
+      return { reviewer: review.reviewer, commitId: review.commitId,
+        sinceApproval: ancestor ? pages.flatMap((page) => page.commits) : null };
+    });
+    return { ownShas: own, approvals };
   });
 }
 
