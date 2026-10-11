@@ -1,23 +1,27 @@
 Closes #5094.
 
 ## What
-- `ROLE_LOGIN` in `src/work-gate.ts` has no `ceo` entry any more (it is `{}`), so `pipelineCodeownerReviewMissing` names nothing: the #1959 cause is retired. The cause name stays declared, so the cause-list pins in `project-roles.test.ts` and the trace fixtures are unchanged.
+- `ROLE_LOGIN` in `src/work-gate.ts` has no `ceo` entry any more (it is `{}`), so `pipelineCodeownerReviewMissing` names nothing: the #1959 cause is retired (a11ign#5044 step 2). The cause name stays declared, so the cause-list pins in `project-roles.test.ts` and the trace fixtures are unchanged.
 - The owned-path check (`src/owned-path-signoff.ts`) is the guard that replaces it. Its test file is unchanged and green in the same run.
-- Tests: the #1959 positive-firing cases are replaced by retirement pins (no PR is named for a workflows path with no code-owner review; `decide()` orders `ceo` for no PR, with and without a drain). The FINISH/ACTION classification assertions are kept.
+- Tests:
+  - `src/packaging/work-gate.test.ts`: the #1959 positive-firing cases are replaced by "#1959 retired" pins (no PR is named for a workflows path with no code-owner review; `decide()` orders `ceo` for no PR, with and without a drain). The FINISH/ACTION classification assertions are kept.
+  - `src/work-gate-codeowner-review-repos.test.ts` (#3720 keying, agent-org#483 review states) and `src/work-gate-codeowner-app-review.test.ts` (a11ign#796 managers-App review): every case keeps its fixture and asserts nothing is named. Each header points at the "#1959 retired" control.
+- Changeset: `.changeset/the-codeowner-review-keys-by-repository.md`.
 
 ## Mutation
-- Restoring `ceo: "a11ign-ai-leads"` in `ROLE_LOGIN` turns two named tests red: `#1959 retired: an open PR touching a pipeline path with no code-owner review is NOT named` and `#1959 retired: decide() orders ceo for NO pull request, a drain included`. The file was restored from a backup copy and `diff` confirmed it byte-identical.
+- Restoring `ceo: "a11ign-ai-leads"` in `ROLE_LOGIN` turns nine tests red: two in `work-gate.test.ts` and seven in `work-gate-codeowner-review-repos.test.ts`. The file was restored from a backup copy and `diff` confirmed it byte-identical.
+
+## Done-when 2: the owned-path check refuses an unsigned change
+The check in `src/owned-path-signoff.ts` refuses a change to an owned path whose body does not state each owned-path fact. The refusal names the fact and the states that satisfy it. `src/packaging/owned-path-signoff.test.ts` ("a change to an owned path with NO sign-off is refused, and it names each missing fact") runs `packages/nvda-worker/src/capture-core.ts` with the body "Fixes a typo." and asserts exit `1`, the fact `CAPTURE_PROTOCOL_VERSION` and the phrase "say one of: unchanged, bumped".
 
 ## Caveats
-- **Blocked: `src/work-gate-codeowner-review-repos.test.ts` is red after this change** (4 tests: #3720 repo keying and #483 review behaviour). It asserts the `ceo` login names a PR, which is now false. It is outside this row's Region (`src/work-gate.ts`, `src/packaging/work-gate.test.ts`), so it was not edited and this PR is NOT opened. Needed: a Region amendment naming that file (and its changeset `.changeset/the-codeowner-review-keys-by-repository.md`), or a ruling on how its cases should read now.
-- Done-when 2 (quote of the owned-path check refusing an unsigned change) is in the PR body once the PR opens.
 - The `ceo` entry of `ROLE_LOGIN` in `src/lane-ownership.ts` is NOT touched (named as out of scope in the row).
-- `tsc --noEmit` cannot run in this checkout: `@types/node` is not installed (the primary checkout lacks it too). `eslint` has no config in this repo.
+- Dead code left for a follow-up: the `CODEOWNER_REVIEW_APPROVED_ONLY` switch and the `ownerHasReviewed` path are no longer reachable from the pipeline check.
 
 ## Acceptance
 
 ```bash
-bash -c 'cd ~/repos/agent-org && npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/work-gate.test.ts src/packaging/owned-path-signoff.test.ts'
+bash -c 'cd ~/repos/agent-org && npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/work-gate.test.ts src/packaging/owned-path-signoff.test.ts src/work-gate-codeowner-review-repos.test.ts src/work-gate-codeowner-app-review.test.ts'
 ```
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
