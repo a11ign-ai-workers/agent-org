@@ -31,6 +31,8 @@ Mutation: predicate always true, always false, template out of `LONG_RUNNING_TEM
 
 Outside-Region: src/packaging/host-units.test.ts — it pins the long-running list, the compile-cache population and the #3443 walk, all of which enumerate shipped units.
 Outside-Region: src/packaging/host-project-paths.test.ts — it pins the tool's entry count (30 to 31), the one numeric pin the new template moves.
+Outside-Region: src/no-loader.test.ts — it lists the units that run node on a `.ts`; the new unit is one more.
+Outside-Region: src/packaging/work-gate.test.ts — it declares each test file that joins the `history` population; the new test file imports `host-units.ts` like the others.
 Outside-Region: .changeset/a-webhook-host-ships-the-event-receivers-unit.md — the entry a project that pins a tag reads.
 
 platform: systemd already starts and restarts a `Type=simple` service and the existing long-running and orphan paths already stop and remove one; the only new machinery is the host-keyed predicate, because `OPTIONAL_UNITS` reads the project's file.
