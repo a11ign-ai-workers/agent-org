@@ -10,7 +10,7 @@ Measured: `VERDICT pass: 28 tests in 1 file` for the acceptance file with the fi
 
 Not here, and named: the installed `~/.local/bin/gh` is still the old rendered wrapper. It stops producing the false incident only after an orchestrator re-renders and installs `host/gh` from this branch; this change does not install it.
 
-Closes a11ign/a11ign#4777
+Closes a11ign/agent-org#1006
 
 platform: no platform feature replaces this shell check; the fix is in the wrapper that GitHub calls through.
 
