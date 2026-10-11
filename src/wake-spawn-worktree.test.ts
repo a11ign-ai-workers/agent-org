@@ -27,6 +27,9 @@ after(() => rmSync(SCRATCH, { recursive: true, force: true }));
 const PROJECT = join(SCRATCH, "project");
 cpSync(fileURLToPath(new URL("./packaging/fixtures/row-claim-file-overlap-rule/project", import.meta.url)), PROJECT, { recursive: true });
 const DECLARATION = join(PROJECT, ".agent-org", "project.json");
+// A SPAWN IS REFUSED BEFORE THE CLAIM WHEN THE ENGINEER BRIEF IS NOT AT ITS ABSOLUTE PATH (#869), so the recorded project holds one: a one-line file,
+// written here rather than into the fixture because `row-claim-file-overlap-rule/project` is shared with suites that never spawn.
+writeFileSync(join(PROJECT, ".agent-org", "roles", "engineer.md"), "# engineer brief (a fixture's one line)\n");
 const declared = JSON.parse(readFileSync(DECLARATION, "utf8")) as { tracker: { key: string; repo: string; board: { owner: string; number: number } }[] };
 declared.tracker.push({ key: "agent-org", repo: "a11ign/agent-org", board: { owner: "a11ign", number: 2 } });
 writeFileSync(DECLARATION, JSON.stringify(declared));
