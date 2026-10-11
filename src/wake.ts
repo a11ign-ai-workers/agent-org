@@ -1329,6 +1329,21 @@ function startWithoutThem({ fs, path, repoRoot, unpublished }: { fs: LinkFs; pat
 }
 
 /**
+ * REMOVE THE LINKS OF A TREE'S `node_modules` THAT NO LONGER RESOLVE, and only those (#808). A tree laid before the clone was re-installed `--prod`
+ * (#714) holds a link per clone entry, and the devDependencies' now point at nothing; `pnpm install` then `mkdir`s THROUGH the dangling `@rstest`
+ * link and dies `ENOENT`, so the order was `UNDELIVERED` on every tick. `lstat` says link, `existsSync` (which follows it) says no. A link that
+ * resolves, and anything that is not a link, is left alone: the install would otherwise re-fetch everything the clone still serves. Only ever
+ * called with the TREE's `node_modules`, so what is removed is a link and never what it named.
+ */
+function clearDanglingLinks(fs: LinkFs, modules: string): void {
+  if (!fs.existsSync(modules)) return;
+  for (const entry of fs.readdirSync(modules)) {
+    const link = `${modules}/${entry}`;
+    if (fs.lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink() && !fs.existsSync(link)) fs.rmSync(link, { force: true });
+  }
+}
+
+/**
  * SUPPLY WHAT THE CLONE LACKS FROM THE TREE: install the tree's own declared packages into the TREE's `node_modules` and report `null`, or a
  * refusal naming the first line of why it could not, with the hand remedy ({@link supplyCommand}). The tree is private to one review and is
  * removed with it (`git worktree remove --force`), so nothing a reviewer shares is written and the clone is left as it was. Not a silent
@@ -1337,6 +1352,11 @@ function startWithoutThem({ fs, path, repoRoot, unpublished }: { fs: LinkFs; pat
 function installIntoTree({ fs, path, repoRoot, declared, missing, install }: { fs: LinkFs; path: string; repoRoot: string; declared: string[]; missing: string[]; install: TreeInstall; }): LinkResult {
   const lacks = `${repoRoot}/node_modules lacks ${namedList(missing)}, which ${path}/package.json declares; supply `
     + `${missing.length === 1 ? "it" : "them"} with ${supplyCommand({ fs, path, repoRoot })}`;
+  try {
+    clearDanglingLinks(fs, `${path}/node_modules`);
+  } catch (err) {
+    return `could not clear the dangling links in ${path}/node_modules before installing: ${firstLine(err)}`;
+  }
   try {
     install({ cwd: path, args: installArgs(fs, path) });
   } catch (err) {
