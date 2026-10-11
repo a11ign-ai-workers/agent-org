@@ -15,6 +15,7 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { blockerClearedOrders, blockerClearedReading, claimStallTick, decide, readRecentlyClosed, BLOCKER_CLEARED_DROP_REASONS } from "./work-gate.ts";
 import { claimRecordComment } from "./row-claim.ts";
+import { readsRecentlyClosed, recentlyClosedConnection } from "./packaging/rows-by-label-fixtures.ts";
 
 const T = (hms: string) => Date.parse(`2026-10-04T${hms}Z`);
 const CLEARED = T("10:35:57");
@@ -173,7 +174,8 @@ test("#3451 `decide` carries it: the order is absent with the facts and present 
 // #3706: A BLOCKER ABSENT FROM THE CLOSING LIST IS BOUNDED, NOT UNREAD.
 //
 // `gh issue list --state closed --limit 100` is the 100 most recently CREATED closed rows, so #3534's blocker #3509 (closed 2026-10-04T20:56:24Z, created long before) was absent and the
-// order was KEPT for six hours for a worker that had claimed at 18:37:10Z. The list is now read with `--search sort:updated-desc`, and `closedAt <= updatedAt` makes the OLDEST LISTED
+// order was KEPT for six hours for a worker that had claimed at 18:37:10Z. The list is now read ordered by `updatedAt` (first `--search sort:updated-desc`, and since #5050 the
+// `issues(states: CLOSED, orderBy: UPDATED_AT)` connection, which is no search), and `closedAt <= updatedAt` makes the OLDEST LISTED
 // `updatedAt` an upper bound on every absent row's closing. THE FIXTURE PINS BOTH SORTS: its oldest listed closing (3538, 2026-10-04T20:31:42Z) is NOT its oldest listed `updatedAt`
 // (3532, 2026-10-05T02:02:42Z), so a bound taken from the oldest closing -- the refuted one -- fails (3).
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -190,7 +192,10 @@ const listing = [
   { number: 3538, closedAt: "2026-10-04T20:31:42Z", updatedAt: "2026-10-05T03:00:00Z" },
   { number: 3532, closedAt: "2026-10-05T00:38:59Z", updatedAt: "2026-10-05T02:02:42Z" },
 ];
-const closingsOf = (rows: object[] = listing) => readRecentlyClosed(() => JSON.stringify(rows));
+const closingsOf = (rows: object[] = listing) => readRecentlyClosed((args) => {
+  if (!readsRecentlyClosed(args)) throw new Error(`unexpected call: ${args.join(" ")}`);
+  return recentlyClosedConnection(rows);
+});
 
 const rowOf = (blockers: number[]) => ({ number: NUMBER, title: "a row", body: "", labels: [{ name: "in-progress" }, { name: `session:${HOLDER}` }],
   blockedBy: { nodes: blockers.map((number) => ({ number, state: "CLOSED" })) } });
@@ -209,16 +214,21 @@ const T3534 = { blockers: [3509, 3532, 3667], now: D("18:38:49") };
 
 test("#3706 (a) the reader asks ONE call, sorted by updatedAt, and bounds an absent row by the OLDEST LISTED updatedAt (not the oldest closing)", () => {
   const calls: string[][] = [];
-  const closings = readRecentlyClosed((args) => { calls.push(args); return JSON.stringify(listing); });
+  const closings = readRecentlyClosed((args) => { calls.push(args); return recentlyClosedConnection(listing); });
   assert.equal(calls.length, 1);
-  assert.deepEqual(calls[0].slice(calls[0].indexOf("--search")), ["--search", "sort:updated-desc", "--json", "number,closedAt,updatedAt"]);
+  // #5050: the premise was "`--search sort:updated-desc`"; the same ordering is the connection's `orderBy`, and the call is NOT a search.
+  assert.equal(readsRecentlyClosed(calls[0]), true);
+  assert.deepEqual(calls[0].slice(0, 2), ["api", "graphql"]);
+  assert.equal(calls[0].some((a) => a === "--search" || a.includes("sort:updated")), false, "a connection read, never a search");
+  const query = String(calls[0].find((a) => a.startsWith("query=")));
+  assert.match(query, /issues\(states:CLOSED,first:\$first,orderBy:\{field:UPDATED_AT,direction:DESC\}\)\{nodes\{number closedAt updatedAt\}\}/, "newest UPDATE first, closedAt and updatedAt");
   assert.equal(closings?.closedNoLaterThan, BOUND);
   assert.ok(Math.min(...(closings as Map<number, number>).values()) < BOUND, "CONTROL: the oldest listed closing is NOT the bound, so the two sorts are told apart");
   assert.equal(closings?.get(3667), D("12:11:59"), "the map is still a Map of closings");
 });
 
 test("#3706 (b) THE BOUND IS CHECKED, NOT TRUSTED: a listing not sorted by updatedAt, or one with an unreadable updatedAt, carries none", () => {
-  const sortedByCreation = [...listing].reverse(); // what `gh` returns when it silently ignores a sort key: updatedAt ascending here
+  const sortedByCreation = [...listing].reverse(); // what a read returns when its sort key is silently ignored: updatedAt ascending here
   const noUpdated = listing.map(({ updatedAt: _dropped, ...rest }) => rest); // an old fake, or a field `gh` stopped returning
   const garbled = listing.map((r, i) => (i === 2 ? { ...r, updatedAt: "not a date" } : r));
   for (const [name, rows] of [["unsorted", sortedByCreation], ["no updatedAt", noUpdated], ["unreadable updatedAt", garbled], ["empty", []]] as const) {
@@ -226,6 +236,8 @@ test("#3706 (b) THE BOUND IS CHECKED, NOT TRUSTED: a listing not sorted by updat
   }
   assert.equal(closingsOf()?.closedNoLaterThan, BOUND, "CONTROL: the sorted listing does carry one");
   assert.equal(readRecentlyClosed(() => { throw new Error("gh refused"); }), null);
+  assert.equal(readRecentlyClosed(() => JSON.stringify({ data: { repository: { issues: null } }, errors: [{ message: "x" }] })), null, "#5050: an answer that is no connection is a refusal, never an empty list");
+  assert.equal(readRecentlyClosed(() => JSON.stringify(listing)), null, "and the old `issue list` array is no answer to the connection read");
 });
 
 test("#3706 (1) the #3534 timeline: #3509 absent, claim 2026-10-05T18:37:10Z -- no order, one drop, `claimed-after-clearing` (and it was KEPT before)", () => {

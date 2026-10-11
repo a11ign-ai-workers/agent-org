@@ -18,6 +18,7 @@ import { labelsToStrip as labelsToStripOfLeaf, stripClaimLabelsVia } from "../cl
 import { labelsToStrip as labelsToStripOfCloser } from "../close-rows-for-merged-pr.ts";
 import { performRelease } from "../wake.ts";
 import { claimRecordComment } from "../row-claim.ts";
+import { connectionOf, readsRowsByLabel } from "./rows-by-label-fixtures.ts";
 
 type Agent = { label: string; status: string };
 type Order = { session: string; cause: string; causeKey: string; release?: { row: number; session: string; why: string; interrupt?: boolean;
@@ -30,7 +31,7 @@ const NOW = Date.parse("2026-10-04T19:33:00Z");
 const record = (session: string) => ({ body: claimRecordComment({ session, branch: BRANCH, worktree: "../wt-3535" }),
   createdAt: "2026-10-04T19:32:06Z", author: { login: "a11ign-ai-workers" } });
 
-/** A CLOSED row as `gh issue list --state closed --label in-progress` returns it. */
+/** A CLOSED row as the closed `in-progress` list returns it (#5050: a by-label connection read; `connectionOf` writes the nodes from this `gh issue list` shape). */
 const closedRow = (session: string, extra: object = {}) => ({ number: 3535, title: "a closed row ends its instance",
   labels: ["in-progress", "started", `session:${session}`].map((name) => ({ name })), comments: [record(session)], closedByPullRequestsReferences: [], ...extra });
 
@@ -272,6 +273,12 @@ test("#3535 the gate's `main` hands the follow-ups' closed claims to the orders:
 
 // --- #3883: THE LABELS OF A CLOSED ROW WHOSE HOLDER IS NOT LISTED ----------------------------------------------------------------------------------------
 
+/** Is this argv the gate's read of the CLOSED rows still carrying `in-progress` (#5050: the by-label connection, where it was `issue list --state closed --label`)? */
+const isClosedClaimLabelRead = (args: string[]) => {
+  const read = readsRowsByLabel(args);
+  return read !== null && read.state === "CLOSED" && read.label === "in-progress";
+};
+
 /** The org as herdr lists it: both standing panes (a COMPLETE listing) and whatever else is passed. */
 const org = (...others: string[]): Agent[] => ["ceo", "orchestrator", ...others].map((label) => ({ label, status: "idle" }));
 const stale = (number: number, ...names: string[]) => ({ number, labels: names.map((name) => ({ name })) });
@@ -404,12 +411,14 @@ test("#745 (6) the read asks EVERY declared tracker, aimed at it, and a second t
   const asked: { args: string[]; repo: string | undefined }[] = [];
   const run = (args: string[], repo?: string) => {
     asked.push({ args, repo });
-    return JSON.stringify(repo === "a11ign/agent-org" ? [{ ...closed(745, "worker-745", minutesAgo(11)) }] : [closed(4437, "worker-9", minutesAgo(1))]);
+    if (!isClosedClaimLabelRead(args)) throw new Error(`unexpected call: ${args.join(" ")}`);
+    return connectionOf(repo === "a11ign/agent-org" ? [{ ...closed(745, "worker-745", minutesAgo(11)) }] : [closed(4437, "worker-9", minutesAgo(1))]);
   };
   const got = closedClaimLabelsWhenListed([...org(), { label: "worker-745", status: "idle" }, { label: "worker-9", status: "idle" }], run, [undefined, "a11ign/agent-org"])!;
   assert.deepEqual(asked.map((a) => a.repo), [undefined, "a11ign/agent-org"], "the home tracker unaimed, as ever; the other aimed");
   assert.deepEqual(got.unread, []);
   assert.deepEqual(got.rows?.map((r) => [r.number, r.repo]), [[4437, undefined], [745, "a11ign/agent-org"]]);
+  assert.equal(asked.every((a) => readsRowsByLabel(a.args)?.state === "CLOSED"), true, "#5050: each is the closed connection read of that tracker, not a search");
   const edits: string[][] = [];
   const said: string[] = [];
   const stripped = stripClosedClaims(got, { gh: (args) => { edits.push(args); return ""; }, say: (l) => { said.push(l); }, repo: "a11ign/a11ign", nowMs: TICK });
@@ -422,7 +431,7 @@ test("#745 (6) the read asks EVERY declared tracker, aimed at it, and a second t
 test("#745 (7) a refused read stays null, never 'no debris': one tracker's refusal is named and the other's rows are still decided", () => {
   const agents = org("worker-745");
   const rows = [closed(745, "worker-9", minutesAgo(11))];
-  const refusing = (bad: (repo: string | undefined) => boolean) => (_args: string[], repo?: string) => { if (bad(repo)) throw new Error("HTTP 502"); return JSON.stringify(rows); };
+  const refusing = (bad: (repo: string | undefined) => boolean) => (_args: string[], repo?: string) => { if (bad(repo)) throw new Error("HTTP 502"); return connectionOf(rows); };
   const trackers = [undefined, "a11ign/agent-org"];
   const all = closedClaimLabelsWhenListed(agents, refusing(() => true), trackers)!;
   assert.equal(all.rows, null, "every read refused: null, and not []");
@@ -431,14 +440,14 @@ test("#745 (7) a refused read stays null, never 'no debris': one tracker's refus
   assert.match(said.join("|"), /NOT read.*refused/);
   const part = closedClaimLabelsWhenListed(agents, refusing((repo) => repo === "a11ign/agent-org"), trackers)!;
   assert.deepEqual([part.rows?.length, part.unread.length], [1, 1], "the home tracker's row is read; the second tracker is named as unread");
-  assert.equal(closedClaimLabelsWhenListed(agents, () => "{}", trackers)!.rows, null, "a non-list answer is a refusal too");
+  assert.equal(closedClaimLabelsWhenListed(agents, () => "{}", trackers)!.rows, null, "an answer that is no connection is a refusal too");
 });
 
 test("#745 (8) the follow-ups' wave reads each declared tracker once, from the one listing", () => {
   const trackers = declaredTrackerRepos();
   assert.equal(trackers[0], undefined, "the home tracker leads, unaimed");
-  const { batches } = followUps(org("worker-3535"), (args) => (args.includes("number,labels,closedAt") ? JSON.stringify([stale(5, "in-progress")]) : "[]"));
-  const asked = batches.flat().filter((c) => c.args.includes("number,labels,closedAt"));
+  const { batches } = followUps(org("worker-3535"), (args) => (isClosedClaimLabelRead(args) ? connectionOf([stale(5, "in-progress")]) : "[]"));
+  const asked = batches.flat().filter((c) => isClosedClaimLabelRead(c.args));
   assert.deepEqual(asked.map((c) => c.repo), trackers, "one read per tracker the project declares, and no tracker twice");
 });
 
@@ -461,22 +470,27 @@ test("#3883 (5) a failed edit is said, counted as NOT stripped, and does not sto
 
 test("#3883 (6) the read: asked once, labels only, closed + in-progress, and ONLY with a COMPLETE listing (a partial listing reads every live holder as absent)", () => {
   const seen: string[][] = [];
-  const run = (args: string[]) => { seen.push(args); return JSON.stringify([stale(1, "in-progress")]); };
+  const run = (args: string[]) => { seen.push(args); return connectionOf([stale(1, "in-progress")]); };
   assert.equal(closedClaimLabelsWhenListed(null, run), null);
   assert.equal(closedClaimLabelsWhenListed([{ label: "worker-9", status: "idle" }], run), null, "neither standing pane listed");
   assert.equal(seen.length, 0, "no call made for either");
   const asked = closedClaimLabelsWhenListed(org(), run, [undefined])!;
-  assert.deepEqual(asked.rows, [stale(1, "in-progress")]);
+  assert.deepEqual(asked.rows?.map(({ number, labels }) => ({ number, labels })), [stale(1, "in-progress")], "the connection's `labels { nodes }` is back as the array the strip reads");
   assert.equal(seen.length, 1);
-  assert.deepEqual(seen[0].slice(0, 6), ["issue", "list", "--state", "closed", "--label", "in-progress"]);
-  assert.equal(seen[0][seen[0].indexOf("--json") + 1], "number,labels,closedAt", "no comments: the page is the debris and nothing else");
+  // #5050: the premise "`issue list --state closed --label in-progress`" was a SEARCH; the same question is the closed by-label connection read, and it is NOT a search.
+  assert.deepEqual(readsRowsByLabel(seen[0]), { label: "in-progress", state: "CLOSED" });
+  assert.deepEqual(seen[0].slice(0, 2), ["api", "graphql"]);
+  assert.equal(seen[0].some((a) => a === "--search" || a.startsWith("search")), false, "a connection read, never a search");
+  const selection = String(seen[0].find((a) => a.startsWith("query="))).replace(/^.*?pageInfo\{hasNextPage endCursor\} nodes\{/, "");
+  assert.match(selection, /^number labels\(first:50\)\{nodes\{name\}\} closedAt\}/, "number, labels and closedAt");
+  assert.doesNotMatch(selection, /comments|body/, "no comments: the page is the debris and nothing else");
   assert.deepEqual(closedClaimLabelsWhenListed(org(), () => { throw new Error("502"); }, [undefined])?.rows, null, "a refusal is null, never []");
   assert.deepEqual(closedClaimLabelsWhenListed(org(), () => "{}", [undefined])?.rows, null);
 });
 
 test("#3883 (7) the follow-ups' wave makes the read once, from the SAME listing it hands #3535 (a second herdr read would be a second answer)", () => {
-  const { batches } = followUps(org("worker-3535"), (args) => (args.includes("number,labels,closedAt") ? JSON.stringify([stale(5, "in-progress")]) : "[]"));
-  const asked = batches.flat().filter((c) => c.args.includes("--state") && c.args.includes("closed") && c.args.includes("in-progress") && c.args.includes("number,labels,closedAt"));
+  const { batches } = followUps(org("worker-3535"), (args) => (isClosedClaimLabelRead(args) ? connectionOf([stale(5, "in-progress")]) : "[]"));
+  const asked = batches.flat().filter((c) => isClosedClaimLabelRead(c.args));
   assert.equal(asked.length, declaredTrackerRepos().length, "once per declared tracker (agent-org#745), never twice for one");
   const calls: Call[] = [];
   const got = readOpenRowFollowUps(OPEN_ROWS, ((args: string[]) => { calls.push({ args, repo: undefined }); return "[]"; }) as never, undefined as never, undefined as never) as { closedClaimLabels: unknown };
@@ -497,5 +511,6 @@ test("#3883 (8) ONE COPY: the gate strips through the leaf, the close path re-ex
 
 test("#3883 (9) the read is counted in GH_READS", () => {
   assert.match(GH_READS.conditionalOnCompleteHerdrListing, /readClosedClaimLabelRows/);
-  assert.match(GH_READS.conditionalOnCompleteHerdrListing, /--state closed --label in-progress/);
+  assert.match(GH_READS.conditionalOnCompleteHerdrListing, /api graphql repository\.issues\(labels: in-progress, states: CLOSED\)/, "#5050: a connection, not `issue list --label`, which `gh` sends as a search");
+  assert.match(GH_READS.conditionalOnCompleteHerdrListing, /number,labels,closedAt/);
 });

@@ -108,11 +108,28 @@ function exhaustedResource(error: unknown, run: Run): string {
     + "search or secondary, which the message does not name";
 }
 
-function noteRefusal({ ask, run, error }: { ask: LabelledRead; run: Run; error: unknown; }): void {
+function noteRefusal({ what, run, error, log }: { what: string; run: Run; error: unknown; log?: (line: string) => void; }): void {
   const first = textOf(error).split("\n").find((line) => line.trim() !== "")?.trim() ?? "";
   const reason = `refused for a rate limit on ${exhaustedResource(error, run)}: ${first}`;
   refusal = reason;
-  (ask.log ?? stderrLine)(`rows-by-label: the read of ${ask.state} rows labelled ${ask.label} was ${reason}; no label read is asked again this tick, and the next tick asks`);
+  (log ?? stderrLine)(`rows-by-label: the read of ${what} was ${reason}; no label read is asked again this tick, and the next tick asks`);
+}
+
+/**
+ * #5050: ANY GRAPHQL LIST READ OF THE TICK, under the one refusal memory. The gate's other connection reads (the closed rows owing an answer, the newest-updated closed rows)
+ * are not by-label reads but spend the same account's resource, so one of them refused for a limit must stop the rest of the tick's asking and name the resource exactly as a
+ * by-label read does. `read` is the call; a refusal that is not a limit is thrown on and remembered by nobody.
+ *
+ * @param ask `what` names the rows in the line a refusal leaves
+ */
+export function readUnlessRefused<T>({ what, run, log, read }: { what: string; run: Run; log?: (line: string) => void; read: () => T; }): T {
+  if (refusal !== null) throw new Error(`not asked again this tick: an earlier read was ${refusal}`);
+  try {
+    return read();
+  } catch (error) {
+    if (isLimitRefusal(error)) noteRefusal({ what, run, error, log });
+    throw error;
+  }
 }
 
 /**
@@ -121,14 +138,8 @@ function noteRefusal({ ask, run, error }: { ask: LabelledRead; run: Run; error: 
  * @param ask `select` is the node selection; `newest` bounds the read to the newest rows instead of refusing a long population
  */
 export function readRowsByLabel(ask: LabelledRead): any[] {
-  const { run } = ask;
-  if (refusal !== null) throw new Error(`not asked again this tick: an earlier read was ${refusal}`);
-  try {
-    return readPages(ask, run);
-  } catch (error) {
-    if (isLimitRefusal(error)) noteRefusal({ ask, run, error });
-    throw error;
-  }
+  const { run, log } = ask;
+  return readUnlessRefused({ what: `${ask.state} rows labelled ${ask.label}`, run, ...(log === undefined ? {} : { log }), read: () => readPages(ask, run) });
 }
 
 /** The fields a claim comparison reads, in the connection's shape. */

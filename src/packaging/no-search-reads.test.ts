@@ -1,18 +1,26 @@
-// no-token: none -- reads source files and answers `run` from fakes; nothing here reaches gh
+// no-token: GH_READS -- #5050. Importing anything from `work-gate.ts` reaches `defaultRun` (`execFileSync("gh", ...)`), and this file never lets it run: every reader is
+// handed an injected `run` that answers from a fake, and the source guard reads files and spawns nothing.
 /**
- * #5039: NO SEARCH-BACKED READ ON THE CLAIM PATH.
+ * #5039: NO SEARCH-BACKED READ ON THE CLAIM PATH. #5050: NOR IN THE GATE, AND ONE REFUSAL IS ASKED ONCE PER TICK.
  *
  * `gh issue list --label X` (and `--search`) is sent by `gh` as a GitHub SEARCH, whose allowance is separate from and far smaller than the
  * GraphQL points. On 2026-10-11 the scheduler App's installation spent it and every claim was refused for it (`B4 COULD NOT BE ASKED`, eighteen
  * times in thirty minutes) while 3,948 points were left and a plain `gh api graphql` still worked. The claim's read of who holds what now reads
  * `repository.issues(labels:)`, a connection, which the search allowance does not govern.
  *
- * Three claims, each with a case that can fail:
+ * #5050 is the gate's half: `work-gate.ts` listed rows with `--label` and `--search` in eleven places, and the same installation spent the same allowance on them (1,620 list
+ * calls in the 14:00Z hour, read from the workers' call ledger, 889 of them the gate's). Its label lists are now the same connection read; the closed rows owing an answer are
+ * aliased connections; the newest-updated closed rows are `issues(orderBy: UPDATED_AT)`. `queue-table.ts` and `work-tick.ts` list nothing with a flag, and are walked all the same.
+ *
+ * Claims, each with a case that can fail:
  *   1. BEHAVIOUR: `lookupClaimedRegions` answers through a `run` that REFUSES any argv carrying `--label` or `--search` (POSITIVE CONTROL: the same
  *      fake answers the non-search read), and a read that fails is `null`, never `[]` (NEGATIVE CONTROL);
  *   2. A read refused for a limit is asked ONCE in a tick, and the line it leaves names WHICH resource;
  *   3. SOURCE: no file on the claim path builds a `issue list` / `pr list` argv carrying `--label` or `--search`; the guard SEES a fixture that
- *      does and passes one that does not.
+ *      does and passes one that does not;
+ *   4. (#5050) EVERY LIST THE GATE READS answers through a `run` that refuses any search argv (POSITIVE CONTROL: the same fake answers the connection), and a read the
+ *      limit refused is NOT asked again by ANY other list read of the tick, whichever kind;
+ *   5. (#5050) SOURCE, widened: the gate's own files (`work-gate.ts`, `queue-table.ts`, `work-tick.ts`, `work-gate/`) are walked by the same guard.
  */
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -21,8 +29,10 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import ts from "typescript";
 import { lookupClaimedRegions } from "../row-claim/file-overlap-rule.ts";
+import { readChairmanBlocked, readClaimedRowComments, readClosedAnswerRows, readClosedClaimLabelRows, readPromotableRows, readReadyRows, readRecentlyClosed }
+  from "../work-gate.ts";
 import { forgetRefusedReads, readClaimedRows } from "../ticket-port/rows-by-label.ts";
-import { connectionOf, readsRowsByLabel } from "./rows-by-label-fixtures.ts";
+import { closedAnswerConnection, connectionOf, readsClosedAnswerRows, readsRecentlyClosed, readsRowsByLabel, recentlyClosedConnection } from "./rows-by-label-fixtures.ts";
 
 beforeEach(() => forgetRefusedReads());
 
@@ -115,6 +125,9 @@ test("a refusal that is not a limit is not remembered: the next ask goes to GitH
 
 // --- 3. the source guard ------------------------------------------------------------------------------------------------------------
 
+/** The flags `gh issue list` / `gh pr list` turn into a SEARCH (#5050 adds the author and assignee the row names: `pr list --author` is one, and neither is needed by a read here). */
+const SEARCH_FLAGS = new Set(["--label", "-l", "--search", "-S", "--author", "-A", "--assignee", "-a"]);
+
 /** The call-shaped array literals that LIST rows with a search-backed flag: `["issue", "list", ..., "--label", ...]`. */
 function searchBackedLists(source: string): string[] {
   const file = ts.createSourceFile("x.ts", source, ts.ScriptTarget.Latest, true);
@@ -124,7 +137,7 @@ function searchBackedLists(source: string): string[] {
     if (ts.isArrayLiteralExpression(node)) {
       const strings = node.elements.map(text);
       const lists = (strings[0] === "issue" || strings[0] === "pr") && strings[1] === "list";
-      const flags = strings.filter((s) => s === "--label" || s === "-l" || s === "--search" || s === "-S");
+      const flags = strings.filter((s) => s !== null && SEARCH_FLAGS.has(s));
       if (lists && flags.length > 0) found.push(`${strings[0]} list ${flags.join(" ")} (line ${file.getLineAndCharacterOfPosition(node.getStart()).line + 1})`);
     }
     ts.forEachChild(node, visit);
@@ -136,6 +149,9 @@ function searchBackedLists(source: string): string[] {
 /** The files the claim reads through: the claim, its rules, the sweep freeze beside them, the incident rows, and the port directory. */
 const COVERED = [
   "row-claim.ts", "sweep-window.ts", "ci-failure-class.ts",
+  // #5050: the gate. `work-gate.ts` is where eleven of them were; the other two list nothing with a flag and stay walked so the first one added is seen.
+  "work-gate.ts", "queue-table.ts", "work-tick.ts",
+  ...readdirSync(join(SRC, "work-gate")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `work-gate/${f}`),
   ...readdirSync(join(SRC, "row-claim")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `row-claim/${f}`),
   ...readdirSync(join(SRC, "ticket-port")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `ticket-port/${f}`),
 ];
@@ -143,7 +159,14 @@ const COVERED = [
 test("NEGATIVE CONTROL (source): no file the claim reads through builds a list argv carrying `--label` or `--search`", () => {
   assert.ok(COVERED.includes("row-claim/file-overlap-rule.ts") && COVERED.includes("ticket-port/rows-by-label.ts"),
     "the walk sees the files this row converted: an empty walk would pass for the wrong reason");
+  assert.ok(["work-gate.ts", "queue-table.ts", "work-tick.ts", "work-gate/org-health.ts"].every((file) => COVERED.includes(file)), "and the gate's own files (#5050)");
   for (const file of COVERED) assert.deepEqual(searchBackedLists(readFileSync(join(SRC, file), "utf8")), [], `${file} lists rows through a SEARCH`);
+});
+
+test("POSITIVE CONTROL (source, #5050): the gate's list reads are SEEN by the walk -- `work-gate.ts` still names `issue list`, so the walk is reading a file that lists", () => {
+  const gate = readFileSync(join(SRC, "work-gate.ts"), "utf8");
+  assert.match(gate, /\["issue", "list", "--state", "open", "--limit"/, "the whole open list is still an `issue list` (it is no search), so the guard is looking at real list calls");
+  assert.doesNotMatch(gate, /"--label", (?:CHAIRMAN|BACKLOG|READY|CLAIM)_LABEL/, "and the four label lists it used to build are gone");
 });
 
 test("POSITIVE CONTROL (source): the guard sees a fixture that lists with `--label` or `--search`, and passes one that does not", () => {
@@ -151,7 +174,109 @@ test("POSITIVE CONTROL (source): the guard sees a fixture that lists with `--lab
   const search = `const read = (run) => run(["pr", "list", "--search", "merged:>=2026-10-01"]);\n`;
   assert.deepEqual(searchBackedLists(label), ['issue list --label (line 1)']);
   assert.deepEqual(searchBackedLists(search), ['pr list --search (line 1)']);
+  assert.deepEqual(searchBackedLists(`const read = (run) => run(["pr", "list", "--author", "app/a11ign", "--json", "number"]);\n`), ['pr list --author (line 1)'],
+    "#5050: an author filter on a list is a search too");
   assert.deepEqual(searchBackedLists(`const read = (run) => run(["issue", "list", "--repo", r, "--state", "open", "--json", "number"]);\n`), [], "a plain list is not a search");
   assert.deepEqual(searchBackedLists(`const make = (run) => run(["issue", "create", "--title", t, "--label", "shared-failure"]);\n`), [],
     "and a label on a WRITE is not a read: the guard names the list shape, not the flag");
+});
+
+// --- 4. the gate's lists, behaviour -------------------------------------------------------------------------------------------------
+
+/** The gate's readers, each with the one call it makes, so a test can drive them all through one fake. */
+const GATE_READS: { name: string; read: (run: (args: string[]) => string) => unknown; }[] = [
+  { name: "readChairmanBlocked", read: (run) => readChairmanBlocked(run) },
+  { name: "readPromotableRows", read: (run) => readPromotableRows(run) },
+  { name: "readReadyRows", read: (run) => readReadyRows(run) },
+  { name: "readClaimedRowComments", read: (run) => readClaimedRowComments(run, TRACKER) },
+  { name: "readClosedClaimLabelRows", read: (run) => readClosedClaimLabelRows((args) => run(args), [undefined]).rows },
+  { name: "readClosedAnswerRows", read: (run) => readClosedAnswerRows(run) },
+  { name: "readRecentlyClosed", read: (run) => readRecentlyClosed(run) },
+];
+
+/** What a gate list read gets from a GitHub whose SEARCH allowance is spent: every `--label`/`--search` argv is refused in the incident's words, a connection answers. */
+function gateGitHub({ failWith }: { failWith?: string; } = {}) {
+  const calls: string[][] = [];
+  const run = (args: string[]): string => {
+    calls.push(args);
+    if (failWith !== undefined) throw new Error(failWith);
+    if (args.includes("--label") || args.includes("--search") && args[0] !== "label") throw new Error(LIMIT_TEXT);
+    if (args[0] === "label") return JSON.stringify([{ name: "answer:ceo" }]);
+    if (readsRowsByLabel(args) !== null) return connectionOf([claimed(7, "src/a.ts", ["ready", "backlog", "needs:chairman", "in-progress"])]);
+    if (readsClosedAnswerRows(args) !== null) return closedAnswerConnection([]);
+    if (readsRecentlyClosed(args)) return recentlyClosedConnection([{ number: 3, closedAt: "2026-10-11T10:00:00Z", updatedAt: "2026-10-11T10:00:00Z" }]);
+    throw new Error(`unexpected call: ${args.join(" ")}`);
+  };
+  return { run, calls };
+}
+
+test("POSITIVE CONTROL: every list the gate reads answers while every `--label` and `--search` argv is refused -- and the fake DOES refuse one", () => {
+  const { run, calls } = gateGitHub();
+  assert.throws(() => run(["issue", "list", "--label", "ready"]), /rate limit already exceeded/, "the control: a pass below is not a fake that accepts anything");
+  calls.length = 0;
+  for (const { name, read } of GATE_READS) {
+    forgetRefusedReads();
+    const answer = read(run);
+    assert.notEqual(answer, null, `${name} answered through connections`);
+  }
+  assert.ok(calls.length >= GATE_READS.length, "each reader asked");
+  assert.deepEqual(calls.filter((args) => args.includes("--label") || (args.includes("--search") && args[0] !== "label")), [], "and none of them was a search");
+});
+
+test("NEGATIVE CONTROL: a gate list read that FAILS is `null`, never `[]` -- for every reader", () => {
+  for (const { name, read } of GATE_READS) {
+    forgetRefusedReads();
+    const { run } = gateGitHub({ failWith: "gh: 502" });
+    const answer = read(run);
+    assert.ok(answer === null || (Array.isArray(answer) && answer.length === 0 && name === "readClosedAnswerRows") === false, `${name} is not an empty list from a failed read`);
+    assert.equal(answer, null, `${name} answers null for a failed read`);
+  }
+});
+
+test("a read refused for a LIMIT is asked ONCE in the tick: no other gate list read -- by label, closed answers or recently closed -- is sent, and the line names the resource", () => {
+  const lines: string[] = [];
+  const probe = "HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 3948\r\nX-Ratelimit-Resource: graphql\r\n\r\n{}";
+  const calls: string[][] = [];
+  const run = (args: string[]): string => {
+    calls.push(args);
+    if (args[0] === "api" && args.includes("-i")) return probe;
+    throw new Error(LIMIT_TEXT);
+  };
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((chunk: string) => { lines.push(String(chunk)); return true; }) as typeof process.stderr.write;
+  try {
+    assert.equal(readReadyRows(run), null, "the first read is refused: null");
+    const asked = calls.length;
+    for (const { read } of GATE_READS.filter(({ name }) => name !== "readReadyRows")) read(run);
+    assert.equal(calls.length, asked, "and not one more call was sent by the other six readers");
+  } finally {
+    process.stderr.write = write;
+  }
+  const said = lines.filter((line) => line.startsWith("rows-by-label:"));
+  assert.equal(said.length, 1, "the refusal is said once");
+  assert.match(said[0], /OPEN rows labelled ready/);
+  assert.match(said[0], /3948 of 5000 left/, "and names the pool it read");
+});
+
+test("the closed answer reads are under the SAME memory as the by-label ones: a refused closed read stops the next by-label read of the tick", () => {
+  forgetRefusedReads();
+  let refused = false;
+  const calls: string[][] = [];
+  const run = (args: string[]): string => {
+    calls.push(args);
+    if (args[0] === "label") return JSON.stringify([{ name: "answer:ceo" }]);
+    if (readsClosedAnswerRows(args) !== null) { refused = true; throw new Error(LIMIT_TEXT); }
+    throw new Error("unexpected call after the refusal");
+  };
+  const quiet = process.stderr.write.bind(process.stderr);
+  process.stderr.write = (() => true) as typeof process.stderr.write;
+  try {
+    assert.equal(readClosedAnswerRows(run), null);
+    const asked = calls.length;
+    assert.equal(readChairmanBlocked(run), null, "and the by-label read, which would have thrown `unexpected call`, was never sent");
+    assert.equal(calls.length, asked);
+  } finally {
+    process.stderr.write = quiet;
+  }
+  assert.ok(refused, "control: the closed read was the one that was refused");
 });

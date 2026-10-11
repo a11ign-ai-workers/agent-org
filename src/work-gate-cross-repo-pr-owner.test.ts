@@ -14,6 +14,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { scopesOf, scopeTick, withScopedPrOwners, resolverDefectOf, fileResolverDefects } from "./work-gate.ts";
 import { sendToGitHub, unstampableRefusal, main as prOpen, EXIT_NOTHING_SENT } from "./pr-open.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 // agent-org#519: the body is no longer an acceptance source, so the diff ADDS this file and `readFile` returns the text the body meant to carry.
 const withAcceptanceFile = (body: string) => ({
@@ -133,16 +134,18 @@ test("(8) resolverDefectOf: a PR that reached ceo while naming a live claimant I
   assert.equal(resolverDefectOf(pr436({ labels: [{ name: "session:worker-77" }] }), LIVE_4371, HOME), null, "its own label answers it");
 });
 
-/** A recorder standing in for `gh`; `open` is what `issue list --label resolver-defect` answers. */
+/** A recorder standing in for `gh`; `open` is what the by-label read of the OPEN `resolver-defect` rows answers (#5050: a GraphQL connection, no longer `issue list --label`). */
 function recorder(open: number[], { refuse = false }: { refuse?: boolean } = {}) {
   const calls: string[][] = [];
   const run = (args: string[]) => {
     calls.push(args);
     if (refuse) throw new Error("HTTP 502");
-    return args[0] === "issue" && args[1] === "list" ? JSON.stringify(open.map((number) => ({ number }))) : "";
+    return readsRowsByLabel(args) !== null ? connectionOf(open.map((number) => ({ number }))) : "";
   };
   return { calls, run };
 }
+/** What each recorded call was, the by-label read named as such: it travels as `api graphql`, which says nothing of what it asked. */
+const kindsOf = (calls: string[][]) => calls.map((call) => (readsRowsByLabel(call) !== null ? "by-label read" : call.slice(0, 2).join(" ")));
 const defectOf = (number: number) => resolverDefectOf(pr436({ number }), LIVE_4371, HOME)!;
 
 test("(9) fileResolverDefects: the first defect files ONE row, later ones comment on it, and a PR is written once", () => {
@@ -152,12 +155,13 @@ test("(9) fileResolverDefects: the first defect files ONE row, later ones commen
   const log = () => {};
   const first = recorder([]);
   assert.equal(fileResolverDefects([defectOf(436)], { run: first.run, statePath, log }), 1);
-  assert.deepEqual(first.calls.map((call) => call.slice(0, 2).join(" ")), ["issue list", "label create", "issue create"]);
+  assert.deepEqual(kindsOf(first.calls), ["by-label read", "label create", "issue create"]);
+  assert.deepEqual(readsRowsByLabel(first.calls[0]), { label: "resolver-defect", state: "OPEN" }, "the open class row is asked for by its label, as a connection and not a search");
   assert.ok(first.calls[2].includes("resolver-defect"), "the row carries the label");
   assert.match(first.calls[2].join(" "), /a11ign\/agent-org#436/, "and names its fixture");
   const second = recorder([4400]);
   assert.equal(fileResolverDefects([defectOf(436), defectOf(437)], { run: second.run, statePath, log }), 1, "436 is remembered; 437 is new");
-  assert.deepEqual(second.calls.map((call) => call.slice(0, 2).join(" ")), ["issue list", "issue comment"]);
+  assert.deepEqual(kindsOf(second.calls), ["by-label read", "issue comment"]);
   assert.equal(second.calls[1][2], "4400", "a later PR comments on the open class row");
   const third = recorder([4400]);
   assert.equal(fileResolverDefects([defectOf(436), defectOf(437)], { run: third.run, statePath, log }), 0);

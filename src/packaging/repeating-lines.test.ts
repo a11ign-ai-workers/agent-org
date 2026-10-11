@@ -21,6 +21,7 @@ import { REPEAT_TICKS, normaliseLine, parseTicks, parseAllowlist, loadAllowlist,
   repeatingLinesTick } from "../repeating-lines.ts";
 import { refusalReport } from "../wake.ts";
 import { CAUSES, JUDGMENT_CAUSES, START_CAUSES, AGED_BACKLOG_MS, agedBacklogOrders, decide, readPromotableRows } from "../work-gate.ts";
+import { connectionOfSelected, readsRowsByLabel, selectedFieldsOf } from "./rows-by-label-fixtures.ts";
 
 const GATE_ENTRY = fileURLToPath(new URL("../work-gate.ts", import.meta.url));
 const STUB_MODE = 0o755;
@@ -257,11 +258,16 @@ test("#2848: both causes are declared as JUDGMENT causes and neither is a START 
   }
 });
 
-/** The real gate as a process, with `gh` returning empty lists and `journalctl` printing `journalText`. */
+/**
+ * The real gate as a process, with `gh` returning empty lists and `journalctl` printing `journalText`. #5050: the label lists are connection reads over `gh api graphql`
+ * now (`issue list --label` was a SEARCH), so the stub answers those -- and the newest-updated closed rows' -- with an empty connection, as it answered `[]` before.
+ */
 function gateWithJournal(journalText: string) {
   const dir = mkdtempSync(join(tmpdir(), "repeating-gate-"));
   try {
-    writeFileSync(join(dir, "gh"), "#!/bin/sh\ncase \"$*\" in\n  \"pr list\"*|\"issue list\"*) printf '%s' '[]' ;;\n  *) exit 1 ;;\nesac\n");
+    const emptyConnection = `{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}`;
+    writeFileSync(join(dir, "gh"), "#!/bin/sh\ncase \"$*\" in\n  \"pr list\"*|\"issue list\"*) printf '%s' '[]' ;;\n"
+      + `  "api graphql"*'labels:[$label]'*|"api graphql"*'issues(states:CLOSED,first:$first'*) printf '%s' '${emptyConnection}' ;;\n  *) exit 1 ;;\nesac\n`);
     writeFileSync(join(dir, "journal.txt"), journalText);
     writeFileSync(join(dir, "journalctl"), `#!/bin/sh\ncat "${join(dir, "journal.txt")}"\n`);
     chmodSync(join(dir, "gh"), STUB_MODE);
@@ -310,9 +316,13 @@ test("#2848: `decide` carries the aged question, `readPromotableRows` asks for t
   const aged = backlogRow(2701, 40);
   const waiting = backlogRow(2702, 40, { body: "Not-before: 2099-01-01" });
   const asked: string[][] = [];
-  const read = readPromotableRows((args) => (asked.push(args), JSON.stringify([aged, waiting])));
+  // #5050: the backlog rows are a by-label CONNECTION read, answered with only the fields it SELECTED (as GitHub does), so a read that dropped `createdAt` would age nothing.
+  const read = readPromotableRows((args) => (asked.push(args), connectionOfSelected([aged, waiting], args)));
   assert.deepEqual(read?.map((r) => r.number), [2701], "the row waiting on a date is not promotable stock, so it is not aged either");
-  assert.match(asked[0].join(" "), /number,title,createdAt,labels,body,blockedBy/);
+  assert.equal(asked.length, 1, "one read, and it is the backlog label's");
+  assert.deepEqual(readsRowsByLabel(asked[0]), { label: "backlog", state: "OPEN" });
+  assert.ok(!asked[0].includes("--search"), "and not a search");
+  assert.ok(selectedFieldsOf(asked[0])?.includes("createdAt"), `the by-label connection's selection names \`createdAt\`, the date the aging needs (${JSON.stringify(selectedFieldsOf(asked[0]))})`);
   const decided = decide({ prs: [], readyRows: [], promotableRows: read ?? [] });
   assert.deepEqual(decided.filter((o: { cause: string }) => o.cause === "backlog-aged-unpromoted").map((o: { subject: string }) => o.subject), ["row-2701"]);
 });
