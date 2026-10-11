@@ -1,5 +1,5 @@
-// COPIED FROM `packages/guards/src/git-env.ts` at c6560f915 (#2658, child 3g of #69; ADR 0040, decision 4): the tool's own copy, so `agent-org` imports nothing outside
-// its package. The product keeps its original and the two can drift, with no cross-repository pin: `agent-org-outward-edges.test.ts` compares them.
+// COPIED FROM `packages/guards/src/git-env.ts` at cc4dd7e09 (#2658, child 3g of #69; ADR 0040, decision 4): the tool's own copy, so `agent-org` imports nothing outside
+// its package. The product keeps its original and the two can drift, with no cross-repository pin: `copies-drifted` in `src/org-health.ts` reads them.
 // CHANGED FROM THE ORIGINAL: NOTHING but this header.
 // ==== end of copy header ====
 // @ts-check
@@ -19,10 +19,10 @@
 //
 // `@a11ign/screenreader-fleet` publishes `check-worker-code.mjs`/`deploy-worker.mjs` as `bin` entries, so
 // its own git-spawning files (`code-drift.mjs` among them) cannot import anything outside their own
-// package -- a published tarball does not carry this repo's top-level `scripts/`. `packages/worker-fleet/
-// src/git-safe-env.mjs` is therefore a DELIBERATE, disclosed duplicate of this file for that one package,
-// pinned equal to it by `packages/worker-fleet/src/git-safe-env.test.ts`. Every other caller (this repo's
-// own top-level scripts, and `packages/lab`/`packages/control`, both `"private": true` and never
+// package -- a published tarball does not carry this repo's top-level `scripts/`. the fleet's
+// `src/git-safe-env.mjs` is therefore a DELIBERATE, disclosed duplicate of this file for that one package,
+// pinned equal to it by the fleet's `src/git-safe-env.test.ts`. Every other caller (this repo's
+// own top-level scripts, and `a11ign/lab`/`packages/control`, both `"private": true` and never
 // published) imports this file directly.
 
 /**
