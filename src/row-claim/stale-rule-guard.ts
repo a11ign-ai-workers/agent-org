@@ -21,7 +21,17 @@
 // modules beside it. A sixth rule module added tomorrow is covered without anyone remembering to list it,
 // which is the property a hand-typed list cannot have.
 //
-// A LEAF MODULE: its only import is `local-import-closure.ts`, which imports nothing but `node:` builtins.
+// WHAT THE CHECKOUT IS COMPARED WITH IS THE RELEASE THE HOST CAN RUN, NOT `origin/main` (agent-org#889, a11ign/agent-org#885 class 2). The host runs the newest release tag
+// (`update-tool` moves its checkout there and nowhere else), so a rule file merged to `main` and not yet released is a rule NO checkout the host can start holds, and counting
+// `HEAD..origin/main` refused every claim for as long as releases were failing: 163 refusals between 08:09 and 09:15 on 2026-10-11, no worker started, and the worker that
+// would have fixed the outage was one of them. The count is `HEAD..<newest release tag>` now. A checkout behind a RELEASE still refuses, which is #1014's case; a checkout
+// behind only unreleased merges is current as far as the host can tell, and says what main holds that the release does not.
+//
+// THE TWO CANNOT ALWAYS BE TOLD APART, and the answer is then to let the claim through, said aloud: no release tag in the checkout (a shallow clone, tags not fetched) leaves
+// nothing to name the release by. A refusal there is the storm again for every such checkout, and a guard that cannot stand behind a verdict does not refuse on it; it logs
+// the rule files `origin/main` has that this checkout lacks, so the fail-open is never silent.
+//
+// A LEAF MODULE: its imports are `local-import-closure.ts`, `git-env.ts` and `release-tag.ts`, which import nothing but `node:` builtins (the last nothing at all).
 // `row-claim.ts` is reachable from a pre-install entry, so a package specifier here would die with
 // ERR_MODULE_NOT_FOUND before `pnpm install` -- `pre-install-import-graph.test.ts` is what proves it.
 import { execFileSync } from "node:child_process";
@@ -30,6 +40,7 @@ import { fileURLToPath } from "node:url";
 
 import { localImports } from "../lib/local-import-closure.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
+import { LATEST, chooseReleaseTag } from "../lib/release-tag.ts";
 
 /**
  * Every git spawn here scrubs `GIT_*`. A hook or a parent process exports `GIT_DIR`/`GIT_INDEX_FILE`, and
@@ -119,23 +130,57 @@ export function rulePathspec(entry: string, repoRoot: string, deps?: { imports?:
 }
 
 /**
- * How many commits `origin/main` has that this checkout does not, TOUCHING THE FILES GIVEN -- or `null`
- * when the comparison cannot be made at all.
+ * How many commits `against` has that this checkout does not, TOUCHING THE FILES GIVEN -- or `null` when the comparison cannot be made at all. `against` is the
+ * newest release tag when one is held (see `releaseRefOf`) and `origin/main` only when none is, where the answer is logged and never a refusal.
  *
  * `null` is CANNOT_ASK and is deliberately NOT folded into zero: a checkout with no `origin/main` ref (a
  * fresh clone mid-fetch, a detached tree) cannot say whether its rule is current, and "could not ask" and
  * "up to date" are the two answers this repository has most often seen conflated.
  */
-export function commitsBehindOn({ repoRoot, files, run }: { repoRoot: string; files: string[]; run?: (args: string[]) => string; }): number | null {
+export function commitsBehindOn({ repoRoot, files, run, against = MAIN_REF }: { repoRoot: string; files: string[]; run?: (args: string[]) => string; against?: string; }): number | null {
   const git = run ?? gitIn(repoRoot);
   try {
-    const count = Number(git(["rev-list", "--count", "HEAD..origin/main", "--", ...files]).trim());
+    const count = Number(git(["rev-list", "--count", `HEAD..${against}`, "--", ...files]).trim());
     // A NUMBER THIS DID NOT PARSE IS NOT A ZERO. `Number("")` is 0 and `Number("fatal: …")` is NaN, and a
     // guard that reads either as "up to date" is the defect it exists to prevent, one layer in.
     return Number.isInteger(count) ? count : null;
   } catch (error) {
-    void error; // no origin/main here, or not a work tree: CANNOT_ASK, never "up to date"
+    void error; // no such ref here, or not a work tree: CANNOT_ASK, never "up to date"
     return null;
+  }
+}
+
+/** The ref a checkout is compared with when it holds no release tag, and the one the unreleased files are read off. */
+const MAIN_REF = "origin/main";
+
+/**
+ * THE RELEASE THE HOST CAN RUN, as a ref this checkout holds: the newest `vX.Y.Z` tag, ordered numerically as `update-tool` selects (`chooseReleaseTag`), spelled
+ * `refs/tags/<tag>` so a branch of the same name cannot be read for it. `null` when the checkout holds no release tag or git cannot list them, which is "cannot tell the
+ * release from main" and not "the release is main".
+ */
+export function releaseRefOf({ repoRoot, run }: { repoRoot: string; run?: (args: string[]) => string; }): string | null {
+  const git = run ?? gitIn(repoRoot);
+  try {
+    const tag = chooseReleaseTag(git(["tag", "--list"]).split("\n").map((line) => line.trim()).filter(Boolean), LATEST);
+    return tag === null ? null : `refs/tags/${tag}`;
+  } catch (error) {
+    void error; // no tags to read: the caller says "no release known" by name
+    return null;
+  }
+}
+
+/**
+ * The rule files `origin/main` holds that `release` does not -- the unreleased merges, repo-relative -- or `[]` when the question cannot be asked. Three-dot: what main
+ * changed since the release, which is empty (and right to be) when the local `origin/main` is behind the release rather than a list of the release's own files.
+ * Used only to word a log line, never to decide.
+ */
+export function unreleasedFiles({ repoRoot, files, release, run }: { repoRoot: string; files: string[]; release: string; run?: (args: string[]) => string; }): string[] {
+  const git = run ?? gitIn(repoRoot);
+  try {
+    return git(["diff", "--no-renames", "--name-only", `${release}...${MAIN_REF}`, "--", ...files]).split("\n").filter(Boolean);
+  } catch (error) {
+    void error; // no origin/main here: nothing is claimed about it
+    return [];
   }
 }
 
@@ -204,6 +249,10 @@ const cannotAskInstalled = (entry: string, why: string) => `CANNOT ASK whether t
  * came from: the commit pnpm installed against `a11ign/agent-org` `main`, narrowed to the rule files exactly as the other layouts are.
  *
  * Not a blanket refusal either: `main` moving on anything but the rule leaves the installed copy current, which is why this compares files and not tips.
+ *
+ * STILL COMPARED WITH `main`, NOT WITH THE NEWEST RELEASE (agent-org#889 moved the checkout layouts only): naming the release takes a second GitHub call in a pre-install
+ * leaf, which `gh-call-baseline.json` counts, and an installed copy under `node_modules/` is no longer how the host runs the tool (#4389, the tool runs from a checkout).
+ * So an installed pin is still refused for a rule file that `main` holds and no release does: the same defect, left in the one layout nobody is meant to run.
  */
 export function installedStaleReason({ entry, sha, packageRoot, compare }: { entry: string; sha: string | null; packageRoot: string; compare?: (sha: string) => { status: string; files: string[]; } | null; }): string | null {
   if (sha === null) return cannotAskInstalled(entry, "the install directory names no commit, so there is nothing to compare with `main`.");
@@ -227,14 +276,14 @@ const cannotAskNothingTracked = (root: string, spec: string[]) => `CANNOT ASK wh
   + "  nothing. The tool's own layout is not the one this guard was asked about; this refuses rather than assuming it is up to date.";
 
 /**
- * The refusal, or `null` when this checkout's copy of the rule is the current one.
+ * The refusal, or `null` when this checkout's copy of the rule is the one the host can run.
  *
- *
- *   `files` is for tests: a real list, never a stub of git. `compare` is the installed layout's GitHub question, injectable for the same reason.
+ *   `files` is for tests: a real list, never a stub of git. `compare` is the installed layout's GitHub question, injectable for the same reason. `log` is where a
+ *   claim let through on unreleased rule files says so (stderr by default).
  */
-export function staleRuleReason({ repoRoot, entry, run, files, compare }: {
+export function staleRuleReason({ repoRoot, entry, run, files, compare, log = logToStderr }: {
     repoRoot?: string; entry?: string; run?: (args: string[]) => string;
-    files?: string[]; compare?: (sha: string) => { status: string; files: string[]; } | null;
+    files?: string[]; compare?: (sha: string) => { status: string; files: string[]; } | null; log?: (line: string) => void;
 } = {}): string | null {
   const here = dirname(fileURLToPath(import.meta.url));
   const installed = installedLayoutOf(entry ?? resolve(here, "..", "row-claim.ts"));
@@ -247,27 +296,56 @@ export function staleRuleReason({ repoRoot, entry, run, files, compare }: {
   // A PATHSPEC THAT MATCHES NO TRACKED FILE CANNOT SAY "UP TO DATE": `git rev-list HEAD..origin/main -- <nothing>` counts 0 and that zero is not a
   // reading of anything (#3041, the same conflation `commitsBehindOn` already refuses for a missing `origin/main`).
   if (spec.length === 0 || trackedFileCount({ repoRoot: root, files: spec, run }) === 0) return cannotAskNothingTracked(root, spec);
-  const behind = commitsBehindOn({ repoRoot: root, files: spec, run });
+  const release = releaseRefOf({ repoRoot: root, run });
+  if (release === null) return withoutRelease({ root, spec, run, log });
+  const behind = commitsBehindOn({ repoRoot: root, files: spec, run, against: release });
   if (behind === null) {
-    return "CANNOT ASK whether this checkout's copy of the rule is current: `origin/main` is not\n"
+    return `CANNOT ASK whether this checkout's copy of the rule is current: the newest release (${release.replace("refs/tags/", "")}) is not\n`
       + "  resolvable here. A verdict computed from a rule that may have been replaced is worse than no\n"
-      + "  verdict, so this refuses rather than assuming it is up to date. `git fetch origin main` and\n"
+      + "  verdict, so this refuses rather than assuming it is up to date. `git fetch --tags origin` and\n"
       + "  try again.";
   }
-  if (behind === 0) return null;
+  if (behind === 0) {
+    // NOT REFUSED, AND NOT SILENT: main holds rule files no release has, so no checkout the host can start holds them either.
+    const unreleased = unreleasedFiles({ repoRoot: root, files: spec, release, run });
+    if (unreleased.length > 0) log(`stale-rule-guard: origin/main holds ${unreleased.length} rule file(s) that ${release.replace("refs/tags/", "")} does not (${unreleased.join(", ")}); not refusing, the host cannot run them yet.`);
+    return null;
+  }
   // NAMES WHAT MOVED, not what was searched. A refusal listing the whole pathspec makes the reader compare
   // two lists to find the one file that matters; `git diff --name-only` has already done that, and a
   // followable refusal is the difference between updating the checkout and arguing with the tool.
-  const moved = movedFiles({ repoRoot: root, files: spec, run });
-  return `THIS CHECKOUT'S COPY OF THE RULE IS ${behind} COMMIT(S) BEHIND \`origin/main\`.\n`
+  const moved = movedFiles({ repoRoot: root, files: spec, run, against: release });
+  return `THIS CHECKOUT'S COPY OF THE RULE IS ${behind} COMMIT(S) BEHIND THE RELEASE THE HOST RUNS (${release.replace("refs/tags/", "")}).\n`
     + `  Moved: ${moved.length > 0 ? moved.join(", ") : spec.join(", ")}\n`
     + "  A refusal printed from a retired rule names a policy the org no longer has -- measured on\n"
     + "  2026-09-12, when a claim was refused by BOTH halves of a sentence describing rules that had been\n"
     + "  replaced four minutes apart. Update this checkout and ask again.";
 }
 
+const logToStderr = (line: string) => { process.stderr.write(`${line}\n`); };
+
 /**
- * The rule files that actually differ from `origin/main`, repo-relative -- or `[]` when the question
+ * A CHECKOUT THAT HOLDS NO RELEASE TAG cannot tell the release from `origin/main`, and the verdict it can give is only ever about main. Main ahead on the rule files is
+ * then LET THROUGH AND LOGGED, naming the files: refusing here is the claim-refusal storm for every checkout without tags. Main unresolvable is still CANNOT ASK, because
+ * with no release and no main there is nothing to compare with at all.
+ */
+function withoutRelease({ root, spec, run, log }: { root: string; spec: string[]; run?: (args: string[]) => string; log: (line: string) => void; }): string | null {
+  const behind = commitsBehindOn({ repoRoot: root, files: spec, run });
+  if (behind === null) {
+    return "CANNOT ASK whether this checkout's copy of the rule is current: `origin/main` is not\n"
+      + "  resolvable here and the checkout holds no release tag. A verdict computed from a rule that may\n"
+      + "  have been replaced is worse than no verdict, so this refuses rather than assuming it is up to\n"
+      + "  date. `git fetch --tags origin` and try again.";
+  }
+  if (behind === 0) return null;
+  const moved = movedFiles({ repoRoot: root, files: spec, run });
+  log(`stale-rule-guard: this checkout holds no release tag, so origin/main's ${behind} commit(s) on the rule files (${moved.length > 0 ? moved.join(", ") : spec.join(", ")}) `
+    + "cannot be told from the release; not refusing.");
+  return null;
+}
+
+/**
+ * The rule files that actually differ from `against` (the release, or `origin/main` where none is held), repo-relative -- or `[]` when the question
  * cannot be asked. Used only to word the refusal, never to decide it: `commitsBehindOn` owns the verdict,
  * and a second command deciding the same thing is how two answers come to disagree.
  *
@@ -283,12 +361,12 @@ export function staleRuleReason({ repoRoot, entry, run, files, compare }: {
  * anything -- `commitsBehindOn` has already returned a non-zero count before this is called, which is only
  * possible when `origin/main` has commits HEAD does not.
  */
-export function movedFiles({ repoRoot, files, run }: { repoRoot: string; files: string[]; run?: (args: string[]) => string; }): string[] {
+export function movedFiles({ repoRoot, files, run, against = MAIN_REF }: { repoRoot: string; files: string[]; run?: (args: string[]) => string; against?: string; }): string[] {
   const git = run ?? gitIn(repoRoot);
   try {
     // `--no-renames`, tree-wide rule: a rename reported as one path makes the OTHER path invisible, and a
     // rule file that moved is exactly the case this refusal exists to name.
-    return git(["diff", "--no-renames", "--name-only", "HEAD...origin/main", "--", ...files])
+    return git(["diff", "--no-renames", "--name-only", `HEAD...${against}`, "--", ...files])
       .split("\n").filter(Boolean);
   } catch (error) {
     void error; // the count above already decided; this only words the message
