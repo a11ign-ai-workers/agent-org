@@ -22,26 +22,10 @@
 // "somebody must approve" is branch protection's requirement, and `gate` does not rerun on a review event,
 // so refusing an unapproved head would stay red after the approval arrived.
 
-export type ApprovalFacts = {
-  /** Commits of the PR itself: in `head` and not in `main`. */
-  ownShas: string[];
-  /** Latest opinion of each reviewer, approvals only, each with the commit it was submitted on. */
-  approvals: { reviewer: string; commitId: string;
-    /** Commits in `commitId...head` (parents included), or null when `commitId` is not an ancestor of the head. */
-    sinceApproval: { sha: string; parents: string[]; }[] | null; }[];
-};
+import type { ApprovalFacts } from "../ticket-port/approval-reads.ts";
 
-type Review = { reviewer: string; state: string; commitId: string; submittedAt: string; };
-
-/** The state each reviewer's NEWEST opinionated review leaves them in: only APPROVED survives as an approval. */
-export function latestApprovals(reviews: Review[]): Review[] {
-  const opinions = reviews
-    .filter((r) => ["APPROVED", "CHANGES_REQUESTED", "DISMISSED"].includes(r.state))
-    .sort((a, b) => a.submittedAt.localeCompare(b.submittedAt));
-  const latest = new Map<string, Review>();
-  for (const review of opinions) latest.set(review.reviewer, review);
-  return [...latest.values()].filter((r) => r.state === "APPROVED");
-}
+export type { ApprovalFacts };
+export { latestApprovals } from "../ticket-port/approval-reads.ts";
 
 function isMergeFromMain(commit: { parents: string[]; }, own: Set<string>): boolean {
   return commit.parents.length >= 2 && commit.parents.slice(1).every((parent) => !own.has(parent));
