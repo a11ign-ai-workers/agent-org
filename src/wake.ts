@@ -61,6 +61,7 @@ import { HOME_CHECKOUT, homeProjectDeclaration } from "./project-config.ts";
 import { stateEntryPath, hostConfigPath, readHostConfig } from "./host-config.ts"; // #2799; the other two for #2969's `clones`, read by host-config since #2991
 import { REPO } from "./project-identity.ts";
 import { roleBriefPath } from "./project-roles.ts";
+import { ENGINEER_BRIEF_SENTENCE, briefRoleSentence } from "./spawn-role-brief.ts"; // #828: the sentence that sends a spawned seat to a role brief
 // #2619 (child 3d of #69): `session:`/`ready` -- `answer:` already arrives via `work-gate.ts`'s
 // re-export of `waiting-condition.ts`'s own field, so it is not re-imported here.
 import { SESSION_PREFIX, READY_LABEL, OUT_OF_RELEASE_LABEL } from "./project-vocabulary.ts";
@@ -3600,10 +3601,6 @@ function engineerBriefLine(label: string, engineers: string[], families: readonl
   return `${ENGINEER_BRIEF_SENTENCE}\n\n`;
 }
 
-/** The one sentence that sends an engineer to {@link ENGINEER_BRIEF}; a spawned order carries it WITHOUT the roster test (#3444). */
-const ENGINEER_BRIEF_SENTENCE = `Before you start, read \`${ENGINEER_BRIEF}\`: the resource ban, the acceptance standard and `
-  + "the habits every engineer is held to. Nothing else tells you them.";
-
 /**
  * The prompt as the woken session receives it: the order's text, prefixed with WHO IT IS.
  *
@@ -3641,13 +3638,15 @@ const ENGINEER_BRIEF_SENTENCE = `Before you start, read \`${ENGINEER_BRIEF}\`: t
  *
  *
  * @param label the concrete session this went to
+ * `briefRole` (#828) is the role brief a SPAWNED seat is sent to, the engineer's by default (byte-identical to the sentence before #828); it is read on the `spawned` branch only, and nothing passes it yet.
  * `blocking` (#4605) is the gate's last count of shelved rows, which `blastTail` turns into the spawned order's `your claim blocks N rows` line; absent, no line, so a caller that does not read it is never the one that invents one.
  * `orderId` (#4068) is the wake id the follow-up header names and the ledger line for this delivery records; see {@link FOLLOW_UP_HEADER}.
  */
 export function addressed(order: { session: string; prompt: string; title?: string; causeKey?: string; cause?: string; }, label: string,
-  { spawned, followUp = false, context, orderId, blocking = null, now = Date.now(), engineers = engineerRoles(), families = SPARE_FAMILIES, ...launch }: LaunchFacts & {
+  { spawned, followUp = false, context, orderId, blocking = null, now = Date.now(), engineers = engineerRoles(), families = SPARE_FAMILIES,
+    briefRole = "engineer", ...launch }: LaunchFacts & {
       spawned?: ClaimedRow; followUp?: boolean; context?: string; orderId?: string; engineers?: string[]; blocking?: BlockingRecord | null; now?: number;
-      families?: readonly import("./arm-pr.ts").SpareFamily[];
+      families?: readonly import("./arm-pr.ts").SpareFamily[]; briefRole?: string;
   } = {}) {
   // `<you>` SUBSTITUTED, not merely explained: the order's own command text carries the placeholder, and
   // an agent that has been told its name still has to edit the command it was handed. Handing it a
@@ -3658,7 +3657,10 @@ export function addressed(order: { session: string; prompt: string; title?: stri
   if (followUp && !spawned) return `${FOLLOW_UP_HEADER(label, { orderId, cause: order.cause })}${staleReadingsClause(label, context)}\n\n${prompt}`;
   const identity = `You are \`${label}\`, an org session in this repository. Use that name wherever a command `
     + `asks which session you are (\`--session=${label}\`).\n\n`;
-  if (spawned) return `${identity}${prompt}\n\n${ENGINEER_BRIEF_SENTENCE}${calmTail(spawned.row)}${tripsTail(spawned.row)}${blastTail(spawned.row, blocking, now)}`;
+  if (spawned) {
+    const brief = briefRole === "engineer" ? ENGINEER_BRIEF_SENTENCE : briefRoleSentence(briefRole);
+    return `${identity}${prompt}\n\n${brief}${calmTail(spawned.row)}${tripsTail(spawned.row)}${blastTail(spawned.row, blocking, now)}`;
+  }
   return `${identity}${prompt}\n\n${engineerBriefLine(label, engineers, families)}${autonomyParagraphs(order, label)}`;
 }
 
