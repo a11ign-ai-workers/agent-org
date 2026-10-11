@@ -60,14 +60,16 @@ export function withClosingRowOwners(prs: any[], openRows: any[], rowsRepo?: str
  *
  * ONLY CALLED FOR A PR NO ROW RUNG ANSWERED, so no row it names is held (a held row would have made `rowOwner`, and a split would have returned): every
  * named row is closed (`closingRowsClosed`, absent from `openRows`) or open and unheld (`closingRowsUnheld`; the wording differs, see `deadOwnerRowClause`).
- * TWO READINGS MUST NOT PASS FOR EITHER: no rows read at all (`openRows` empty because the read was refused, the case `withClosingRowOwners` leaves as it
- * was, and not "unclaimed") and a PR that names no row (nothing to be closed or unclaimed). `{}` for both.
+ * #5115: A PR THAT NAMES NO ROW (`Closes: none -- <reason>`) is `closingRowsNone`, the third shape, and not "nobody could be named": its owner is known and gone
+ * all the same, and a11ign#5115 (label `session:worker-5109`) was recorded as `owner-unresolved` for it, the eighth time.
+ * TWO READINGS MUST NOT PASS FOR ANY OF THEM: no rows read at all (`openRows` empty because the read was refused, the case `withClosingRowOwners` leaves as
+ * it was, and not "unclaimed"), which is `{}`.
  */
-function rowsNobodyHolds(pr: any, openRows: any[], rowsRepo?: string): { closingRowsClosed?: true; closingRowsUnheld?: true; } {
+function rowsNobodyHolds(pr: any, openRows: any[], rowsRepo?: string): { closingRowsClosed?: true; closingRowsUnheld?: true; closingRowsNone?: true; } {
   if (openRows.length === 0) return {};
   const open = new Set(openRows.map((row) => Number(row.number)));
   const named = rowsNamedBy(pr, rowsRepo);
-  if (named.length === 0) return {};
+  if (named.length === 0) return { closingRowsNone: true };
   return named.every(({ row }) => !open.has(row)) ? { closingRowsClosed: true } : { closingRowsUnheld: true };
 }
 

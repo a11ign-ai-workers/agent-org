@@ -61,7 +61,7 @@ import { sandboxGitEnv } from "./lib/git-env.ts";
 import { isAppLogin, spenderPhraseFor } from "./gh-ledger.ts";
 import { GITHUB_ROLES, homeHostConfig, hostConfigPath, roleIdentity, stateEntryPath, type HostConfig } from "./host-config.ts";
 // A LEAF too (node builtins only): the append-only log of events that never become a closed row, where a refused claim is written and read back.
-import { FAILURE_LEDGER_FILE, parseFailureLedger } from "./failure-ledger.ts";
+import { CLAIM_REFUSED_KIND, FAILURE_LEDGER_FILE, parseFailureLedger } from "./failure-ledger.ts";
 // A LEAF (`claim-labels.ts` imports nothing), so the label is read from where it is declared, as `repeating-lines.ts` does.
 import { READY_LABEL, STATE_LABELS, stateLabelFindings } from "./claim-labels.ts";
 import { boardTruthTable } from "./board-truth-audit.ts";
@@ -642,11 +642,8 @@ export const CLAIM_REFUSAL_STORM_REFUSALS = 10;
 /** The window those refusals are counted in. */
 export const CLAIM_REFUSAL_STORM_MINUTES = 15;
 
-/**
- * The failure ledger's event kind for ONE REFUSED CLAIM: `<kind>\t<ts, ms>\t<ref>` with the REASON as the ref, one line of it, so that a storm is a count of lines and "the
- * most frequent reason" is a group by ref. Not seeded in `FAILURE_KINDS`, for the reason `MESSAGING_AUDIENCE_MISUSE_KIND` gives: `repeatsIn` and the daily pass read any key.
- */
-export const CLAIM_REFUSED_KIND = "claim-refused";
+// #972: the kind is declared in the ledger's leaf, where the recorder reads it; re-exported here for the reader's callers.
+export { CLAIM_REFUSED_KIND };
 
 /** One refused claim, as the failure ledger holds it: when, and the claim's own words for why (a line, never a path through a stack). */
 export type ClaimRefusal = { at: number; reason: string };

@@ -33,6 +33,7 @@ import { sandboxGitEnv } from "./lib/git-env.ts";
 import { HOME_CHECKOUT } from "./project-config.ts";
 import { REPO } from "./project-identity.ts";
 import { ORG_LOGINS } from "./messaging/sources/readers.ts";
+import { readMergedPullRequests } from "./ticket-port/rows-since.ts"; // #5076: the merged list is a connection, never a search
 
 const DAY_MS = 86_400_000;
 export const WINDOW_DAYS = 14;
@@ -329,10 +330,13 @@ function loginsBySha(runGh: Run, repo: string, since: Date): Map<string, string 
  * @param {Run} runGh @param {string} repo @param {Date} since
  * @returns {Map<number, { author: string | null, title: string, body: string }>}
  */
+/** Pages of 100 merged pull requests read for the ledger's window: 5,000, the limit the search was given. */
+const MERGED_WINDOW_PAGES = 50;
+
 function mergedPullRequests(runGh: Run, repo: string, since: Date): Map<number, { author: string | null; title: string; body: string; }> {
-  const raw = runGh(["pr", "list", "--repo", repo, "--state", "merged", "--search", `merged:>=${since.toISOString().slice(0, 10)}`,
-    "--limit", "5000", "--json", "number,author,title,body"]);
-  const rows: { number: number; author: { login?: string; } | null; title: string; body: string; }[] = JSON.parse(raw);
+  // #5076: a connection read, not `--search merged:>=` (a GitHub SEARCH). 50 pages is the 5,000 the search was given; a window past them is refused, not cut.
+  const rows = readMergedPullRequests({ repo, select: "number title body author{login}", run: runGh,
+    window: { since: since.toISOString().slice(0, 10), maxPages: MERGED_WINDOW_PAGES } }) as unknown as { number: number; author: { login?: string; } | null; title: string; body: string; }[];
   return new Map(rows.map((r) => [r.number, { author: r.author?.login ?? null, title: r.title, body: r.body ?? "" }]));
 }
 

@@ -15,10 +15,11 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { sandboxGitEnv } from "./lib/git-env.ts";
-import { tmpDirForFile } from "./lib/tmp-fixture.ts";
+import { removeAll, tmpDirForFile } from "./lib/tmp-fixture.ts";
 import { githubReaders, readRepository, tagReleasesFrom } from "./dora.ts";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -43,13 +44,13 @@ const releaseRows = (count: number) => Array.from({ length: count }, (_, index) 
 const log = join(scratch, "calls.log");
 const bin = join(scratch, "bin");
 execFileSync("mkdir", ["-p", bin]);
-/** A `gh` that lists the releases from a file, answers a `commits/<tag>` at once, and takes `$FAKE_PR_SLEEP` seconds over `pr list`; every call is one line of the log. */
+/** A `gh` that lists the releases from a file, answers a `commits/<tag>` at once, and takes `$FAKE_PR_SLEEP` seconds over the merged list (`api graphql`, #5076: it was `pr list --search`); every call is one line of the log. */
 writeFileSync(join(bin, "gh"), `#!/bin/sh
 echo "$*" >> "${log}"
 case "$1 $2" in
   "api repos/a11ign/frequent/releases") cat "${scratch}/releases.json";;
   "api repos/a11ign/frequent/commits/"*) echo "${SHA} ${PARENT}";;
-  "pr list") exec sleep "\${FAKE_PR_SLEEP:-0}";;
+  "api graphql") exec sleep "\${FAKE_PR_SLEEP:-0}";;
   "repo view") echo '{"hasIssuesEnabled":false}';;
 esac
 `);
@@ -70,7 +71,7 @@ function readWith({ tags, budgetMs, timeoutMs, prSleep = 0 }: { tags: number; bu
   return { reading, calls: callsLogged() };
 }
 
-const NOT_STARTED = /^its merged pull requests could not be read \(gh pr list was not started: this repository's read budget is spent\)$/;
+const NOT_STARTED = /^its merged pull requests could not be read \(gh api graphql was not started: this repository's read budget is spent\)$/;
 
 test("the fixture is a repository that releases on every merge: at least 100 tags, each of them a call of its own when no clone answers", () => {
   assert.ok(TAGS >= MIN_TAGS);
@@ -82,22 +83,22 @@ test("a budget spent by the tag reads says `was not started: ... budget is spent
   const { reading, calls } = readWith({ tags: TAGS, budgetMs: TAGS * COMMIT_MS, timeoutMs: 5_000 });
   assert.equal(reading.status, "read");
   assert.match(reading.reasons.leadTime, NOT_STARTED);
-  assert.ok(!calls.some((line) => line.startsWith("pr list")), "the control: `gh pr list` really was not started");
+  assert.ok(!calls.some((line) => line.startsWith("api graphql")), "the control: the merged list (`gh api graphql`) really was not started");
   assert.equal(calls.filter((line) => line.includes("/commits/")).length, TAGS, "the control: the tag reads are what spent it");
   assert.doesNotMatch(reading.reasons.leadTime, /timed out/);
 });
 
-test("a `gh pr list` that runs past its OWN limit says `timed out after N s`, and not a word of the budget", () => {
+test("a merged-list read (`gh api graphql`) that runs past its OWN limit says `timed out after N s`, and not a word of the budget", () => {
   const { reading, calls } = readWith({ tags: 3, budgetMs: 10 * TAGS * COMMIT_MS, timeoutMs: 1_000, prSleep: 5 });
-  assert.ok(calls.some((line) => line.startsWith("pr list")), "the control: the list was started");
-  assert.match(reading.reasons.leadTime, /^its merged pull requests could not be read \(gh pr list timed out after 1 s\)$/);
+  assert.ok(calls.some((line) => line.startsWith("api graphql")), "the control: the list was started");
+  assert.match(reading.reasons.leadTime, /^its merged pull requests could not be read \(gh api graphql timed out after 1 s\)$/);
   assert.doesNotMatch(reading.reasons.leadTime, /budget/);
 });
 
-test("a `gh pr list` given only what was left of the budget says so, with its own limit beside it: neither of the two words above", () => {
+test("a merged-list read given only what was left of the budget says so, with its own limit beside it: neither of the two words above", () => {
   const { reading } = readWith({ tags: 3, budgetMs: 3 * COMMIT_MS + 1_000, timeoutMs: 5_000, prSleep: 8 });
   const reason: string = reading.reasons.leadTime;
-  assert.match(reason, /\(gh pr list timed out after 1 s, all that was left of this repository's read budget \(a call's own limit is 5 s\)\)$/);
+  assert.match(reason, /\(gh api graphql timed out after 1 s, all that was left of this repository's read budget \(a call's own limit is 5 s\)\)$/);
   assert.doesNotMatch(reason, NOT_STARTED);
 });
 
@@ -183,4 +184,45 @@ test("a tag the clone does NOT hold, even after the fetch, is asked of GitHub: t
   assert.deepEqual(asked, ["v-only-on-github"]);
   assert.equal(placed.find((release) => release.id === "v-only-on-github")?.commit, SHA);
   assert.deepEqual(placed.slice(0, TAGS).map((release) => release.commit), chain);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// PART THREE (#987): THE DIRECTORY THIS FILE MAKES IS REMOVED, OR THIS FILE FAILS. The merge-queue run 38150393779 left `dora-budget-*` holding 4 of its 5 entries
+// with all ten cases green, which ejected an unrelated pull request. These two are the helper's two halves, kept in the file that leaked.
+
+const FIXTURE = fileURLToPath(new URL("./lib/tmp-fixture.ts", import.meta.url));
+
+/** A child that makes a `tmpDirForFile` directory with a file in it and exits through `process.exit`, so the helper's `after` never gets to run. Returns the directory it made. */
+function childMakingADirectory(name: string, { exitFallback }: { exitFallback: boolean }): string {
+  const script = join(scratch, `${name}.ts`);
+  writeFileSync(script, `import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpDirForFile } from ${JSON.stringify(FIXTURE)};
+const dir = tmpDirForFile("fixture-exit-");
+writeFileSync(join(dir, "kept"), "1");
+console.log(dir);
+${exitFallback ? "" : "process.removeAllListeners('exit');"}
+process.exit(0);
+`);
+  const out = execFileSync("node", [script], { env: { ...sandboxGitEnv(), PATH: process.env.PATH, TMPDIR: scratch }, encoding: "utf8" });
+  return out.trim();
+}
+
+test("a fork that exits before the helper's `after` runs still has its directory removed, and with the exit fallback taken away the same child leaves it (the positive control)", () => {
+  const left = childMakingADirectory("without-fallback", { exitFallback: false });
+  assert.ok(existsSync(join(left, "kept")), "the control: a child whose `after` never runs and has no exit fallback leaves its directory");
+  const removed = childMakingADirectory("with-fallback", { exitFallback: true });
+  assert.ok(!existsSync(removed), `${removed} is still there after its process exited`);
+});
+
+test("a directory that cannot be removed does not stop the others, and is named in a failure thrown at the end", () => {
+  const made = new Set([join(scratch, "stuck-a"), join(scratch, "stuck-b"), join(scratch, "stuck-c")]);
+  for (const dir of made) mkdirSync(dir);
+  const stuck = join(scratch, "stuck-b");
+  const remove = (dir: string) => { if (dir === stuck) throw Object.assign(new Error("busy"), { code: "ENOTEMPTY" }); execFileSync("rmdir", [dir]); };
+  assert.throws(() => removeAll(made, remove), (error: Error) => error.message.includes(`${stuck}: ENOTEMPTY`) && !error.message.includes("stuck-a"));
+  assert.ok(!existsSync(join(scratch, "stuck-a")) && !existsSync(join(scratch, "stuck-c")), "the directories either side of the stuck one are removed");
+  assert.deepEqual([...made], [stuck], "only the one that failed stays registered, for the exit fallback");
+  removeAll(made);
+  assert.ok(!existsSync(stuck));
 });

@@ -388,6 +388,7 @@ test("#5098 the roll-up is no cause: by its name, by the step it fails, and by t
   assert.equal(sharedFailureGroups([pr(1, "checks"), pr(2, "checks")], () => ({ ...install, check: "checks" })).length, 1, "positive control: the same pair on a real job IS grouped");
   // by STEP and by LINE, for a roll-up that is named something else
   assert.equal(readSignature(checkOf("ci-ok"), jobRun("Every job ran, and ran clean", "##[error]boom")), null);
+  assert.equal(readSignature(checkOf("ci-ok"), jobRun("Every job that ran, ran clean", "##[error]boom")), null, "the other spelling of the roll-up step, as the row names it");
   assert.equal(readSignature(checkOf("ci-ok"), jobRun("Check results", "##[error]a job reported 'failure', not success")), null);
   assert.deepEqual(readSignature(checkOf("ci-ok"), jobRun("Check results", "##[error]boom"))?.line, "boom", "positive control: the same step and a real error is read");
 });

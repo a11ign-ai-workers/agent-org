@@ -239,7 +239,7 @@ const RUNNER_SETUP_STEP = /^(set up job|initialize containers|complete job|check
 const SETUP_STEP = /^(set up|setup|install|initialize containers|complete job|post |checkout|run actions\/|download|restore|cache)/i;
 /** The roll-up job reports OTHER jobs' results, so its failure is every failure's echo: it names no cause (#5098). By name, by step, and by the line its script prints. */
 const AGGREGATOR_CHECK = /(^|[\s/])gate$/i;
-const AGGREGATOR_STEP = /^every job ran\b/i;
+const AGGREGATOR_STEP = /^every job (?:that )?ran\b/i;
 const AGGREGATOR_LINE = /##\[group\]Run for result in|\ba job reported\b|\breported '[^']*', not success/;
 /** Lines that match {@link ERROR_LINE} and are not the failure: a package manager's warning, a command echoed by the runner, and the exit code every failed step ends on. */
 const NOT_THE_FAILURE = /^(?:WARN\b|warn(?:ing)?\b|##\[(?:group|endgroup|command|warning)\]|##\[error\]Process completed with exit code)/i;

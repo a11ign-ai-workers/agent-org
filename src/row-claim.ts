@@ -74,6 +74,7 @@ import { READY_LABEL, WAS_READY_LABEL } from "./ready-label-audit.ts";
 import { gitCommonDir, appendJsonl, testsFirstOf, readTestsFirstFlag } from "./merge-guard.ts";
 import { withBoardSnapshot, PROJECT_OWNER, PROJECT_NUMBER } from "./board-snapshot.ts";
 import { runnerReason, laneReason, drainReason, oneRowReason } from "./row-claim/runner-rule.ts";
+import { readStandIns, type LaneStandIn } from "./row-claim/lane-stand-in.ts";
 import { activeDrain, sparePathsFrom, ledgerPathFrom, isSpareRole, isPersistentRole, readSpareRegistry } from "./wake.ts";
 import { readWithFirstWaveTogether, runBatch, readChairmanPriority, CHAIRMAN_PRIORITY_LABEL } from "./work-gate.ts"; // #3566, slice 4: `wake.ts` above already loads it, and it never loads this file. #4793: and the gate's own reading of whose a chairman row is
 import { lookup } from "./merge-guard/lookups.ts";
@@ -87,6 +88,8 @@ import { readSweepWindows, sweepFreezeAtClaim, sweepFreezeOf, type SweepRow } fr
 import { templateFieldsReason, lookupIssueBody } from "./row-claim/template-fields-rule.ts";
 import { scopeHash, claimedScopeOf, CLAIM_RECORD_SCOPE } from "./claim-scope.ts"; // #4759: the leaf the tick compares the record with the live row from
 import { staleRuleReason } from "./row-claim/stale-rule-guard.ts";
+import { stateEntryPath } from "./host-config.ts";
+import { CLAIM_REFUSED_KIND, FAILURE_LEDGER_FILE, recordFailure } from "./failure-ledger.ts"; // #972: a refusal is a line of the ledger the storm signal reads
 // #2031 EXTRACTED THE RULE THIS FILE DEFINED, and the extraction is the whole of this file's change.
 // `work-gate.ts` now asks the same question of every Ready row, and #2031's own filing names the reason
 // it may not re-derive it: "both parse a trailing `-<n>` out of an `ls-remote` listing, and #2014's
@@ -500,9 +503,12 @@ export function claimStatus(labels: string[]): { claimed: boolean; started: bool
  *
  * @param {string[]} labelsBefore
  * @param {string} mySession
+ * @param {{ row?: number, standIns?: readonly LaneStandIn[], now?: number }} [lane] #947: the row number and the
+ *   records of spawns, so a one-shot seat standing in for a lane owner passes THAT owner's lane for THAT row. Absent
+ *   (the merge guard's call), no record is read and the lane rule is exactly what it was.
  * @returns {{ proceed: true } | { proceed: false, reason: string }}
  */
-export function decideClaim(labelsBefore: string[], mySession: string): { proceed: true; } | { proceed: false; reason: string; } {
+export function decideClaim(labelsBefore: string[], mySession: string, lane?: { row?: number; standIns?: readonly LaneStandIn[]; now?: number; }): { proceed: true; } | { proceed: false; reason: string; } {
   // #444: a RESERVATION check, ahead of the CLAIM check -- a row can be `ready` (not yet `in-progress`)
   // and still reserved for a specific session, which is #324's own shape before anyone claims it.
   const reserved = runnerReason(labelsBefore, mySession);
@@ -511,14 +517,19 @@ export function decideClaim(labelsBefore: string[], mySession: string): { procee
   // #1039: BESIDE THE RESERVATION, AND BEFORE THE `claimed` CHECK for the same reason. A row can be
   // `ready` and in somebody else's lane, which is exactly the state #965 was in when it was claimed --
   // a check gated on `claimed` first would let anyone take an unclaimed row out of its owner's lane.
-  const lane = laneReason(labelsBefore, mySession);
-  if (lane) return { proceed: false, reason: lane };
+  const laneRefusal = laneReason(labelsBefore, mySession, lane);
+  if (laneRefusal) return { proceed: false, reason: laneRefusal };
 
   const status = claimStatus(labelsBefore);
   if (!status.claimed) return { proceed: true };
   if (status.sessions.includes(mySession)) return { proceed: true };
   const by = status.sessions.length > 0 ? status.sessions.join(", ") : "someone (no session label recorded yet)";
   return { proceed: false, reason: `issue is already claimed by ${by}` };
+}
+
+/** #947: the stand-in records handed to `decideClaim`, and only for an open row (an unread `state` is "not verified closed", as everywhere above). */
+function standInFor(issueNumber: number, issue: IssueClaim): { row?: number; standIns?: readonly LaneStandIn[]; } {
+  return issue.state === "CLOSED" ? {} : { row: issueNumber, standIns: readStandIns() };
 }
 
 /** The words a claim in a tracker that declares no board says instead of a move, and `runDispatchOrClaim` reads them back to print the line. */
@@ -1013,6 +1024,22 @@ export function failureReport(error: unknown): { exitCode: number; text: string;
 }
 
 /**
+ * #972: EVERY REFUSAL THIS FILE PRINTS (`NOT CLAIMED:` or `COULD NOT DETERMINE:`) IS ALSO ONE `claim-refused` LINE OF THE FAILURE LEDGER, the line `claimRefusalStormReading`
+ * (agent-org#889) counts. The reason is the refusal's FIRST line, with its tabs spaced out, so the line parses. Called AFTER the verdict is printed and never throws into the claim:
+ * an append that is refused is said on stderr by `recordFailure`, and the verdict and exit code are what they were. A landed claim is never passed here.
+ * @param {string} refusal the text after the prefix
+ * @param {{ logPath?: string, now?: number }} [where] the ledger (the host's, by default) and the time (now, by default)
+ */
+export function recordClaimRefusal(refusal: string, { logPath = stateEntryPath(FAILURE_LEDGER_FILE), now = Date.now() }: { logPath?: string; now?: number; } = {}): void {
+  try {
+    const ref = refusal.split("\n")[0].replace(/\t/g, " ").trim() || "no reason given";
+    recordFailure({ logPath, classKey: CLAIM_REFUSED_KIND, ref, now });
+  } catch (cause) {
+    process.stderr.write(`row-claim: could not record a refusal in the failure ledger (${String((cause as Error)?.message ?? cause).split("\n")[0]}) -- the verdict stands.\n`);
+  }
+}
+
+/**
  * #2151: THE WHOLE LABEL LIST a claim leaves the row carrying, computed from `labels` as read immediately
  * before the write: everything it already holds stays, `ready` goes, and each of `add` joins unless the
  * row has it. Pure.
@@ -1082,7 +1109,7 @@ function applyClaimLabels(issueNumber: number, { run, mySession, extraLabels, la
   const claimLabels = [CLAIM_LABEL, `${SESSION_PREFIX}${mySession}`, ...extraLabels];
   ensureLabelsExist([...claimLabels, WAS_READY_LABEL], { run, batch: labelBatch, repo });
   const fresh = fetchLabels(issueNumber, { run, repo });
-  const decision = decideClaim(fresh.labels, mySession);
+  const decision = decideClaim(fresh.labels, mySession, standInFor(issueNumber, fresh));
   if (!decision.proceed) {
     return { refusal: `${decision.reason} -- as read immediately before the label write, which a claim that `
       + "landed since the first read would otherwise have been erased by. Nothing was written." };
@@ -1232,7 +1259,7 @@ function writeRowLabels(issueNumber: number, mySession: string, extraLabels: str
       } = {}): { claimed: true; statusMoved: true; } | { claimed: true; statusMoved: false; notOnBoard: boolean; statusReason: string; } | { claimed: false; reason: string; } {
   const repo = tracker?.repo ?? REPO;
   const before = fetchLabels(issueNumber, { run, repo });
-  const decision = decideClaim(before.labels, mySession);
+  const decision = decideClaim(before.labels, mySession, standInFor(issueNumber, before));
   if (!decision.proceed) return { claimed: false, reason: decision.reason };
   const notEngineer = persistentReason(mySession, persistent);
   if (notEngineer) return { claimed: false, reason: notEngineer };
@@ -1948,6 +1975,42 @@ function undoCreatedWorktree({ branch, worktree }: { branch: string; worktree: s
 }
 
 /**
+ * agent-org#1036: THE MOST LIVE WORKTREES A CHECKOUT MAY HOLD before a claim that would create one is refused. Measured 2026-10-11 (`git worktree
+ * list | wc -l` on the primary checkout, the main one included, a11ign/a11ign#3870 reading 3): 97, down from 356 on 2026-10-06 (#3850), so a cap of
+ * 100 leaves three claims of room. Only the prune brings the count down; a claim never removes a worktree to make room for itself.
+ */
+export const WORKTREE_CAP = 100;
+
+/**
+ * agent-org#1036: THE LIVE WORKTREE COUNT of the checkout `run` is in, the main one included -- one `worktree` line per entry of
+ * `git worktree list --porcelain`. A listing git cannot give THROWS, as {@link rowBranchesOnOrigin} does: a count that cannot be read is
+ * not a count under the cap, so the claim refuses to create a tree on a guess.
+ * @param {typeof defaultRun} run
+ * @returns {number}
+ */
+function liveWorktreeCount(run: typeof defaultRun): number {
+  let listing: string;
+  try {
+    listing = String(run("git", ["worktree", "list", "--porcelain"]));
+  } catch (cause) {
+    throw new Error(`row-claim: could not count the live worktrees -- refusing to create one on a guess. ${(cause as Error).message}`, { cause });
+  }
+  return listing.split("\n").filter((line) => line.startsWith("worktree ")).length;
+}
+
+/**
+ * agent-org#1036: THE REFUSAL AT THE CAP, before any write. It names the count and the prune: a claim creates a worktree, so the only way
+ * under the cap is for the prune to remove some.
+ * @param {number} live
+ * @returns {string}
+ */
+function worktreeCapReason(live: number): string {
+  return `this checkout holds ${live} live worktrees, at or over the cap of ${WORKTREE_CAP} (agent-org#1036). Refusing before any write: `
+    + "a claim creates a worktree, and the count falls only when the prune removes some. Run the prune "
+    + "(`pnpm run worktrees:prune -- --apply`, the form the hourly unit runs), then claim again.";
+}
+
+/**
  * #1432: CLAIM, CREATING THE WORKTREE -- `row-claim claim --branch=<b> --worktree=<p>`. In order: refuse if the path or
  * branch exists, or (#2014) if origin already holds a branch for THIS ROW; fetch; `git worktree add -b <b> <p>
  * origin/main`; stamp it; claim. A claim that is refused or loses
@@ -1982,6 +2045,9 @@ export function claimWithWorktree(issueNumber: number, mySession: string, { bran
   const refusal = worktreeTargetReason({ branch, worktree: tree, issueNumber, adopt, mySession }, { run, exists, owner });
   if (refusal) return { claimed: false, reason: refusal };
   if (adopt !== undefined) return adoptWorktree(issueNumber, mySession, { branch, worktree: tree, adopt, run: ranIn, stamp, claim, claimDeps });
+  // agent-org#1036: a claim that would create a tree is refused at the cap, before the fetch or any write.
+  const live = liveWorktreeCount(run);
+  if (live >= WORKTREE_CAP) return { claimed: false, reason: worktreeCapReason(live) };
   const landed: string[] = [];
   return withLandedWrites(issueNumber, landed, () => {
     run("git", ["fetch", "--quiet", "origin"]);
@@ -2811,6 +2877,7 @@ function runStatus(issueNumber: number, trackerKey: string = "") {
   const found = trackerFor(trackerKey);
   if (!found.ok) {
     process.stderr.write(`COULD NOT DETERMINE: ${found.reason}\n`);
+    recordClaimRefusal(found.reason);
     process.exitCode = 2;
     return;
   }
@@ -2831,6 +2898,7 @@ function runStatus(issueNumber: number, trackerKey: string = "") {
     renderStatus(issueNumber, title, claimStatus(labels), { body, recorded });
   } catch (error) {
     process.stderr.write(`COULD NOT DETERMINE: ${(error as Error).message}\n`);
+    recordClaimRefusal((error as Error).message);
     process.exitCode = 2;
   }
 }
@@ -3012,6 +3080,7 @@ function runDeclineOrConflict(mode: "decline" | "conflict", issueNumber: number,
   const refusal = trackerClaimRefusal({ mode, key: trackerKeyOf(rest), number: issueNumber });
   if (refusal) {
     process.stdout.write(`NOT CLAIMED: ${refusal}\n`);
+    recordClaimRefusal(refusal);
     process.exitCode = 1;
     return;
   }
@@ -3114,6 +3183,7 @@ function runDispatchOrClaim(mode: "dispatch" | "claim", issueNumber: number, res
   const trackerRefusal = trackerClaimRefusal({ mode, key: trackerKeyOf(rest), number: issueNumber, session: mySession, worktree });
   if (trackerRefusal) {
     process.stdout.write(`NOT CLAIMED: ${trackerRefusal}\n`);
+    recordClaimRefusal(trackerRefusal);
     process.exitCode = 1;
     return;
   }
@@ -3121,6 +3191,7 @@ function runDispatchOrClaim(mode: "dispatch" | "claim", issueNumber: number, res
   const cloned = claimCloneFor(key, { branch, worktree });
   if (cloned !== null && "refusal" in cloned) {
     process.stdout.write(`NOT CLAIMED: ${cloned.refusal}\n`);
+    recordClaimRefusal(cloned.refusal);
     process.exitCode = 1;
     return;
   }
@@ -3154,12 +3225,15 @@ function runDispatchOrClaim(mode: "dispatch" | "claim", issueNumber: number, res
       }
     } else {
       process.stdout.write(`NOT CLAIMED: ${result.reason}\n`);
+      recordClaimRefusal(result.reason);
       process.exitCode = 1;
     }
   } catch (error) {
     // #1399: a failure after a landed write exits LANDED_WRITE_EXIT and names the writes; otherwise exit 2.
     const report = failureReport(error);
     process.stderr.write(`${report.text}\n`);
+    // #972: only the "could not determine" outcome is a refusal; a partial write is not one, and says so on its own line.
+    if (report.exitCode !== LANDED_WRITE_EXIT) recordClaimRefusal((error as Error).message);
     process.exitCode = report.exitCode;
   }
 }
@@ -3238,6 +3312,8 @@ function runDecline(issueNumber: number, rest: string[]) {
     // #1399: a failure after a landed write exits LANDED_WRITE_EXIT and names the writes; otherwise exit 2.
     const report = failureReport(error);
     process.stderr.write(`${report.text}\n`);
+    // #972: only the "could not determine" outcome is a refusal; a partial write is not one, and says so on its own line.
+    if (report.exitCode !== LANDED_WRITE_EXIT) recordClaimRefusal((error as Error).message);
     process.exitCode = report.exitCode;
   }
 }
@@ -3312,6 +3388,7 @@ async function main() {
   const stale = staleRuleReason();
   if (stale) {
     process.stderr.write(`COULD NOT DETERMINE: ${stale}\n`);
+    recordClaimRefusal(stale);
     process.exitCode = 2;
     return;
   }

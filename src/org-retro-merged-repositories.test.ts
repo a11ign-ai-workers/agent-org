@@ -17,6 +17,7 @@ import { } from "node:fs";
 import { join } from "node:path";
 import assert from "node:assert/strict";
 import * as retro from "./org-retro.ts";
+import { readsRowsSince, sinceAnswer } from "./packaging/rows-by-label-fixtures.ts";
 import { parseProjectDeclaration } from "./project-config.ts";
 import { tmpDir } from "./lib/tmp-fixture.ts";
 
@@ -121,11 +122,24 @@ test("a repository that is unreadable and empty elsewhere: every repository read
 });
 
 test("the read pages past 200 and says so when it hits its limit: a full page is `unknown`, never a count that stopped short", () => {
-  const args = retro.mergedPrsArgs(AGENT_ORG, WINDOW.since);
-  assert.equal(args[args.indexOf("-R") + 1], AGENT_ORG, "the repository is named: a read with no -R is the working directory's repository only");
-  const limit = Number(args[args.indexOf("--limit") + 1]);
+  // #5076: the read is the `pullRequests` connection (it was `pr list -R repo --search merged:>= --limit`, a GitHub SEARCH), paged until a row falls before the window.
+  const limit = retro.MERGED_READ_LIMIT;
   assert.ok(limit > 200, `the old read was --limit 200; this one is ${limit}`);
-  assert.deepEqual([args[0], args[1], args[args.indexOf("--state") + 1]], ["pr", "list", "merged"]);
+  const inWindow = (count: number) => Array.from({ length: count }, (_, i) => ({ ...pr(i + 1, 10), updatedAt: "2026-10-04T12:00:00Z" }));
+  const asked: string[][] = [];
+  const readOver = (rows: any[]) => (args: string[]) => { asked.push(args); return JSON.parse(sinceAnswer(args, rows)); };
+  const paged = retro.readMergedSince(AGENT_ORG, WINDOW.since, readOver(inWindow(150))) as any[];
+  assert.equal(paged.length, 150, "the read pages past one page of a hundred");
+  assert.equal(asked.length, 2);
+  assert.deepEqual(readsRowsSince(asked[0]), { kind: "pullRequests", states: ["MERGED"], orderBy: "UPDATED_AT", label: null, repo: AGENT_ORG, after: null },
+    "the repository is named in the variables: a read with none would answer for the working directory's repository only");
+  assert.ok(asked.every((args) => !args.includes("--search") && !args.includes("--limit") && !args.includes("--label")), "and none is a search");
+  assert.equal((retro.readMergedSince(AGENT_ORG, WINDOW.since, readOver([...inWindow(1), { ...pr(9, 5, "2026-10-03T00:00:00Z"), updatedAt: "2026-10-04T12:00:00Z" }])) as any[]).length, 1,
+    "a row updated inside the window and merged before it is read and not counted: it is kept by its own mergedAt");
+  assert.equal(retro.readMergedSince(AGENT_ORG, WINDOW.since, () => null), null, "a refused read is null: unknown, never an empty list");
+  assert.equal(retro.readMergedSince(AGENT_ORG, WINDOW.since, readOver(inWindow(limit + 1))), retro.MERGED_LIMIT_HIT, "a window of more rows than the pages hold says it hit the limit");
+  const hit = retro.readMerged({ declaration: THREE, since: WINDOW.since, readPrs: (repo, from) => retro.readMergedSince(repo, from, readOver(inWindow(limit + 1))) });
+  assert.deepEqual(hit.map((r: any) => [r.prs, r.limitHit]), [[null, true], [null, true], [null, true]]);
 
   const full = Array.from({ length: limit }, (_, i) => pr(i + 1, 10));
   const report = reportOf(THREE, { ...MERGED_BY_REPOSITORY, [AGENT_ORG]: full });

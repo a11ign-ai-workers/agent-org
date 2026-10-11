@@ -5,6 +5,8 @@ import { ROUTED_TO } from "../work-gate.ts";
 // #2619 (child 3d of #69): the `lane:` prefix and the `lane:any` sentinel, moved to the project's
 // declared vocabulary.
 import { LANE_PREFIX } from "../project-vocabulary.ts";
+// #947: a one-shot seat standing in for a lane owner, for one row (a record of a spawn, never a name pattern).
+import { standsIn, type LaneStandIn } from "./lane-stand-in.ts";
 
 // RULE: IS THIS ROW RESERVED FOR A SPECIFIC SESSION? -- #444.
 //
@@ -84,10 +86,12 @@ export function runnerReason(labels: string[], mySession: string): string | null
  *   against a known roster. `pool` is the same for the routed pool: #2506 left the shipped pool ONE name, and the
  *   exemption below needs two members to fire, so without this seam no test could reach it. `lanePrefix`
  *   (#2619, child 3d of #69) is a11ign's `LANE_PREFIX` by default, injectable so a test can state a fixture
- *   project's own prefix and show this same rule, unchanged, reads THAT project's lane labels.
+ *   project's own prefix and show this same rule, unchanged, reads THAT project's lane labels. `standIns`, `row`
+ *   and `now` (#947) are the records of spawns: a seat is the owner only for the row and the owner a fresh record
+ *   names, so default none (or no `row`) changes nothing. The caller passes `row` only for an open row.
  * @returns {string | null} a refusal reason, or null if no live session's lane reserves this row
  */
-export function laneReason(labels: string[], mySession: string, deps?: { liveSessions?: readonly string[]; pool?: readonly string[]; lanePrefix?: string; }): string | null {
+export function laneReason(labels: string[], mySession: string, deps?: { liveSessions?: readonly string[]; pool?: readonly string[]; lanePrefix?: string; standIns?: readonly LaneStandIn[]; row?: number; now?: number; }): string | null {
   const live = deps?.liveSessions ?? LIVE_SESSIONS;
   const pool = labels.includes("fleet-gated") ? (deps?.pool ?? ROUTED_TO["fleet-gated"]) : [];
   const lanePrefix = deps?.lanePrefix ?? LANE_PREFIX;
@@ -95,7 +99,8 @@ export function laneReason(labels: string[], mySession: string, deps?: { liveSes
     .filter((l) => l.startsWith(lanePrefix))
     .map((l) => l.slice(lanePrefix.length))
     .filter((owner) => owner !== "any" && owner !== mySession && isLiveSession(owner, live))
-    .filter((owner) => !(pool.includes(owner) && pool.includes(mySession)));
+    .filter((owner) => !(pool.includes(owner) && pool.includes(mySession)))
+    .filter((owner) => !(deps?.row !== undefined && standsIn(deps.standIns ?? [], { seat: mySession, row: deps.row, owner, now: deps.now ?? Date.now() })));
   if (owners.length === 0) return null;
   return `this row is in ${owners.join(", ")}'s lane (a \`${lanePrefix}\` label), and a lane is not a wall: ask `
     + `${owners.join(" or ")} to assign it, and record the crossing as a \`Lane-exception:\` line in the `

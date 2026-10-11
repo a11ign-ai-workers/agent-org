@@ -35,6 +35,8 @@ import { GRAPHQL_POOL_PROBE, poolFromHeaders } from "./api-pool.ts";
 // cancelled or in-flight run, so the streak read below agrees with the order `work-gate.ts` wakes a fixer
 // with -- a second reading of red here would let the two disagree about whether the fix is owed.
 import { newestVerdictRun, TRUNK_WORKFLOW } from "./trunk-red.ts";
+// agent-org#992: A LAB PULL REQUEST'S RED CROSS-REPO LEG, asked once for both arming doors (the sweep imports it from here as it does `blockerVerdict`).
+import { crossRepoRedMarker, crossRepoRedVerdict } from "./cross-repo-red.ts";
 
 /**
  * EXIT CODES ARE THE CONTRACT. `auto-arm.yml`'s `arm` step goes red on any non-zero, so each code's job is to tell the
@@ -280,21 +282,25 @@ const blockedMarker = (blockers: number[]) => `<!-- arm-refused: open-blocker ${
  * #3544: THE REFUSAL, WHERE A HUMAN LOOKS -- one comment on the PR, not one per tick. The sweep re-asks every tick, so the comment
  * is found by its marker before it is posted; the wait is then read off the PR rather than guessed from a green, unarmed one.
  * A failed read or post is SAID and never turns the refusal into anything else: the PR was not armed either way.
- * @param {{ number: string | number, repo: string, verdict: { why: string, blockers: number[] },
+ *
+ * agent-org#992: ONE SHAPE FOR TWO REFUSALS. An open blocker is a wait that ends by itself, so its comment says nothing needs doing; a
+ * red cross-repo leg (`files`) ends only when the author adds the declaration, so its comment says the line to add is in the reason, and
+ * its marker holds the files so a changed set is said afresh.
+ * @param {{ number: string | number, repo: string, verdict: { why: string, blockers: number[] } | { why: string, files: string[] },
  *   run: (ghArgs: string[]) => string, error: (line: string) => void }} refusal
  * @returns {{ posted: boolean }}
  */
 export function announceBlocked({ number, repo, verdict, run, error }: {
-        number: string | number; repo: string; verdict: { why: string; blockers: number[]; };
+        number: string | number; repo: string; verdict: { why: string; blockers: number[]; } | { why: string; files: string[]; };
         run: (ghArgs: string[]) => string; error: (line: string) => void;
     }): { posted: boolean; } {
-  const marker = blockedMarker(verdict.blockers);
+  const marker = "files" in verdict ? crossRepoRedMarker(verdict.files) : blockedMarker(verdict.blockers);
+  const tail = "files" in verdict ? "This comment is posted once for this set of files, and again if the set changes." : "This comment is posted once; nothing needs doing here.";
   try {
     const existing = JSON.parse(run(["pr", "view", String(number), "--repo", repo, "--json", "comments"])).comments;
     if (!Array.isArray(existing)) throw new Error("the API returned no comment list");
     if (existing.some((comment) => String(comment?.body ?? "").includes(marker))) return { posted: false };
-    run(["pr", "comment", String(number), "--repo", repo, "--body",
-      `${marker}\n**Not armed: ${verdict.why}.** This comment is posted once; nothing needs doing here.`]);
+    run(["pr", "comment", String(number), "--repo", repo, "--body", `${marker}\n**Not armed: ${verdict.why}.** ${tail}`]);
     return { posted: true };
   } catch (cause) {
     error(`arm-pr: could not tell #${number} why it is not armed: ${(cause as Error).message}`);
@@ -1124,6 +1130,14 @@ export function runArmPr({ argv, env, run = defaultRun, sleep = defaultSleep, lo
     const cannotAsk = blocker.kind === "cannot-ask";
     (cannotAsk ? error : log)(`arm-pr: NOT arming #${number} -- ${blocker.why}`);
     if (blocker.kind === "open-blocker") announceBlocked({ number, repo, verdict: blocker, run: (args) => gh(args, run), error });
+    return cannotAsk ? EXIT.CANNOT_ASK : EXIT.DONE;
+  }
+  // agent-org#992: AFTER the blocker exit and before any write, the same shape. A red leg the declaration has not answered is a DONE, as a block is.
+  const crossRed = crossRepoRedVerdict({ number, repo, prBody, run: (args) => gh(args, run) });
+  if (crossRed.kind !== "clear") {
+    const cannotAsk = crossRed.kind === "cannot-ask";
+    (cannotAsk ? error : log)(`arm-pr: NOT arming #${number} -- ${crossRed.why}`);
+    if (crossRed.kind === "cross-repo-red") announceBlocked({ number, repo, verdict: crossRed, run: (args) => gh(args, run), error });
     return cannotAsk ? EXIT.CANNOT_ASK : EXIT.DONE;
   }
   const { outcome, jumpFailure } = armOrJump({ number, repo, prBody }, { run, sleep, log, error });

@@ -9,8 +9,8 @@
  * afterwards lets the call land and asks someone to undo it. It is also the shape `mjs-ratchet.test.ts` takes for "can only go down" (#4249). If `ceo` wants the row-filing form
  * as well, it is one further row on top of this one; this choice is reversed on #826.
  *
- * WHY `gh-call-inventory.test.ts` DOES NOT HOLD THIS. It fails when `docs/gh-call-inventory.json` is stale and the cure is to regenerate it, which blesses the new call. The
- * inventory says what is there; `docs/gh-call-baseline.json` says what MAY be there.
+ * WHY `gh-call-inventory.test.ts` DOES NOT HOLD THIS. It holds the scanner (an independent reader must find no spawner the scan lacks), and the inventory it prints is not
+ * committed (a11ign/a11ign#5126), so no copy of it can bless a new call. The inventory says what is there; `docs/gh-call-baseline.json` says what MAY be there.
  *
  * WHAT FAILS: a file of a fresh inventory that (a) is outside `src/ticket-port/` and has no baseline entry, or (b) holds more `spawns` or more `calls` than its entry. The message
  * names the file and both numbers.

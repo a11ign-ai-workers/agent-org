@@ -1,7 +1,7 @@
 // THE AUDIENCE AUDIT (a11ign/a11ign#4746, #928 row 4 of 5; the detector #4437 names): an `announcement` that asks the chairman something, or an `ask` with no row or
 // record, is a LEDGER INCIDENT. Without it the channel drifts back into the one chat it replaced ("really hard to keep track of what I'm needed for").
 //
-//   announcement-question   an announcement whose text ends a line in `?`, or carries a `needs:chairman` / `answer:` / "reply" request marker (the lists below)
+//   announcement-question   an announcement whose text ends a line in `?`, or carries a `needs:chairman` / `answer:` / "reply" request marker (the lists below); a `release:` quotes label names, so it is not read for the markers
 //   ask-row                 an ask naming neither a row (`row`) nor the reason its kind has none (`rowLess`): it could not be ticked or listed against anything
 //   ask-record              an ask with no `askId`: `foldAsks` could not tell which ask it was
 //
@@ -46,11 +46,14 @@ const printToStdout = (line: string) => process.stdout.write(`${line}\n`);
 export const declaredAudience: AudienceOf = (key) => (DEFAULT_CONFIG.kinds as Record<string, { audience: string }>)[key.split(":")[0]]?.audience;
 
 /** Whether the text asks the chairman something: a line ending `?`, a request marker, or the word "reply". */
-export function asksSomething(text: string): boolean {
+export function asksSomething(text: string, markers: readonly string[] = REQUEST_MARKERS): boolean {
   const lowered = text.toLowerCase();
   const endsInQuestion = text.split(/\r?\n/).some((line) => line.trim().endsWith("?"));
-  return endsInQuestion || REQUEST_MARKERS.some((marker) => lowered.includes(marker)) || REPLY_REQUEST.test(text);
+  return endsInQuestion || markers.some((marker) => lowered.includes(marker)) || REPLY_REQUEST.test(text);
 }
+
+/** A release quotes the label names it removed or never applied ("once its answer:ceo is removed"), so in one a label marker is not a request. The `?` and "reply" checks still apply to it. */
+const markersOf = (line: Line): readonly string[] => (String(line.key).split(":")[0] === "release" ? [] : REQUEST_MARKERS);
 
 const nonEmpty = (value: unknown): boolean => typeof value === "string" && value.trim() !== "";
 
@@ -79,7 +82,7 @@ function audienceChecked(line: Line, audienceOf: AudienceOf): string | undefined
 export function misuseOf(line: Line, audienceOf: AudienceOf = declaredAudience): Misuse[] {
   const audience = audienceChecked(line, audienceOf);
   const failed: string[] = [];
-  if (audience === AUDIENCE.announcement && asksSomething(String(line.text ?? ""))) failed.push(HALF.question);
+  if (audience === AUDIENCE.announcement && asksSomething(String(line.text ?? ""), markersOf(line))) failed.push(HALF.question);
   if (audience === AUDIENCE.ask && !nonEmpty(line.row) && !nonEmpty(line.rowLess)) failed.push(HALF.row);
   if (audience === AUDIENCE.ask && !nonEmpty(line.askId)) failed.push(HALF.record);
   return failed.map((half) => ({ half, messageRef: refOf(line), excerpt: excerptOf(line.text) }));

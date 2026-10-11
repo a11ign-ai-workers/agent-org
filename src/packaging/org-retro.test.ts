@@ -25,6 +25,7 @@ import { CAUSES, JUDGMENT_CAUSES, START_CAUSES, HOLD_RED_JOBS } from "../work-ga
 import { PROFILES } from "../worker-profile.ts";
 import { HOME_CHECKOUT, HOST_ENV } from "../project-config.ts";
 import { tmpDir } from "../lib/tmp-fixture.ts";
+import { connectionOf, readsRowsByLabel, readsRowsSince, sinceAnswer } from "./rows-by-label-fixtures.ts";
 
 const HOUR_MS = 3_600_000;
 const NOW = Date.parse("2026-10-02T00:00:00Z");
@@ -532,11 +533,18 @@ function idleReading({ holders, prs = [], declare = {}, ledger = "" }: { holders
   writeFileSync(join(stateDir, "wake-ledger"), ledger);
   const repos = ["a11ign/a11ign", "a11ign/agent-org"];
   const read = (args: string[]) => {
+    // #5076: the claimed rows are `issues(labels:)` and the merged list `pullRequests(states: MERGED)`, both connections; the open lists are plain `gh` lists.
+    const byLabel = readsRowsByLabel(args);
+    const repoOf = (): string => `${args.find((a) => a.startsWith("owner="))?.slice("owner=".length)}/${args.find((a) => a.startsWith("name="))?.slice("name=".length)}`;
+    if (byLabel !== null) {
+      const here = holders.filter((h) => repos[h.tracker] === repoOf());
+      return JSON.parse(connectionOf(here.map((h) => ({ number: h.row, comments: claimedRow(h.row, h.session, h.claimedAt).comments }))));
+    }
+    if (readsRowsSince(args) !== null) return JSON.parse(sinceAnswer(args, []));
     const repo = args[args.indexOf("-R") + 1];
-    if (args[0] === "pr") return args.includes("merged") ? [] : prs.map((p, i) => ({ number: i + 1, body: "", headRefName: `b${i}`, labels: [{ name: `session:${p.session}` }] }));
+    if (args[0] === "pr") return prs.map((p, i) => ({ number: i + 1, body: "", headRefName: `b${i}`, labels: [{ name: `session:${p.session}` }] }));
     const here = holders.filter((h) => repos[h.tracker] === repo);
-    return args.includes("--label") ? here.map((h) => ({ number: h.row, comments: claimedRow(h.row, h.session, h.claimedAt).comments }))
-      : here.map((h) => ({ number: h.row, labels: claimedRow(h.row, h.session, h.claimedAt).labels }));
+    return here.map((h) => ({ number: h.row, labels: claimedRow(h.row, h.session, h.claimedAt).labels }));
   };
   return readIdleClaimedHours({ now: NOW, stateDir, declaration: TWO_TRACKERS, read });
 }
@@ -572,7 +580,8 @@ test("a claim older than the window counts only the window, and an undated claim
 test("a refused list is unknown, never 0, and the number is in the report and the readings line", () => {
   const stateDir = tmpDir("org-retro-idle-");
   assert.equal(readIdleClaimedHours({ now: NOW, stateDir, declaration: TWO_TRACKERS, read: () => null }), null, "no tracker list");
-  assert.equal(readIdleClaimedHours({ now: NOW, stateDir, declaration: TWO_TRACKERS, read: (args) => (args[0] === "pr" ? null : []) }), null, "no pull-request list");
+  assert.equal(readIdleClaimedHours({ now: NOW, stateDir, declaration: TWO_TRACKERS, read: (args) => (args[0] === "pr" || readsRowsSince(args) !== null ? null
+    : readsRowsByLabel(args) !== null ? JSON.parse(connectionOf([])) : []) }), null, "no pull-request list");
   const reading = { hours: 120, claims: 12, idleClaims: 12, undated: [] };
   const base = { merged: [], openPrs: [], journal: "", ledger: "", turns: [], handFixes: HAND_FIXES_ONE, readings: parseReadings("") };
   const report = buildReport({ ...base, idleClaimedHours: reading }, NOW);

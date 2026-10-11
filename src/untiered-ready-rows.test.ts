@@ -12,8 +12,13 @@ import { untieredReadyRows, untieredLines, ghReadyReader, hasTierDecision, ROW_L
 import { buildReport, renderReport, retrospectiveTick, untieredSweepOrder } from "./org-retro.ts";
 import { PROFILES } from "./worker-profile.ts";
 import { JUDGMENT_CAUSES, START_CAUSES } from "./work-gate.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
+import { forgetRefusedReads } from "./ticket-port/rows-by-label.ts";
 
 const NOW = Date.parse("2026-10-09T10:30:00Z");
+
+// the refusal memory of `rows-by-label.ts` is the process's: a read refused for a limit in one case must not stop the next case's read.
+test.beforeEach(() => forgetRefusedReads());
 
 /** A `ready` row with no decision and no excluding label: the shape the count exists for. */
 const BARE = Object.freeze({
@@ -152,19 +157,23 @@ test("the line gives the FIRST TEN numbers and counts the rest", () => {
   assert.doesNotMatch(line, /#110/);
 });
 
-test("`ghReadyReader` asks the tracker for its open `ready` rows with the fields read, and a refusal throws to be named", () => {
+test("`ghReadyReader` asks the tracker for its open `ready` rows with the fields read, as a connection and never a search, and a refusal throws to be named", () => {
   const asked: string[][] = [];
   const reader = ghReadyReader({ key: "agent-org", repo: "a11ign/agent-org" }, (args) => {
     asked.push(args);
-    return JSON.stringify([BARE]);
+    return connectionOf([BARE]);
   });
   assert.equal(reader.key, "agent-org");
-  assert.deepEqual(reader.listRows().map((r) => r.number), [466]);
-  const args = asked[0].join(" ");
-  assert.match(args, /--repo a11ign\/agent-org/);
-  assert.match(args, /--state open/);
-  assert.match(args, /--label ready/);
-  assert.match(args, /--json number,title,body,labels,comments/);
+  const rows = reader.listRows();
+  assert.deepEqual(rows.map((r) => r.number), [466]);
+  assert.deepEqual(rows[0].labels, [{ name: "ready" }, { name: "lane:any" }], "the labels come back as `gh issue list --json` gave them, which the decision reads");
+  assert.deepEqual(rows[0].comments, [{ body: "claimed" }]);
+  assert.equal(asked.length, 1);
+  assert.ok(!asked[0].includes("--label") && !asked[0].includes("--search"), "#5076: no search-backed list");
+  assert.deepEqual(readsRowsByLabel(asked[0]), { label: "ready", state: "OPEN" });
+  assert.ok(asked[0].includes("owner=a11ign") && asked[0].includes("name=agent-org"), "the repository is named in the variables");
+  const query = asked[0].find((arg) => arg.startsWith("query=")) ?? "";
+  for (const field of ["number", "title", "body", "labels(", "comments("]) assert.ok(query.includes(field), `the read selects ${field}`);
   const refusing = ghReadyReader({ key: "", repo: "a11ign/a11ign" }, () => { throw new Error("gh: rate limited"); });
   assert.equal(untieredReadyRows({ trackers: [refusing] }).status, "unknown");
 });

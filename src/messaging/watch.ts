@@ -69,6 +69,7 @@ import { HOME_CHECKOUT } from "../project-config.ts";
 import { readAgents } from "../herdr-agents.ts";
 import { completionPath } from "../lib/tick-completion.ts";
 import { isBrokenRed } from "../red-pr.ts";
+import { asListJson, foldPage, parsePage, sincePageArgs, SINCE_PAGE_SIZE, type SinceRead } from "../ticket-port/rows-since.ts"; // #5076: the label and merged lists are connections, never a search
 
 const execFileAsync = promisify(execFile);
 const GH_TIMEOUT_MS = 60_000;
@@ -80,16 +81,36 @@ const EXIT = Object.freeze({ ok: 0, failed: 1, refused: 2 });
 export const READ_METHODS = Object.freeze(["issuesLabelled", "issueComments", "mergedPullsSince", "redPulls"]);
 
 const ALLOWED_VERBS = new Set(["issue list", "issue view", "pr list"]);
-const ALLOWED_FLAGS = new Set(["-R", "--label", "--state", "--search", "--json", "--limit"]);
+// #5076: `--label` and `--search` are not here any more -- `gh` sends them as a GitHub SEARCH, and no reader builds one: the label and merged lists are `api graphql` reads.
+const ALLOWED_FLAGS = new Set(["-R", "--state", "--json", "--limit"]);
 /** The REST paths `gh api` may be given, after `repos/<owner>/<name>/`: the ones `sources/readers.ts` reads, each a listing or a lookup. */
 const READ_API_PATH = /^repos\/[\w.-]+\/[\w.-]+\/(pulls|issues|issues\/\d+\/comments|actions\/runs|actions\/workflows\/[\w.-]+\/runs|actions\/runs\/\d+\/jobs|releases|check-runs\/\d+\/annotations)(\?[\w=&.,%:-]*)?$/;
 /** The two lookups the milestones source makes beyond `READ_API_PATH`, after `repos/<owner>/<name>/`: one issue, one pull request. A NUMBER, never a search. */
 const MILESTONE_API_PATH = /^repos\/[\w.-]+\/[\w.-]+\/(issues|pulls)\/\d+$/;
 
+/** A GraphQL document that is a QUERY: the keyword opens it, and no operation of another kind is in it. */
+const GRAPHQL_QUERY = /^query=query[\s($]/;
+const GRAPHQL_WRITE = /\b(?:mutation|subscription)\b/;
+
+/**
+ * `gh api graphql -f query=<a query> [-F name=value]...` and nothing else (#5076): a READ over GraphQL, which `rows-since.ts` builds. The one `-f` is the document, and it is
+ * refused unless it is a `query` with no `mutation` or `subscription` in it; every other token is a `-F name=value` variable, the one flag that cannot change a verb.
+ */
+function assertReadOnlyGraphql(argv: readonly string[]) {
+  const rest = argv.slice(2);
+  const pairsOnly = rest.length >= 2 && rest.length % 2 === 0;
+  const flagsRight = pairsOnly && rest.every((token, at) => (at % 2 === 1 ? at === 1 || !token.includes("=@") && !token.startsWith("@") : at === 0 ? token === "-f" : token === "-F"));
+  const document = rest[1] ?? "";
+  if (!flagsRight || !GRAPHQL_QUERY.test(document) || GRAPHQL_WRITE.test(document)) {
+    throw new Error(`chairman-watch reads only: \`gh api graphql ${rest.join(" ").slice(0, 80)}\` is not an allowed read`);
+  }
+}
+
 /**
  * `gh api <path>` and nothing after the path: a GET is the default and every flag that would change it (`-X`, `-f`, `-F`, `--input`) is a token this refuses.
  */
 function assertReadOnlyApi(argv: readonly string[]) {
+  if (argv[1] === "graphql") return assertReadOnlyGraphql(argv);
   if (argv.length !== 2 || !(READ_API_PATH.test(argv[1]) || MILESTONE_API_PATH.test(argv[1]))) throw new Error(`chairman-watch reads only: \`gh api ${argv.slice(1).join(" ")}\` is not an allowed read`);
 }
 
@@ -129,10 +150,24 @@ export function createGhReader({ run = runGh }: { run?: (argv: readonly string[]
     assertReadOnlyGh(argv);
     return JSON.parse(await run(argv));
   }
+  /** Every page of a connection read, each argv through the read-only check, in the shape `gh <kind> list --json` gave. */
+  async function connection(ask: SinceRead): Promise<any[]> {
+    let rows: any[] = [];
+    let after: string | null = null;
+    for (let pagesRead = 1; ; pagesRead += 1) {
+      const argv = sincePageArgs(ask, after);
+      assertReadOnlyGh(argv);
+      const folded = foldPage({ ask, rows, page: parsePage(await run(argv), ask), pagesRead });
+      rows = folded.rows;
+      if (folded.next === null) return rows.map(asListJson);
+      after = folded.next;
+    }
+  }
   return {
-    issuesLabelled({ repo, label, comments = false, limit = 100 }: { repo: string; label: string; comments?: boolean; limit?: number; }) {
-      const fields = comments ? "number,title,url,updatedAt,comments" : "number,title,url,updatedAt";
-      return list(["issue", "list", "-R", repo, "--label", label, "--state", "open", "--json", fields, "--limit", String(limit)]);
+    async issuesLabelled({ repo, label, comments = false, limit = 100 }: { repo: string; label: string; comments?: boolean; limit?: number; }) {
+      // The oldest hundred comments, as `gh issue list --json comments` gave (see requests.ts); the fields are what `RowComment` reads.
+      const select = `number title url updatedAt${comments ? " comments(first:100){nodes{body createdAt authorAssociation}}" : ""}`;
+      return connection({ kind: "issues", states: ["OPEN"], label, orderBy: "CREATED_AT", repo, select, newest: limit });
     },
     /** All of one row's comments: the list returns only the oldest hundred (see requests.ts). */
     async issueComments({ repo, number }: { repo: string; number: number; }) {
@@ -140,9 +175,11 @@ export function createGhReader({ run = runGh }: { run?: (argv: readonly string[]
       return Array.isArray(row?.comments) ? row.comments : [];
     },
     async mergedPullsSince({ repo, sinceMs, limit = 100 }: { repo: string; sinceMs: number; limit?: number; }) {
-      const since = new Date(sinceMs).toISOString();
-      const pulls = await list(["pr", "list", "-R", repo, "--state", "merged", "--search", `merged:>=${since}`, "--json", "number,mergedAt", "--limit", String(limit)]);
-      // The search qualifier is the filter and this is the check on it: a count of "merged in 24 h" must not include a merge from last week.
+      // A connection cannot filter by `mergedAt`, so the merged pull requests are read newest-UPDATED first back to `since` (a merge is an update, so none is missed) and
+      // kept by their own `mergedAt`: a count of "merged in 24 h" must not include a merge from last week. A window of more rows than `limit` fills two pages past it and
+      // THROWS, which the summary reads as unread, as it reads a list at its limit.
+      const maxPages = Math.ceil(limit / SINCE_PAGE_SIZE) + 1;
+      const pulls = await connection({ kind: "pullRequests", states: ["MERGED"], orderBy: "UPDATED_AT", repo, select: "number mergedAt", since: new Date(sinceMs).toISOString(), maxPages });
       return pulls.filter((pull) => Date.parse(pull.mergedAt) >= sinceMs);
     },
     /**

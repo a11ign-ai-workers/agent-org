@@ -23,13 +23,49 @@ import { join } from "node:path";
 const perTest = new Set<string>();
 const perFile = new Set<string>();
 
-function removeAll(made: Set<string>): void {
-  for (const dir of made) rmSync(dir, { recursive: true, force: true });
-  made.clear();
+/** `rmSync`'s own retries (it retries EBUSY, ENOTEMPTY and EPERM only): a late writer in the tree, such as a `git` the test spawned, is waited out rather than ending the removal. */
+const RETRIES = { maxRetries: 5, retryDelay: 100 };
+
+/** What removes one directory; a test passes its own to make a removal fail. */
+type Remove = (dir: string) => void;
+
+/**
+ * (#987) EVERY DIRECTORY IS TRIED, AND A FAILURE IS THE FILE'S OWN RED. Measured in the merge-queue run 38150393779: a file passed all its cases and its
+ * directory was left holding 4 of the 5 entries it was made with, so the removal had begun (one entry gone) and stopped, and nothing said so. A removal
+ * that threw at the first failure took the remaining directories with it and, in `after`, ended the hook with the rest of the list untried. So each
+ * directory is attempted whatever the one before did, a directory that could not be removed stays in `made` for the exit fallback below, and the failures
+ * are thrown together, naming each path, so the leak is this file's failure and not the queue's.
+ */
+export function removeAll(made: Set<string>, remove?: Remove): void {
+  const failures: string[] = [];
+  for (const dir of made) {
+    try {
+      if (remove) remove(dir);
+      else rmSync(dir, { recursive: true, force: true, ...RETRIES });
+      made.delete(dir);
+    } catch (error) {
+      failures.push(`${dir}: ${(error as NodeJS.ErrnoException).code ?? String(error)}`);
+    }
+  }
+  if (failures.length > 0) throw new Error(`tmp-fixture: could not remove ${failures.length} test director${failures.length === 1 ? "y" : "ies"}: ${failures.join("; ")}`);
+}
+
+function removeAllQuietly(made: Set<string>): void {
+  try { removeAll(made); } catch { /* the exit fallback has nowhere to report to; the teardown names what is left */ }
 }
 
 afterEach(() => removeAll(perTest));
-after(() => { removeAll(perTest); removeAll(perFile); });
+after(() => {
+  const failures: unknown[] = [];
+  for (const made of [perTest, perFile]) {
+    try { removeAll(made); } catch (error) { failures.push(error); }
+  }
+  if (failures.length > 0) throw new Error(failures.map((error) => (error as Error).message).join("; "));
+});
+
+// The fallback for any path the runner takes after the last case that never reaches `after` (a fork that exits first): the process's own `exit`, which runs
+// synchronously, removes whatever is still registered. A killed fork still leaves its directory, and the teardown names it.
+process.once("exit", () => { removeAllQuietly(perTest); removeAllQuietly(perFile); });
 
 /**
  * A fresh directory under the system temp directory, removed after the test that made it.

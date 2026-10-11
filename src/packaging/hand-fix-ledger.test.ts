@@ -17,6 +17,7 @@ import {
   judgeChange, ledgerLine, readLedger, trendOf, HAND_FIX_FORMAT,
 } from "../hand-fix-ledger.ts";
 import { main as prOpen, EXIT_NOTHING_SENT } from "../pr-open.ts";
+import { readsRowsSince, sinceAnswer } from "./rows-by-label-fixtures.ts";
 import { ORG_LOGINS as READERS_ORG_LOGINS, ORG_ACCOUNT_LOGINS, ORG_APP_SLUGS } from "../messaging/sources/readers.ts";
 
 const EM = "—";
@@ -290,15 +291,16 @@ test("#2939 the MERGER is never read: a merge commit by the chairman's account o
     throw new Error(`unexpected git ${args.join(" ")}`);
   };
   const fakeGh = (args: string[]) => {
+    // #5076: the merged pull requests are the `pullRequests` connection, not `pr list --search`; asked first, since its argv also begins `api`.
+    if (readsRowsSince(args) !== null) return sinceAnswer(args, [{ number: 77, mergedAt: "2026-09-30T10:00:00Z", author: { login: "a11ign-ai-workers" }, title: "x", body: "" }]);
     if (args[0] === "api" && args[1] === "repos/o/r/commits/main") return "h".repeat(40);
     if (args[0] === "api") return `${MERGE}\tDanBeckDev\n${BRANCH}\ta11ign-ai-workers\n`;
-    if (args[0] === "pr") return JSON.stringify([{ number: 77, author: { login: "a11ign-ai-workers" }, title: "x", body: "" }]);
     throw new Error(`unexpected gh ${args.join(" ")}`);
   };
   const changes = gatherChanges({ git, gh: fakeGh, repo: "o/r" })({ from: new Date("2026-09-03T00:00:00Z"), to: NOW });
   assert.deepEqual(changes.map((c) => [c.key, c.actors]), [["pr:77", ["a11ign-ai-workers", "a11ign-ai-workers"]]]);
   assert.equal(buildLedger(changes).count, 0);
-  const human = gatherChanges({ git, gh: (a) => (a[0] === "api" && a[1] !== "repos/o/r/commits/main" ? `${MERGE}\tDanBeckDev\n${BRANCH}\tDanBeckDev\n` : fakeGh(a)), repo: "o/r" })(
+  const human = gatherChanges({ git, gh: (a) => (a[0] === "api" && a[1] !== "repos/o/r/commits/main" && readsRowsSince(a) === null ? `${MERGE}\tDanBeckDev\n${BRANCH}\tDanBeckDev\n` : fakeGh(a)), repo: "o/r" })(
     { from: new Date("2026-09-03T00:00:00Z"), to: NOW });
   assert.equal(buildLedger(human).count, 1, "positive control: the same change with a human commit on the branch IS counted");
 });

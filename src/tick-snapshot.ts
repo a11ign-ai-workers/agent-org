@@ -19,10 +19,16 @@
 //
 // THE ETAG IS SENT WITHOUT ITS `W/` PREFIX. Measured 2026-10-08 with `gh` 2.100: `If-None-Match: W/"x"` came back 200 and cost a point, the same tag unprefixed came back 304.
 // `gh api` exits 1 on a 304 (it says `gh: HTTP 304`), so the status is read off the `-i` header block, never off the exit code.
+//
+// IN `webhook` MODE (agent-org#981, a11ign/a11ign#5043) THE ANSWER COMES FROM THE EVENT QUEUE, NOT FROM A PROBE: `refreshTickSnapshot` is handed `events`, and while the receiver is `healthy` a
+// repository named by an event bumps its generation and every other keeps its counter, with NO `gh` call at all. Not `healthy`, it runs the probes above exactly as before: a dead receiver
+// costs the old polling, never a silent org. Without `events` nothing here changes.
+// A repository DUE for its reconcile in that mode is probed once (agent-org#982): a probe that moved with no event behind it is DRIFT and is filed once (`event-drift.ts` says what it can and cannot mean).
 
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
+import { driftOf, fileDrift, type FileDrift } from "./event-drift.ts";
 
 /** A repository is re-read at least this often even when every probe says unchanged: what a probe cannot see (a non-Actions status) is bounded by it. */
 export const MAX_UNCHANGED_SECONDS = 300;
@@ -60,6 +66,13 @@ const ghRun: GhRun = (args) => {
   return { stdout: r.stdout ?? "", status: r.status };
 };
 
+/** A `GhRun` as the `Run` `recordIncident` takes: the output, and a throw on a refusal (it catches that and the caller retries). */
+const asRun = (run: GhRun) => (args: string[]): string => {
+  const { stdout, status } = run(args);
+  if (status !== 0) throw new Error(`gh ${args.slice(0, 2).join(" ")} exited ${status ?? "without a status"}`);
+  return stdout;
+};
+
 /**
  * One probe: conditional if a tag is held. `changed` is true for a 200 whose tag is not the one held, or for an answer that is none of 200, 304, 404 and 410; a 404 or 410 is a repository
  * with no Actions (or no issues) and is a steady state, not a change. A 200 with the SAME tag is not a change either (a CDN may ignore the condition).
@@ -75,6 +88,12 @@ export function probeOnce({ path, held, run }: { path: string; held: string | un
   if (answer.status === HTTP_OK && answer.etag !== null) return { changed: answer.etag !== held, etag: answer.etag, why: answer.etag === held ? "200 same tag" : "200 new tag" };
   return { changed: true, etag: held, why: `unreadable (${answer.status ?? "no status"})` };
 }
+
+/**
+ * What the event queue told this tick (agent-org#981). `changed` is the repositories the consumed events named; `healthy` is the caller's verdict that the receiver is alive (the
+ * heartbeat is younger than its limit), so the probes may be skipped; `reconcileEverySeconds` replaces `MAX_UNCHANGED_SECONDS` while it is.
+ */
+export type TickEvents = { changed: ReadonlySet<string>, healthy: boolean, reconcileEverySeconds: number };
 
 /**
  * what is kept per repository: the tag each probe path last returned, and when its generation last moved
@@ -109,10 +128,18 @@ function writeWhole(path: string, text: string) {
 
 /**
  * Probe each repository once and move its generation. Returns one line per repository for the tick's log.
- * @param {{ repos: string[], homeRepo: string, configDir: string, run?: GhRun, nowMs?: number }} input
+ * @param {{ repos: string[], homeRepo: string, configDir: string, run?: GhRun, nowMs?: number, events?: TickEvents }} input
  * `homeRepo` is the repository a call that names none is about, so its generation is ALSO written under `default`.
+ * `events` absent is the poll path, unchanged. With `events.healthy` no probe runs: a repository in `events.changed` (compared without case, as GitHub spells `full_name` its own way)
+ * is bumped, one that is not keeps its counter, and its `verified-at` still moves, because a live receiver is what vouches for it. Not healthy, the probes run as they always did.
  */
-export function refreshTickSnapshot({ repos, homeRepo, configDir, run = ghRun, nowMs = Date.now() }: { repos: string[]; homeRepo: string; configDir: string; run?: GhRun; nowMs?: number; }) {
+export function refreshTickSnapshot({ repos, homeRepo, configDir, run = ghRun, nowMs = Date.now(), events, fileDrift: file = (drift) => fileDrift(drift, { run: asRun(run) }) }: { repos: string[]; homeRepo: string; configDir: string; run?: GhRun; nowMs?: number; events?: TickEvents; fileDrift?: FileDrift; }) {
+  const viaEvents = events !== undefined && events.healthy;
+  if (viaEvents && !(Number.isFinite(events.reconcileEverySeconds) && events.reconcileEverySeconds > 0)) {
+    throw new Error(`reconcileEverySeconds must be a positive number of seconds, not ${events.reconcileEverySeconds}: a repository would never be re-read`);
+  }
+  const named = new Set([...(events?.changed ?? [])].map((repo) => repo.toLowerCase()));
+  const reconcileSeconds = viaEvents ? events.reconcileEverySeconds : MAX_UNCHANGED_SECONDS;
   const root = join(configDir, "read-cache");
   mkdirSync(join(root, "gen"), { recursive: true });
   const tagsPath = join(root, "etags.json");
@@ -121,14 +148,24 @@ export function refreshTickSnapshot({ repos, homeRepo, configDir, run = ghRun, n
   const lines = [];
   for (const repo of repos) {
     const held = tags[repo] ?? { tags: {}, bumpedAt: 0 };
-    const probes = probePaths(repo).map((path) => ({ path, ...probeOnce({ path, held: held.tags[path], run }) }));
     const before = readGeneration(join(root, "gen", slugOf(repo)));
-    const changed = probes.some((p) => p.changed);
-    const due = before === null || nowS - held.bumpedAt >= MAX_UNCHANGED_SECONDS;
+    const due = before === null || nowS - held.bumpedAt >= reconcileSeconds;
+    const eventNamed = named.has(repo.toLowerCase());
+    // Poll: the probes are the answer. Events: none, except ONCE when the repository is due, as the safety net for a delivery the receiver never got (agent-org#982).
+    const probes = !viaEvents || due ? probePaths(repo).map((path) => ({ path, held: held.tags[path], ...probeOnce({ path, held: held.tags[path], run }) })) : [];
+    const drift = viaEvents && due ? driftOf({ repo, probes, named: eventNamed, windowStartS: held.bumpedAt, nowS }) : null;
+    // A refused filing leaves the window and the held tags as they were, so the next tick is due and the same probe says CHANGED again: retried, not lost.
+    const filed = drift === null ? null : file(drift);
+    const unfiled = drift !== null && !filed;
+    const changed = (viaEvents && eventNamed) || probes.some((p) => p.changed);
     const counter = changed || due ? (before?.counter ?? 0) + 1 : (before?.counter ?? 1);
-    tags[repo] = { tags: Object.fromEntries(probes.flatMap((p) => (p.etag === undefined ? [] : [[p.path, p.etag]]))), bumpedAt: changed || due ? nowS : held.bumpedAt };
+    // While events answer, tags are kept as they are except at a reconcile that filed (or found nothing): they are what the probes compare against on the tick the receiver is found dead, where a difference reads as a change.
+    const kept = viaEvents && (!due || unfiled) ? held.tags : Object.fromEntries(probes.flatMap((p) => (p.etag === undefined ? [] : [[p.path, p.etag]])));
+    tags[repo] = { tags: kept, bumpedAt: unfiled ? held.bumpedAt : changed || due ? nowS : held.bumpedAt };
     for (const slug of repo === homeRepo ? [slugOf(repo), slugOf("")] : [slugOf(repo)]) writeWhole(join(root, "gen", slug), `${counter} ${nowS}\n`);
-    lines.push(`${repo}: ${changed || due ? "CHANGED" : "unchanged"} (${probes.map((p) => p.why).join(", ")}${due && !changed ? "; re-read due" : ""}) generation ${counter}`);
+    const driftNote = drift === null ? "" : `; MISSED DELIVERY inferred from the ${drift.probe} probe, ${filed ? "incident filed" : "incident NOT filed, retried next tick"}`;
+    const why = viaEvents ? (eventNamed ? "event" : "no event") : probes.map((p) => p.why).join(", ");
+    lines.push(`${repo}: ${changed || due ? "CHANGED" : "unchanged"} (${why}${due && !changed ? "; re-read due" : ""}${driftNote}) generation ${counter}`);
   }
   writeWhole(tagsPath, JSON.stringify(tags));
   return lines;

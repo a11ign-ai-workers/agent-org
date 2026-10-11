@@ -92,3 +92,43 @@ export function connectionOfSelected(rows: readonly FakeRow[], args: readonly st
   if (fields !== null) answer.data.repository.issues.nodes = answer.data.repository.issues.nodes.map((node: Record<string, unknown>) => Object.fromEntries(fields.map((field) => [field, node[field]])));
   return JSON.stringify(answer);
 }
+
+// --- #5076: THE FAKE'S HALF OF `ticket-port/rows-since.ts` ---------------------------------------------------------------------------------------
+// A merged or closed list is no longer `gh pr list --search merged:>=T` / `issue list --search closed:...`: it is `repository.pullRequests(states:)` or
+// `repository.issues(states:)`, a connection ordered newest first, paged 100 at a time. A fake writes its rows as it always did (`labels: [{ name }]`,
+// `files: [{ path }]`, `mergeCommit: { oid }`, scalars) and these two say what a request asked and answer it in the connection's shape.
+
+/** What a `gh api graphql` argv asked of a rows-since read, or `null` when it is some other call. `after` is the page cursor, `null` for the first page. */
+export function readsRowsSince(args: readonly string[]): {
+  kind: "issues" | "pullRequests"; states: string[]; orderBy: "CREATED_AT" | "UPDATED_AT"; label: string | null; repo: string; after: string | null;
+} | null {
+  if (args[0] !== "api" || args[1] !== "graphql") return null;
+  const query = args.find((arg) => arg.startsWith("query=")) ?? "";
+  const asked = /(issues|pullRequests)\(states:\[([A-Z,]+)\],(?:labels:\[\$label\],)?first:\d+,after:\$after,orderBy:\{field:(CREATED_AT|UPDATED_AT),/.exec(query);
+  if (asked === null) return null;
+  const variable = (name: string): string | null => args.find((arg) => arg.startsWith(`${name}=`))?.slice(name.length + 1) ?? null;
+  return { kind: asked[1] as "issues" | "pullRequests", states: asked[2].split(","), orderBy: asked[3] as "CREATED_AT" | "UPDATED_AT",
+    label: variable("label"), repo: `${variable("owner")}/${variable("name")}`, after: variable("after") };
+}
+
+/** A fake row's arrays become connections (`{ nodes }`), and a bare label name becomes `{ name }`, as the connection gives them. */
+function asNodes(row: FakeRow): Record<string, unknown> {
+  const named = (item: unknown): unknown => (typeof item === "string" ? { name: item } : item);
+  return Object.fromEntries(Object.entries(row).map(([key, value]) => [key, Array.isArray(value) ? { nodes: value.map(named) } : value]));
+}
+
+/**
+ * The connection's answer for `args` over `rows`, already in the order the read asked (newest first): the page at `after` (a cursor this function made), 100 rows of it,
+ * and `hasNextPage` when more follow. Throws when `args` is not a rows-since read, so a fake that routes by it cannot answer another call by accident.
+ */
+export function sinceAnswer(args: readonly string[], rows: readonly FakeRow[]): string {
+  const asked = readsRowsSince(args);
+  if (asked === null) throw new Error(`not a rows-since read: ${args.join(" ").slice(0, 120)}`);
+  const PAGE = 100;
+  const from = asked.after === null ? 0 : Number(asked.after.replace(/^c/, ""));
+  const page = rows.slice(from, from + PAGE);
+  const more = from + PAGE < rows.length;
+  return JSON.stringify({ data: { repository: { [asked.kind]: {
+    pageInfo: { hasNextPage: more, endCursor: more ? `c${from + PAGE}` : null }, nodes: page.map(asNodes),
+  } } } });
+}

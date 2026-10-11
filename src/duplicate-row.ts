@@ -12,6 +12,7 @@ import { decide, decisionLogPathFrom, decisionSwitchesPath, readSwitches, record
 import { printDiagnostic, processState } from "./triage-provider.ts";
 import { readFileSync } from "node:fs";
 import { DUPLICATE_SIMILARITY, namesDifferentRepos, similarity, wordsOf } from "./board-truth-audit.ts";
+import { openRestListing } from "./blast-radius.ts";
 import { extractRegionSection, regionPathsFromBody } from "./region-paths.ts";
 
 export const DISTINCT_FROM_FLAG = "--distinct-from=";
@@ -19,7 +20,6 @@ export const DISTINCT_FROM_FLAG = "--distinct-from=";
 export const MAX_CANDIDATES = 5;
 /** Title words in common, over all words, at or above which an open row is a candidate. Never above the audit's own bar, so every twin the audit would name is asked about. */
 export const CANDIDATE_OVERLAP = Math.min(0.5, DUPLICATE_SIMILARITY);
-const OPEN_ROW_READ_LIMIT = 1000;
 const MAX_REGION_PATHS = 12;
 const USE = "duplicate-row";
 
@@ -78,8 +78,7 @@ const regionOf = (body: string): string[] => regionPathsFromBody(extractRegionSe
 
 function openRows(repo: string, run: Run): RowRef[] | null {
   try {
-    const rows = JSON.parse(run("gh", ["issue", "list", "--repo", repo, "--state", "open", "--limit", String(OPEN_ROW_READ_LIMIT), "--json", "number,title"]));
-    return Array.isArray(rows) ? rows.filter((r) => Number.isInteger(r?.number) && typeof r?.title === "string") : null;
+    return openRestListing<RowRef>((args) => run("gh", args), repo, "issues").filter((r) => Number.isInteger(r.number) && typeof r.title === "string");
   } catch {
     return null; // an unreadable board asks nobody: the exact-title rule still runs, and says so itself when IT cannot read
   }

@@ -28,13 +28,14 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { tellBlocked, BLOCKED_TOLD_FILE } from "./worker-state.ts";
-import { stateEntryPath } from "./host-config.ts";
+import { EVENT_QUEUE_ENTRY, homeHostConfig, stateEntryPath, type HostConfig } from "./host-config.ts";
+import { ackThrough, changedRepos, readNewEvents } from "./event-queue.ts";
 import { defaultRun, promptOrQueue, STANCE, EXIT as PROMPT_EXIT } from "./prompt-session.ts";
 import { PANE_DIALOG_RAISED_FILE, raisePaneDialogs, readRaised, writeRaised } from "./pane-dialog.ts";
 import { homeProjectDeclaration } from "./project-config.ts";
 import { completionPath, writeCompletion } from "./lib/tick-completion.ts";
 import { toolVersionLine } from "./lib/tool-version.ts";
-import { refreshTickSnapshot } from "./tick-snapshot.ts";
+import { refreshTickSnapshot, type TickEvents } from "./tick-snapshot.ts";
 import { clearOwnMarker, deliverTickOrders, killedTickOrders, readKilledTick, slowThresholdSeconds, slowTickOrders, tickMarkerPath,
   writeStartMarker } from "./work-tick-health.ts";
 import { CENSUS_ENV, childrenCpuMs, installSpawnCensus, readCensus, setCensusPhase, summariseCensus } from "./lib/spawn-census.ts";
@@ -524,25 +525,94 @@ function tidyRoster(roster: NonNullable<ReturnType<typeof readAgents>>, ledgerPa
   meter.phase("paneDialogs", () => raiseDialogsNow(roster, ledgerPath));
 }
 
+/** The receiver writes its heartbeat every 30 s (`event-receiver.ts`); one older than this is a dead receiver, not a quiet queue (agent-org#981). */
+export const HEARTBEAT_MAX_AGE_SECONDS = 120;
+
+/** Seconds since the receiver's heartbeat file (`<queue>.alive`, an ISO time) was written, or null for none: absent, unparseable, or from the future, each of which cannot vouch for the receiver. */
+function heartbeatAgeSeconds(path: string, nowMs: number): number | null {
+  try {
+    const at = Date.parse(readFileSync(path, "utf8").trim());
+    return Number.isNaN(at) || at > nowMs ? null : Math.floor((nowMs - at) / 1000);
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * (agent-org#981) WHAT THE EVENT QUEUE SAYS THIS TICK, for a host whose `events.source` is `webhook`; null for `poll` or no block, which passes no `events` and is today's behaviour.
+ * Events are read and handed over even when the receiver looks dead (the probes then cover them; the cursor still moves). An event that names no repository, or a queue line that did not
+ * parse, cannot say WHICH repository moved, so it names all of them: fail towards reading. `ack` is for the caller to run only AFTER the generations are written (agent-org#979).
+ * @returns {{ events: TickEvents, say: string, ack: () => string | null } | null}
+ */
+export function eventsForTick({ host, repos, nowMs }: { host: HostConfig; repos: string[]; nowMs: number; }): { events: TickEvents; say: string; ack: () => string | null; } | null {
+  const declared = host.events;
+  if (declared === undefined || declared.source !== "webhook") return null;
+  const queuePath = stateEntryPath(EVENT_QUEUE_ENTRY, { host, home: host.home });
+  const cursorPath = `${queuePath}.cursor`;
+  const age = heartbeatAgeSeconds(`${queuePath}.alive`, nowMs);
+  const healthy = age !== null && age < HEARTBEAT_MAX_AGE_SECONDS;
+  const reconcileEverySeconds = declared.reconcileMinutes * 60;
+  const unhealthy = (why: string) => `EVENTS UNHEALTHY (${why}), probes run`;
+  const heartbeat = age === null ? "heartbeat absent" : `heartbeat ${age}s`;
+  let read;
+  try {
+    read = readNewEvents({ queuePath, cursorPath });
+  } catch (err) {
+    return { events: { changed: new Set(), healthy: false, reconcileEverySeconds }, say: unhealthy(`queue unreadable: ${whatGhSaid(err)}`), ack: () => null };
+  }
+  const everything = read.unreadable > 0 || read.events.some((event) => typeof event.repo !== "string" || event.repo === "");
+  const changed = new Set(everything ? repos : changedRepos(read.events));
+  const stamps = read.events.map((event) => Date.parse(event.receivedAt)).filter((at) => !Number.isNaN(at));
+  const waited = stamps.length === 0 ? "" : `, oldest event waited ${Math.max(0, Math.floor((nowMs - Math.min(...stamps)) / 1000))}s`;
+  const count = read.events.length;
+  const say = !healthy ? unhealthy(heartbeat) : count === 0 ? "EVENTS no events" : `EVENTS ${count} event${count === 1 ? "" : "s"}${waited}`;
+  const consumed = count + read.unreadable > 0;
+  const ack = () => {
+    if (!consumed) return null;
+    try {
+      ackThrough({ cursorPath, through: read.through });
+      return null;
+    } catch (err) {
+      return `EVENTS cursor not moved (${whatGhSaid(err)}): the events are read again next tick`; // generations are already written, so the snapshot stands; a re-bump is harmless
+    }
+  };
+  return { events: { changed, healthy, reconcileEverySeconds }, say, ack };
+}
+
 /**
  * (#4148) THE TICK'S SNAPSHOT, refreshed once and BEFORE anything reads GitHub: one conditional REST probe pair per declared repository (a 304 costs no point), after which every
  * reader this tick starts is answered from the wrapper's store for a repository that did not change. `A11Y_TICK_SNAPSHOT` is set only when the refresh RAN, in this process's own
  * environment so the gate, wake and every child inherit it; a refresh that could not run unsets it, and every read then goes to GitHub as it did before this existed. Returns the one line the tick logs.
- * @param {{ declaration?: () => import("./project-config.ts").ProjectDeclaration, configDir?: string | undefined, refresh?: typeof refreshTickSnapshot, env?: NodeJS.ProcessEnv }} [deps]
+ * IN `webhook` MODE (agent-org#981) the event queue answers instead and a quiet tick makes no call; `source: "poll"` in `host.json` is the one-line revert, and a host that declares
+ * none, or whose declaration cannot be read, polls.
+ * @param {{ declaration?: () => import("./project-config.ts").ProjectDeclaration, configDir?: string | undefined, refresh?: typeof refreshTickSnapshot, env?: NodeJS.ProcessEnv, host?: () => HostConfig | undefined, nowMs?: number }} [deps]
  * @returns {string}
  */
-export function refreshSnapshotOrSay({ declaration = homeProjectDeclaration, configDir = process.env.GH_CONFIG_DIR, refresh = refreshTickSnapshot, env = process.env }: { declaration?: () => import("./project-config.ts").ProjectDeclaration; configDir?: string | undefined; refresh?: typeof refreshTickSnapshot; env?: NodeJS.ProcessEnv; } = {}): string {
+export function refreshSnapshotOrSay({ declaration = homeProjectDeclaration, configDir = process.env.GH_CONFIG_DIR, refresh = refreshTickSnapshot, env = process.env, host = pollingHostOrUndefined, nowMs = Date.now() }: { declaration?: () => import("./project-config.ts").ProjectDeclaration; configDir?: string | undefined; refresh?: typeof refreshTickSnapshot; env?: NodeJS.ProcessEnv; host?: () => HostConfig | undefined; nowMs?: number; } = {}): string {
   delete env.A11Y_TICK_SNAPSHOT;
   if (configDir === undefined || configDir === "") return "SNAPSHOT OFF: GH_CONFIG_DIR is unset, so there is no account store to hold one; every read goes to GitHub this tick.";
   try {
     const project = declaration();
     const repos = [...new Set([...project.tracker.map((t) => t.repo), ...project.code.map((c) => c.repo)])];
-    const lines = refresh({ repos, homeRepo: project.repo, configDir });
+    const declaredHost = host();
+    const tick = declaredHost === undefined ? null : eventsForTick({ host: declaredHost, repos, nowMs });
+    const lines = tick === null ? refresh({ repos, homeRepo: project.repo, configDir }) : refresh({ repos, homeRepo: project.repo, configDir, nowMs, events: tick.events });
     env.A11Y_TICK_SNAPSHOT = "1";
+    const notAcked = tick?.ack() ?? null;
     const changed = lines.filter((line) => line.includes(": CHANGED"));
-    return `SNAPSHOT ${repos.length} repositories, ${changed.length} changed${changed.length > 0 ? ` (${changed.map((line) => line.split(":")[0]).join(", ")})` : ""}`;
+    const base = `SNAPSHOT ${repos.length} repositories, ${changed.length} changed${changed.length > 0 ? ` (${changed.map((line) => line.split(":")[0]).join(", ")})` : ""}`;
+    return tick === null ? base : [base, tick.say, notAcked].filter((part) => part !== null).join("; ");
   } catch (err) {
     return `SNAPSHOT NOT REFRESHED (${whatGhSaid(err)}): every read goes to GitHub this tick.`;
+  }
+}
+
+/** The host's declaration, or undefined when it cannot be read: the tick then polls, as it did before a host could declare events. */
+function pollingHostOrUndefined(): HostConfig | undefined {
+  try {
+    return homeHostConfig();
+  } catch {
+    return undefined;
   }
 }
 
