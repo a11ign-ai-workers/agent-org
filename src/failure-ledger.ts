@@ -48,6 +48,13 @@ export const CHAIRMAN_LABEL_NOT_CHAIRMAN_KIND = "chairman-label-not-chairman";
 export const EMERGENCY_PRIORITY_USED_KIND = "emergency-priority-used";
 export const EMERGENCY_PRIORITY_NOT_HONOURED_KIND = "emergency-priority-not-honoured";
 
+/**
+ * The event kind for ONE REFUSED CLAIM: `<kind>\t<ts, ms>\t<ref>` with the REASON as the ref, one line of it, so that a storm is a count of lines and "the most frequent reason" is a
+ * group by ref. Not seeded in `FAILURE_KINDS`, for the reason `MESSAGING_AUDIENCE_MISUSE_KIND` gives: `repeatsIn` and the daily pass read any key. Written by `row-claim.ts`'s
+ * `recordClaimRefusal` (agent-org#972) and read by `org-health.ts`'s `readClaimRefusals` (agent-org#889): it lives here so both can name it without the other.
+ */
+export const CLAIM_REFUSED_KIND = "claim-refused";
+
 export type FailureEntry ={ classKey: string, at: number, ref: string };
 /** `at` is epoch ms; absent means the tick's own `now` (an event dated by its source, such as a hand fix, carries its own) */
 export type FailureEvent = { classKey: string, ref: string, at?: number };
