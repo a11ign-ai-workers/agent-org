@@ -243,3 +243,49 @@ test("#4148 part 6: a write to repository X drops X's reads and leaves Y's; a wr
     assert.equal(countOf(h, "o/x") + countOf(h, "o/y"), 4, `${args.join(" ")}: names no repository, so both X and Y were read again`);
   }
 });
+
+// agent-org#742 (a11ign#4148 residual): THE LEDGER'S 10th FIELD NAMES WHY A READ MISSED. Without it the three polling callers' misses (93% of their reads, measured 2026-10-11) could not be told
+// apart as "the same question asked again" or "a different one every tick", because the ledger holds the subcommand and never the arguments.
+const verdictOf = (h: ReturnType<typeof host>) => h.ledgerLines().map((line) => line.split("\t")[9]);
+/** the verdict's `:`-separated parts: `<verdict>:<argument digest>:<key digest>:<repository slug>` */
+const DIGEST_ARGV = 1;
+const DIGEST_KEY = 2;
+
+test("agent-org#742: the ledger's last field is the cache verdict: miss-absent, hit-ttl, then miss-generation-moved, and `-` for a call the cache never looked at", () => {
+  const h = host();
+  const tick = { A11Y_TICK_SNAPSHOT: "1", GH_REPO: "a11ign/agent-org" };
+  h.call({}, "pr", "list", "--json", "number");
+  h.call({}, "pr", "list", "--json", "number");
+  h.call({}, "pr", "merge", "7");
+  const [first, second, write] = verdictOf(h);
+  assert.match(first, /^miss-absent:[0-9a-f]{8}:[0-9a-f]{8}:default$/, "POSITIVE CONTROL: a read the cache looked at carries a verdict");
+  assert.match(second, /^hit-ttl:/, "the identical read inside N seconds is a hit, and says which kind");
+  assert.equal(second.split(":")[DIGEST_ARGV], first.split(":")[DIGEST_ARGV], "the same question has the same argument digest");
+  assert.equal(write, "-", "a write is not a read the cache looked at");
+  const g = host();
+  writeGeneration(g.rc, "a11ign_agent-org", 1, 5);
+  g.call(tick, "pr", "list");
+  g.age(200);
+  writeGeneration(g.rc, "a11ign_agent-org", 2, 5);
+  g.call(tick, "pr", "list");
+  assert.match(verdictOf(g)[1], /^miss-generation-moved:[0-9a-f]{8}:[0-9a-f]{8}:a11ign_agent-org$/, "the repository changed since the entry was stored: that is the reason, named");
+  const s = host();
+  s.call({ GH_REPO: "a11ign/agent-org" }, "pr", "list");
+  s.age(200);
+  s.call({ GH_REPO: "a11ign/agent-org" }, "pr", "list");
+  assert.match(verdictOf(s)[1], /^miss-no-snapshot:/, "a session past N seconds is not a tick child: no snapshot, and the verdict says so rather than 'absent'");
+});
+
+test("agent-org#742: the same arguments from another directory keep their argument digest and change the key digest, which is how a key that moves between ticks is read", () => {
+  const h = host();
+  const other = join(h.root, "elsewhere");
+  mkdirSync(other);
+  h.call({}, "issue", "list", "--state", "open");
+  h.call({ CWD: other }, "issue", "list", "--state", "open");
+  h.call({}, "issue", "list", "--state", "closed");
+  const [a, b, c] = verdictOf(h).map((v) => v.split(":"));
+  assert.equal(b[DIGEST_ARGV], a[DIGEST_ARGV], "one question");
+  assert.notEqual(c[DIGEST_ARGV], a[DIGEST_ARGV], "two questions have two digests: a digest that is always the same would pass the line above and name nothing");
+  assert.notEqual(b[DIGEST_KEY], a[DIGEST_KEY], "two entries");
+  assert.match(b[0], /^miss-absent$/, "and the second was not served by the first's entry");
+});
