@@ -46,14 +46,16 @@ import { SPAWNS_GH, agentOrgCommand } from "./acceptance-commands.ts";
 import { COMMANDS, FIXED_ARGS } from "./commands.ts";
 import { pnpmDrift } from "./host-pnpm.ts";
 import { codexClientDaemonDrift } from "./codex-drift.ts";
-import { HOME_CHECKOUT, PROJECT_DECLARATION_PATH, ProjectDeclarationRefusal } from "./project-config.ts";
+import { HOME_CHECKOUT, PROJECT_DECLARATION_PATH, ProjectDeclarationRefusal, homeProjectDeclaration } from "./project-config.ts";
 import { CLAUDE_EFFORTS, DECLARED_CLAUDE_MODELS, HAIKU_MODEL_ID, HAIKU_TIER_LABEL } from "./worker-profile.ts";
 import { REPO } from "./project-identity.ts";
+import { appRoleSilent, appRoleSilentEvents, type LedgerSource, type SilentRole } from "./app-role-silent.ts";
+import { FAILURE_LEDGER_FILE, recordFailures } from "./failure-ledger.ts";
 import { readAgents, absentSeats } from "./herdr-agents.ts";
 import { persistentEntries, persistentRoles, roleBriefPath } from "./project-roles.ts";
 import { kernelFindings, kernelNotes } from "./host-kernel.ts";
-import { HostConfigRefusal, LONG_RUNNING_TEMPLATES, TEMPLATE_SUFFIX, homeHostConfig, leadsWorkspacesText, readBeforeTick, readUnitsDeclaration,
-  renderTemplate, renderedName, stateEntryPath, templateValues } from "./host-config.ts";
+import { GITHUB_ROLES, type GithubRole, HostConfigRefusal, LONG_RUNNING_TEMPLATES, TEMPLATE_SUFFIX, homeHostConfig, leadsWorkspacesText, readBeforeTick, readUnitsDeclaration,
+  renderTemplate, renderedName, roleIdentity, stateEntryPath, templateValues } from "./host-config.ts";
 
 /**
  * Where the TOOL keeps the units and scripts it ships: four unit templates (each a service and a timer; the fourth, the shadow window's, is #2867), the
@@ -1735,6 +1737,12 @@ function seatWrapperFiles(deps: ShippedDeps & { scriptDir?: string; seatDir?: st
   return [{ label: "claude seat wrapper", target: join(dir, "claude"), mode: 0o755, expected: shippedScriptText("claude", deps) }];
 }
 
+/** The routing wrapper as an owned file: where it is installed and the text it must hold. `expected` is `null` when the shipped copy cannot be read. @param {Parameters<typeof ownedIdentityFiles>[0]} [deps] */
+function ghWrapperFile(deps: Parameters<typeof ownedIdentityFiles>[0] = {}): { label: string; target: string; mode: number; expected: string | null; } {
+  const { scriptDir = binDirectory(deps) } = deps;
+  return { label: "gh", target: join(scriptDir, "gh"), mode: 0o755, expected: shippedScriptText("gh", deps) };
+}
+
 /**
  * The files this repository owns on the host for the identity policy, each with the text it must hold.
  * `expected` is `null` when the shipped source cannot be read, which is NOT the empty string.
@@ -1748,7 +1756,7 @@ export function ownedIdentityFiles(deps: ShippedDeps & {
 } = {}): { label: string; target: string; mode: number; expected: string | null; }[] {
   const { scriptDir = binDirectory(deps), workersDir = workersDirectory(deps), leadsDir = leadsDirectory(deps) } = deps;
   return [
-    { label: "gh", target: join(scriptDir, "gh"), mode: 0o755, expected: shippedScriptText("gh", deps) },
+    ghWrapperFile(deps),
     ...agentOrgLauncher(scriptDir, deps),
     ...seatWrapperFiles(deps),
     { label: "gh-leads-workspaces.txt", target: join(leadsDir, "workspaces.txt"),
@@ -1991,14 +1999,125 @@ export function hostIdentityInstall({ mkdir = mkdirSync, write = writeFileSync, 
     } = {}): string[] {
   return ownedIdentityFiles(where).map(({ label, target, mode, expected }) => {
     if (expected === null) throw new Error(`cannot install ${label}: the shipped copy could not be read`);
-    mkdir(dirname(target), { recursive: true });
-    const temp = `${target}.installing`;
-    write(temp, expected);
-    chmod(temp, mode);
-    rename(temp, target);
+    writeOwnedFile({ target, mode, text: expected, mkdir, write, chmod, rename });
     out(`installed ${target}\n`);
     return target;
   });
+}
+
+/** One file, ATOMICALLY: a temp file in the same directory, then a rename. `hostIdentityInstall` and `rerenderGhWrapper` write through this one, so there is one definition of "installed". */
+function writeOwnedFile({ target, mode, text, mkdir, write, chmod, rename }: { target: string; mode: number; text: string;
+    mkdir: typeof mkdirSync; write: typeof writeFileSync; chmod: typeof chmodSync; rename: typeof renameSync; }): void {
+  mkdir(dirname(target), { recursive: true });
+  const temp = `${target}.installing`;
+  write(temp, text);
+  chmod(temp, mode);
+  rename(temp, target);
+}
+
+// --- agent-org#790: A MERGED `github.identity` SWITCH TAKES EFFECT ON THE NEXT TICK, NOT WHEN SOMEBODY REMEMBERS `host:install` ---------------
+//
+// MEASURED 2026-10-10 (a11ign#4906): the switch merged at 22:18:30Z; the installed wrapper had been rendered at 22:05Z, so `app_declared()` was empty and every call kept
+// going to the shared account until a session re-ran `host:install` at 22:20Z. `host:check` said `gh: DIVERGED` the whole time and nothing reads it after a merge. A declared
+// app role that is not in effect is the one drift whose cost is silent and immediate (the workers' gate sees through the app's pool or it does not), so it is the one
+// drift the tick mends itself, and ONLY that file: the unit files, the other owned files and every service are left alone, so a tick never restarts anything for this.
+
+/** The two places the wrapper carries `github.identity`: the roles line and the `app_declared()` body (`host/gh`, rendered from `appRoles` and `appDeclared`). */
+const WRAPPER_APP_ROLES = /^APP_ROLES=.*$/m;
+const WRAPPER_APP_DECLARED = /^app_declared\(\) \{\n[\s\S]*?\n\}$/m;
+
+/**
+ * The identity a rendered wrapper carries, as the text of those two places, or `null` for a wrapper that has neither (a copy from before #4900). Compared as TEXT so the comparison and the
+ * render cannot disagree: both are the one template filled by `appTokenValues`.
+ * @param {string} text @returns {string | null}
+ */
+export function wrapperIdentity(text: string): string | null {
+  const roles = WRAPPER_APP_ROLES.exec(text)?.[0];
+  const declared = WRAPPER_APP_DECLARED.exec(text)?.[0];
+  return roles === undefined || declared === undefined ? null : `${roles}\n${declared}`;
+}
+
+/**
+ * Re-render `~/.local/bin/gh` when its identity block is not the one `host.json` declares, and say whether it did. The WHOLE wrapper is written, as `host:install` writes it (a half-patched
+ * file is a wrapper nobody reviewed), but only when the identity block differs: any other divergence is still `host:check`'s to report and `host:install`'s to fix, so a release
+ * that changed an unrelated line of the template does not have every tick racing to write it.
+ *
+ * NOT WRITTEN, each for its own reason: no wrapper installed (that is `NOT INSTALLED`, and a tick has no business creating the file every agent's PATH resolves); a shipped copy or a
+ * template that cannot be rendered (`hostIdentityDrift` says `SHIPPED COPY UNREADABLE`, and an empty `gh` on every PATH is worse than a stale one); a wrapper with no identity block
+ * on a host that declares no app (the two behave the same, so there is nothing to take effect).
+ * @param {Parameters<typeof ownedIdentityFiles>[0] & { mkdir?: typeof mkdirSync, write?: typeof writeFileSync, chmod?: typeof chmodSync, rename?: typeof renameSync }} [deps]
+ * @returns {string | null} the path it wrote, or `null` when it wrote nothing
+ */
+export function rerenderGhWrapper({ mkdir = mkdirSync, write = writeFileSync, chmod = chmodSync, rename = renameSync, ...where }:
+    Parameters<typeof ownedIdentityFiles>[0] & { mkdir?: typeof mkdirSync; write?: typeof writeFileSync; chmod?: typeof chmodSync; rename?: typeof renameSync; } = {}): string | null {
+  const { read = readFileSync } = where;
+  const { target, mode, expected } = ghWrapperFile(where);
+  if (expected === null) return null;
+  const installed = textOf(target, read);
+  if (installed === null) return null;
+  const wanted = wrapperIdentity(expected);
+  if (wanted === null) return null;
+  const has = wrapperIdentity(installed);
+  const declaresApp = GITHUB_ROLES.some((role) => roleIdentity(where.host ?? homeHostConfig(), role).mode === "github-apps");
+  if (has === wanted || (has === null && !declaresApp)) return null;
+  writeOwnedFile({ target, mode, text: expected, mkdir, write, chmod, rename });
+  return target;
+}
+
+/**
+ * THE TICK'S TURN AT IT, as `host:check --json` notes: `[]` when nothing was written. A render that REFUSES (a `host.json` the tool cannot read, a template with a placeholder no value
+ * fills) is said as a note and never thrown, because the gate reads this process and an exception here would make every tick report the host as unaskable.
+ * @param {Parameters<typeof rerenderGhWrapper>[0] & { err?: (line: string) => void }} [deps] @returns {Finding[]}
+ */
+export function tickRerenderGhWrapper({ err = (l) => process.stderr.write(l), ...deps }: Parameters<typeof rerenderGhWrapper>[0] & { err?: (line: string) => void; } = {}): Finding[] {
+  try {
+    const target = rerenderGhWrapper(deps);
+    if (target === null) return [];
+    err(`re-rendered ${target}: its identity block was not the one host.json declares (agent-org#790)\n`);
+    return [{ unit: target, problem: "RE-RENDERED -- ITS IDENTITY DID NOT MATCH host.json",
+      detail: "the installed `gh` carried a `github.identity` block other than the declared one, so this tick wrote it again from the shipped template (the same render `host:install` does "
+        + "for this file) and touched no other file. Not a failure: it is what lets a merged switch take effect without anybody re-running `host:install`." }];
+  } catch (cause) {
+    err(`could not re-render the gh wrapper: ${String((cause as Error)?.message ?? cause).split("\n")[0]}\n`);
+    return [];
+  }
+}
+
+/**
+ * THE DETECTOR FOR THE CASE WHERE THE RE-RENDER DID NOT TAKE EFFECT (agent-org#790): a role `host.json` declares `github-apps` whose calls, for ten minutes, were none of them as its app
+ * (a mint that fails falls back to the shared account by design, so the wrapper works and the app is silently not in use). Reads each account's call ledger, asks `appRoleSilent`, and
+ * files each role through `recordFailures`, which skips an episode it already holds: a standing one is one line however many ticks see it. A host that declares no app reads nothing at all.
+ *
+ * AN UNREADABLE LEDGER IS SAID AND NOT COUNTED: no file is a role that made no call (`appRoleSilent` returns nothing for it), and a file that fails to read is reported on `err`, never a
+ * silent role. Never throws: a recorder can only ever be missing an event, never stop the tick that called it.
+ * @param {{ host?: HostConfig, now?: number, read?: typeof readFileSync, logPath?: string, record?: typeof recordFailures, err?: (line: string) => void }} [deps]
+ * @returns {SilentRole[]} the roles it found silent, recorded or not
+ */
+export function tickAppRoleSilent({ host = homeHostConfig(), now = Date.now(), read = readFileSync, logPath, record = recordFailures,
+  err = (line) => process.stderr.write(line) }: { host?: HostConfig; now?: number; read?: typeof readFileSync; logPath?: string;
+    record?: typeof recordFailures; err?: (line: string) => void; } = {}): SilentRole[] {
+  try {
+    const declared = GITHUB_ROLES.filter((role: GithubRole) => roleIdentity(host, role).mode === "github-apps");
+    if (declared.length === 0) return [];
+    const sources: LedgerSource[] = ([["workers", host.gh.workers], ["managers", host.gh.leads]] as const).flatMap(([role, dir]) => {
+      const path = join(dir, "gh", "gh-calls.tsv");
+      try {
+        return [{ role, lines: String(read(path, "utf8")).split("\n") }];
+      } catch (cause) {
+        if ((cause as { code?: string }).code !== "ENOENT") err(`app-role-silent: could not read ${path}: ${String((cause as Error)?.message ?? cause).split("\n")[0]}\n`);
+        return [];
+      }
+    });
+    const silent = appRoleSilent(sources, declared, now);
+    for (const { role, calls, lastApp } of silent) {
+      err(`app-role-silent: ${role} is declared github-apps and made ${calls} call(s) in 10 minutes, none as app:${role} (its last app line: ${lastApp ?? "none in the ledger"})\n`);
+    }
+    if (silent.length > 0) record({ logPath: logPath ?? stateEntryPath(FAILURE_LEDGER_FILE, { host }), events: appRoleSilentEvents(silent), now });
+    return silent;
+  } catch (cause) {
+    err(`app-role-silent: could not read the declaration: ${String((cause as Error)?.message ?? cause).split("\n")[0]}\n`);
+    return [];
+  }
 }
 
 // --- #3316: THE REVIEWERS' DOOR IS A COPY ON THE HOST, SO IT IS COMPARED AND INSTALLED LIKE THE WRAPPER ------
@@ -2306,7 +2425,8 @@ export function missingUnitPrograms(deps: ShippedDeps & {
 
 /**
  * THE INSTALL THE HELD CHECKOUT IS WAITING FOR (a11ign/a11ign#4392): `host-install-pending`, one finding per installed unit (or the launcher) that runs a program the release
- * `update-tool` would move to lacks. The question lives in `update-tool.ts`, which asks it before every move, so the hold and this report cannot disagree; it is in `hostUnitDrift`
+ * `update-tool` would move to lacks, and (a11ign/agent-org#714) one `package.json` finding when the release declares `dependencies` the tool's `node_modules` does not hold, which
+ * `update-tool` installs itself and so reports only after that install failed. The questions live in `update-tool.ts`, which asks them before every move, so the hold and this report cannot disagree; it is in `hostUnitDrift`
  * so the gate's `hostDriftOrders` wakes `orchestrator` with the unit names from a tick that still runs. A host naming no `tool` has no checkout to hold, and reports nothing.
  * @param {ShippedDeps & { installedDir?: string, run?: (args: string[]) => string }} [deps] @returns {Finding[]}
  */
@@ -2859,7 +2979,9 @@ export function liveClaudeSessions(run: (args: string[]) => string = (args) => e
   }
 }
 
-export type SessionModelDeps = { sessions?: ReturnType<typeof liveClaudeSessions>, projectsDir?: string, tail?: (path: string) => string, declared?: Record<string, { id: string }>, rowLabels?: (row: number) => readonly string[] | null, seatModels?: () => Readonly<Record<string, string>> | null };
+export type SessionModelDeps = { sessions?: ReturnType<typeof liveClaudeSessions>, projectsDir?: string, tail?: (path: string) => string, declared?: Record<string, { id: string }>, rowLabels?: (row: number) => readonly string[] | null, seatModels?: () => Readonly<Record<string, string>> | null,
+  /** The keys of the trackers beyond the first that the project declares: the only keys a `worker-<key>-<n>` can carry. Defaults to the declaration's own, {@link readTrackerKeys}. */
+  trackerKeys?: () => readonly string[] };
 /**
  * A RESUMED SESSION KEEPS ITS SAVED MODEL (#2783). 2026-09-29: the chairman moved the org to Sonnet 5.5 and the three
  * standing sessions, restarted with `--resume`, came back on Sonnet 5 -- `settings.json`'s `model` is read for a FRESH
@@ -2902,8 +3024,36 @@ function readRowLabels(row: number): string[] | null {
     const out = execFileSync("gh", ["api", `repos/${REPO}/issues/${row}`, "--jq", "[.labels[].name]"], { encoding: "utf8", timeout: 30_000 });
     return JSON.parse(out);
   } catch {
-    return null;  // unreadable is not "unlabelled": the caller keeps the plain comparison, which fails toward the finding
+    return null;  // unreadable is not "unlabelled": the caller does not take a tier from it, and judges the worker as any other
   }
+}
+
+/**
+ * The keys of the trackers beyond the first that the project declares, or `[]` when the declaration could not be read: an unreadable declaration
+ * is "no key is known", so a keyed name is judged against the org's models alone, which fails toward the finding. Read lazily and on a keyed name only.
+ * @returns {readonly string[]}
+ */
+function readTrackerKeys(): readonly string[] {
+  try {
+    return homeProjectDeclaration().tracker.map((tracker) => tracker.key).filter((key) => key !== "");
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The (tracker key, row) an engineer instance is named for, or `null` when the name is none: `worker-<n>` for the first tracker's row (key `""`) and
+ * `worker-<key>-<n>` for a declared tracker's, the grammar `row-claim`'s `claimNames` writes. A key is never one that ends in `-<digits>`, so a name
+ * cannot parse two ways, and a key no tracker declares (`worker-capture-2407`) names no worker's row.
+ * @param {string} name @param {() => readonly string[]} trackerKeys
+ * @returns {{ key: string, number: number } | null}
+ */
+function workerInstance(name: string, trackerKeys: () => readonly string[]): { key: string; number: number } | null {
+  const found = /^worker-(?:([a-z0-9-]+)-)?([1-9][0-9]*)$/.exec(name);
+  if (found === null) return null;
+  const key = found[1] ?? "";
+  if (key !== "" && (/-[0-9]+$/.test(key) || !trackerKeys().includes(key))) return null;
+  return { key, number: Number(found[2]) };
 }
 
 /**
@@ -2935,11 +3085,12 @@ function declaredModelId(model: string, declared: Record<string, { id: string }>
 
 type ExpectedModels =
   | { ids: string[]; source: "org" }
+  | { ids: string[]; source: "worker" }
   | { ids: string[]; source: "tier"; row: number }
   | { ids: string[]; source: "roster"; declaredAs: string };
 
 /**
- * THE MODEL A SESSION IS EXPECTED TO RUN. Three things decide it, the most specific first:
+ * THE MODEL A SESSION IS EXPECTED TO RUN. Four things decide it, the most specific first:
  *
  * - **Its roster entry (#4762).** A persistent seat whose entry declares a `model` is expected on THAT model alone (#4740: a11ign#4760 declared the
  *   liaison on Haiku, and judging it against Sonnet called the declared state drift, with a remedy that would have undone the declaration). A declared
@@ -2947,20 +3098,26 @@ type ExpectedModels =
  * - **Its row's tier (#4457).** A `tier:haiku` row gets a `claude-haiku-5-5` worker BY DESIGN (`HAIKU_TIER_LABEL`), so judging that worker against
  *   Sonnet alone called the intended state drift, and its remedy (`/model sonnet`) would have undone the saving the tier is for. A worker is named
  *   for its row, so the row's labels decide.
- * - **The org's declared models.** Every other session, a seat declaring nothing, and a worker whose row could not be read.
+ * - **Its start (agent-org#795).** An engineer instance (`worker-<n>`, or `worker-<key>-<n>` for another tracker's row) is STARTED by the gate on a profile the router
+ *   chose (`routeOnly`, `engineer-route.ts`): Sonnet (the org's declared model) or `HAIKU_MODEL_ID`, and a routed row carries no label saying which. So it is
+ *   expected on the org's models OR Haiku. That is for engineer instances ONLY: a standing seat on Haiku is still the resumed-session drift this finding
+ *   exists for (#2783), and the roster entry above is how a seat declares Haiku. A keyed worker's row is another tracker's, which `readRowLabels` cannot read
+ *   (it would read the first tracker's row of that number), so it takes no tier from a label. A name that is not one of these is judged below.
+ * - **The org's declared models.** Every other session, a seat declaring nothing.
  * @param {string} name @param {SessionModelDeps} deps @param {Record<string, string> | null} seatModels {@link readSeatModels}, read once per check
  * @returns {ExpectedModels | null}
  */
-function expectedModels(name: string, { declared = DECLARED_CLAUDE_MODELS, rowLabels = readRowLabels }: SessionModelDeps, seatModels: Readonly<Record<string, string>> | null): ExpectedModels | null {
+function expectedModels(name: string, { declared = DECLARED_CLAUDE_MODELS, rowLabels = readRowLabels, trackerKeys = readTrackerKeys }: SessionModelDeps, seatModels: Readonly<Record<string, string>> | null): ExpectedModels | null {
   const seatModel = seatModels?.[name];
   if (seatModel !== undefined) {
     const id = declaredModelId(seatModel, declared);
     return id === null ? null : { ids: [id], source: "roster", declaredAs: seatModel };
   }
-  const worker = /^worker-([1-9][0-9]*)$/.exec(name);
-  const row = worker === null ? null : Number(worker[1]);
-  if (row !== null && rowLabels(row)?.includes(HAIKU_TIER_LABEL)) return { ids: [HAIKU_MODEL_ID], source: "tier", row };
-  return { ids: Object.values(declared).map((m) => m.id), source: "org" };
+  const orgIds = Object.values(declared).map((m) => m.id);
+  const worker = workerInstance(name, trackerKeys);
+  if (worker === null) return { ids: orgIds, source: "org" };
+  if (worker.key === "" && rowLabels(worker.number)?.includes(HAIKU_TIER_LABEL)) return { ids: [HAIKU_MODEL_ID], source: "tier", row: worker.number };
+  return { ids: [...orgIds, HAIKU_MODEL_ID], source: "worker" };
 }
 
 /** What the finding says about where the expectation came from and what, if anything, the reader can do. */
@@ -2973,6 +3130,9 @@ function modelDriftDetail(model: string, expected: ExpectedModels): string {
         + `Run \`/model ${expected.declaredAs}\` in that session: this check reads and cannot switch it.`;
     case "tier":
       return `${found}; row #${expected.row} carries \`${HAIKU_TIER_LABEL}\`, so the tier expects ${ids}. The tier was not applied to this worker; this check reads and cannot switch it.`;
+    case "worker":
+      return `${found}; the org declares ${expected.ids.filter((id) => id !== HAIKU_MODEL_ID).map((i) => `\`${i}\``).join(", ")}, and a worker may also be on \`${HAIKU_MODEL_ID}\` when the router chose it at its start. `
+        + "A resumed session keeps its saved model, not settings.json's. Run `/model <alias>` in that session: this check reads and cannot switch it.";
     default:
       return `${found}; the org declares ${ids}. A resumed session keeps its saved model, not settings.json's. Run \`/model <alias>\` in that session: this check reads and cannot switch it.`;
   }
@@ -3163,10 +3323,14 @@ function remedy(drift: Finding[]): string {
  */
 function jsonReport() {
   const asked = systemdUserAvailable();
+  // THE TICK'S TWO TURNS AT agent-org#790, in this order and BEFORE the findings are read: the wrapper is re-rendered first, so a switch that merged this minute is not reported
+  // DIVERGED by the process that just fixed it, and the detector asks about what the re-render could not mend. Both only on a host with a user systemd, which is an agent host.
+  const rerendered = asked ? tickRerenderGhWrapper() : [];
+  if (asked) tickAppRoleSilent();
   // `notes` ARE NOT `findings`: the gate wakes a session on any finding, and a global `user.name` is not
   // something to wake anybody for (#2332).
   return `${JSON.stringify({ asked, findings: asked ? hostFindings() : [],
-    notes: asked ? hostNotes() : [] })}\n`;
+    notes: asked ? [...rerendered, ...hostNotes()] : [] })}\n`;
 }
 
 /**

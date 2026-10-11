@@ -186,7 +186,7 @@ test("#4620 SALVAGE: a tree with a tracked edit is removed only after refs/salva
   assert.deepEqual(report.removed.map((r) => r.path), [path]);
   assert.ok(!existsSync(path));
   assert.equal(atRemoval.refs.length, 1, "exactly one salvage ref existed when the removal ran");
-  assert.match(atRemoval.refs[0][0], /^refs\/salvage\/wt-edit-a-\d+$/);
+  assert.match(atRemoval.refs[0][0], /^refs\/salvage\/wt-edit-a-[0-9a-f]{8}-\d+$/);
   assert.match(atRemoval.diff, /\+an edit nobody committed/, "the salvaged commit's diff contains the edit");
   assert.equal(sha(primary.root, "refs/heads/agent/wt-edit-a"), head, "and the committed work is the surviving branch");
   assert.equal(sha(primary.root, `${atRemoval.refs[0][1]}^`), head, "the salvage commit sits on HEAD");
@@ -224,6 +224,42 @@ test("#4620 SALVAGE CONTROL 2/4: a ref that does not READ BACK as the salvage co
   assert.deepEqual(report.removed, []);
   assert.ok(existsSync(path));
   assert.match(report.dirty[0].reason ?? "", /reads back as .*, not /);
+});
+
+test("#4620 SALVAGE CONTROL 2b/4: a failed `git stash create` names git's stderr in the line, not only the command (first 200 characters)", () => {
+  const primary = buildPrimary();
+  const path = tree(primary, "wt-edit-g");
+  writeFileSync(join(path, "app.txt"), "one\nedit\n");
+  const stderr = `fatal: simulated index lock ${"x".repeat(300)}`;
+  const run = (cmd: string, args: string[], opts: { cwd: string }) => {
+    if (args.includes("stash")) throw Object.assign(new Error("Command failed: git stash create"), { stderr: `${stderr}\n` });
+    return realRun(cmd, args, opts);
+  };
+  const report = pruneWorktrees(primary.root, { now: QUIET(), ...REMOVE_BY_REF, run });
+  assert.deepEqual(report.removed, []);
+  assert.ok(existsSync(path), "the tree stands");
+  const reason = report.dirty[0].reason ?? "";
+  assert.ok(reason.endsWith(`(${stderr.slice(0, 200)})`), reason);
+  assert.ok(!reason.includes("Command failed"), "the command line is not what the reader is left with");
+});
+
+test("#4620 SAME NAME: three dirty trees under different parents that share one basename are each salvaged to a ref of their own", () => {
+  const primary = buildPrimary();
+  const trees = ["a", "b", "c"].map((parent) => {
+    const path = tree(primary, `${parent}/tree`);
+    writeFileSync(join(path, "app.txt"), `one\nedit under ${parent}\n`);
+    return { path, parent };
+  });
+  const report = pruneWorktrees(primary.root, { now: QUIET(), ...REMOVE_BY_REF });
+  assert.deepEqual(report.dirty, [], `none is left DIRTY for sharing a name: ${JSON.stringify(report.dirty)}`);
+  assert.deepEqual(report.removed.map((r) => r.path).sort(), trees.map((t) => t.path).sort());
+  const refs = salvageRefs(primary).map(([ref]) => ref);
+  assert.equal(new Set(refs).size, 3, `three distinct salvage refs, got ${refs.join(", ")}`);
+  for (const { path, parent } of trees) {
+    const [ref] = report.removed.find((r) => r.path === path)?.salvaged ?? [];
+    assert.ok(ref !== undefined, `${path} names a salvage ref`);
+    assert.equal(git(primary.root, "show", `${ref}:app.txt`), `one\nedit under ${parent}\n`, `${ref} carries ${parent}'s edit and no other tree's`);
+  }
 });
 
 test("#4620 SALVAGE CONTROL 3/4: untracked WORK is never salvaged -- the tree stays DIRTY before any ref is written", () => {
@@ -280,8 +316,8 @@ test("#4620 DETACHED: a detached tree with a tracked edit has its HEAD and its e
   assert.deepEqual(report.removed.map((r) => r.path), [path]);
   assert.ok(!existsSync(path));
   const refs = salvageRefs(primary);
-  const pinnedHead = refs.find(([name]) => /^refs\/salvage\/wt-detached-a-head-\d+$/.test(name));
-  const pinnedEdit = refs.find(([name]) => /^refs\/salvage\/wt-detached-a-\d+$/.test(name));
+  const pinnedHead = refs.find(([name]) => /^refs\/salvage\/wt-detached-a-[0-9a-f]{8}-head-\d+$/.test(name));
+  const pinnedEdit = refs.find(([name]) => /^refs\/salvage\/wt-detached-a-[0-9a-f]{8}-\d+$/.test(name));
   assert.equal(pinnedHead?.[1], head, "HEAD is pinned by name");
   assert.ok(pinnedEdit, "and so is the edit");
   assert.match(git(primary.root, "diff", `${pinnedEdit![1]}^`, pinnedEdit![1]), /\+edit on a detached head/);

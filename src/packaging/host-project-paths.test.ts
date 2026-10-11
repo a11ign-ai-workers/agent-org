@@ -95,6 +95,9 @@ test("#2620: a host.json's values are what `templateValues` hands the templates,
   assert.deepEqual(templateValues(host, units), {
     home: "/home/agent", binDir: "/home/agent/.local/bin", checkout: "/home/agent/repos/a11y-witness",
     workersDir: "/home/agent/workers", leadsDir: "/home/agent/leads", prefix: "a11ign-",
+    // #4900: the four values the wrapper's app block renders from; a host that declares no `github-apps` role has `appRoles` empty and the block does nothing.
+    appRoles: "", appDeclared: "case \"$1\" in\n    *) return 1 ;;\n  esac", appTokenDir: "/home/agent/.cache/a11ign/app-tokens",
+    appTokenScript: "/home/agent/repos/a11y-witness/packages/agent-org/src/app-token.ts",
   });
   assert.deepEqual(host.gh.leadsWorkspaces.map((w) => w.id), ["w6", "w2", "w5"], "the leads list is the file it replaced");
 });
@@ -125,7 +128,13 @@ const TODAYS_TEXT = {
 // a11ign/a11ign#4397 MOVED IT AGAIN, deliberately: `gh pr create` is refused unless `A11Y_PR_OPEN` is set (only `pr:open` sets it). Same staleness, same remedy.
 // a11ign/a11ign#4148 part 6 MOVED IT AGAIN, deliberately: `auth git-credential` and an `api` call naming GET no longer drop the read cache, and a write drops only its own repository's entries. Same staleness, same remedy.
 // agent-org#486 MOVED IT AGAIN, deliberately: `issue comment`, `pr comment` and `pr review` get a trailing `<!-- decided-by: <role> run: <id> -->` line. Same staleness, same remedy.
-const TODAYS_GH_WRAPPER = "a5c6b093f1aef6aa302b3e425ce37f4426c519b396d7f57947ce73164096f37a";
+// a11ign/a11ign#4900 MOVED IT AGAIN, deliberately: a role `host.json` declares as `github-apps` calls as that app (`GH_TOKEN` from `app-token.ts`'s cache); for the recorded host, which declares none, the block is inert. Same staleness, same remedy.
+// a11ign/a11ign#4898 MOVED IT AGAIN, deliberately: a WRITE that GitHub refuses for a rate limit is queued under `<GH_CONFIG_DIR>/refused-queue` and the wrapper exits 75 ("held, not failed"); the gate's `ghQueueTick` makes it after the reset. Same staleness, same remedy. The review of #779 moved it once more: a `gh api graphql` whose BODY is a mutation in `--input FILE` or `-F name=@FILE` is a write too.
+// agent-org#817 MOVED IT AGAIN, deliberately: an explicit `GH_CONFIG_DIR` that is neither the workers' nor the leads' (the reviewer's `a11ign-bot`) names no app role, so the call goes out as that account and not as the workers App. Same staleness, same remedy.
+// a11ign/a11ign#4899 MOVED IT AGAIN, deliberately: a plain `api <path>` GET past its 20 s cache entry is revalidated with `If-None-Match` and a 304 is replayed from the stored body (ledger resource `etag`, no point spent). Same staleness, same remedy.
+// a11ign/a11ign#4148 residual (agent-org#741) MOVED IT AGAIN, deliberately: the caller is cut to 160 characters AFTER its `--import` preload is taken out, and the hourly rollup gains a seventh field, the caller's script. Same staleness, same remedy.
+// agent-org#791 MOVED IT AGAIN, deliberately: `gh api user` (bare, or `--jq .login`) under a role whose App declares a `slug` is answered `<slug>[bot]` from the declaration and not sent to GitHub, which refuses an installation token `GET /user`; `app_declared()` gains `app_slug`. For the recorded host, which declares no app, the new block is inert. Same staleness, same remedy.
+const TODAYS_GH_WRAPPER = "2b8d3606043e51f6b6285b815cc3e4b0daadd215f6bea1896ae4d569eba7ba74";
 // #2896 MOVED THIS ONE, deliberately: the recorded host's header says `pnpm run host:install` / `pnpm run host:check` where it said `npm run`.
 const TODAYS_LEADS_LIST = "dbca070c4bb7934ff1e9cdc9505f9edee638d98fcff10963b18d5d3a743770a2";
 

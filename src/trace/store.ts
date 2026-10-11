@@ -38,11 +38,13 @@ import type { Carry, Previous } from "./ingest-state.ts";
 export const DEFINITIONS = [
   "EVENT: one record in the store, `kind` turn | wake | compaction | gh_call | deferral, or one of GitHub's (`GITHUB_KINDS`). A record is never edited; running the ingest twice adds nothing, because every record has a stable `id`.",
   "TURN: one API message of a Claude session (de-duplicated by message id), with its tokens, cost and wall-clock. It belongs to the wake that precedes it in its transcript.",
+  "COMPACTION (`kind: compaction`, agent-org#478): one `isCompactSummary` record of a transcript. THE CALL THAT WROTE THE SUMMARY IS IN NO TURN and the transcript holds no usage for it (measured on 1,351 compactions: the summary is a `user` record with no `usage`, `compact_boundary` carries only `preTokens`, `postTokens` and `durationMs`, and no record between them has one). Its usage exists only in Claude Code's own OpenTelemetry, as an `api_request` with `query_source: \"compact\"`, which `otel-receiver.ts` stores (as `querySource`) for a process launched with the exporter's variables. When the ingest finds that request (the same session id, nearest the summary record, each used once) the event carries `tokens`, `model` and `costUsd` (priced like a turn, `null` for a model with no price, never 0); when it does not, the event carries `costUsd: null` and `unmeasured: \"no-usage-record\"`, which is NOT a free compaction. An event stored before the reader has neither and is read as unmeasured. The call is separate from the turn that follows (which re-reads the window and is priced as a turn), so adding it counts nothing twice.",
   "WAKE: a delivery that started a model turn (wakes-per-row's definition). `deliveryLagMs` is delivery minus the time `wake` typed the order, when the ledger line pairs (not the gate's deferral, which no record keeps).",
+  "WAKE OUTCOME (`outcome`, `runId` of a wake, agent-org#487, INFERRED from what the session issued between the order and its last turn, `wakeOutcomes`): `wrote` when the session issued a write verb (`gh issue|pr edit|comment|close|reopen|create|ready|merge|review`, from the ledger, or read off a turn's command text), or edited a file or ran `git commit|push` (a turn's `repoWrite`); else `escalated` when it ran `prompt:session` to another session (the two send logs name the sender); else `no-op`. A wake that did both is `wrote`. `null` when it cannot be told, never `no-op`: the ledger's hour is short in the store or uncounted (`countedHours`), the turns issued `gh` commands (`ghCommands`) and the ledger holds none of the session's calls in the window, the window holds a call whose verb the ledger does not keep (`gh api ...`), a turn was stored before `repoWrite` and `ghCommands` or names no transcript, or a send of an unnamed sender falls in it. ABSENT: not yet derived (a window still open). `runId` is the session id that ran the wake (the transcript's file name, the key `host/gh` writes on each ledger line); `null` when the first turn names none.",
   "WALL-CLOCK OF A TURN (inferred): from the record before its first block to its last block. That record is stamped after a tool call ends, so the call is NOT in it: it is the model's own time.",
   "TOOL TIME OF A TURN (`toolMs`, measured): when the message follows a tool call, from the last block of the message before it to the tool's result record; `null` when it follows no tool call, never 0. A turn that follows an order or a prompt has none, and so does the first turn of a read when nothing was carried to say when the call began.",
   "TOOL READ (`toolRead`, measured): on the turn that CARRIES a result, the growth of the window the result caused: this turn's `input + cacheRead + cacheWrite5m + cacheWrite1h`, less the previous message's, less the previous message's own `output` (which re-enters the window the same way). Present only when the previous message called `Read`, `Grep` or `Glob`; `tool` is that tool, or `mixed` when the message called more than one tool (any mix with a tool that is not one of the three is in it too), and `tokens` is `null` (never 0) when the window cannot be read that way: a prompt, an order or a compaction came between, the window shrank, or the previous message is not in the store. `null` on a turn stored by this reader means no such call preceded it; an ABSENT field is a turn stored before the reader, which says nothing.",
-  "COST: tokens x the rate in PRICES, cache writes at the 1-hour rate when the split is absent (every transcript seen writes 1-hour). `null` for a model with no price.",
+  "COST: tokens x the rate in PRICES, cache writes at the 1-hour rate when the split is absent (every transcript seen writes 1-hour). `null` for a model with no price. A STORED `costUsd` IS A FIRST READING, priced at the rates of the day it was ingested (the stored value switched cache-read pricing from $0.20 to $0.10 on 2026-10-08), so a sum of stored `costUsd` over the raw file is wrong for that reason as well as for the duplicate ids under SUPERSEDED: `repriceEvents` reprices every turn at read and `trace cost` is the command that sums.",
   "GITHUB EVENT: what GitHub's REST API holds of a row or pull request (`source: github`, session `github`): filed/opened, claimed/released (the claim-record comments), labeled/unlabeled for an order to a session or a hold, ready_for_review, reviewed (state, and the head it was posted on), head_moved, ci_run, added_to_merge_queue, removed_from_merge_queue, merged, closed.",
   "HEAD_MOVED (inferred): `at` is the commit's own date, not the push's; the timeline carries no push event. CI RUN: each head the timeline names is asked for its check-runs; the merge queue's own runs, on its temporary branch, and legacy commit statuses are not read.",
   "OUTCOME of a queue exit (inferred): `merged` when it falls within 5 s of the pull request's merge, else `unmerged` (an ejection or a person). GitHub writes the same event for both.",
@@ -98,22 +100,30 @@ export type TraceEvent = {
   pr: number | null; repo: string | null; cause: string | null; causeKey: string | null; wakeId: string | null; model?: string; tokens?: Tokens;
   costUsd?: number | null; toolRead?: ToolRead | null; transcript?: string; wallClockMs?: number | null; toolMs?: number | null; deliveryLagMs?: number | null; bytes?: number; sidechain?: boolean; harness?: "codex";
   rows?: number[]; prs?: number[]; touchedRows?: number[]; touchedPrs?: number[]; actor?: string | null; seq?: number; claimant?: string; name?: string; state?: string | null; status?: string; headSha?: string; mergeSha?: string; startedAt?: number;
-  completedAt?: number | null; how?: "delivered" | "gone"; outcome?: "merged" | "unmerged"; account?: string; resource?: string; cost?: number | null; exit?: number; command?: string; workspace?: string;
+  completedAt?: number | null; how?: "delivered" | "gone"; outcome?: "merged" | "unmerged" | WakeOutcome | null; runId?: string | null; repoWrite?: boolean; ghCommands?: number; account?: string; resource?: string; cost?: number | null; exit?: number; command?: string; workspace?: string;
   script?: string; sessionId?: string; keyedBy?: "session" | "time" | null; unkeyed?: "script" | "no-turn";
   /** a turn's reasoning effort as Claude Code wrote it on the transcript record; ABSENT when the record carried none, which is not `low` (agent-org#469) */
   effort?: string;
+  /** a compaction whose summary call has no readable usage (`costUsd` is then null, never 0); ABSENT on a measured one, and on one stored before the reader, which says nothing */
+  unmeasured?: typeof NO_USAGE_RECORD;
 };
+
+export const NO_USAGE_RECORD = "no-usage-record";
+
+/** What a wake did (agent-org#487). On a `wake` event `outcome` is one of these or `null`; on a queue exit it is `merged` | `unmerged`: the kinds do not overlap. */
+export type WakeOutcome = "wrote" | "no-op" | "escalated";
 
 export type ToolRead = { tool: "Read" | "Grep" | "Glob" | "mixed"; tokens: number | null };
 
 /**
  * Cost of a turn, or `null` when the model has no price: an unpriced turn is unknown, and 0 would say it was free.
+ * @param cacheReadRate dollars per million for the cache-read tokens in place of the model's own: how `trace cost` reads a turn the way Claude Code's own display does
  */
-export function costOf(model: string | undefined, tokens: Tokens): number | null {
+export function costOf(model: string | undefined, tokens: Tokens, cacheReadRate?: number): number | null {
   const price = PRICES.find((entry) => (entry.model === undefined ? model?.startsWith(entry.prefix ?? "") : model === entry.model));
   if (!price) return null;
   if (price.maxPrompt !== undefined && tokens.input + tokens.cacheRead + tokens.cacheWrite5m + tokens.cacheWrite1h > price.maxPrompt) return null;
-  const dollars = (tokens.input * price.input + tokens.output * price.output + tokens.cacheRead * price.cacheRead
+  const dollars = (tokens.input * price.input + tokens.output * price.output + tokens.cacheRead * (cacheReadRate ?? price.cacheRead)
     + tokens.cacheWrite5m * price.input * WRITE_5M_FACTOR + tokens.cacheWrite1h * price.input * WRITE_1H_FACTOR) / TOKENS_PER_MILLION;
   return Math.round(dollars * COST_PRECISION) / COST_PRECISION;
 }
@@ -121,11 +131,11 @@ export function costOf(model: string | undefined, tokens: Tokens): number | null
 /**
  * The events with every turn's `costUsd` REPRICED from `PRICES` as it stands now, never read off the line it was stored on: the store is append-only and a transcript that has not
  * changed is not read again, so a price added after ingest (a11ign/a11ign#3582) would otherwise never reach the turns stored before it (#3638: 147,675 turns kept `null`).
- * A model with no price stays `null`. A turn with no `tokens` has nothing to price from and is left as stored, and any event that is not a turn is returned as it came.
+ * A model with no price stays `null`. A turn with no `tokens` has nothing to price from and is left as stored, and any event that is not a turn or a measured compaction is returned as it came.
  */
 export function repriceEvents(events: TraceEvent[]): TraceEvent[] {
   return events.map((event) => {
-    if (event.kind !== "turn" || !event.tokens) return event;
+    if ((event.kind !== "turn" && event.kind !== "compaction") || !event.tokens) return event;
     const costUsd = costOf(event.model, event.tokens);
     return costUsd === event.costUsd ? event : { ...event, costUsd };
   });
@@ -334,7 +344,7 @@ export function eventsOfTranscript({ text, file, ledger, rowRepo, carry = null, 
     ?? { id: null, ...subjectOfSession(session, rowRepo), cause: null, causeKey: null };
   const priorAt = carry?.lastAt ?? null;
   const reads = toolReadsOf({ records, groups: groups.filter((group) => !held.includes(group)), end: settled.length, carried: carry?.previous ?? null });
-  events.push(...turnsOf({ records, groups: groups.filter((group) => !held.includes(group)), session, transcript: transcriptId(file), owner, priorAt, rowRepo, reads: reads.byMessage }), ...compactionsOf(settled, session, owner));
+  events.push(...turnsOf({ records, groups: groups.filter((group) => !held.includes(group)), session, transcript: transcriptId(file), owner, priorAt, rowRepo, reads: reads.byMessage }), ...compactionsOf(settled, session, owner, transcriptId(file)));
   const lastAt = settled.findLast((candidate) => !Number.isNaN(candidate.at))?.at ?? priorAt;
   const remembered = [...used, ...spent].filter((entry) => latest === null || entry.at >= latest.at - LEDGER_MEMORY_MS);
   return {
@@ -347,7 +357,9 @@ export function eventsOfTranscript({ text, file, ledger, rowRepo, carry = null, 
  * The verbs of `gh issue` / `gh pr` that WRITE to the thing they name. A `view` is not here: a turn that only read a row was not what ruled on it, and a ruling's turn is
  * the one that edits or comments.
  */
-const GH_WRITES = /\bgh\s+(issue|pr)\s+(?:edit|comment|close|reopen|ready|merge|review)\s+(\d+)\b([^\n;&|]*)/g;
+/** `gh`'s own verbs (a regex source, so none of them is a string literal for the vocabulary ratchet to take for the project's words). */
+const GH_WRITE_VERBS = /edit|comment|close|reopen|ready|merge|review/.source.split("|");
+const GH_WRITES = new RegExp(`\\bgh\\s+(issue|pr)\\s+(?:${GH_WRITE_VERBS.join("|")})\\s+(\\d+)\\b([^\\n;&|]*)`, "g");
 
 /** Another repository's clone, named in a command: its `gh issue edit 187` is that repository's 187, not the primary's. */
 const OTHER_CLONE = /agent-org|screenreader-worker|documents/;
@@ -374,6 +386,44 @@ export function touchesOf(blocks: Rec[], rowRepo: string): { touchedRows?: numbe
   return { ...(rows.size > 0 ? { touchedRows: [...rows].sort((a, b) => a - b) } : {}), ...(prs.size > 0 ? { touchedPrs: [...prs].sort((a, b) => a - b) } : {}) };
 }
 
+/** The tools that write a file; a path under `/tmp/` is a scratch note (a comment body staged for `--body-file`), not the repository. */
+const FILE_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+const SCRATCH_PATH = /^\/tmp\//;
+const GIT_WRITES = /\bgit\s+(?:-C\s+\S+\s+)?(?:commit|push)\b/;
+
+/**
+ * Whether a turn WROTE TO THE REPOSITORY (agent-org#487): a file tool outside `/tmp/`, or a Bash `git commit` / `git push`, read off its tool calls. A `gh` write is `touchesOf`'s and the
+ * ledger's, not this. A lower bound: a script or a `sed -i` that writes a file is not seen. It is stored as `true` OR `false` on every turn the reader builds, so a turn stored before it
+ * (the field ABSENT) is told from one that wrote nothing, which `wakeOutcomes` needs to refuse `no-op`.
+ * @param blocks the records of one API message
+ */
+export function repoWriteOf(blocks: Rec[]): boolean {
+  return blocks.some(({ record }) => (Array.isArray(record?.message?.content) ? record.message.content : []).some((block: any) => {
+    if (block?.type !== "tool_use") return false;
+    if (FILE_TOOLS.has(block.name)) return !SCRATCH_PATH.test(String(block.input?.file_path ?? block.input?.notebook_path ?? ""));
+    return typeof block.input?.command === "string" && GIT_WRITES.test(block.input.command);
+  }));
+}
+
+/** A `gh` at the start of a simple command: after a line start, `;`, `&`, `|`, `(`, `$(` or a backtick, as `gh issue view` or `gh api`. */
+const GH_COMMAND = /(?:^|[;&|(]\s*|\n\s*|\$\(\s*|`)gh\s+[a-z]/g;
+
+/**
+ * How many `gh` commands a turn's Bash calls name (agent-org#487), counted off the command text. It is what `wakeOutcomes` sets against the ledger: a turn that issued `gh` commands and a
+ * window the ledger holds no call of that session in is a window the ledger did not record, which is no proof the session did nothing. Counts a `gh` named inside a quoted body too, which
+ * can only make a window `null`. ABSENT on a turn stored before the reader, never 0.
+ * @param blocks the records of one API message
+ */
+export function ghCommandsOf(blocks: Rec[]): number {
+  let count = 0;
+  for (const { record } of blocks) {
+    for (const block of Array.isArray(record?.message?.content) ? record.message.content : []) {
+      if (block?.type === "tool_use" && typeof block.input?.command === "string") count += block.input.command.match(GH_COMMAND)?.length ?? 0;
+    }
+  }
+  return count;
+}
+
 type Owner = (at: number) => { id: string | null; row: number | null; pr: number | null; repo: string | null; rows?: number[]; prs?: number[]; cause: string | null; causeKey: string | null };
 
 /** The several subjects a wake's key named, as event fields: present only when it named several, so an event with one subject is the shape it always was. */
@@ -390,12 +440,13 @@ function turnsOf({ records, groups, session, transcript, owner, priorAt, rowRepo
     const previous = before[first];
     const tokens = tokensOf(record.message.usage);
     const own = owner(endedAt);
+    const blocks = records.slice(first, last + 1).filter(({ record: block }) => block?.message?.id === messageId);
     return {
       id: `turn:${messageId}`, kind: "turn", source: "transcript", at: endedAt, session, transcript, row: own.row, pr: own.pr, repo: own.repo, ...listedBy(own), cause: own.cause,
       causeKey: own.causeKey, wakeId: own.id, model: record.message.model, tokens, costUsd: costOf(record.message.model, tokens), toolRead: reads.get(messageId) ?? null,
       wallClockMs: previous !== null && !Number.isNaN(endedAt) ? Math.max(0, endedAt - previous) : null, toolMs: toolMsBefore(records, first, assistantAt[first]),
       sidechain: record.isSidechain === true, ...effortOf(record),
-      ...touchesOf(records.slice(first, last + 1).filter(({ record: block }) => block?.message?.id === messageId), rowRepo),
+      ...touchesOf(blocks, rowRepo), repoWrite: repoWriteOf(blocks), ghCommands: ghCommandsOf(blocks),
     };
   });
 }
@@ -499,12 +550,64 @@ function toolMsBefore(records: Rec[], first: number, startedAt: number | null): 
   return startedAt === null || Number.isNaN(resultAt) ? null : Math.max(0, resultAt - startedAt);
 }
 
-function compactionsOf(records: { index: number; at: number; record: any; }[], session: string, owner: Owner): TraceEvent[] {
+/**
+ * One event per compaction summary record. THE TRANSCRIPT HOLDS NO USAGE FOR THE CALL THAT WROTE IT (a11ign/agent-org#478, measured: 0 of 1,351 compactions have a record with
+ * `usage` between `compact_boundary`'s start and the summary, and the summary is a `user` record), so the event is born `unmeasured`; `measureCompactions` fills it from Claude
+ * Code's own `api_request` when the exporter saw the call. `transcript` is the id that request names as its `session.id`.
+ */
+function compactionsOf(records: { index: number; at: number; record: any; }[], session: string, owner: Owner, transcript: string): TraceEvent[] {
   return records.filter(({ record }) => record?.isCompactSummary === true && !Number.isNaN(Date.parse(record.timestamp))).map(({ at }) => {
     const own = owner(at);
     return { id: `compaction:${session}:${at}`, kind: "compaction", source: "transcript", at, session, row: own.row, pr: own.pr, repo: own.repo, ...listedBy(own),
-      cause: own.cause, causeKey: own.causeKey, wakeId: own.id };
+      cause: own.cause, causeKey: own.causeKey, wakeId: own.id, transcript, costUsd: null, unmeasured: NO_USAGE_RECORD };
   });
+}
+
+/** What of an `otel-receiver.ts` `api_request` the join reads (the store holds it under `kind: "api_request"`). */
+export type SummaryRequest = { kind?: string; id: string; at: number; sessionId: string | null; querySource?: string | null; model: string | null;
+  usage: { input: number | null; output: number | null; cacheRead: number | null; cacheCreation: number | null }; };
+
+/** A request and the summary record it wrote are stamped milliseconds apart (measured: 5 ms); a minute is far more than that and far less than the gap between two compactions. */
+export const SUMMARY_MATCH_MS = 60_000;
+const COMPACT_QUERY_SOURCE = "compact";
+
+/**
+ * The compactions with the usage of the call that wrote their summary, where Claude Code's exporter saw it: `api_request` with `query_source: "compact"`, of the same session id,
+ * nearest the summary record, each request used once. Its tokens go in the store's shape (an unsplit cache write at the 1-hour rate, as the COST definition says), priced by `costOf`:
+ * `null` for a model with no price, never 0. A compaction with no such request, or whose request lacks a count, is returned as it came: `unmeasured`, not free.
+ * It is a SEPARATE API call from every turn, so no turn changes and none is added.
+ */
+export function measureCompactions(compactions: TraceEvent[], requests: SummaryRequest[]): TraceEvent[] {
+  const wanted = requests.filter((request) => request.kind === "api_request" && request.querySource === COMPACT_QUERY_SOURCE && request.sessionId !== null);
+  const used = new Set<string>();
+  return [...compactions].sort((a, b) => a.at - b.at).map((compaction) => {
+    if (compaction.kind !== "compaction" || compaction.transcript === undefined) return compaction;
+    const near = wanted.filter((request) => request.sessionId === compaction.transcript && !used.has(request.id) && Math.abs(request.at - compaction.at) <= SUMMARY_MATCH_MS)
+      .sort((a, b) => Math.abs(a.at - compaction.at) - Math.abs(b.at - compaction.at) || a.at - b.at);
+    const found = near.find(({ usage }) => [usage.input, usage.output, usage.cacheRead, usage.cacheCreation].every((count) => count !== null));
+    if (!found) return compaction;
+    used.add(found.id);
+    const tokens: Tokens = { input: found.usage.input as number, output: found.usage.output as number, cacheRead: found.usage.cacheRead as number, cacheWrite5m: 0, cacheWrite1h: found.usage.cacheCreation as number };
+    const measured: TraceEvent = { ...compaction, tokens, costUsd: found.model === null ? null : costOf(found.model, tokens) };
+    if (found.model !== null) measured.model = found.model;
+    delete measured.unmeasured;
+    return measured;
+  });
+}
+
+/**
+ * The batch an ingest appends, with the usage of each compaction's summary call where the store holds the exporter's request for it: the compactions of the batch, and the ones
+ * already stored `unmeasured` whose request has arrived since (the receiver is another writer, so it is often later than the transcript). A late one is a corrected copy of the
+ * stored event and replaces it (SUPERSEDED); one still `unmeasured` is not appended again.
+ * @param stored the store's events, among them the `api_request` lines of `otel-receiver.ts`
+ */
+export function withCompactionUsage(batch: TraceEvent[], stored: TraceEvent[]): TraceEvent[] {
+  const requests = stored.filter((event) => (event.kind as string) === "api_request") as unknown as SummaryRequest[];
+  if (requests.length === 0) return batch;
+  const inBatch = new Set(batch.map((event) => event.id));
+  const late = stored.filter((event) => event.kind === "compaction" && event.unmeasured === NO_USAGE_RECORD && !inBatch.has(event.id));
+  const measured = new Map(measureCompactions([...batch.filter((event) => event.kind === "compaction"), ...late], requests).map((event) => [event.id, event]));
+  return [...batch.map((event) => measured.get(event.id) ?? event), ...late.map((event) => measured.get(event.id) as TraceEvent).filter((event) => event.unmeasured === undefined)];
 }
 
 // ---------------------------------------------------------------------------------------------------------------------------------------------------------
@@ -566,6 +669,100 @@ export function readStore(path: string, chunkBytes: number = STORE_READ_CHUNK): 
 export function openStore(path: string, read: (path: string) => TraceEvent[] = readStore): { path: string; events: TraceEvent[]; at: Map<string, number>; } {
   const events = read(path);
   return { path, events, at: new Map(events.map((event, position) => [event.id, position])) };
+}
+
+const ID_PREFIX = Buffer.from('{"id":"');
+const QUOTE_BYTE = 0x22;
+const BACKSLASH_BYTE = 0x5c;
+
+/**
+ * The id of one stored line WITHOUT parsing the line into an event: an event is written `{"id":"...",...}`, so the id is the bytes up to the next quote. A line that does not start that
+ * way, or whose id holds an escape, is parsed as JSON, so the answer never depends on the key order of the writer that wrote it.
+ */
+function idOfLine(line: Buffer): string {
+  if (line.subarray(0, ID_PREFIX.length).equals(ID_PREFIX)) {
+    const close = line.indexOf(QUOTE_BYTE, ID_PREFIX.length);
+    if (close !== -1 && !line.subarray(ID_PREFIX.length, close).includes(BACKSLASH_BYTE)) return line.toString("utf8", ID_PREFIX.length, close);
+  }
+  const { id } = JSON.parse(line.toString("utf8"));
+  if (typeof id !== "string") throw new Error(`a stored line carries no id: ${line.toString("utf8", 0, 120)}`);
+  return id;
+}
+
+/** `ids` maps each id found on more than one line to the number of lines it is on; `extra` is the lines past the first of each, which is what `compact-store` removes. */
+export type Duplicates = { lines: number; distinct: number; extra: number; ids: Map<string, number>; };
+
+/**
+ * The ids that appear on more than one line of a store file, and how many extra lines they hold: the count `readStore` hides, because it keeps the last copy of each id. It reads the file
+ * in chunks and takes each line's id off its first bytes, never parsing a line into an event (the file is hundreds of megabytes and this runs on a clock). The unterminated end is a line a
+ * writer is still writing, and is not counted. A missing file holds none.
+ * @param chunkBytes a parameter so a test can make a line span chunks
+ */
+export function duplicateIds(path: string, chunkBytes: number = STORE_READ_CHUNK): Duplicates {
+  const copies = new Map<string, number>();
+  let lines = 0;
+  if (existsSync(path)) {
+    const fd = openSync(path, "r");
+    try {
+      eachLine(fd, (line, terminated) => {
+        if (!terminated || line.length === 0) return;
+        const id = idOfLine(line);
+        lines += 1;
+        copies.set(id, (copies.get(id) ?? 0) + 1);
+      }, chunkBytes);
+    } finally {
+      closeSync(fd);
+    }
+  }
+  const ids = new Map([...copies].filter(([, count]) => count > 1));
+  return { lines, distinct: copies.size, extra: lines - copies.size, ids };
+}
+
+/** What Claude Code's own cost display reads a cache-read token at, per million (the stored value was priced at it until 2026-10-08, and `PRICES` holds the page's rate). */
+export const CLIENT_CACHE_READ_RATE = 0.2;
+
+export type CostBy = "day" | "row" | "cause" | "session";
+export const COST_BY: CostBy[] = ["day", "row", "cause", "session"];
+export type CostRow = { key: string; turns: number; unpriced: number; usd: number; usdAtClientRate: number; };
+
+const NO_KEY = { row: "(no row)", cause: "(no cause)" };
+
+/** The keys a turn is reported under. A turn on SEVERAL rows (`rows`, `row` null) is under each of them, as `DEFINITIONS` says, so the rows of a `--by row` are not to be added. */
+function costKeys(event: TraceEvent, by: CostBy): string[] {
+  if (by === "day") return [new Date(event.at).toISOString().slice(0, "YYYY-MM-DD".length)];
+  if (by === "session") return [event.session];
+  if (by === "cause") return [event.cause ?? NO_KEY.cause];
+  if (event.row !== null) return [`#${event.row}`];
+  return event.rows && event.rows.length > 0 ? event.rows.map((row) => `#${row}`) : [NO_KEY.row];
+}
+
+/**
+ * The turns of a store summed by `day` (UTC), `row`, `cause` or `session`: each turn ONCE (the caller read through `readStore`) and priced from `PRICES` at the call, never from the stored
+ * `costUsd` (a stored value that disagrees is not the one summed). `usdAtClientRate` is the same turns with every cache-read token priced at `CLIENT_CACHE_READ_RATE`, so the two differ by
+ * the cache-read tokens times the gap between that rate and the model's own. A turn with no price (or no tokens) is counted in `unpriced` and adds no dollars, which is not the same as free.
+ * @returns the rows by key, and the total, in which a turn counts once however many rows it is on
+ */
+export function costBy(events: TraceEvent[], by: CostBy, since: number | null = null): { rows: CostRow[]; total: CostRow; } {
+  const sum = (key: string): CostRow => ({ key, turns: 0, unpriced: 0, usd: 0, usdAtClientRate: 0 });
+  const total = sum("total");
+  const rows = new Map<string, CostRow>();
+  const add = (row: CostRow, usd: number | null, atClient: number | null) => {
+    row.turns += 1;
+    if (usd === null || atClient === null) row.unpriced += 1;
+    else {
+      row.usd += usd;
+      row.usdAtClientRate += atClient;
+    }
+  };
+  for (const event of events) {
+    if (event.kind !== "turn" || (since !== null && event.at < since)) continue;
+    const usd = event.tokens ? costOf(event.model, event.tokens) : null;
+    const atClient = event.tokens ? costOf(event.model, event.tokens, CLIENT_CACHE_READ_RATE) : null;
+    add(total, usd, atClient);
+    for (const key of costKeys(event, by)) add(rows.get(key) ?? rows.set(key, sum(key)).get(key) as CostRow, usd, atClient);
+  }
+  const settled = (row: CostRow): CostRow => ({ ...row, usd: Math.round(row.usd * COST_PRECISION) / COST_PRECISION, usdAtClientRate: Math.round(row.usdAtClientRate * COST_PRECISION) / COST_PRECISION });
+  return { rows: [...rows.values()].map(settled).sort((a, b) => a.key.localeCompare(b.key, "en", { numeric: true })), total: settled(total) };
 }
 
 /** What a store file holds: its lines, the ids among them, the lines a rewrite removes (all but the last copy of an id) and how many of those are of each `kind`. */
@@ -756,4 +953,161 @@ export function eventsForRow(events: TraceEvent[], { rows, prs }: { rows: number
     || [...(event.rows ?? []), ...(event.touchedRows ?? [])].some((row) => wantedRows.has(row)) || [...(event.prs ?? []), ...(event.touchedPrs ?? [])].some((pr) => wantedPulls.has(pr));
   return events.filter(about)
     .sort((a, b) => a.at - b.at || (a.seq ?? 0) - (b.seq ?? 0) || a.id.localeCompare(b.id));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// WHAT A WAKE DID (agent-org#487, Move 0 of a11ign/a11ign#4505): `outcome` and `runId` on a wake event. INFERRED, and `null` wherever the store cannot tell, never `no-op`.
+//
+// THE WINDOW is the wake's own span: from the second of the order to its last turn (the turns the store gives it by `wakeId`), a little over for a stamp rounded to the second. Not the gap to the
+// next order: a seat is idle most of that gap, and an unattributed send from a person's shell would fall in it.
+//
+// THREE SOURCES, each named by what it can and cannot see. (1) The `gh` ledger's lines (`gh_call` events, keyed by the session id the wrapper writes, `host/gh`): it keeps `argv[1] argv[2]` and
+// the exit status, so `issue comment` is a write and `api graphql` is unknowable. (2) The turn's own command text (`touchedRows`, `touchedPrs`) and tool calls (`repoWrite`): a file edit or a
+// `git push` is in no ledger. (3) The two `prompt:session` logs (a delivery to an idle seat, a delivery queued for a busy one): `prompt:session` is no `gh` call. ~20% of their senders are
+// unknown (no herdr workspace), which can neither be `escalated` nor ruled out, so a window such an unnamed send falls in is `null`.
+//
+// A GAP IN THE LEDGER READS AS A QUIET SESSION, and it is the way this goes wrong. The ledger keeps 2 MiB and `.hourly` counts what a trim dropped; a trim that outran the ingest leaves the
+// store short (measured: 10-09T19 to 10-10T06 held 0 to 22% of the calls the rollup counted, by hour). Two screens, neither proof of a whole ledger: `countedHours` (an hour the count shows the store short of, or has no
+// count for) and the turn's own `gh` commands set against the ledger (a window whose text issued `gh` and whose ledger holds no call of the session). Measured against the transcripts'
+// command text on 2026-10-10: the first alone let 4 of 130 told `no-op`s through, every one of them a window of the second kind. A window outside the screens can show a write and can never
+// show its absence beyond them.
+const MS_PER_SECOND = 1000;
+const HOUR_CHARS = "2026-10-08T13".length;
+/** A message is stamped when it ENDS and a ledger line to the second, so a call of the last turn can sit a moment past it. */
+const WINDOW_SLACK_MS = 2 * MS_PER_SECOND;
+/** A window no later order has closed is final this long after its last turn. */
+export const OUTCOME_QUIET_MS = 15 * 60_000;
+
+const LEDGER_WRITES = new Set(["issue", "pr"].flatMap((noun) => [...GH_WRITE_VERBS, "create"].map((verb) => `${noun} ${verb}`)));
+/** Calls known to change nothing. `api ...` is NOT here: `gh api <path> -f x=y` is a write and the ledger keeps two words. `auth git-credential` is what `git fetch` and `git push` ask; the push is `repoWrite`'s. */
+const LEDGER_READS = new Set(["issue view", "issue list", "issue status", "pr view", "pr list", "pr status", "pr checks", "pr diff", "run view", "run list", "run watch", "repo view",
+  "search issues", "search prs", "label list", "release list", "release view", "auth status", "auth git-credential"]);
+
+export type Send = { from: string | null; at: number };
+
+const SENT_BY = /^Sent to you by `([^`]+)`/;
+const SENT_BY_UNKNOWN = /^Sent to you by a caller/;
+
+/**
+ * The `prompt:session` sends of the two logs (`prompt-session-direct`, `prompt-session-handoffs`): `from` the sender's session name, or `null` for a caller `prompt:session` could not name. A line of
+ * the gate's own (an interruption notice) is no send, and a send to the sender's own session is not an escalation.
+ * @param texts the contents of the log files
+ */
+export function sendsOfLogs(texts: string[]): Send[] {
+  const sends: Send[] = [];
+  for (const line of texts.flatMap((text) => text.split("\n"))) {
+    let record: any;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof record?.session !== "string") continue;
+    let from: string | null | undefined;
+    let at: unknown;
+    if ("sender" in record) {
+      from = typeof record.sender === "string" && record.sender !== "" ? record.sender : null;
+      at = record.sentAt;
+    } else if (typeof record.prompt === "string") {
+      from = SENT_BY.exec(record.prompt)?.[1] ?? (SENT_BY_UNKNOWN.test(record.prompt) ? null : undefined);
+      at = record.queuedAt;
+    }
+    if (from !== undefined && typeof at === "number" && from !== record.session) sends.push({ from, at });
+  }
+  return sends;
+}
+
+/** The UTC hour of a time, as the ledger's rollup writes it (`2026-10-08T13`). */
+export const hourOf = (ms: number) => new Date(ms).toISOString().slice(0, HOUR_CHARS);
+
+/**
+ * The hours the ledger's own count does NOT show the store short of, per ACCOUNT: for each account with a call in the hour, in the store or in the ledger, the ledger has a count for it (the
+ * lines still in the file plus `.hourly`, what a trim dropped) and the store holds at least that many. That can prove a shortfall and cannot prove completeness: an hour the store has an
+ * account's calls in and the ledger has no count for is short of proof (the file was trimmed before the rollup existed: a small ledger's three lines had vouched for an hour of 696 calls
+ * of two other accounts), and a gap INSIDE an hour whose count is met by a surplus elsewhere in it is not seen (measured, 2026-10-09T04: 3,997 stored against 2,315 counted, one ten-minute
+ * bucket holding 119 calls against some 900 in the others). `wakeOutcomes` sets the turn's own `gh` commands against the ledger for that.
+ * @param ledgerCalls calls per `<hour>\t<account>`, from the ledger files and their rollups
+ */
+export function countedHours({ ledgerCalls, events }: { ledgerCalls: Map<string, number>; events: TraceEvent[]; }): Set<string> {
+  const stored: Map<string, number> = new Map();
+  for (const event of events) if (event.kind === "gh_call") stored.set(`${hourOf(event.at)}\t${event.account}`, (stored.get(`${hourOf(event.at)}\t${event.account}`) ?? 0) + 1);
+  const hours = new Set([...ledgerCalls.keys(), ...stored.keys()].map((key) => key.split("\t")[0]));
+  const short = new Set([...stored].filter(([key, calls]) => calls > 0 && !ledgerCalls.has(key)).map(([key]) => key.split("\t")[0]));
+  for (const [key, calls] of ledgerCalls) if ((stored.get(key) ?? 0) < calls) short.add(key.split("\t")[0]);
+  return new Set([...hours].filter((hour) => !short.has(hour)));
+}
+
+const pushTo = (map: Map<string, TraceEvent[]>, key: string, event: TraceEvent) => {
+  const held = map.get(key);
+  if (held) held.push(event);
+  else map.set(key, [event]);
+};
+
+/**
+ * The wake events whose `outcome` or `runId` is to change, as corrected copies for `appendToStore`. A wake with a told outcome is left; one that is `null` is asked again (the ledger may be whole
+ * by now); one whose window is still open and has not written is left ABSENT, so each wake is rewritten once, when it settles. `wrote` is final at once: a later turn cannot undo it.
+ * @param sends see {@link sendsOfLogs}
+ * @param readable whether the ledger is whole for the whole of `[from, to]` (see {@link countedHours})
+ */
+export function wakeOutcomes({ events, sends, readable, now }: { events: TraceEvent[]; sends: Send[]; readable: (from: number, to: number) => boolean; now: number; }): TraceEvent[] {
+  const turnsOfWake: Map<string, TraceEvent[]> = new Map();
+  const callsOf: Map<string, TraceEvent[]> = new Map();
+  const wakesOf: Map<string, TraceEvent[]> = new Map();
+  for (const event of events) {
+    if (event.kind === "turn" && event.wakeId) pushTo(turnsOfWake, event.wakeId, event);
+    else if (event.kind === "gh_call" && event.sessionId) pushTo(callsOf, event.sessionId, event);
+    else if (event.kind === "wake") pushTo(wakesOf, event.session, event);
+  }
+  const corrected: TraceEvent[] = [];
+  for (const wakes of wakesOf.values()) {
+    wakes.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+    for (const [index, wake] of wakes.entries()) {
+      const turns = turnsOfWake.get(wake.id);
+      if (typeof wake.outcome === "string" || !turns?.length) continue;
+      turns.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+      const next = wakes[index + 1];
+      const lastTurnAt = turns[turns.length - 1].at;
+      const from = Math.floor(wake.at / MS_PER_SECOND) * MS_PER_SECOND;
+      const to = Math.min(lastTurnAt + WINDOW_SLACK_MS, next?.at ?? Number.POSITIVE_INFINITY);
+      const calls = [...new Set(turns.map((turn) => turn.transcript))].flatMap((id) => (id ? callsOf.get(id) ?? [] : [])).filter((call) => call.at >= from && call.at <= to);
+      const written = (call: TraceEvent) => LEDGER_WRITES.has(call.command ?? "") && call.exit === 0;
+      const wrote = calls.some(written) || turns.some((turn) => (turn.touchedRows?.length ?? 0) + (turn.touchedPrs?.length ?? 0) > 0 || turn.repoWrite === true);
+      if (!wrote && next === undefined && now - lastTurnAt < OUTCOME_QUIET_MS) continue;
+      let outcome: WakeOutcome | null = "wrote";
+      if (!wrote) {
+        const issued = turns.reduce((sum, turn) => sum + (turn.ghCommands ?? 0), 0);
+        const blind = !readable(from, to) || turns.some((turn) => turn.repoWrite === undefined || turn.ghCommands === undefined || !turn.transcript)
+          || (issued > 0 && calls.length === 0) || calls.some((call) => !LEDGER_READS.has(call.command ?? "") && !written(call));
+        const sent = sends.filter((send) => send.at >= from && send.at <= to);
+        if (blind) outcome = null;
+        else if (sent.some((send) => send.from === wake.session)) outcome = "escalated";
+        else outcome = sent.some((send) => send.from === null) ? null : "no-op";
+      }
+      const runId = turns[0].transcript ?? null;
+      if (wake.outcome !== outcome || wake.runId !== runId) corrected.push({ ...wake, outcome, runId });
+    }
+  }
+  return corrected;
+}
+
+export type OutcomeRow = { cause: string; wakes: number; wrote: number; noOp: number; escalated: number; null: number; unsettled: number };
+
+/** The split of the wakes in `[from, to)` by cause. An outcome that is `null` or ABSENT counts as `null`: both are "not told", which is the line a reader must not mistake for `no-op`; `unsettled` is the absent ones, a part of `null`. */
+export function outcomeSplit({ events, window }: { events: TraceEvent[]; window: { from: number; to: number; }; }): { window: { from: number; to: number; }; total: OutcomeRow; byCause: OutcomeRow[]; } {
+  const row = (cause: string): OutcomeRow => ({ cause, wakes: 0, wrote: 0, noOp: 0, escalated: 0, null: 0, unsettled: 0 });
+  const total = row("all causes");
+  const byCause: Map<string, OutcomeRow> = new Map();
+  for (const event of events) {
+    if (event.kind !== "wake" || event.at < window.from || event.at >= window.to) continue;
+    const cause = event.cause ?? "(no cause)";
+    const line = byCause.get(cause) ?? row(cause);
+    byCause.set(cause, line);
+    const field = event.outcome === "wrote" ? "wrote" : event.outcome === "no-op" ? "noOp" : event.outcome === "escalated" ? "escalated" : "null";
+    for (const into of [line, total]) {
+      into.wakes += 1;
+      into[field] += 1;
+      if (event.outcome === undefined) into.unsettled += 1;
+    }
+  }
+  return { window, total, byCause: [...byCause.values()].sort((a, b) => b.wakes - a.wakes || a.cause.localeCompare(b.cause)) };
 }

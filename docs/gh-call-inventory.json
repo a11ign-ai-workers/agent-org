@@ -1,19 +1,19 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 94,
-    "spawns": 133,
-    "calls": 390,
+    "files": 96,
+    "spawns": 136,
+    "calls": 395,
     "shapes": {
-      "api rest": 136,
+      "api rest": 138,
       "issue list": 42,
-      "api graphql": 38,
+      "api graphql": 39,
       "issue view": 34,
       "pr list": 29,
-      "issue comment": 26,
+      "issue comment": 27,
       "pr view": 17,
       "issue edit": 13,
-      "label create": 10,
+      "label create": 11,
       "pr merge": 6,
       "project item-edit": 6,
       "issue create": 4,
@@ -361,6 +361,12 @@
       "labels": [],
       "parsesCloses": false
     },
+    "src/gh-ledger.ts": {
+      "spawns": 1,
+      "calls": {},
+      "labels": [],
+      "parsesCloses": false
+    },
     "src/hand-fix-ledger.ts": {
       "spawns": 1,
       "calls": {
@@ -550,10 +556,11 @@
       "parsesCloses": false
     },
     "src/pr-open.ts": {
-      "spawns": 6,
+      "spawns": 7,
       "calls": {
-        "api rest": 5,
-        "label create": 1,
+        "api graphql": 1,
+        "api rest": 6,
+        "label create": 2,
         "pr edit": 1,
         "pr merge": 1
       },
@@ -632,6 +639,15 @@
       "spawns": 0,
       "calls": {
         "api rest": 3
+      },
+      "labels": [],
+      "parsesCloses": false
+    },
+    "src/route-guard.ts": {
+      "spawns": 1,
+      "calls": {
+        "api rest": 1,
+        "issue comment": 1
       },
       "labels": [],
       "parsesCloses": false

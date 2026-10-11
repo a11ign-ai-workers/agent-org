@@ -18,6 +18,16 @@
 // yes), P(score <= k) and P(subsystems = yes) against the named thresholds below, each scaled to the cost of being wrong: moving DOWN a tier is cheap to be wrong about, because
 // `engineer-escalation.ts` (#4630) catches it. The confidence floor still decides which answers the WINDOW reads ({@link adjustWindow}) and applies to every other use; it no longer discards a routing answer.
 //
+// #4902: HAIKU IS CHOSEN ON SIZE AND CONTAINMENT, NOT ON `mechanical`. Measured on the decision log (2026-10-10, 30 records), P(mechanical = yes) had a median of 0.10 and none reached 0.65, so a
+// gate on it sent nothing to Haiku: our rows describe a change rather than list every edit. {@link takesHaiku} reads P(score <= 2), or P(score <= 3) with subsystems and debugging both unlikely.
+// `mechanical` is still asked and logged, and decides only an unscored row in a small Region.
+//
+// #4904: THE ROUTE CAN BE ONE QUESTION. With `routing.question: "choice"` in the project's declaration (`project-config.ts`) the provider is asked, in the SAME call as the four, ONE choice over the
+// configured routes: "the cheapest route that finishes this row in one pass, with no move up to a stronger route". The four still run and are logged for `route-accuracy` and the window; they no
+// longer decide. {@link acceptPick} takes the pick with UNEVEN thresholds (a pick cheaper than the fallback at P >= `cheaperMinP`, a dearer one at P >= `dearerMinP`), because a wrong cheap
+// start costs one move up (#4630) and a wrong dear one costs the row's whole price; anything else, an off-list answer or a failed call is {@link fallbackRoute}, unchanged. `traits` (and an absent
+// block) is today's composition, byte for byte. A `tier:<route>` label beats the provider for any configured route; a row nothing may lower is still never lowered.
+//
 // THE STATE IS STRUCTURED AND TRIMMED: the title, the Region's entries, the Acceptance's command text and the Done-when list. Never the row's body, which an agent wrote.
 import { readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
@@ -28,18 +38,28 @@ import { decide, decisionLogPathFrom, decisionsIn, readSwitches, recordOutcome, 
 import { stateEntryPath } from "./host-config.ts";
 import { LANE_PREFIX, NEEDS_CHAIRMAN_LABEL } from "./project-vocabulary.ts";
 import { extractLabeledSection, extractRegionSection, splitRegionEntry } from "./region-paths.ts";
+import { ABSENT_ROUTING, homeProjectDeclaration, ROUTES, type RouteGuidance, type RouteName, type RoutingDeclaration } from "./project-config.ts";
 import { printDiagnostic, processState } from "./triage-provider.ts";
 import { AUTOCOMPACT_WINDOW_TOKENS, clampWindow, haikuTierProfile, HAIKU_TIER_LABEL, MIN_WORKING_ROOM_TOKENS, ordinaryTierProfile, SONNET_WINDOW_RUNGS, type TierProfile } from "./worker-profile.ts";
 
-export type Route = "haiku/high" | "sonnet/medium" | "sonnet/high";
+export type Route = RouteName;
 /** `override` is a `tier:haiku` label deciding; `refused` is a row nothing may lower; `jev` is a provider's answers composed; `fallback` is the file-count rule. */
 export type Via = "override" | "refused" | "jev" | "fallback";
-export type RouteRow = { number: number; title: string; labels: readonly string[]; body: string };
+export type RouteRow = {
+  number: number;
+  /** The tracker key of another tracker's row (`agent-org`); absent for the first tracker's. It spells the ledger id, so `agent-org#7` and a11ign's `#7` are two rows (a11ign/agent-org#756). */
+  key?: string;
+  title: string; labels: readonly string[]; body: string };
 export type Routed = { route: Route; via: Via;
   /** THE REASON THE ROUTE WAS TAKEN, one text: the work tick's `routed ...` journal line and the decision log's outcome line (`route <route> via <via> (<why>)`) both print it. */ why: string;
   /** `null` is the ordinary Sonnet/high profile at the ordinary window, byte-identical to before. */ profile: TierProfile | null;
   /** WHY THE WINDOW IS WHAT IT IS (#4738), only when it is not simply the route's own: the Region's size, what the provider's answers did to it, or the ceiling that held it. Kept apart from `why`, which IS the reason a fallback was taken. */ windowWhy?: string;
-  /** Why the provider did not decide this route (a fallback), or which questions' probabilities it did not give (a `jev` route held to what the rest compose); absent when it decided it. */ reason?: string };
+  /** Why the provider did not decide this route (a fallback), or which questions' probabilities it did not give (a `jev` route held to what the rest compose); absent when it decided it. */ reason?: string;
+  /** Only in `choice` mode (#4904): what the one route question said and why the route is the one that ran. Absent in `traits` mode, whose lines are unchanged. */ picked?: Picked };
+/** The reason a route was taken, in `choice` mode: the {@link Via}s, plus the two ways a provider's pick is not taken. */
+export type Because = Via | "low-confidence" | "invalid-option";
+/** WHAT THE `route` QUESTION SAID (#4904): the pick (`null` for an answer that was not a configured route, or none asked), EVERY route's probability as given (`null` when none was), the reason, and the call's milliseconds. */
+export type Picked = { pick: string | null; because: Because; probabilities: Readonly<Record<string, number>> | null; ms: number };
 /** One answer per question; `null` is an answer that was not given: malformed, or under the confidence floor. The WINDOW reads these ({@link adjustWindow}); the route reads {@link Readings}. */
 export type Answers = { mechanical: boolean | null; subsystems: boolean | null; debugging: boolean | null; score: number | null };
 /**
@@ -52,14 +72,22 @@ export type Readings = { mechanical: number | null; subsystems: number | null; d
 export const SMALL_ROW_FILES = 3;
 /** The complexity `score` a Haiku row may be at most (3 since a11ign#4877, the chairman's direction on the trial report, a11ign#4627), and the one a Sonnet/medium row is. */
 export const HAIKU_MAX_SCORE = 3;
+/** The score a row is at most when it is Haiku's on size alone (#4902). */
+export const HAIKU_SMALL_SCORE = 2;
 export const MEDIUM_SCORE = 3;
 // THE ROUTING THRESHOLDS (#4875, the chairman's starting values, to be calibrated from the probabilities the decision log now keeps). Each is a probability, and each is LOW on purpose:
 // a row sent down a tier wrongly is caught by the escalation (a Haiku start costs about $0.10 and a restart; a Sonnet/high row's median cost is $1.01), so the price of being wrong
 // is small and the price of never trying is the cost of every row.
-/** Haiku/high needs P(mechanical = yes) of at least this... */
+/** Haiku/high on SIZE: P(score <= {@link HAIKU_SMALL_SCORE}) of at least this (#4902). */
+export const HAIKU_MIN_P_SMALL = 0.6;
+/** Haiku/high on CONTAINMENT: P(score <= {@link HAIKU_MAX_SCORE}) of at least this... */
+export const HAIKU_MIN_P_SCORE = 0.9;
+/** ...AND P(subsystems = yes) at most this... */
+export const HAIKU_MAX_P_SUBSYSTEMS = 0.1;
+/** ...AND P(debugging = yes) at most this. */
+export const HAIKU_MAX_P_DEBUGGING = 0.25;
+/** With no score given, a row the provider reads as mechanical at least this strongly may still go to Haiku from a small Region. The only place `mechanical` is a gate left. */
 export const HAIKU_MIN_P_MECHANICAL = 0.65;
-/** ...AND P(score <= {@link HAIKU_MAX_SCORE}) of at least this. */
-export const HAIKU_MIN_P_SCORE = 0.6;
 /** Sonnet/medium needs P(score <= {@link MEDIUM_SCORE}) of at least this... */
 export const MEDIUM_MIN_P_SCORE = 0.6;
 /** ...AND P(subsystems = yes) BELOW this. */
@@ -77,6 +105,8 @@ const ACCEPTANCE_CHARS = 600;
 const DONE_WHEN_ITEMS = 8;
 const DONE_WHEN_CHARS = 200;
 const ID_PREFIX = "row-";
+/** The decision log's id for a row: `row-<n>` for the first tracker's, `row-<key>-<n>` for another's -- the spelling its worker is named by. */
+const idOf = ({ key, number }: Pick<RouteRow, "key" | "number">): string => `${ID_PREFIX}${key === undefined || key === "" ? "" : `${key}-`}${number}`;
 
 // --- the criteria: what each answer means, with rows whose outcome is known (#4764 change 3 and #4752, the method of #4627's 07:45Z direction) ---
 //
@@ -183,6 +213,43 @@ export const QUESTIONS: Readonly<Record<keyof Answers, Question>> = Object.freez
     instructions: "Complexity of the row, as the level whose summary and signals fit it. Signals: file count, whether the Acceptance is a command, whether the Done-when is checkable." },
 });
 
+// --- the route as ONE choice (#4904) ---
+
+/**
+ * What each route is, for the provider: the shape of {@link SCORE_LEVEL_DATA} (`what`, signals, `not_for`, examples), the examples ROWS OF OURS whose merge is known. The cheap route is the
+ * evidence's (Haiku's first-pass rate was 100% on 16 rows at a median $0.10 against $0.94, measured 2026-10-10), so its signals are the ones that row sizes 1 and 2 share. A declaration's
+ * `routing.guidance` replaces a route's WHOLE entry.
+ */
+export const ROUTE_DATA: Readonly<Record<Route, RouteGuidance>> = Object.freeze({
+  "haiku/high": { what: "every edit is stated by the row and contained: a constant, a path, a rename, one stated fix or a sweep of the same edit, with the test that proves it",
+    signals: [...SCORE_LEVEL_DATA[0].signals, "the Done-when is checkable by the Acceptance command as written"],
+    notFor: "a new module or a wire the row describes without spelling out, a Region spanning modules that interact, or a cause the row does not state",
+    examples: [...SCORE_LEVEL_DATA[0].examples, MECHANICAL_DATA.yes.examples[2]].map(exampleText) },
+  "sonnet/medium": { what: "a new small unit with its test in one subsystem, or a few edits that each need the code around them read first",
+    signals: SCORE_LEVEL_DATA[2].signals.slice(),
+    notFor: "a change in how two modules agree, a migration, a design the row leaves open, or an unknown failure to find",
+    examples: SCORE_LEVEL_DATA[2].examples.map(exampleText) },
+  "sonnet/high": { what: "a change in how modules agree, a new seam or a migration, anything whose shape the row does not state, or a failure whose cause has to be found first",
+    signals: [...SCORE_LEVEL_DATA[3].signals, ...SCORE_LEVEL_DATA[4].signals],
+    notFor: "one stated edit, or a few independent ones, whose every part the row spells out",
+    examples: [...SCORE_LEVEL_DATA[3].examples, SCORE_LEVEL_DATA[4].examples[0]].map(exampleText) },
+});
+
+export const ROUTE_INSTRUCTIONS = "Pick the cheapest route that finishes this row in one pass, with no move up to a stronger route afterwards. When unsure between two, pick the dearer: a row that moves up costs more than one that started there.";
+
+/**
+ * THE ONE QUESTION (#4904): a `choice` whose options are the configured routes, each carrying its guidance. `fallback` is the row's own {@link fallbackRoute}, which is what `decide` hands
+ * back for an answer it could not read. `minConfidence: 0` because the floor is not this question's gate: {@link acceptPick} reads the pick's own probability against the two thresholds,
+ * and a floor that replaced the pick would hide the probability the log must keep.
+ */
+export function routeQuestion(routing: Pick<RoutingDeclaration, "routes" | "guidance">, fallback: Route): Question {
+  const criteria = Object.fromEntries(routing.routes.map((route) => {
+    const { what, signals, notFor, examples } = routing.guidance[route] ?? ROUTE_DATA[route];
+    return [route, { what, signals: [...signals], not_for: notFor, examples: [...examples] }];
+  }));
+  return { type: "choice", criteria, fallback, minConfidence: 0, instructions: ROUTE_INSTRUCTIONS };
+}
+
 const asBool = (value: unknown): boolean | null => (value === "yes" ? true : value === "no" ? false : null);
 
 /** P(score <= `level`): the sum of the distribution's levels 1 to `level`, which is what a row split across ADJACENT levels is worth to a tier that takes both. */
@@ -194,10 +261,16 @@ export function scoreAtMost(distribution: Readonly<Record<string, number>>, leve
 /** `regionFiles` is {@link regionFileCount}: 0 is a Region that names nothing, which is never "small". */
 const isSmallRegion = (regionFiles: number): boolean => regionFiles > 0 && regionFiles <= SMALL_ROW_FILES;
 
-/** Mechanical, and either a low score or (the score NOT given) a Region small enough that a mechanical row's stated edits cannot be many. */
-function takesHaiku({ mechanical, score }: Readings, regionFiles: number): boolean {
-  if (mechanical === null || mechanical < HAIKU_MIN_P_MECHANICAL) return false;
-  return score === null ? isSmallRegion(regionFiles) : scoreAtMost(score, HAIKU_MAX_SCORE) >= HAIKU_MIN_P_SCORE;
+/**
+ * HAIKU IS CHOSEN ON SIZE AND CONTAINMENT, NOT ON MECHANICALNESS (#4902): our rows describe changes rather than listing every edit, so P(mechanical) had a median of 0.10 and never
+ * reached 0.65, and nothing went to Haiku. Either the row is probably tiny (P(score <= 2)), or it is probably small AND contained (P(score <= 3), no subsystems, not debugging). A
+ * distribution not given never qualifies a row on the containment branch. `mechanical` is logged and only decides an UNSCORED row in a small Region, as before.
+ */
+function takesHaiku({ mechanical, subsystems, debugging, score }: Readings, regionFiles: number): boolean {
+  if (score === null) return mechanical !== null && mechanical >= HAIKU_MIN_P_MECHANICAL && isSmallRegion(regionFiles);
+  if (scoreAtMost(score, HAIKU_SMALL_SCORE) >= HAIKU_MIN_P_SMALL) return true;
+  const contained = subsystems !== null && subsystems <= HAIKU_MAX_P_SUBSYSTEMS && debugging !== null && debugging <= HAIKU_MAX_P_DEBUGGING;
+  return contained && scoreAtMost(score, HAIKU_MAX_SCORE) >= HAIKU_MIN_P_SCORE;
 }
 
 /** A score that is probably at most {@link MEDIUM_SCORE}, and subsystems not probably yes (not given passes: a row this small is not reasoned across modules by default). */
@@ -208,7 +281,7 @@ function takesMedium({ subsystems, score }: Readings): boolean {
 
 /**
  * THE ROUTE A SET OF PROBABILITIES COMPOSES, PURE (#4875, on #4764's rungs). Probably debugging an unknown failure holds a row at Sonnet/high ({@link HOLD_AT_P_DEBUGGING}). Otherwise,
- * in order: Haiku/high ({@link takesHaiku}), Sonnet/medium ({@link takesMedium}), and ANYTHING ELSE is Sonnet/high as before. A question whose distribution was not given never lowers
+ * in order: Haiku/high ({@link takesHaiku}: size and containment), Sonnet/medium ({@link takesMedium}), and ANYTHING ELSE is Sonnet/high as before. A question whose distribution was not given never lowers
  * a row, except that an unscored mechanical row in a small Region may go to Haiku and a debugging question not given does not hold one.
  */
 export function composeRoute(readings: Readings, { regionFiles }: { regionFiles: number }): Route {
@@ -322,7 +395,8 @@ function haikuProfileOf(row: RouteRow, switchPath: string | undefined): HaikuAsk
   return profile === null ? { refused } : { profile };
 }
 
-export type RouteDeps = DecisionDeps & { /** For a test: the Haiku switch file. */ haikuSwitchPath?: string };
+export type RouteDeps = DecisionDeps & { /** For a test: the Haiku switch file. */ haikuSwitchPath?: string;
+  /** For a test, or a caller that has read it: the project's `routing` block. Absent is the home project's declaration, and that unreadable is {@link ABSENT_ROUTING}. */ routing?: RoutingDeclaration };
 
 /** THE `--autocompact` WINDOW A ROUTE'S START GETS (#4738), read off its profile: no profile is the ordinary one, at {@link AUTOCOMPACT_WINDOW_TOKENS}. */
 export const windowOf = ({ profile }: Pick<Routed, "profile">): number => profile?.autocompactWindow ?? AUTOCOMPACT_WINDOW_TOKENS;
@@ -437,7 +511,9 @@ export async function routeEngineer(row: RouteRow, deps: RouteDeps): Promise<Rou
   const routed = sizeWindow(chosen, row, provided, deps);
   const window = `${windowLabel(windowOf(routed))}${routed.windowWhy === undefined ? "" : ` (${routed.windowWhy})`}`;
   const wouldBe = routed.via === "jev" ? ` [fallback would be ${fallbackRoute(row)}]` : "";
-  recordOutcome("model-routing", `${ID_PREFIX}${row.number}`, `route ${routed.route} window ${window} via ${routed.via} (${routed.why})${wouldBe}`, deps, routed.reason);
+  // `[fallback would be X]` stays LAST: `routeCostReading` anchors on it.
+  const picked = routed.picked === undefined ? "" : ` ${pickedText(routed.route, routed.picked)}`;
+  recordOutcome("model-routing", idOf(row), `route ${routed.route} window ${window} via ${routed.via} (${routed.why})${picked}${wouldBe}`, deps, routed.reason);
   if (routed.via === "jev") guardRouteCost(deps);
   return routed;
 }
@@ -472,18 +548,47 @@ function jsonOrNothing(line: string): unknown {
 type Chosen = { routed: Routed; /** The provider's answers, when it gave any: the window reads them too. */ provided: Provided | null };
 const alone = (routed: Routed): Chosen => ({ routed, provided: null });
 
-async function routeOnly(row: RouteRow, deps: RouteDeps): Promise<Chosen> {
-  if (row.labels.includes(HAIKU_TIER_LABEL)) {
+/** The project's `routing` block: the caller's, else the home declaration's. A declaration that cannot be read routes as before, and says so: the route lowers cost and must not cost a start. */
+function routingOf(deps: Pick<RouteDeps, "routing" | "diagnostic">): RoutingDeclaration {
+  if (deps.routing !== undefined) return deps.routing;
+  try {
+    return homeProjectDeclaration().routing;
+  } catch (err) {
+    (deps.diagnostic ?? printDiagnostic)(`agent-org: engineer-route: the project declaration could not be read (${err instanceof Error ? err.message : String(err)}), so the route is composed as before`);
+    return ABSENT_ROUTING;
+  }
+}
+
+/** The labels that name a route: `tier:haiku` is `haiku/high`'s since #4629, and `tier:<model>-<effort>` is every route's (#4904). */
+const labelsOf = (route: Route): string[] => [...(route === "haiku/high" ? [HAIKU_TIER_LABEL] : []), `tier:${route.replace("/", "-")}`];
+
+/** The route a row's labels name among the CONFIGURED ones. Two labels name the dearer: a label never lowers a row below what another one asks. */
+function labelledRoute(labels: readonly string[], routes: readonly Route[]): { route: Route; label: string } | null {
+  const named = routes.flatMap((route) => labelsOf(route).filter((label) => labels.includes(label)).map((label) => ({ route, label })));
+  return named.sort((a, b) => ROUTE_COST[b.route] - ROUTE_COST[a.route])[0] ?? null;
+}
+
+/** A label decides before the provider is asked. Haiku goes through the code `tier:haiku` always used; a Sonnet route is refused for a row nothing may lower, as Haiku is. */
+function overridden(row: RouteRow, { route, label }: { route: Route; label: string }, deps: RouteDeps): Routed {
+  if (route === "haiku/high") {
     const haiku = haikuProfileOf(row, deps.haikuSwitchPath);
-    if ("profile" in haiku) return alone(decided("haiku/high", "override", HAIKU_TIER_LABEL, haiku.profile));
-    const refusal = `${HAIKU_TIER_LABEL} was refused: ${haiku.refused}`;
-    return alone({ ...ordinary("override", refusal), reason: refusal });
+    if ("profile" in haiku) return decided(route, "override", label, haiku.profile);
+    const refusal = `${label} was refused: ${haiku.refused}`;
+    return { ...ordinary("override", refusal), reason: refusal };
   }
   const held = whyHeld(row);
-  if (held !== null) return alone({ ...ordinary("refused", held), reason: held });
-  const decision = await decide("model-routing", routeState(row), QUESTIONS, { ...deps, id: `${ID_PREFIX}${row.number}` });
+  if (held !== null) return { ...ordinary("override", `${label} was refused: ${held}`), reason: `${label} was refused: ${held}` };
+  return route === "sonnet/medium" ? decided(route, "override", label, SONNET_MEDIUM) : ordinary("override", label);
+}
+
+/** A route no cheaper than `route` that is configured: a composed route a project did not configure moves UP to the next one it did, never down. `sonnet/high` is always configured. */
+const atLeast = (route: Route, routes: readonly Route[]): Route => ROUTES.find((own) => routes.includes(own) && ROUTE_COST[own] >= ROUTE_COST[route]) ?? "sonnet/high";
+
+/** The `traits` composition, as it was before #4904 and byte for byte. */
+async function routeByTraits(row: RouteRow, routing: RoutingDeclaration, deps: RouteDeps): Promise<Chosen> {
+  const decision = await decide("model-routing", routeState(row), QUESTIONS, { ...deps, id: idOf(row) });
   if (decision.via === "none") return alone(withReason(profiled(fallbackRoute(row), "fallback", row, deps.haikuSwitchPath), decision.reason ?? "the provider gave no answer and no reason"));
-  const composed = composeRoute(readingsOf(decision.answers), { regionFiles: regionFileCount(row.body) });
+  const composed = atLeast(composeRoute(readingsOf(decision.answers), { regionFiles: regionFileCount(row.body) }), routing.routes);
   const routed = profiled(composed, "jev", row, deps.haikuSwitchPath);
   // The line says which probabilities composed the route, so "sonnet/high" is never just "the ordinary profile": the person reading sees what held it there. A distribution that was
   // not given is a null, not a zero, and says why; `composeRoute` says what each one's absence means.
@@ -492,6 +597,94 @@ async function routeOnly(row: RouteRow, deps: RouteDeps): Promise<Chosen> {
   const unread = (Object.keys(QUESTIONS) as (keyof Answers)[]).filter((name) => decision.answers[name].probabilities === undefined);
   const reason = unread.length === 0 ? {} : { reason: `probabilities not given (${unread.map((name) => `${name}: ${whyUnread(decision.answers[name])}`).join("; ")})` };
   return { routed: { ...routed, why, ...reason }, provided: windowAnswers(decision.answers) };
+}
+
+type Verdict = { route: Route; via: Via; because: Because; why: string };
+const showP3 = (p: number): string => p.toFixed(3);
+
+/**
+ * THE PROVIDER'S PICK AGAINST THE FALLBACK, PURE (#4904). A pick that is not a configured route is `invalid-option`. A pick that IS the fallback stands, since nothing moves. A pick CHEAPER
+ * than the fallback needs P >= `cheaperMinP` and a DEARER one P >= `dearerMinP`; short of it the route is the fallback, `low-confidence`. A pick with no distribution has no probability to
+ * read, which is not a probability of zero but is never enough to move a route either.
+ */
+export function acceptPick(answer: Answer, fallback: Route, routing: Pick<RoutingDeclaration, "routes" | "cheaperMinP" | "dearerMinP">): Verdict {
+  const taken = (because: Because, why: string): Verdict => ({ route: fallback, via: "fallback", because, why });
+  const pick = answer.value as Route;
+  if (answer.confidence === undefined || !routing.routes.includes(pick)) return taken("invalid-option", "the provider's answer was not one of the configured routes");
+  if (answer.probabilities === undefined) return taken("low-confidence", `the provider picked ${pick} and gave no probabilities, so no threshold can be read`);
+  const p = Number((answer.probabilities[pick] ?? 0).toFixed(PROBABILITY_PLACES));
+  if (pick === fallback) return { route: pick, via: "jev", because: "jev", why: `the provider picked ${pick} at P=${showP3(p)}, the route the fallback takes` };
+  const cheaper = ROUTE_COST[pick] < ROUTE_COST[fallback];
+  const needed = cheaper ? routing.cheaperMinP : routing.dearerMinP;
+  const rule = `a pick ${cheaper ? "cheaper" : "dearer"} than the fallback ${fallback} needs P >= ${needed}`;
+  if (p < needed) return taken("low-confidence", `the provider picked ${pick} at P=${showP3(p)}, under it: ${rule}`);
+  return { route: pick, via: "jev", because: "jev", why: `the provider picked ${pick} at P=${showP3(p)} (${rule})` };
+}
+
+/** The verdict as a start. A Haiku route its switch or its refusals hold is NOT sent to Sonnet/high: the row takes the fallback it would have had, which is never dearer than the rule this replaced. */
+function takeVerdict(verdict: Verdict, fallback: Route, row: RouteRow, deps: RouteDeps): Routed {
+  const { route, via, why } = verdict;
+  if (route === "haiku/high") {
+    const haiku = haikuProfileOf(row, deps.haikuSwitchPath);
+    if ("refused" in haiku) return takeVerdict({ route: fallback, via: "fallback", because: "fallback", why: `${why}; Haiku was refused: ${haiku.refused}` }, fallback, row, deps);
+    return decided(route, via, why, haiku.profile);
+  }
+  const routed = route === "sonnet/medium" ? decided(route, via, why, SONNET_MEDIUM) : ordinary(via, why);
+  return via === "jev" ? routed : withReason(routed, why);
+}
+
+async function routeByChoice(row: RouteRow, routing: RoutingDeclaration, deps: RouteDeps): Promise<Chosen> {
+  const fallback = fallbackRoute(row);
+  const clock = deps.now ?? Date.now;
+  const started = clock();
+  const questions = { ...QUESTIONS, route: routeQuestion(routing, fallback) };
+  const decision = await decide("model-routing", routeState(row), questions, { ...deps, id: idOf(row) });
+  const ms = Math.max(0, clock() - started);
+  if (decision.via === "none") {
+    const routed = withReason(profiled(fallback, "fallback", row, deps.haikuSwitchPath), decision.reason ?? "the provider gave no answer and no reason");
+    return alone({ ...routed, picked: { pick: null, because: "fallback", probabilities: null, ms } });
+  }
+  const answer = decision.answers.route;
+  const verdict = acceptPick(answer, fallback, routing);
+  const taken = takeVerdict(verdict, fallback, row, deps);
+  const pick = verdict.because === "invalid-option" ? null : String(answer.value);
+  const because = taken.route === verdict.route ? verdict.because : "fallback";
+  return { routed: { ...taken, picked: { pick, because, probabilities: answer.probabilities ?? null, ms } }, provided: windowAnswers(decision.answers) };
+}
+
+/** A `choice` decision's line always says why: the reasons that asked nobody (a label, a refusal, no provider) are the `via` itself, with nothing picked and nothing spent. */
+const withPicked = (chosen: Chosen): Chosen => (chosen.routed.picked !== undefined ? chosen
+  : { ...chosen, routed: { ...chosen.routed, picked: { pick: null, because: chosen.routed.via, probabilities: null, ms: 0 } } });
+
+async function chooseRoute(row: RouteRow, routing: RoutingDeclaration, deps: RouteDeps): Promise<Chosen> {
+  const labelled = labelledRoute(row.labels, routing.routes);
+  if (labelled !== null) return alone(overridden(row, labelled, deps));
+  const held = whyHeld(row);
+  if (held !== null) return alone({ ...ordinary("refused", held), reason: held });
+  return routing.question === "choice" ? routeByChoice(row, routing, deps) : routeByTraits(row, routing, deps);
+}
+
+async function routeOnly(row: RouteRow, deps: RouteDeps): Promise<Chosen> {
+  const routing = routingOf(deps);
+  const chosen = await chooseRoute(row, routing, deps);
+  return routing.question === "choice" ? withPicked(chosen) : chosen;
+}
+
+// The line's bracket, `[pick <route|none>; ran <route>; because <why>; P <route>=<p> ...|not given; <n>ms]`: what the route question said and what ran. {@link pickedOf} is its one reader, so a
+// replay of past decisions against new thresholds (the REQUEST line keeps the provider's whole `answers` too) reads the same text the writer wrote.
+const PICKED_LINE = /\[pick (\S+); ran (\S+); because (\S+); P (.*?); (\d+)ms\]/;
+
+function pickedText(ran: Route, { pick, because, probabilities, ms }: Picked): string {
+  const given = probabilities === null ? "not given" : Object.entries(probabilities).map(([route, p]) => `${route}=${showP3(p)}`).join(" ");
+  return `[pick ${pick ?? "none"}; ran ${ran}; because ${because}; P ${given}; ${Math.round(ms)}ms]`;
+}
+
+/** The route question's bracket out of an outcome line, or `null` for a line that has none (a `traits` line, or one written before #4904). */
+export function pickedOf(outcome: string): (Picked & { ran: string }) | null {
+  const [, pick, ran, because, given, ms] = PICKED_LINE.exec(outcome) ?? [];
+  if (ran === undefined) return null;
+  const probabilities = given === "not given" ? null : Object.fromEntries(given.split(" ").map((entry) => { const [route, p] = entry.split("="); return [route, Number(p)]; }));
+  return { pick: pick === "none" ? null : pick, ran, because: because as Because, probabilities, ms: Number(ms) };
 }
 
 /** P(yes), or `null` when no distribution was read. A distribution that does not name `yes` is a probability of zero: the provider put nothing there. */

@@ -49,12 +49,13 @@
 // A LEAF, RELATIVE IMPORTS ONLY, like `repeating-lines.ts`: `work-gate.ts` imports this, and it runs before any `pnpm install`/build.
 import { canStrip, describeBad, type NodeStripFact } from "./node-strips-types.ts";
 import { execFileSync } from "node:child_process";
-import { readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./lib/git-env.ts";
-import { spenderPhrase } from "./gh-ledger.ts";
+import { isAppLogin, spenderPhraseFor } from "./gh-ledger.ts";
+import { GITHUB_ROLES, homeHostConfig, roleIdentity, type HostConfig } from "./host-config.ts";
 // A LEAF (`claim-labels.ts` imports nothing), so the label is read from where it is declared, as `repeating-lines.ts` does.
 import { READY_LABEL, STATE_LABELS, stateLabelFindings } from "./claim-labels.ts";
 import { boardTruthTable } from "./board-truth-audit.ts";
@@ -646,7 +647,48 @@ export function poolLowReading({ pools, spenderOf = ledgerSpender }: { pools: Po
 /** The config directory `host/gh` writes this process's ledger under: the one `gh` itself reads, else the default. */
 const ledgerDir = () => process.env.GH_CONFIG_DIR ?? join(process.env.XDG_CONFIG_HOME ?? join(homedir(), ".config"), "gh");
 
-const ledgerSpender = (account: string): string | null => spenderPhrase(join(ledgerDir(), "gh-calls.tsv"), account);
+/** @param {HostConfig} host @returns {string} the reviewer's `gh` config directory, `<home>/reviewer/gh` */
+export const reviewerGhDir = (host: HostConfig): string => join(host.home, "reviewer", "gh");
+
+/**
+ * (#4916) EVERY LEDGER A DECLARED ROLE'S CALLS ARE WRITTEN TO: this process's own config directory and the workers', leads' and reviewer's (`host/gh` routes a role to
+ * whichever of them its session runs under, and `app:<role>` lines are in each). A directory that does not exist is not a ledger of this host and is left out; this
+ * process's own stays, so a ledger it cannot read is still said. The reviewer's is `wake.ts`'s `REVIEWER_GH_CONFIG_DIR`, derived from `home` because `wake.ts` imports
+ * this file; `org-health-app-spender.test.ts` pins the two together.
+ * @param {{host: HostConfig, ownDir: string}} where @returns {string[]} the `gh-calls.tsv` paths, each once
+ */
+export function ledgerPathsOf({ host, ownDir }: { host: HostConfig; ownDir: string; }): string[] {
+  const dirs = [ownDir, join(host.gh.workers, "gh"), join(host.gh.leads, "gh"), reviewerGhDir(host)].map((dir) => resolve(dir));
+  return [...new Set(dirs)].filter((dir) => dir === resolve(ownDir) || existsSync(dir)).map((dir) => join(dir, "gh-calls.tsv"));
+}
+
+/** A config directory that exists and holds no `gh-calls.tsv` has had no call written to it, which is a ledger with nothing in it; a directory that is not there is unread. */
+const readLedgerFile = (path: string): string => (existsSync(dirname(path)) && !existsSync(path) ? "" : readFileSync(path, "utf8"));
+
+/** @param {HostConfig} host @returns {string[]} the roles `host.json` declares as `github-apps` */
+const declaredAppRoles = (host: HostConfig): string[] => GITHUB_ROLES.filter((role) => roleIdentity(host, role).mode === "github-apps");
+
+/**
+ * The spender sentence for ONE pool's login: an account is read from its own ledger line name, an App (`<slug>[bot]`) from the `app:<role>` lines of the role that
+ * owns it, and both from every ledger `ledgerPathsOf` names. `read` is the seam a test uses.
+ * @param {{account: string, host: HostConfig, ownDir: string, now?: number, read?: (path: string) => string}} where
+ */
+export function spenderOfAccount({ account, host, ownDir, now, read = readLedgerFile }: { account: string; host: HostConfig; ownDir: string; now?: number; read?: (path: string) => string; }): string | null {
+  return spenderPhraseFor({ ledgers: ledgerPathsOf({ host, ownDir }), login: account, appRoles: declaredAppRoles(host), now, read });
+}
+
+export function ledgerSpender(account: string, hostOf: () => HostConfig = homeHostConfig): string | null {
+  const ownDir = ledgerDir();
+  let host: HostConfig;
+  try {
+    host = hostOf();
+  } catch (cause) {
+    // The declaration could not be read: an ordinary account still has this process's own ledger, but an App's role cannot be named from nothing.
+    if (isAppLogin(account)) return `${account} is an App and the host declaration that names its role could not be read (${(cause as Error).message}), so its spender is UNREADABLE`;
+    return spenderPhraseFor({ ledgers: [join(ownDir, "gh-calls.tsv")], login: account, read: readLedgerFile });
+  }
+  return spenderOfAccount({ account, host, ownDir });
+}
 
 /**
  * `. Spender: ...` for each low GRAPHQL pool whose account is named, else "". An account the ledger cannot say anything of reads `UNREADABLE`, because the omission would look
@@ -789,7 +831,15 @@ export function shelvedCircleReading({ circles }: { circles: ShelvedCircle[] | n
 /**
  * One declared copy: where it came from and where it sits (both relative to the checkout), how many lines its own header says it changed (`null` when the header says none), the original's text (`null` when it could not be read) and the copy's text.
  */
-export type CopyPair = { original: string, copy: string, allowedLines: number | null, originalText: string | null, copyText: string };
+export type CopyPair = { original: string, copy: string, allowedLines: number | null, originalText: string | null, copyText: string, comparedIn?: string | null };
+
+/**
+ * An original that moved into an installed package is named by its specifier (`@a11ign/toolchain/lib/<stem>`), never by a path of the
+ * checkout. The package ships COMPILED output, so no line of it is a line of the copy: it is compared by a test that reads names and
+ * behaviour, which the copy's header names (`COMPARED IN`).
+ */
+const isInstalledOriginal = (original: string): boolean => original.startsWith("@");
+const COPY_COMPARED_IN = /^\/\/ COMPARED IN `([^`]+)`/;
 
 /**
  * SIGNAL (#3533): A RUNNER OF `agent-org` THAT IS NOT ON THE NEWEST RELEASE FOR LONGER THAN ONE RELEASE CYCLE, whichever of the three kinds it is (the tool checkout, a worktree's resolved
@@ -1021,6 +1071,10 @@ function linesWithoutCounterpart(lines: string[], against: string[]): number {
  */
 function judgePair(pair: CopyPair): { verdict: "same" | "drifted" | "unknown"; why: string; } {
   if (pair.originalText === null) return { verdict: "unknown", why: `${pair.original} could not be read` };
+  if (isInstalledOriginal(pair.original)) {
+    return pair.comparedIn ? { verdict: "same", why: "" }
+      : { verdict: "unknown", why: `${pair.original} is installed compiled and no test that is still reading this stem is named by its header, so nothing compares it` };
+  }
   const { body, complete } = withoutCopyHeader(pair.copyText);
   if (!complete) return { verdict: "drifted", why: "the copy has no complete header" };
   if (pair.allowedLines === null) return { verdict: "unknown", why: "its header does not say how many lines it changed" };
@@ -1055,6 +1109,39 @@ export function copyDriftReading({ pairs }: { pairs: CopyPair[] | null; }): Read
     detail: `${drifted.length} declared cop${drifted.length === 1 ? "y" : "ies"} drifted from the original: ${named.join("; ")}${more}` };
 }
 
+/**
+ * WHERE AN INSTALLED ORIGINAL IS: `<root>/node_modules/<package>/` plus what the package's own `exports` map gives for the subpath, so the
+ * module counts as present only where the package says it ships it. `null` for anything that cannot be read, a package that is not
+ * installed and a subpath it no longer exports alike.
+ */
+function readInstalledOriginal(read: (path: string) => string, root: string, specifier: string): string | null {
+  const [scope, name, ...subpath] = specifier.split("/");
+  if (name === undefined) return null;
+  const dir = `${root}/node_modules/${scope}/${name}`;
+  const manifest = readOrNull(read, `${dir}/package.json`);
+  if (manifest === null) return null;
+  try {
+    const entry = JSON.parse(manifest).exports?.[`./${subpath.join("/")}`];
+    const target = typeof entry === "string" ? entry : entry?.default;
+    return typeof target === "string" ? readOrNull(read, `${dir}/${target.replace(/^\.\//, "")}`) : null;
+  } catch {
+    return null;
+  }
+}
+
+/**
+ * THE TEST A COPY SAYS COMPARES IT, or `null`: the header names it (`COMPARED IN`), the file must be readable in the tool, and it must still
+ * name the copy's stem as a key (`"<stem>":`), so a test that stopped probing this copy, or a header naming a file that is gone, is not "compared".
+ */
+function comparerOf(read: (path: string) => string, toolRoot: string, copy: string, copyText: string): string | null {
+  const lines = copyText.split("\n");
+  const named = lines.slice(0, Math.max(lines.indexOf(COPY_HEADER_END), 0)).map((line) => COPY_COMPARED_IN.exec(line)?.[1]).find(Boolean);
+  if (named === undefined) return null;
+  const stem = copy.split("/").pop()?.replace(/\.[^.]+$/, "");
+  const text = readOrNull(read, `${toolRoot}/${named}`);
+  return text !== null && text.includes(`"${stem}":`) ? named : null;
+}
+
 /** @returns the text, or `null` for a file that cannot be read: absent is not empty */
 function readOrNull(read: (path: string) => string, path: string): string | null {
   try {
@@ -1067,7 +1154,8 @@ function readOrNull(read: (path: string) => string, path: string): string | null
 /**
  * THE DECLARED COPIES OF A CHECKOUT, discovered from the headers: every file in `COPIES_DIR` whose header names its original. `null`
  * when the directory cannot be listed. Each pair's original is read here and is `null` in the pair when it cannot be.
- * `root` is the PROJECT, where each copy's original is read; `toolRoot` is where the copies themselves are.
+ * `root` is the PROJECT, where each copy's original is read (an original named by package specifier is read from the package installed
+ * under it); `toolRoot` is where the copies themselves are.
  */
 export function readDeclaredCopies({ root = DEFAULT_ROOT, toolRoot = TOOL_ROOT, list = (dir) => readdirSync(dir), read = (path) => readFileSync(path, "utf8") }: { root?: string; toolRoot?: string; list?: (dir: string) => string[]; read?: (path: string) => string; } = {}): CopyPair[] | null {
   let names;
@@ -1088,7 +1176,9 @@ export function readDeclaredCopies({ root = DEFAULT_ROOT, toolRoot = TOOL_ROOT, 
     const original = copyText.split("\n").map((line) => COPY_HEADER_START.exec(line)?.[1]).find(Boolean);
     if (original === undefined) continue;
     const changed = COPY_HEADER_CHANGES.exec(copyText);
-    pairs.push({ original, copy, originalText: readOrNull(read, `${root}/${original}`), copyText, allowedLines: changed === null ? null : Number(changed[1] ?? (/ONE LINE/.test(changed[0]) ? 1 : 0)) });
+    const installed = isInstalledOriginal(original);
+    pairs.push({ original, copy, originalText: installed ? readInstalledOriginal(read, root, original) : readOrNull(read, `${root}/${original}`), copyText,
+      ...(installed ? { comparedIn: comparerOf(read, toolRoot, copy, copyText) } : {}), allowedLines: changed === null ? null : Number(changed[1] ?? (/ONE LINE/.test(changed[0]) ? 1 : 0)) });
   }
   return pairs;
 }

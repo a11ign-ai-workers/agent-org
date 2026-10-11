@@ -1,5 +1,6 @@
-// COPIED FROM `packages/guards/src/worktree-resolution.ts` at f3b5c5f59 (#2658, child 3g of #69; ADR 0040, decision 4): the tool's own copy, so `agent-org` imports nothing outside
-// its package. The product keeps its original and the two can drift, with no cross-repository pin: `agent-org-outward-edges.test.ts` compares them.
+// COPIED FROM `@a11ign/toolchain/lib/worktree-resolution` at 0.7.1 (first copied from `packages/guards/src/worktree-resolution.ts` at f3b5c5f59, #2658, child 3g of #69; ADR 0040, decision 4): the tick's own copy, so
+// `work-gate.ts`, `work-tick.ts` and `wake.ts` run before any install (the ceo, agent-org#522). a11ign#4589 moved the original to the toolchain, which ships it COMPILED, so the two are never compared by text.
+// COMPARED IN `src/packaging/bootstrap-copies-match-toolchain.test.ts` (agent-org#715): by exported names and by behaviour, against the toolchain version `package.json` declares. org-health reads that test before it calls this pair compared.
 // CHANGED FROM THE ORIGINAL, ONE LINE: its comment naming `assert-glob-not-empty.mjs`, which the original now spells `assert-glob-not-empty.ts` (renamed by the `js-to-ts` sweep).
 // ==== end of copy header ====
 // @ts-check

@@ -29,7 +29,8 @@ import { fileURLToPath } from "node:url";
 import { refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { tellBlocked, BLOCKED_TOLD_FILE } from "./worker-state.ts";
 import { stateEntryPath } from "./host-config.ts";
-import { defaultRun } from "./prompt-session.ts";
+import { defaultRun, promptOrQueue, STANCE, EXIT as PROMPT_EXIT } from "./prompt-session.ts";
+import { PANE_DIALOG_RAISED_FILE, raisePaneDialogs, readRaised, writeRaised } from "./pane-dialog.ts";
 import { homeProjectDeclaration } from "./project-config.ts";
 import { completionPath, writeCompletion } from "./lib/tick-completion.ts";
 import { toolVersionLine } from "./lib/tool-version.ts";
@@ -47,7 +48,7 @@ export { childrenCpuMs };
 // run at all -- which is exactly the state it was found in: a quiet queue and a session stuck behind a
 // menu since nobody knows when.
 import { readAgents, readHandoffs, handoffQueuePath, ledgerPathFrom, tearDownSpares,
-  tearDownReviewers, recoverNow, startAbsentSeats, checkChairmanPath }
+  tearDownReviewers, recoverNow, startAbsentSeats, checkChairmanPath, paneReader }
   from "./wake.ts";
 
 /**
@@ -431,6 +432,34 @@ export function githubStatusWallMs(gateStderr: string | null | undefined): numbe
   return wall === undefined ? undefined : Number(wall);
 }
 
+/** The sender a pane-dialog order is attributed to: the tick is not a session, and an order with no sender is also recorded as an unidentified caller's. */
+const PANE_DIALOG_SENDER = "work-tick";
+
+/**
+ * #463: EVERY LIVE SESSION'S PANE IS READ FOR A MENU OR DIALOG, and the first tick that sees one orders its owner (`dialogOwner`), once per dialog text. `DECISION` because an
+ * incident is the order a deep queue must still accept (`deepQueueRefusal`) and a lead seat must not hold as an FYI. An order that was not accepted is not remembered, so the next
+ * tick asks again; the memory is written after, and a memory that cannot be written is said and the tick goes on (a repeat order is a nuisance, a stopped tick is not).
+ * @param {NonNullable<ReturnType<typeof readAgents>>} roster @param {string} ledgerPath
+ */
+function raiseDialogsNow(roster: NonNullable<ReturnType<typeof readAgents>>, ledgerPath: string) {
+  const say = (line: string) => process.stderr.write(`${line}\n`);
+  const path = stateEntryPath(PANE_DIALOG_RAISED_FILE);
+  const memory = readRaised(path);
+  const queue = handoffQueuePath(ledgerPath);
+  const raising = raisePaneDialogs({ roster, memory, report: say, read: paneReader(defaultRun),
+    order: (owner, text) => {
+      const code = promptOrQueue({ run: defaultRun, label: owner, text, agents: roster, path: queue, stance: STANCE.DECISION, sender: PANE_DIALOG_SENDER });
+      return code === PROMPT_EXIT.OK || code === PROMPT_EXIT.QUEUED;
+    } });
+  try {
+    writeRaised(path, memory, raising.raised);
+  } catch (err) {
+    say(`PANE DIALOG memory could not be written at ${path} (${whatGhSaid(err)}); a dialog raised this tick is raised again next tick.`);
+  }
+  for (const { label, owner, dialog } of raising.sent) say(`PANE DIALOG ${label} -- raised to ${owner}: ${dialog.question} [${dialog.choices.join(" | ")}]`);
+  if (raising.refused.length > 0) say(`PANE DIALOG ${raising.refused.join(", ")} -- the order was not accepted; tried again next tick.`);
+}
+
 /**
  * The three tear-downs and the blocked-session report, each one a phase. BEFORE the quiet exit, deliberately, all four: each is an event that
  * produces no order, so a quiet gate is the tick on which it most needs doing.
@@ -456,6 +485,8 @@ function tidyRoster(roster: NonNullable<ReturnType<typeof readAgents>>, ledgerPa
   // AND THE RECOVERY OF WORK A RESTART OR A KILL DROPPED (#2470): a pane whose last line reads `Interrupted`, and a delivery the ledger
   // recorded that never arrived. It QUEUES (a resume is an authored handoff), and the queue is what makes a quiet gate deliver.
   meter.phase("recover", () => recoverNow(roster, ledgerPath));
+  // AND A PANE THAT SHOWS A MENU OR DIALOG (#463): after the tear-downs, so a session this tick ended is not read, and a phase of its own because it is one herdr read per session.
+  meter.phase("paneDialogs", () => raiseDialogsNow(roster, ledgerPath));
 }
 
 /**

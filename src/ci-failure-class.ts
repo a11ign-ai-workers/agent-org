@@ -23,8 +23,8 @@ const MAX_LINE_CHARS = 160;
 const FACTS_HEADROOM_BYTES = 512;
 const QUESTION = "class";
 const INSTRUCTIONS = "A pull request's CI check is red. From the failing test's error lines and the facts, which class is the failure?";
-// eslint-disable-next-line no-control-regex -- the escape character is what an ANSI colour code starts with
-const ANSI = /\u001b\[[0-9;]*[A-Za-z]/g;
+// eslint-disable-next-line no-control-regex -- the escape character is what an ANSI control sequence starts with; this is ECMA-48's whole CSI form (colour `ESC[31;1m`, and `ESC[?25l` too)
+const ANSI = /\u001b\[[0-?]*[ -/]*[@-~]/g;
 
 /** What is known about one red check. The four booleans are computed in code; `rerunAlready` is whether this run was already rerun once. */
 export type CiFailureFacts = {
@@ -181,7 +181,9 @@ export function readCiFailure({ repo, number, head8 }: RedPullRequest, gh: Gh, n
   if (red === undefined || ids === null) return null;
   const run: WorkflowRun = json(gh, `repos/${repo}/actions/runs/${ids[1]}`);
   const workflow = String(run.name ?? "");
-  const log = gh(["api", `repos/${repo}/actions/jobs/${ids[2]}/logs`]);
+  // An Actions log carries colour codes, and `gh api` exits 1 on any terminal escape sequence unless told to allow it: without the flag this read never returned and no class was ever asked
+  // (#767). The escapes are stripped HERE, once, so a coloured `##[error]` is matched by `ERROR_LINE` and `RATE_LIMIT_OR_RUNNER_LOST` as the plain line it is.
+  const log = gh(["api", `repos/${repo}/actions/jobs/${ids[2]}/logs`, "--allow-escape-sequences"]).replace(ANSI, "");
   const errorLines = log.split("\n").filter((line) => ERROR_LINE.test(line)).slice(-LOG_LINES_KEPT);
   const onMain: WorkflowRun[] = json(gh, `repos/${repo}/actions/runs?branch=main&per_page=${MAIN_RUNS_LISTED}`)?.workflow_runs ?? [];
   const failing: WorkflowRun[] = json(gh, `repos/${repo}/actions/runs?status=failure&event=pull_request&per_page=${RUNS_LISTED}`)?.workflow_runs ?? [];

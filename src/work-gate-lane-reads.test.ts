@@ -6,7 +6,8 @@
  * recently closed ones, each through the synchronous `gh`: 10 reads, 9.7 s summed in one gate run (all 10 distinct argv, none repeated, so nothing to
  * read once). The fix moves WHEN they wait (`readWithFirstWaveTogether`, slices 2 and 3's seam) and nothing else, so what is pinned is:
  *   - the control: a `run` handed in (a test's stand-in for `gh`) is NOT batched, and reads one call at a time in today's order;
- *   - wave 2 (`readTrackerLanes`): backlog, `needs:chairman` and open arrive in ONE batch and the lanes are what the one-at-a-time read returned;
+ *   - wave 2 (`readTrackerLanes`): the open list goes in ONE batch and backlog and `needs:chairman` are MADE FROM IT (#4899) when it came back complete, the lanes
+ *     being what the one-at-a-time read returned; a FULL page (or a refused one) is not folded, and the two label lists then arrive TOGETHER in a second batch;
  *   - wave 3 (`readOpenRowFollowUps`): the claimed rows' comments, the closed-answer `label list` and the closings arrive in one batch, and a quiet
  *     tracker asks for NO MORE than it did (the conditional reads stay conditional: the rehearsal asks only what the rows in hand ask for);
  *   - a refusal in one lane is that lane's `null` and nobody else's (#1286: "could not ask" is never "nothing there");
@@ -30,7 +31,7 @@ const has = (args: string[], ...words: string[]) => words.every((word) => args.i
 const refused = (): never => { throw Object.assign(new Error("Command failed: gh"), { status: 1, stderr: "HTTP 502", stdout: "" }); };
 
 /** What `gh` answers, by argv. An `api` call (a chairman row's events) is refused, so the row says so by `chairmanReadRefused`. */
-function ghAnswer(args: string[], { chairmanRows = [] as unknown[], refuse = [] as string[] } = {}): string {
+function ghAnswer(args: string[], { chairmanRows = [] as unknown[], refuse = [] as string[], open = OPEN_ROWS as unknown[] } = {}): string {
   if (refuse.some((word) => has(args, word))) return refused();
   if (args[0] === "api") return refused();
   if (has(args, "--label", "needs:chairman")) return JSON.stringify(chairmanRows);
@@ -40,7 +41,7 @@ function ghAnswer(args: string[], { chairmanRows = [] as unknown[], refuse = [] 
   if (has(args, "--state", "closed") && has(args, "--search", "sort:updated-desc")) return JSON.stringify([{ number: 9, closedAt: "2026-10-06T04:00:00Z", updatedAt: "2026-10-06T04:00:00Z" }]);
   if (has(args, "--state", "closed")) return "[]";
   if (args[0] === "pr") return "[]";
-  return JSON.stringify(OPEN_ROWS);
+  return JSON.stringify(open);
 }
 
 /** The `run` a test hands the gate: one call at a time, noted, answering by argv. */
@@ -49,7 +50,7 @@ function sequentialRun(seen: Call[], options = {}) {
 }
 
 /** A batch that answers as `ghAnswer` does and notes every call it was handed, one entry per BATCH. */
-function fakeBatch(batches: Call[][], options: { chairmanRows?: unknown[], refuse?: string[] } = {}) {
+function fakeBatch(batches: Call[][], options: { chairmanRows?: unknown[], refuse?: string[], open?: unknown[] } = {}) {
   return (calls: Call[]): Answer[] => {
     batches.push(calls);
     return calls.map((call) => {
@@ -57,6 +58,9 @@ function fakeBatch(batches: Call[][], options: { chairmanRows?: unknown[], refus
     });
   };
 }
+
+/** 500 open rows: the page that may have been cut, which nothing is made from (#4899). */
+const FULL_PAGE = Array.from({ length: 500 }, (_, at) => ({ ...OPEN_ROWS[0], number: 1000 + at }));
 
 const shape = (call: Call) => call.args.slice(0, 2).join(" ") + (call.args.includes("--label") ? ` ${call.args[call.args.indexOf("--label") + 1]}` : "");
 
@@ -74,32 +78,70 @@ test("CONTROL: a run handed in is not batched -- its calls arrive one at a time,
   assert.equal(seen.length, 3, "each lane once");
 });
 
-test("wave 2: backlog, needs:chairman and open arrive in ONE batch, and the lanes are what the one-at-a-time read returned", () => {
+test("wave 2: open arrives alone in the batch and backlog and needs:chairman are made from it; the lanes are what the one-at-a-time read returned (#4899)", () => {
+  const BACKLOG_ROW = { ...OPEN_ROWS[0], number: 43, title: "backlog row", labels: [{ name: "backlog" }] };
+  const open = [...OPEN_ROWS, BACKLOG_ROW];
   const batches: Call[][] = [];
   const seen: Call[] = [];
-  const together = readTrackerLanes(sequentialRun(seen) as never, fakeBatch(batches));
+  const together = readTrackerLanes(sequentialRun(seen, { open }) as never, fakeBatch(batches, { open }));
   assert.equal(batches.length, 1, "one batch, not one per lane");
-  assert.deepEqual(batches[0].map(shape), ["issue list backlog", "issue list needs:chairman", "issue list"]);
+  assert.deepEqual(batches[0].map(shape), ["issue list"], "the open list alone: the two label lists are not asked");
+  assert.deepEqual(seen, [], "and nothing is left over to read one at a time");
+  assert.deepEqual(together.promotableRows?.map((row: { number: number }) => row.number), [43], "POSITIVE CONTROL: the backlog lane is not empty, so equal means made from the list");
+});
+
+test("a FULL open page is not folded: the two label lists are asked, together in ONE more batch, and the lanes are the one-at-a-time read's", () => {
+  const batches: Call[][] = [];
+  const seen: Call[] = [];
+  const together = readTrackerLanes(sequentialRun(seen, { open: FULL_PAGE }) as never, fakeBatch(batches, { open: FULL_PAGE }));
+  assert.equal(batches.length, 2, "the open list, then the lists it could not answer");
+  assert.deepEqual(batches[0].map(shape), ["issue list"]);
+  assert.deepEqual(batches[1].map(shape).sort(), ["issue list backlog", "issue list needs:chairman"]);
   assert.deepEqual(seen, [], "nothing left over to read one at a time");
-  assert.deepEqual(together, readTrackerLanes(sequentialRun([]) as never), "the same lanes");
+  assert.deepEqual(together, readTrackerLanes(sequentialRun([], { open: FULL_PAGE }) as never), "the same lanes");
 });
 
 test("a refusal in ANY one lane is that lane's null, beside the other lanes' answers", () => {
   const lanes = [["promotableRows", "backlog"], ["chairmanBlocked", "needs:chairman"], ["openRowsRead", "500"]] as const;
+  // a FULL page is not folded (#4899), so each lane is asked on its own and each can be refused on its own
   for (const [lane, word] of lanes) {
-    const together = readTrackerLanes(sequentialRun([]) as never, fakeBatch([], { refuse: [word] })) as Record<string, unknown>;
+    const options = { open: FULL_PAGE, refuse: [word] };
+    const together = readTrackerLanes(sequentialRun([], options) as never, fakeBatch([], options)) as Record<string, unknown>;
     assert.equal(together[lane], null, `${lane}: refused is null, never []`);
     for (const [other] of lanes.filter(([name]) => name !== lane)) assert.notEqual(together[other], null, `${other} keeps its answer beside ${lane}'s refusal`);
-    assert.deepEqual(together, readTrackerLanes(sequentialRun([], { refuse: [word] }) as never), `${lane}: the one-at-a-time read says the same`);
+    assert.deepEqual(together, readTrackerLanes(sequentialRun([], options) as never), `${lane}: the one-at-a-time read says the same`);
   }
+});
+
+test("#4899: a refused OPEN list is its null, and the label lanes it would have made are then asked on their own, never answered [] from nothing", () => {
+  const seen: Call[] = [];
+  const batches: Call[][] = [];
+  const options = { refuse: ["500"] };
+  const together = readTrackerLanes(sequentialRun(seen, options) as never, fakeBatch(batches, options));
+  assert.equal(together.openRowsRead, null, "refused is null");
+  assert.notEqual(together.promotableRows, null, "the backlog lane was asked, and answered");
+  assert.notEqual(together.chairmanBlocked, null, "and so was the chairman lane");
+  assert.deepEqual(batches[1].map(shape).sort(), ["issue list backlog", "issue list needs:chairman"], "asked together, as the fold's fall-through");
+  assert.deepEqual(seen, [], "and not one by one");
+});
+
+test("#4899: a lane refused while the open list is complete cannot be: it is not asked, so nothing is reported refused that was never sent", () => {
+  const batches: Call[][] = [];
+  const options = { refuse: ["backlog", "needs:chairman"] };
+  const together = readTrackerLanes(sequentialRun([], options) as never, fakeBatch(batches, options));
+  assert.deepEqual(batches[0].map(shape), ["issue list"]);
+  assert.deepEqual(together.promotableRows, [], "made from the complete list: no backlog rows in it");
+  assert.deepEqual(together.chairmanBlocked, []);
 });
 
 test("a chairman row's events are NOT foreseen by the batch: they run one at a time through run, as before", () => {
   const batches: Call[][] = [];
   const seen: Call[] = [];
-  const chairmanRows = [{ number: 7, title: "asks", updatedAt: "2026-10-06T05:00:00Z" }];
-  const together = readTrackerLanes(sequentialRun(seen, { chairmanRows }) as never, fakeBatch(batches, { chairmanRows }));
-  assert.equal(batches[0].length, 3, "the three lists went together");
+  const chairmanRows = [{ number: 7, title: "asks", updatedAt: "2026-10-06T05:00:00Z", labels: [{ name: "needs:chairman" }] }];
+  // the open list carries the chairman row, so the lane is made from it (#4899) and its events are what is left for `run`
+  const open = [...OPEN_ROWS, ...chairmanRows];
+  const together = readTrackerLanes(sequentialRun(seen, { chairmanRows, open }) as never, fakeBatch(batches, { chairmanRows, open }));
+  assert.equal(batches[0].length, 1, "the open list went alone; the chairman lane was made from it");
   assert.ok(seen.length > 0 && seen.every(({ args }) => args[0] === "api"), "the events calls were left to the one-at-a-time run");
   assert.deepEqual(together.chairmanBlocked?.map((row: { number: number, chairmanReadRefused?: boolean }) => [row.number, row.chairmanReadRefused]), [[7, true]]);
 });

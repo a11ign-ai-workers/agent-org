@@ -20,6 +20,8 @@
 #      acted as the org owner, with admin, and one spent his search limit. Admin acts are done from the chairman's own
 #      machine, never from this host. The refusal exits before gh-real and BEFORE THE LEDGER below, so it writes no line:
 #      a ledger line goes into the account's own config dir and there is no account here to name.
+#   6. (#4900) a role `host.json` declares as `github-apps` acts as its app, not as the account: see the block headed #4900 below. A host
+#      that declares none is routed by steps 1-5 exactly as before.
 #
 # Routing is by herdr workspace id, which survives a session restart.
 #
@@ -69,6 +71,11 @@ fi
 # ledger is never mixed across accounts): time, account, resource, cost, exit status, `argv[1] argv[2]`, workspace,
 # the CALLING process's command line and, LAST, the id of the session that made the call. `src/gh-ledger.ts` reads and reports it.
 #
+#   - THE CALLER IS CUT TO 160 CHARACTERS AFTER ITS `--import` PRELOAD IS TAKEN OUT (a11ign/a11ign#4148 residual). A unit's node is started
+#     `node --import file:///.../src/lib/crash-exit.ts /.../src/work-gate.ts`, and the preload alone is about 100 of the 160, so a cut made
+#     first kept `work-g` or a bare `node` for 28% of one afternoon's list calls and the script's name never reached the reader.
+#     `gh-ledger.ts` `callerScript` takes the same preload out when it reads, which is why a line written before this still reads.
+#
 #   - THE SESSION ID is `CLAUDE_CODE_SESSION_ID` (a Claude Code session's environment; it is the file name of its transcript,
 #     `~/.claude/projects/<dir>/<id>.jsonl`), else `CODEX_THREAD_ID` (a Codex session's; measured 2026-10-05 in `~/.codex/sessions` rollouts: a value a tool
 #     shell printed is the id in its rollout's own file name). `-` when neither is set, which is what a unit or script outside any session writes.
@@ -112,8 +119,8 @@ ledger_record() { # status stdout-copy first-arg second-arg
     cost=$(grep -o '"rateLimit": *{[^}]*}' "$2" | grep -o '"cost": *[0-9]*' | tr -dc '0-9\n' |
       awk '{ s += $1; n++ } END { if (n) print s }')
   fi
-  account=$(sed -n 's/^ *user: *//p' "$cfg/hosts.yml" | head -n 1)
-  caller=$(tr '\0\t\n' '   ' < "/proc/$PPID/cmdline" | cut -c1-160)
+  account=${app_account:-$(sed -n 's/^ *user: *//p' "$cfg/hosts.yml" | head -n 1)}
+  caller=${LEDGER_CALLER:-$(tr '\0\t\n' '   ' < "/proc/$PPID/cmdline" | sed -E 's/--import(=|[[:space:]]+)[^[:space:]]+//g' | cut -c1-160)}
   session=$(session_id)
   now=${A11Y_GH_LEDGER_NOW:-$(date -u +%Y-%m-%dT%H:%M:%SZ)}
   printf '%s\t%s\t%s\t%s\t%s\t%s %s\t%s\t%s\t%s\n' "$now" "${account:-unknown}" "$resource" "$cost" "$1" "$3" "$4" \
@@ -127,20 +134,35 @@ ledger_record() { # status stdout-copy first-arg second-arg
 
 # --- #4148: THE HOURLY ROLLUP -- a reading for any hour, though the ledger keeps only the newest half -------------
 #
-# What the trim is about to drop is counted FIRST, per UTC hour, account and resource, into `<ledger>.hourly` (one TAB line:
-# hour, account, resource, calls, points READ, floor points; the same two numbers `gh-ledger.ts` reads off a ledger line, so a
-# reading adds the two files and never double-counts: a line is in the ledger or in the rollup, never both). Merged on every trim
-# so the file holds one line per hour x account x resource and not one per trim. If the rollup cannot be written the trim does NOT
-# go ahead (the caller's `&&`): a kept ledger past its bound is a diagnostic's lesser harm than a lost hour. Two calls trimming at
-# once can count a span twice, which is the race the trim above already accepts.
+# What the trim is about to drop is counted FIRST, per UTC hour, account, resource AND CALLER SCRIPT, into `<ledger>.hourly` (one TAB line:
+# hour, account, resource, calls, points READ, floor points and, 7th, the script that made the calls; the same numbers `gh-ledger.ts`
+# reads off a ledger line, so a reading adds the two files and never double-counts: a line is in the ledger or in the rollup, never both).
+# A six-field line, from before the caller was kept, is READ as it always was and kept as six fields: its calls have no caller to name and
+# are never given one. Merged on every trim so the file holds one line per hour x account x resource x caller and not one per trim. If
+# the rollup cannot be written the trim does NOT go ahead (the caller's `&&`): a kept ledger past its bound is a diagnostic's lesser
+# harm than a lost hour. Two calls trimming at once can count a span twice, which is the race the trim above already accepts.
+#
+# `script()` is `gh-ledger.ts` `callerScript` in awk, and `gh-ledger.test.ts` feeds both the same callers so they cannot drift apart
+# unseen: a session's shell, else the first `name.ext` of the command line past any `--import` preload, else its first word.
 rollup_dropped() { # ledger-file dropped-bytes
   { cat "$1.hourly" 2>/dev/null; head -c "$2" "$1"; } | awk -F'\t' '
-    NF == 6 { k = $1 "\t" $2 "\t" $3; calls[k] += $4; read[k] += $5; floor[k] += $6 }
+    function script(c,   u, w) {
+      if (c ~ "/shell-snapshots/snapshot-") return "(a session\047s shell)"
+      u = c; gsub("--import(=| +)[^ ]+", "", u)
+      if (match(u " ", "[^/ ]+\\.(mjs|cjs|js|ts|sh|py)[^A-Za-z0-9_]")) return substr(u, RSTART, RLENGTH - 1)
+      sub("^ +", "", u); split(u, w, / +/)
+      return w[1] != "" ? w[1] : "unknown"
+    }
+    NF == 6 || NF == 7 { k = $1 "\t" $2 "\t" $3 "\t" (NF == 7 ? $7 : ""); calls[k] += $4; read[k] += $5; floor[k] += $6 }
     NF >= 8 && $1 ~ /^[0-9][0-9][0-9][0-9]-[0-9][0-9]-[0-9][0-9]T[0-9][0-9]/ {
-      res = $3; sub(/\?$/, "", res); k = substr($1, 1, 13) "\t" $2 "\t" res
+      res = $3; sub(/\?$/, "", res); k = substr($1, 1, 13) "\t" $2 "\t" res "\t" script($8)
       calls[k] += 1; if ($4 != "") read[k] += $4
       floor[k] += ($4 != "" ? $4 : (res == "graphql" ? 1 : 0)) }
-    END { for (k in calls) printf "%s\t%d\t%d\t%d\n", k, calls[k], read[k], floor[k] }' | sort > "$1.hourly.$$" &&
+    END { for (k in calls) {
+      split(k, p, "\t")
+      printf "%s\t%s\t%s\t%d\t%d\t%d", p[1], p[2], p[3], calls[k], read[k], floor[k]
+      if (p[4] != "") printf "\t%s", p[4]
+      printf "\n" } }' | sort > "$1.hourly.$$" &&
     mv "$1.hourly.$$" "$1.hourly"
 }
 
@@ -167,6 +189,25 @@ rollup_dropped() { # ledger-file dropped-bytes
 # account, or a person, is not seen here: that is what the 20 s and the tick's generation bound.
 # `A11Y_GH_READ_CACHE=off` skips all of it. A hit is recorded in the ledger as resource `cache`: it spends no point, and the ledger can show the hit rate.
 
+# Succeeds when a `gh api graphql` call's BODY is a mutation the arguments do not spell out: `--input FILE`, or `-F`/`--field name=@FILE`, is read, and a
+# file that cannot be (standard input `-`, a missing one) counts as one, since a body we cannot read is not shown to be a query (#4898, the review).
+graphql_body_mutates() {
+  prev=
+  for a; do
+    f=
+    case "$prev" in --input) f=$a ;; -F|--field) case "$a" in *=@*) f=${a#*=@} ;; esac ;; esac
+    case "$a" in
+      --input=*) f=${a#--input=} ;;
+      -F?*=@*|--field=*=@*) f=${a#*=@} ;;
+    esac
+    prev=$a
+    [ -n "$f" ] || continue
+    [ "$f" != - ] && [ -r "$f" ] || return 0
+    grep -q mutation "$f" 2>/dev/null && return 0
+  done
+  return 1
+}
+
 # Sets `class` to read | write | neutral for the arguments given.
 call_class() {
   class=read
@@ -181,6 +222,7 @@ call_class() {
     if [ "$2" = graphql ]; then
       class=neutral
       for a; do case "$a" in *mutation*) class=write ;; esac; done
+      if graphql_body_mutates "$@"; then class=write; fi
       return 0
     fi
     api_method=; api_body=0; api_input=0; api_neutral=0; prev=
@@ -222,6 +264,66 @@ read_repo_slug() {
     prev=$a
   done
   repo_slug=$(printf %s "${r:-default}" | tr -c 'A-Za-z0-9._-' '_')
+}
+
+# --- #4899: A REST READ IS REVALIDATED, NOT RE-FETCHED ------------------------------------------------------------------------
+#
+# The 20 s entry and the tick's generation answer a read asked AGAIN SOON. Past them a `gh api <path>` GET went to GitHub and was charged a core
+# point for the same bytes. GitHub answers a request carrying `If-None-Match: <etag>` with a 304 when nothing changed, and a 304 is not counted
+# against the primary limit, so this block keeps, per read, the last ETag and the body it came with (`$RC/c/<repository>~<key>`: the tag on line 1,
+# the stdout the caller got after it) and asks with the tag. A 304 is replayed from the entry with exit 0 and nothing on stderr; a 200 replaces it.
+#
+#   - NOT A TIME BOUND: the server decides, so an entry of any age is as true as the answer to the request, for a session as much as the tick,
+#     and a write need not drop it (the next read finds a new tag and a 200).
+#   - THE TAG IS SENT WITHOUT ITS `W/` PREFIX, which came back 200 and cost a point when sent (measured 2026-10-08, `tick-snapshot.ts`).
+#   - ONLY A PLAIN GET: one path, optionally `--jq`/`-q` and a named GET. `gh api -i` prints the header block and then the body exactly as it
+#     would have printed it alone (`--jq` included, measured 2026-10-10, gh 2.100), so the block is cut off by its blank line and the caller gets
+#     its own bytes. A flag that changes what is printed (`--paginate`, `--slurp`, `--template`, `--input`, `--cache`, a body field, `-H`, `-i`)
+#     leaves the call exactly as it was.
+#   - A 304 with no entry to replay (it was swept) is NOT turned into an answer: gh's own exit status and message stand.
+#   - `A11Y_GH_READ_CACHE=off` skips it, with the rest.
+
+# Succeeds when the arguments are a plain `api <path>` GET (see above).
+etag_eligible() {
+  [ "$1" = api ] || return 1
+  shift
+  paths=0; want=
+  for a; do
+    if [ -n "$want" ]; then
+      [ "$want" = method ] && [ "$(printf %s "$a" | tr 'a-z' 'A-Z')" != GET ] && return 1
+      want=; continue
+    fi
+    case "$a" in
+      --jq|-q) want=jq ;;
+      -X|--method) want=method ;;
+      --jq=*|-X[Gg][Ee][Tt]|--method=[Gg][Ee][Tt]) ;;
+      -*) return 1 ;;
+      graphql|*rate_limit*) return 1 ;;
+      *) paths=$((paths + 1)) ;;
+    esac
+  done
+  [ -z "$want" ] && [ "$paths" = 1 ]
+}
+
+# Runs after a real call made with `-i` and an optional `If-None-Match`: cuts the header block off `$copy`, replays or stores the entry, and
+# leaves in `$copy` the stdout the caller would have got without `-i`, in `status` the status it would have got, and in `errcopy` its stderr.
+etag_settle() {
+  code=$(sed -n '1s/^HTTP\/[0-9.]* \{1,\}\([0-9]\{3\}\).*/\1/p' "$copy" 2>/dev/null)
+  [ -n "$code" ] || return 0 # no header block: gh failed before it spoke, and what it printed is the answer
+  split=$(grep -n -m1 '^[[:space:]]*$' "$copy" | cut -d: -f1)
+  tag=$(sed -n 's/^[Ee][Tt][Aa][Gg]: *\(W\/\)\{0,1\}\("[^"]*"\).*/\2/p' "$copy" | head -n 1)
+  stripped=$copy.body
+  if [ -n "$split" ]; then tail -n +"$((split + 1))" "$copy" > "$stripped"; else : > "$stripped"; fi
+  case "$code" in
+    304) if [ -f "$cond_file" ]; then
+           tail -n +2 "$cond_file" > "$stripped" && status=0 && : > "$errcopy" && LEDGER_RESOURCE=etag
+         fi ;;
+    2??) if [ -n "$tag" ]; then
+           { printf '%s\n' "$tag"; cat "$stripped"; } > "$cond_file.$$" 2>/dev/null && mv "$cond_file.$$" "$cond_file" 2>/dev/null
+           [ "$(($$ % 16))" -eq 0 ] && find "$RC/c" -type f -mmin +720 -exec rm -f {} + 2>/dev/null
+         fi ;;
+  esac
+  mv "$stripped" "$copy"
 }
 
 # Sets `repo_slug` for a WRITE: as `read_repo_slug`, except that `gh api repos/<owner>/<repo>/...` names its repository in the path, which
@@ -271,6 +373,142 @@ read_cache_store() { # the stdout copy, the generation read BEFORE the call ran
   [ "$(($$ % 16))" -eq 0 ] && find "$RC/e" -type f -mmin +60 -exec rm -f {} + 2>/dev/null
   return 0
 }
+
+# --- #4900: A ROLE'S GITHUB APP, WHEN host.json DECLARES ONE -------------------------------------------------------
+#
+# Every session of a role shared one personal account's pool and its secondary limit, and the gate starved behind six workers (17 ticks
+# in 30 minutes ended `CANNOT ASK`). `host.json`'s `github.identity` can name, per role, a GitHub App; for such a role this wrapper puts the
+# app's installation token in `GH_TOKEN`, which `gh` prefers to `hosts.yml`, and the call is the app's, on the app's own pool.
+#
+#   - THE DEFAULT IS TODAY'S BEHAVIOUR, BYTE FOR BYTE. `@@appRoles@@` renders empty on a host that declares no app, and this block then
+#     does nothing: no token file is read, no process is started. `A11Y_APP_ROLES` overrides it, as `A11Y_GH_REAL` overrides the exec.
+#   - THE ROLE is read off the same facts the routing above used: `AGENT_ORG_GH_ROLE` when a caller declares one (a unit may), else
+#     no workspace id (a unit or script outside any agent workspace: the gate, the tick, `host:*`) is `scheduler`, the leads config
+#     is `managers`, anything else is `workers`. (#817) A role is named ONLY for a config that is the role's own, `$WORKERS_DIR/gh` or
+#     `$LEADS_DIR/gh` (a call with `GH_CONFIG_DIR` unset was given one of the two above): any other explicit `GH_CONFIG_DIR`, the
+#     reviewer's `a11ign-bot` or a unit's own, has NO app role and goes out as that config's account, as rule 1 says. Without it the
+#     reviewer was handed the workers App's token, was the author of the PR it reviewed, and GitHub refused the approval.
+#   - AN EXPLICIT `GH_TOKEN` OR `GITHUB_TOKEN` WINS, as an explicit `GH_CONFIG_DIR` does: a runner or a person who named a credential is not re-routed.
+#   - THE TOKEN is read from the cache file `agent-org`'s minter writes (`<expiry epoch> <token>`), in shell and with no process, while it has
+#     more than 5 minutes left; only a stale one starts `app-token.ts`, once an hour per role.
+#   - A MINT THAT FAILS FALLS BACK TO TODAY'S ACCOUNT, and the call goes through as it always did. It is recorded as ONE ledger line with
+#     resource `incident`, status 1, the command `app-token <role>` and the minter's reason in the caller field (`gh-ledger.ts`
+#     reads it, at no points), and the role is not asked again for 60 seconds, so an outage costs one process a minute and not one per call.
+#   - THE MINTER NEVER SEES THE CALL'S STDIN (`</dev/null`): `gh pr create --body-file -` reads it, and a minter that consumed it would
+#     post an empty body. Its stderr goes to a file beside the token, never to the caller's.
+#   - THE LEDGER NAMES THE APP (`app:<role>`), not the account whose `hosts.yml` the call would otherwise have read, so a pool is not
+#     charged to a name it did not spend.
+app_account=
+app_role() {
+  case "${AGENT_ORG_GH_ROLE:-}" in scheduler|workers|managers) printf %s "$AGENT_ORG_GH_ROLE"; return 0 ;; esac
+  # A config of its own (the reviewer's `a11ign-bot`, a unit's) names no role: printing none sends the call out as that account.
+  case "$GH_CONFIG_DIR" in "$WORKERS_DIR/gh"|"$LEADS_DIR/gh") ;; *) return 0 ;; esac
+  if [ -z "${HERDR_WORKSPACE_ID:-}" ]; then printf scheduler
+  elif [ "$GH_CONFIG_DIR" = "$LEADS_DIR/gh" ]; then printf managers
+  else printf workers; fi
+}
+
+# `$1` a role: sets `app_id`, `app_key`, `app_inst` and `app_slug` from the declaration rendered here (host.json's `github.identity`), or fails
+# for a role it declares no app for. The minter is handed the first three and never reads host.json: it would have to resolve the project from
+# the cwd. `app_slug` is empty for an app declared with no slug.
+app_declared() {
+  app_id=; app_key=; app_inst=; app_slug=
+  @@appDeclared@@
+}
+
+# `$1` a role: prints its token and succeeds, or fails and prints nothing (the incident is recorded here).
+app_token() {
+  app_declared "$1" || return 1
+  app_dir=${A11Y_APP_TOKEN_DIR:-@@appTokenDir@@}
+  now_s=$(date +%s)
+  if IFS=' ' read -r app_exp app_tok 2>/dev/null < "$app_dir/$1.token"; then
+    case "$app_exp" in
+      ''|*[!0-9]*) ;;
+      *) if [ -n "$app_tok" ] && [ "$((app_exp - now_s))" -gt "${A11Y_APP_REFRESH_MARGIN:-300}" ]; then printf %s "$app_tok"; return 0; fi ;;
+    esac
+  fi
+  if IFS= read -r app_failed 2>/dev/null < "$app_dir/$1.failed"; then
+    case "$app_failed" in
+      ''|*[!0-9]*) ;;
+      *) [ "$((now_s - app_failed))" -lt "${A11Y_APP_RETRY_SECONDS:-60}" ] && return 1 ;;
+    esac
+  fi
+  app_cmd=${A11Y_APP_NODE:-node}
+  app_script=${A11Y_APP_TOKEN_SCRIPT:-@@appTokenScript@@}
+  mkdir -p "$app_dir" 2>/dev/null && chmod 700 "$app_dir" 2>/dev/null
+  app_err=$app_dir/$1.err
+  if command -v timeout >/dev/null 2>&1; then
+    app_tok=$(A11Y_APP_ID=$app_id A11Y_APP_KEY_PATH=$app_key A11Y_APP_INSTALLATION_ID=$app_inst A11Y_APP_TOKEN_DIR=$app_dir \
+      timeout 30 "$app_cmd" "$app_script" "$1" 2>"$app_err" < /dev/null)
+  else
+    app_tok=$(A11Y_APP_ID=$app_id A11Y_APP_KEY_PATH=$app_key A11Y_APP_INSTALLATION_ID=$app_inst A11Y_APP_TOKEN_DIR=$app_dir \
+      "$app_cmd" "$app_script" "$1" 2>"$app_err" < /dev/null)
+  fi
+  app_status=$?
+  case "$app_tok" in ''|*[!A-Za-z0-9_-]*) [ "$app_status" -eq 0 ] && app_status=1 ;; esac
+  if [ "$app_status" -eq 0 ]; then
+    rm -f "${app_dir:?}/$1.failed" 2>/dev/null
+    printf %s "$app_tok"
+    return 0
+  fi
+  printf '%s\n' "$now_s" > "$app_dir/$1.failed" 2>/dev/null
+  reason=$(head -n 1 "$app_err" 2>/dev/null | tr '\0\t\n' '   ' | cut -c1-160)
+  # a subshell, so the three settings below cannot outlive the incident line (a prefix assignment on a function call is not portable)
+  (
+    LEDGER_RESOURCE=incident
+    LEDGER_CALLER="app-token $1 failed, fell back to the account: ${reason:-no reason given}"
+    app_account=
+    ledger_record "$app_status" "" app-token "$1"
+  ) 2>/dev/null || :
+  return 1
+}
+
+APP_ROLES=${A11Y_APP_ROLES-@@appRoles@@}
+if [ -n "$APP_ROLES" ] && [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; then
+  app_who=$(app_role)
+  case " $APP_ROLES " in
+    *" $app_who "*)
+      if [ -n "$app_who" ] && app_tok=$(app_token "$app_who") && [ -n "$app_tok" ]; then
+        GH_TOKEN=$app_tok
+        export GH_TOKEN
+        app_account=app:$app_who
+      fi ;;
+  esac
+fi
+
+# --- #791: `gh api user` UNDER AN APP IS ANSWERED FROM THE DECLARATION, NOT SENT TO GITHUB -----------------------------------------
+#
+# An installation token is refused `GET /user` (`403 Resource not accessible by integration`, measured 2026-10-10 under the workers' App), and
+# three callers ask it who they are: `pr:open` (`defaultLogin`, when a diff touches a review-only lane), the review door
+# (`pr-review-verdict.sh`, exit 4) and the weekly post. For a call that goes out as a role's App this prints `{"login":"<slug>[bot]"}`, the
+# login the App's writes are authored as, with no call to GitHub, and records the ledger line as `app:<role>`, resource `declared`.
+#
+#   - ONLY THE TWO SPELLINGS THE CALLERS USE: `api user` (or `api /user`) bare, and with `--jq .login` (`-q .login`, `--jq=.login`, `-q.login`,
+#     `-q=.login`). Any other argument (another filter, `-H`, `-i`, `--hostname`, a method) goes through, since a login is all this can say
+#     and a wrong answer to a different question is worse than GitHub's refusal. The answer carries `login` and nothing else.
+#   - ONLY A CALL THAT IS THE APP'S: `app_account` is set above only when the role's token was read or minted and is in `GH_TOKEN`. A mint that
+#     failed falls back to the account and the call goes through, where GitHub answers with that account's own login, which is true; an explicit
+#     `GH_TOKEN` or `GITHUB_TOKEN`, and a role with no App, never reach here either.
+#   - A ROLE WITH AN APP AND NO `slug` IS UNCHANGED: the wrapper has no login to give and does not guess one from the app's id or the account.
+app_login=
+app_user_asked() { # the call's arguments: succeeds for the bare `api user` or `api user --jq .login`, setting `app_user_jq` to 1 for the second
+  app_user_jq=0
+  [ "$1" = api ] && { [ "${2:-}" = user ] || [ "${2:-}" = /user ]; } || return 1
+  shift 2
+  case $# in
+    0) return 0 ;;
+    1) case "$1" in --jq=.login|-q.login|-q=.login) app_user_jq=1; return 0 ;; esac ;;
+    2) case "$1 $2" in "--jq .login"|"-q .login") app_user_jq=1; return 0 ;; esac ;;
+  esac
+  return 1
+}
+if [ -n "$app_account" ] && app_user_asked "$@" && app_declared "${app_account#app:}" && [ -n "$app_slug" ]; then
+  app_login="${app_slug}[bot]"
+  if [ "$app_user_jq" = 1 ]; then printf '%s\n' "$app_login"; else printf '{"login":"%s"}\n' "$app_login"; fi
+  LEDGER_RESOURCE=declared
+  ledger_record 0 "" "$1" "$2" 2>/dev/null || :
+  exit 0
+fi
 
 # --- #4505 MOVE 0 (agent-org#486): A DECISION COMMENT CARRIES THE ROLE AND RUN THAT POSTED IT --------------------------------
 #
@@ -359,6 +597,109 @@ case "$1 $2" in
     ;;
 esac
 
+# --- #4898: A RATE LIMIT NEVER STOPS A SESSION -- A REFUSED WRITE IS HELD, AND THE GATE MAKES IT AFTER THE RESET -------------
+#
+# 2026-10-10: `pr:open` was refused with `GraphQL: API rate limit already exceeded` after every check had passed, and the worker stopped and
+# asked a human to rerun it. A write GitHub refuses for a rate limit has changed nothing there, so it is safe to make again; this holds it.
+#
+#   - ONLY A WRITE (`call_class` below says which): a read's answer is wanted now, and a refused read passes through as it always did.
+#   - THE REFUSAL is recognised in `gh`'s stderr (`rate_limit_kind`: primary, secondary). `src/gh-ledger.ts` `refusalKind` holds the same two
+#     phrase lists for the retry's own answer, and `gh-ledger.test.ts` feeds both the same fixtures.
+#   - THE RESET is a REAL call's `X-Ratelimit-Reset` (a probe that GitHub answers for nothing while the pool is empty), never `rate_limit`,
+#     which has reported a full pool during an outage (#1967); no usable header is an hour, the longest a primary pool waits. A secondary
+#     limit names no reset here, so it is two minutes (`A11Y_GH_QUEUE_SECONDARY_SECONDS`) and the gate backs off if it is refused again.
+#   - THE CALL is kept in `$GH_CONFIG_DIR/refused-queue` (`A11Y_GH_QUEUE_DIR`): its arguments NUL-separated, its stdin, a copy of every
+#     body file it names (the caller's scratch file is gone by the retry) and the directory it ran in. `gh-ledger.ts` reads it.
+#   - THE EXIT STATUS IS 75, `EX_TEMPFAIL`, and the line on stderr says "QUEUED, NOT SENT": not 0, because the write has not happened and
+#     a caller that reads 0 would go on to read it back; not 1, because 1 is "retry the same command", which makes a second copy.
+#     `pr:open` reads 75 and attaches its arm and label as follow-ups (`A11Y_GH_QUEUED_TO` names the file it learns the entry from).
+#   - NOT QUEUED: a call the GATE is retrying (`A11Y_GH_QUEUE_RETRY`), which reports to the gate, and a call whose stderr is a terminal.
+#   - `A11Y_GH_QUEUE=off` skips all of it. A queue that cannot be written leaves the call exactly as it was: the refusal, exit status and all.
+rate_limit_kind() { # stderr-file: sets `refusal` to primary or secondary, or fails
+  refusal=
+  if grep -qiE 'secondary rate limit|abuse detection|submitted too quickly' "$1" 2>/dev/null; then refusal=secondary
+  elif grep -qiE 'api rate limit (already )?exceeded|rate limit exceeded|HTTP 429' "$1" 2>/dev/null; then refusal=primary
+  else return 1; fi
+}
+
+probe_headers() { # a real call whose response headers are wanted, bounded
+  if command -v timeout >/dev/null 2>&1; then timeout 15 "$GH_REAL" "$@"; else "$GH_REAL" "$@"; fi
+}
+
+# Sets `reset_at` (epoch seconds) for a refusal of kind `$1` whose stderr is `$2`. The pool that refused is read off the message: gh
+# prefixes a GraphQL refusal with `GraphQL:`; the probe asks that pool, so its answer is about the pool that is empty.
+queue_reset_at() {
+  now_s=$(date +%s)
+  reset_at=$((now_s + ${A11Y_GH_QUEUE_SECONDARY_SECONDS:-120}))
+  [ "$1" = primary ] || return 0
+  if grep -qi 'graphql' "$2" 2>/dev/null; then set -- "$1" "$2" api -i graphql -f 'query={viewer{login}}'; else set -- "$1" "$2" api -i user; fi
+  shift 2
+  stamp=$(probe_headers "$@" </dev/null 2>/dev/null | tr 'A-Z' 'a-z' | sed -n 's/^x-ratelimit-reset: *\([0-9][0-9]*\).*/\1/p' | head -n 1)
+  case "$stamp" in
+    ''|*[!0-9]*) reset_at=$((now_s + 3600)) ;;
+    *) if [ "$stamp" -le "$now_s" ]; then reset_at=$((now_s + 60))
+       elif [ "$((stamp - now_s))" -le 3700 ]; then reset_at=$((stamp + 5))
+       else reset_at=$((now_s + 3600)); fi ;;
+  esac
+}
+
+# Sets `copied` to the path to put in the queued arguments for `$1`: a copy inside the queue (named by argument number `$2`) when `$1` is a
+# readable file, else `$1` itself. Not a command substitution: that would strip a trailing newline from an argument that is no file.
+queue_copy() {
+  copied=$1
+  if [ -f "$1" ] && [ -r "$1" ] && cp "$1" "$q_dir/$q_id.file$2" 2>/dev/null; then copied=$q_dir/$q_id.file$2; fi
+}
+
+# `$1` the kind, `$2` the pool, then the call's arguments. Writes the entry, the `.meta` LAST and renamed into place, so a reader never
+# meets half of one; sets `q_dir` and `q_id`. Fails, leaving nothing behind, when any part cannot be written.
+queue_call() {
+  q_kind=$1; q_res=$2; shift 2
+  q_dir=${A11Y_GH_QUEUE_DIR:-$GH_CONFIG_DIR/refused-queue}
+  mkdir -p "$q_dir" 2>/dev/null || return 1
+  q_id=$(date +%s)-$$
+  : > "$q_dir/$q_id.argv" || return 1
+  q_i=0; q_prev=
+  for a; do
+    q_i=$((q_i + 1))
+    case "$a" in
+      *=@*) queue_copy "${a#*=@}" "$q_i"; arg=${a%%=@*}=@$copied ;;
+      --body-file=*|--input=*) queue_copy "${a#*=}" "$q_i"; arg=${a%%=*}=$copied ;;
+      *) case "$q_prev" in --body-file|-F|--input) queue_copy "$a" "$q_i"; arg=$copied ;; *) arg=$a ;; esac ;;
+    esac
+    printf '%s\0' "$arg" >> "$q_dir/$q_id.argv" || { rm -f "${q_dir:?}/${q_id:?}".*; return 1; }
+    q_prev=$a
+  done
+  if [ -n "$stdin_copy" ]; then cp "$stdin_copy" "$q_dir/$q_id.stdin" 2>/dev/null || { rm -f "${q_dir:?}/${q_id:?}".*; return 1; }; fi
+  {
+    printf 'queuedAt\t%s\n' "$now_s"
+    printf 'resetAt\t%s\n' "$reset_at"
+    printf 'attempts\t0\n'
+    printf 'kind\t%s\n' "$q_kind"
+    printf 'resource\t%s\n' "$q_res"
+    printf 'cwd\t%s\n' "$(printf %s "$PWD" | tr '\t\n' '  ')"
+    printf 'workspace\t%s\n' "${HERDR_WORKSPACE_ID:--}"
+    printf 'session\t%s\n' "$(session_id | sed 's/^$/-/')"
+  } > "$q_dir/$q_id.meta.tmp" 2>/dev/null && mv "$q_dir/$q_id.meta.tmp" "$q_dir/$q_id.meta" 2>/dev/null || { rm -f "${q_dir:?}/${q_id:?}".*; return 1; }
+}
+
+# The whole step, for a call that has just been refused: succeeds, having said so on stderr, when the call is held. The call's arguments.
+queue_refused() {
+  queue_reset_at "$refusal" "$errcopy"
+  if grep -qi 'graphql' "$errcopy" 2>/dev/null; then q_pool=graphql; else q_pool=core; fi
+  queue_call "$refusal" "$q_pool" "$@" || return 1
+  at=$(date -u -d "@$reset_at" +%H:%M:%SZ 2>/dev/null || date -u -r "$reset_at" +%H:%M:%SZ 2>/dev/null || echo "epoch $reset_at")
+  printf 'gh: QUEUED, NOT SENT: GitHub refused this call for a %s rate limit and it changed nothing. It is held as %s in %s and the gate makes it after %s. Exit 75 means held, not failed: do not repeat the command and do not ask a human; carry on.\n' \
+    "$refusal" "$q_id" "$q_dir" "$at" >&2
+  [ -n "${A11Y_GH_QUEUED_TO:-}" ] && printf '%s\t%s\t%s\n' "$q_dir" "$q_id" "$reset_at" > "$A11Y_GH_QUEUED_TO" 2>/dev/null
+  # a subshell, so the settings cannot outlive the line
+  (
+    LEDGER_RESOURCE=queue
+    LEDGER_CALLER="queued $q_id until $at: $refusal rate limit on $q_pool"
+    ledger_record 0 "" "$1" "$2"
+  ) 2>/dev/null || :
+  return 0
+}
+
 call_class "$@"
 cache_on=0
 RC=${A11Y_GH_READ_CACHE_DIR:-$GH_CONFIG_DIR/read-cache}
@@ -378,17 +719,45 @@ if [ "$class" = read ] && [ "${A11Y_GH_READ_CACHE:-}" != off ] && [ ! -t 1 ]; th
   fi
   cache_on=1
 fi
+ledger_a=$1; ledger_b=$2
 
 # stdout is captured for the one call that can carry a cost and for a read that may be stored, and only when it is not a terminal.
 copy=
 if { [ "$1 $2" = "api graphql" ] || [ "$cache_on" = 1 ]; } && [ ! -t 1 ]; then
   copy=$(mktemp "${TMPDIR:-/tmp}/gh-call.XXXXXX" 2>/dev/null) || copy=
 fi
+# #4899: a plain `api <path>` GET that missed the entry above is asked with the ETag it was last answered under (`etag_eligible`, `etag_settle`).
+cond_on=0; cond_file=; errcopy=
+if [ "$cache_on" = 1 ] && [ -n "$copy" ] && etag_eligible "$@"; then
+  errcopy=$(mktemp "${TMPDIR:-/tmp}/gh-err.XXXXXX" 2>/dev/null) || errcopy=
+  if [ -n "$errcopy" ] && mkdir -p "$RC/c" 2>/dev/null; then
+    cond_on=1
+    cond_file=$RC/c/$(entry_prefix "$repo_slug")~$key
+    cond_tag=
+    [ -f "$cond_file" ] && IFS= read -r cond_tag 2>/dev/null < "$cond_file"
+    shift
+    if [ -n "$cond_tag" ]; then set -- api -i -H "If-None-Match: $cond_tag" "$@"; else set -- api -i "$@"; fi
+  fi
+fi
 # gh-real runs in the background so this shell can forward a signal, and dash gives a background command /dev/null for stdin
 # even for `<&0` (measured: the piped body vanished), so stdin is carried on fd 3. A closed stdin is tested first because a
 # failing `exec` redirection ends the shell.
 if (exec 3<&0) 2>/dev/null; then exec 3<&0; else exec 3</dev/null; fi
-if [ -n "$copy" ]; then "$GH_REAL" "$@" <&3 3<&- > "$copy" & else "$GH_REAL" "$@" <&3 3<&- & fi
+# #4898: a write's stderr is kept to be read for a rate-limit refusal, and echoed back unchanged after the call; a stdin the call names (`-`)
+# is kept too, since gh-real consumes it and the queued retry needs it again.
+queue_on=0; stdin_copy=
+if [ "$class" = write ] && [ "${A11Y_GH_QUEUE:-}" != off ] && [ -z "${A11Y_GH_QUEUE_RETRY:-}" ] && [ ! -t 2 ]; then
+  errcopy=$(mktemp "${TMPDIR:-/tmp}/gh-err.XXXXXX" 2>/dev/null) && queue_on=1 || errcopy=
+fi
+if [ "$queue_on" = 1 ]; then
+  for a; do [ "$a" = - ] && { stdin_copy=$(mktemp "${TMPDIR:-/tmp}/gh-in.XXXXXX" 2>/dev/null) || stdin_copy=; break; }; done
+  if [ -n "$stdin_copy" ]; then
+    if cat <&3 > "$stdin_copy" 2>/dev/null; then exec 3<&-; exec 3< "$stdin_copy"; else stdin_copy=; fi
+  fi
+fi
+if [ -n "$errcopy" ]; then
+  if [ -n "$copy" ]; then "$GH_REAL" "$@" <&3 3<&- > "$copy" 2> "$errcopy" & else "$GH_REAL" "$@" <&3 3<&- 2> "$errcopy" & fi
+elif [ -n "$copy" ]; then "$GH_REAL" "$@" <&3 3<&- > "$copy" & else "$GH_REAL" "$@" <&3 3<&- & fi
 child=$!
 exec 3<&-
 trap 'kill -TERM "$child" 2>/dev/null' TERM INT HUP
@@ -397,10 +766,17 @@ status=$?
 # a trapped signal ends the first `wait` early with 128+n while the child is still dying; wait for its real status
 kill -0 "$child" 2>/dev/null && { wait "$child"; status=$?; }
 trap - TERM INT HUP
+[ "$cond_on" = 1 ] && etag_settle
 [ -n "$copy" ] && cat "$copy"
-ledger_record "$status" "$copy" "$1" "$2" 2>/dev/null || :
+[ -n "$errcopy" ] && cat "$errcopy" >&2
+ledger_record "$status" "$copy" "$ledger_a" "$ledger_b" 2>/dev/null || :
+if [ "$queue_on" = 1 ] && [ "$status" -ne 0 ] && rate_limit_kind "$errcopy"; then
+  queue_refused "$@" && status=75
+fi
 [ "$cache_on" = 1 ] && [ -n "$copy" ] && [ "$status" -eq 0 ] && read_cache_store "$gen0" "$copy"
 [ "$class" = write ] && [ "${A11Y_GH_READ_CACHE:-}" != off ] && drop_read_cache "$@"
 [ -n "$copy" ] && rm -f "${copy:?}"
+[ -n "$errcopy" ] && rm -f "${errcopy:?}"
+[ -n "$stdin_copy" ] && rm -f "${stdin_copy:?}"
 [ -n "$attr_dir" ] && rm -rf "${attr_dir:?}"
 exit "$status"
