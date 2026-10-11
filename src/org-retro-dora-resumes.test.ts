@@ -43,7 +43,7 @@ function installFakeGh() {
 case "$*" in *${HUNG}*) exec sleep 30;; esac
 case "$1 $2" in
   "api repos/"*) echo '[[]]';;
-  "pr list") echo '[]';;
+  "api graphql") echo '{"data":{"repository":{"pullRequests":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}';;
   "repo view") echo '{"hasIssuesEnabled":false}';;
 esac
 `);

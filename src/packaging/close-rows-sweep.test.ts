@@ -13,6 +13,7 @@ import { fileURLToPath } from "node:url";
 import { mergedPrsInWindow, DEFAULT_WINDOW_MINUTES, closeOnePr, sweepExit, EXIT } from "../close-rows-sweep.ts";
 import { closurePlan } from "../close-rows-for-merged-pr.ts";
 import { refusalCause } from "../settle-closed-status.ts";
+import { readsRowsSince, sinceAnswer } from "./rows-by-label-fixtures.ts";
 
 /** CAPTURED, not composed: the reason `moveProjectStatus` gave for #1299 in trunk run 34769927592 (`02ae7420`). */
 const CAPTURED_PROJECT_UNREADABLE = "could not move #1299's Status to \"Done\" -- board-snapshot: could not read "
@@ -28,39 +29,45 @@ const refuseOnly = (row: number, message: string) => (n: number) =>
 const SCRIPT = fileURLToPath(new URL("../close-rows-sweep.ts", import.meta.url));
 
 // --- mergedPrsInWindow: the query, driven with an injected gh ---
+// #5076: the list is `repository.pullRequests(states:[MERGED])`, a connection read newest-updated first back to the window's start and kept by `mergedAt` -- the
+// `--search merged:>=` it replaced was a GitHub SEARCH, whose allowance the installation spent.
 
-test("mergedPrsInWindow: queries `gh pr list` scoped to state=merged and base=main -- never an unscoped "
-  + "list this repo would have to filter itself", () => {
-  let capturedArgs: string[] = [];
-  const fakeGh = (args: string[]) => { capturedArgs = args; return "[]"; };
+/** A merged pull request as the connection returns it. `updatedAt` is never before `mergedAt`. */
+const merged = (number: number, mergedAt: string, base = "main", updatedAt = mergedAt) => ({ number, mergedAt, updatedAt, baseRefName: base });
+const ago = (minutes: number) => new Date(Date.now() - minutes * 60_000).toISOString();
+
+test("mergedPrsInWindow: reads the MERGED pull requests of the repository as a connection -- never a search, and never an unscoped list", () => {
+  const calls: string[][] = [];
+  const fakeGh = (args: string[]) => { calls.push(args); return sinceAnswer(args, []); };
   mergedPrsInWindow("a11ign/a11ign", 45, fakeGh);
-  assert.ok(capturedArgs.includes("--state"));
-  assert.ok(capturedArgs.includes("merged"),
-    "THE RISK THIS ROW NAMES: a PR that did not merge must never be in this list at all -- proven at the "
-    + "query, not by a downstream filter that could be forgotten");
-  assert.ok(capturedArgs.includes("--base"));
-  assert.ok(capturedArgs.includes("main"));
+  assert.equal(calls.length, 1);
+  assert.deepEqual(readsRowsSince(calls[0]), { kind: "pullRequests", states: ["MERGED"], orderBy: "UPDATED_AT", label: null, repo: "a11ign/a11ign", after: null },
+    "THE RISK THIS ROW NAMES: a PR that did not merge must never be in this list at all -- proven at the query, not by a downstream filter that could be forgotten");
+  assert.ok(!calls[0].includes("--search") && !calls[0].includes("--label"), "no argv is a GitHub search");
 });
 
-test("mergedPrsInWindow: the `merged:>=` search bound is an ISO timestamp roughly `windowMinutes` ago, "
-  + "never a bare date", () => {
-  let capturedArgs: string[] = [];
-  const fakeGh = (args: string[]) => { capturedArgs = args; return "[]"; };
-  const before = Date.now();
-  mergedPrsInWindow("owner/repo", 45, fakeGh);
-  const searchArg = capturedArgs[capturedArgs.indexOf("--search") + 1];
-  const match = /merged:>=(.+)/.exec(searchArg);
-  assert.ok(match, `expected a merged:>=<timestamp> search qualifier, got: ${searchArg}`);
-  const since = Date.parse(match[1]);
-  const expectedMs = before - 45 * 60_000;
-  assert.ok(Math.abs(since - expectedMs) < 5000,
-    `since (${match[1]}) should be ~45 minutes before now, drifted by ${Math.abs(since - expectedMs)}ms`);
+test("mergedPrsInWindow: the window is an ISO timestamp roughly `windowMinutes` ago: a merge before it is not returned, one inside it is, and a row only UPDATED inside it is not", () => {
+  const rows = [merged(3, ago(5)), merged(2, ago(40)), merged(9, ago(600), "main", ago(1)), merged(1, ago(50), "main", ago(30))];
+  const fakeGh = (args: string[]) => sinceAnswer(args, rows);
+  const result = mergedPrsInWindow("owner/repo", 45, fakeGh);
+  assert.deepEqual(result.map((pr) => pr.number), [3, 2],
+    "#9 was merged ten hours ago and updated a minute ago (a comment): read, and dropped by its own mergedAt; #1 merged 50 minutes ago is outside a 45 minute window");
 });
 
-test("mergedPrsInWindow: parses gh's JSON output into the number list", () => {
-  const fakeGh = () => JSON.stringify([{ number: 232 }, { number: 281 }]);
-  const result = mergedPrsInWindow("owner/repo", DEFAULT_WINDOW_MINUTES, fakeGh);
+test("mergedPrsInWindow: only pull requests merged into `main` are returned (the base filter is kept)", () => {
+  const rows = [merged(5, ago(2), "main"), merged(6, ago(3), "release"), merged(7, ago(4), "main")];
+  assert.deepEqual(mergedPrsInWindow("owner/repo", 45, (args) => sinceAnswer(args, rows)), [{ number: 5 }, { number: 7 }]);
+});
+
+test("mergedPrsInWindow: returns the number list (and nothing else of the row)", () => {
+  const result = mergedPrsInWindow("owner/repo", DEFAULT_WINDOW_MINUTES, (args) => sinceAnswer(args, [merged(232, ago(1)), merged(281, ago(2))]));
   assert.deepEqual(result, [{ number: 232 }, { number: 281 }]);
+});
+
+test("mergedPrsInWindow: a read that fails THROWS, never an empty list that reads as 'nothing merged' (negative control)", () => {
+  assert.throws(() => mergedPrsInWindow("owner/repo", 45, () => { throw new Error("gh: 502"); }), /gh: 502/);
+  assert.throws(() => mergedPrsInWindow("owner/repo", 45, () => "not json"), SyntaxError);
+  assert.deepEqual(mergedPrsInWindow("owner/repo", 45, (args) => sinceAnswer(args, [])), [], "control: an answered empty window IS []");
 });
 
 // --- closurePlan is REUSED, not re-derived -- proven by import identity, not by re-testing its logic ---

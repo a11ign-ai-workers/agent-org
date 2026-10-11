@@ -59,6 +59,7 @@ import { sandboxGitEnv } from "./lib/git-env.ts";
 // here: #2008's finding was a predicate that disagreed with the claim path about what a claim means, and
 // a second spelling of the label is how that disagreement gets to happen again silently.
 import { READY_LABEL, WAS_READY_LABEL, CLAIM_LABEL, STATE_LABELS, stateLabelFindings } from "./claim-labels.ts";
+import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: label lists are connections, never a search
 // #782: THE PURE DECISION ONLY -- `labelsToStrip` classifies a label, it never calls `gh`. Importing it
 // does NOT give this file a mutation capability; the header above's ruling ("this audit REPORTS the
 // debris; it does not strip it... a bulk label mutation is product-manager's deliberate act") is
@@ -297,6 +298,9 @@ function asksToCeiling(first: number): number {
   return Math.ceil(Math.log2(MAX_ISSUE_FETCH / Math.max(first, 1))) + 1;
 }
 
+/** The ONE place this file hands a list read's `run` the command `gh`; the connection readers of `ticket-port/` take the result as their `run`. */
+const gh = (run: typeof defaultRun) => (args: string[]): string => run("gh", args);
+
 /**
  * #1090: ASK FOR MORE UNTIL THE ANSWER IS SHORT -- the shared walk behind every list in this file.
  *
@@ -323,7 +327,7 @@ function listUntilShort({ run, argv, what, first = FIRST_ASK, repo = trackerRepo
     }
     let raw: string;
     try {
-      raw = run("gh", argv(limit));
+      raw = gh(run)(argv(limit));
     } catch (cause) {
       throw new Error(`ready-label-audit: could not list ${what} from ${repo} -- refusing to guess. `
         + `${(cause as Error).message}`, { cause });
@@ -1110,10 +1114,24 @@ export function unclaimableReadyRows(rows: ReadyRowWithBody[]): Array<{ number: 
 export type ReadyRowWithBody = { number: number, title: string, labels: string[], body: string };
 
 /**
+ * The open rows of the tracker carrying `label`, as `readRowsByLabel` gives them, THROWN as this file's refusal when they could not be read.
+ * @param {{ run: typeof defaultRun, what: string, label: string, select: string }} spec
+ * @returns {any[]}
+ */
+function readLabelledRows({ run, what, label, select }: { run: typeof defaultRun; what: string; label: string; select: string; }): any[] {
+  try {
+    return readRowsByLabel({ label, state: "OPEN", select, repo: trackerRepo(), run: gh(run) });
+  } catch (cause) {
+    throw new Error(`ready-label-audit: could not list ${what} from ${trackerRepo()} -- refusing to guess. ${(cause as Error).message}`, { cause });
+  }
+}
+
+/**
  * Every open row carrying `ready`, WITH its body -- the one field `fetchIssues` does not carry.
  *
- * THROUGH `listUntilShort` like every list here, and the `--label ready` filter is server-side so the
- * walk reads only the population being asked about rather than every open body. A response entry with no
+ * A CONNECTION READ (#5076: `gh issue list --label` was sent as a GitHub SEARCH, whose allowance the installation spent), `repository.issues(labels:)`, so GitHub
+ * filters server-side and the read is only the population being asked about rather than every open body; `readRowsByLabel` refuses a population it cannot
+ * hold whole, as `listUntilShort` did at its ceiling. A response entry with no
  * `body` STRING throws: an empty body (`""`) is a real, checkable fact -- every section missing -- while
  * an entry that never carried the key is "asked the wrong question", and reading it as empty would report
  * a row unclaimable on the strength of a field nobody read (the same distinction `lookupIssueBody` draws
@@ -1123,9 +1141,8 @@ export type ReadyRowWithBody = { number: number, title: string, labels: string[]
  * @returns {ReadyRowWithBody[]}
  */
 export function fetchReadyRowsWithBodies({ run = defaultRun }: { run?: typeof defaultRun; } = {}): ReadyRowWithBody[] {
-  const parsed = listUntilShort({ run, what: "open ready rows with bodies",
-    argv: (ask) => ["issue", "list", "--repo", trackerRepo(), "--state", "open", "--label", READY_LABEL,
-      "--limit", String(ask), "--json", "number,title,labels,body"] });
+  const parsed = readLabelledRows({ run, what: "open ready rows with bodies", label: READY_LABEL, select: "number title body labels(first:50){nodes{name}}" })
+    .map((node) => ({ ...node, labels: node?.labels?.nodes })); // the shape `gh issue list --json` gave, which the checks below read
   return parsed.map((entry: unknown, i: number) => {
     const obj = (entry as { number?: unknown, title?: unknown, labels?: unknown, body?: unknown });
     if (typeof obj?.number !== "number" || typeof obj?.title !== "string" || !Array.isArray(obj?.labels)
@@ -2114,7 +2131,8 @@ function reportReleaseDrift() {
       "--json", "number", ...args] });
   const rows = (args: string[]) =>
     ((list(args) as unknown) as {number: number}[]);
-  const labelled = rows(["--label", OUT_OF_RELEASE_LABEL]);
+  // #5076: the label side is a connection read (`--label` was a GitHub SEARCH); the milestone side is a plain filtered list, which is not.
+  const labelled: { number: number; }[] = readLabelledRows({ run, what: "out-of-release rows", label: OUT_OF_RELEASE_LABEL, select: "number" });
   const milestoned = rows(["--milestone", OUT_OF_RELEASE_MILESTONE]);
   const { labelOnly, milestoneOnly } = releaseDeclarationDrift(labelled, milestoned);
 

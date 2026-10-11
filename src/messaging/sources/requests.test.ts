@@ -17,6 +17,7 @@ import { createFakeProvider } from "../fake-provider.ts";
 import { createLedger, foldLedger, readLedgerLines } from "../ledger.ts";
 import { READ_METHODS, assertReadOnlyGh, createGhReader, main, runWatch } from "../watch.ts";
 import { defaultLedgerPath } from "../state.ts";
+import { readsRowsSince, sinceAnswer } from "../../packaging/rows-by-label-fixtures.ts";
 import { observeRequests, parseChairmanOptions, parseRequestKey, readRequests, requestKey } from "./requests.ts";
 
 const REPO = "a11ign/a11ign";
@@ -549,9 +550,17 @@ describe("chairman-watch makes only read calls (done-when 5)", () => {
     assert.equal(w.provider.sent.length, 2, "one request and one summary");
   });
 
-  test("the real reader: every command it builds is a list and passes the read-only check", async () => {
-    const commands: unknown[] = /** @type {string[][]} */ ([]);
-    const reader = createGhReader({ run: async (argv) => { commands.push([...argv]); return "[]"; } });
+  /** A `run` for the real reader: a connection read gets an empty connection, any other list `[]`; every argv is kept. */
+  function recordingRun(commands: string[][]) {
+    return async (argv: readonly string[]): Promise<string> => {
+      commands.push([...argv]);
+      return readsRowsSince(argv) === null ? "[]" : sinceAnswer(argv, []);
+    };
+  }
+
+  test("the real reader: every command it builds is a list and passes the read-only check, and none is a search (#5076)", async () => {
+    const commands: string[][] = [];
+    const reader = createGhReader({ run: recordingRun(commands) });
     await reader.issuesLabelled({ repo: REPO, label: "needs:chairman", comments: true, limit: 200 });
     await reader.issuesLabelled({ repo: REPO, label: "ready" });
     await reader.mergedPullsSince({ repo: REPO, sinceMs: Date.parse("2026-10-01T07:00:00Z") });
@@ -559,9 +568,42 @@ describe("chairman-watch makes only read calls (done-when 5)", () => {
     await reader.issueComments({ repo: REPO, number: 2623 });
     assert.equal(commands.length, 5);
     for (const argv of commands) assert.doesNotThrow(() => assertReadOnlyGh(argv), argv.join(" "));
-    assert.deepEqual(commands[0], ["issue", "list", "-R", REPO, "--label", "needs:chairman", "--state", "open", "--json", "number,title,url,updatedAt,comments", "--limit", "200"]);
-    assert.ok(commands[2].includes("merged:>=2026-10-01T07:00:00.000Z"));
+    for (const argv of commands) assert.ok(!argv.includes("--label") && !argv.includes("--search"), `a search-backed list: ${argv.join(" ")}`);
+    const [first, second, merged] = commands.map((argv) => readsRowsSince(argv));
+    assert.deepEqual(first, { kind: "issues", states: ["OPEN"], orderBy: "CREATED_AT", label: "needs:chairman", repo: REPO, after: null });
+    assert.equal(second?.label, "ready");
+    assert.deepEqual(merged, { kind: "pullRequests", states: ["MERGED"], orderBy: "UPDATED_AT", label: null, repo: REPO, after: null });
+    assert.match(commands[0].find((arg) => arg.startsWith("query=")) ?? "", /comments\(first:100\)\{nodes\{body createdAt authorAssociation\}\}/, "the comments are selected only when asked for");
+    assert.doesNotMatch(commands[1].find((arg) => arg.startsWith("query=")) ?? "", /comments/);
     assert.deepEqual(commands[4], ["issue", "view", "2623", "-R", REPO, "--json", "comments"]);
+  });
+
+  test("assertReadOnlyGh admits a GraphQL QUERY with variables and refuses a mutation, a second document, and a variable read from a file (#5076)", async () => {
+    const commands: string[][] = [];
+    await createGhReader({ run: recordingRun(commands) }).issuesLabelled({ repo: REPO, label: "ready" });
+    const built = commands[0];
+    assert.doesNotThrow(() => assertReadOnlyGh(built), "POSITIVE CONTROL: the argv the reader really builds");
+    const document = built.find((arg) => arg.startsWith("query=")) as string;
+    const refused: [string, string[]][] = [
+      ["a mutation", built.map((arg) => (arg === document ? document.replace("query=query(", "query=mutation(") : arg))],
+      ["a mutation after the query", built.map((arg) => (arg === document ? `${document} mutation { x }` : arg))],
+      ["a subscription", built.map((arg) => (arg === document ? document.replace("query=query(", "query=subscription(") : arg))],
+      ["a second document", [...built, "-f", "query=mutation { x }"]],
+      ["a variable read from a file", [...built, "-F", "x=@/etc/passwd"]],
+      ["a flag that is not a variable", [...built, "--method", "POST"]],
+      ["no document", ["api", "graphql", "-F", "owner=a"]],
+      ["the document not first", ["api", "graphql", "-F", "owner=a", "-f", document]],
+    ];
+    for (const [what, argv] of refused) assert.throws(() => assertReadOnlyGh(argv), /reads only/, what);
+  });
+
+  test("a label that looks like a flag is a VARIABLE's value now, never a flag: the command is the same read, and the value is not a token of its own (#5076)", async () => {
+    const commands: string[][] = [];
+    await createGhReader({ run: recordingRun(commands) }).issuesLabelled({ repo: REPO, label: "--web" });
+    assert.equal(commands.length, 1);
+    assert.ok(commands[0].includes("label=--web"), "carried as `-F label=--web`");
+    assert.ok(!commands[0].includes("--web"), "and never as a token that `gh` could read as a flag");
+    assert.equal(commands[0][commands[0].indexOf("label=--web") - 1], "-F");
   });
 
   test("the VERB is refused on its own, with every flag allowed (the flag check must not be what catches a write)", () => {
@@ -572,6 +614,7 @@ describe("chairman-watch makes only read calls (done-when 5)", () => {
 
   test("assertReadOnlyGh refuses every verb that writes, and a list with a flag the readers do not use", () => {
     for (const argv of [
+      ["issue", "list", "-R", REPO, "--label", "ready"], ["pr", "list", "-R", REPO, "--state", "merged", "--search", "merged:>=2026-10-01"], // #5076: search-backed
       ["issue", "comment", "1", "--body", "x"], ["issue", "edit", "1", "--add-label", "x"], ["issue", "close", "1"], ["pr", "merge", "1"],
       ["pr", "comment", "1"], ["api", "-X", "POST", "repos/a/b/issues"], ["api", "repos/a/b"], ["label", "create", "x"], ["issue", "create"], [],
       ["issue", "list", "--web"], ["pr", "list", "--jq", ".[]"], ["issue", "view", "1", "--web"], ["pr", "view", "1"],
@@ -583,17 +626,31 @@ describe("chairman-watch makes only read calls (done-when 5)", () => {
   test("the real reader checks the command it built BEFORE it runs it, whatever `run` would have allowed", async () => {
     let ran = 0;
     const reader = createGhReader({ run: async () => { ran += 1; return "[]"; } });
-    // A label that is really a flag is the injection a query can carry: the check is on the built command, and runs BEFORE `run`.
     await reader.redPulls({ repo: REPO });
-    assert.equal(ran, 1);
-    await assert.rejects(() => reader.issuesLabelled({ repo: REPO, label: "--web" }), /reads only/);
-    assert.equal(ran, 1, "the refused command was never run");
+    assert.equal(ran, 1, "POSITIVE CONTROL: a read the check admits is run");
+    // The check is `assertReadOnlyGh` over the built argv, called before `run` (a reader that handed `run` first would have run this one: the document is no query).
+    const checked: string[][] = [];
+    const guarded = createGhReader({ run: async (argv) => { checked.push([...argv]); return "[]"; } });
+    await assert.rejects(() => guarded.issuesLabelled({ repo: REPO, label: "ready" }), /did not come back as a connection/, "an admitted read whose answer is not a connection throws, never an empty list");
+    assert.equal(checked.length, 1);
   });
 
-  test("the merged filter drops a merge older than the window even if the search returned it", async () => {
+  test("the merged filter drops a merge older than the window even if the connection returned it (it was UPDATED inside the window)", async () => {
     const since = Date.parse("2026-10-01T07:00:00Z");
-    const reader = createGhReader({ run: async () => JSON.stringify([{ number: 1, mergedAt: "2026-10-01T07:00:00Z" }, { number: 2, mergedAt: "2026-09-30T23:00:00Z" }]) });
+    const rows = [
+      { number: 1, mergedAt: "2026-10-01T07:00:00Z", updatedAt: "2026-10-01T07:00:00Z" },
+      { number: 2, mergedAt: "2026-09-30T23:00:00Z", updatedAt: "2026-10-01T08:00:00Z" },
+    ].sort((a, b) => Date.parse(b.updatedAt) - Date.parse(a.updatedAt));
+    const reader = createGhReader({ run: async (argv) => sinceAnswer(argv, rows) });
     assert.deepEqual((await reader.mergedPullsSince({ repo: REPO, sinceMs: since })).map((pull) => pull.number), [1]);
+  });
+
+  test("a merged window the pages cannot hold THROWS, never a count cut short (#5076)", async () => {
+    const rows = Array.from({ length: 450 }, (_, i) => ({ number: i + 1, mergedAt: "2026-10-01T08:00:00Z", updatedAt: "2026-10-01T08:00:00Z" }));
+    const reader = createGhReader({ run: async (argv) => sinceAnswer(argv, rows) });
+    await assert.rejects(() => reader.mergedPullsSince({ repo: REPO, sinceMs: Date.parse("2026-10-01T07:00:00Z"), limit: 100 }), /cut short/);
+    const fits = createGhReader({ run: async (argv) => sinceAnswer(argv, rows.slice(0, 150)) });
+    assert.equal((await fits.mergedPullsSince({ repo: REPO, sinceMs: Date.parse("2026-10-01T07:00:00Z"), limit: 100 })).length, 150, "control: a window of two pages is read");
   });
 });
 

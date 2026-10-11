@@ -35,6 +35,7 @@ import { HOME_CHECKOUT } from "./project-config.ts";
 // A LEAF module with no imports of its own (#804), so this cannot form a cycle -- the same property that
 // let `close-rows-for-merged-pr.ts` import it under the no-`pnpm install` constraint.
 import { READY_LABEL } from "./claim-labels.ts";
+import { asListJson, readRowsSince, SINCE_PAGE_SIZE } from "./ticket-port/rows-since.ts"; // #5076: the PR windows are connections, never a search
 // The gate predicates live in `board-gates.ts` (#429), a module with no process in it, so a test of the
 // selection runs where a test of this file cannot. Re-exported: no importer of this file changes.
 import { latestVerdictGate } from "./board-gates.ts";
@@ -492,37 +493,38 @@ export function daysUntil(iso: string) {
 // disagreement once (`whatMerged`'s own 17-vs-42 lesson, above). `since` travels with every function's
 // return value rather than living only in the caller's variable name.
 //
-// A COUNT NOBODY CAN RECOMPUTE IS AN OPINION -- `conflictMetrics`'s own `method` field states the search
-// qualifiers and the git commands used, the same way `fleet-hours`'s own `method` field does, so a board
+// A COUNT NOBODY CAN RECOMPUTE IS AN OPINION -- `conflictMetrics`'s own `method` field states the connection
+// reads and the git commands used, the same way `fleet-hours`'s own `method` field does, so a board
 // record copies it rather than retyping it.
 
-/** Bounded PR-listing refusal, on `issues()`'s own rule: a length at the limit MAY be truncated, and
- * reading a partial listing as the whole window is worse than refusing.
+/** Bounded PR-listing refusal, on `issues()`'s own rule: a window of more rows than this is REFUSED, because
+ * reading a partial listing as the whole window is worse than refusing. (#5076: a count of pull requests, read as
+ * pages of {@link SINCE_PAGE_SIZE} by a connection, so this is a whole number of pages.)
  */
-export const PR_SEARCH_LIMIT = 500;
+export const PR_WINDOW_LIMIT = 500;
 
 /**
+ * #5076: a CONNECTION read, not `gh pr list --search <qualifier>:>=<since>` (a GitHub SEARCH, whose allowance the installation spent). A connection cannot filter by
+ * `merged:` or `closed:`, so the window is read by `createdAt` (for `created`) or `updatedAt` (the others) and each row is kept by its own time; see `rows-since.ts`.
+ * `closed` reads the CLOSED state alone: GitHub's `closed:` also returned merged pull requests, and the one caller keeps only those that were not.
  * @param {"created" | "merged" | "closed"} qualifier
- * @param {string} since ISO date/time, used verbatim as a GitHub search qualifier value
+ * @param {string} since ISO date/time
  * @param {((args: string[]) => string) | undefined} run the `gh` call, REQUIRED (#1407): `conflictMetrics` hands in
- *   the live one, a test hands in recorded listings. A defaulted one is a live `gh pr list` from a test suite.
+ *   the live one, a test hands in recorded listings. A defaulted one is a live `gh` call from a test suite.
  * @returns {any[]}
  */
 function prsBy(qualifier: "created" | "merged" | "closed", since: string, run: ((args: string[]) => string) | undefined): any[] {
   if (typeof run !== "function") {
     throw new Error(`board-data: prsBy("${qualifier}") needs a run -- it is required, because a defaulted one is `
-      + "a live `gh pr list` (#1407: conflict-metrics.test.ts reached it on every local run).");
+      + "a live `gh` call (#1407: conflict-metrics.test.ts reached it on every local run).");
   }
-  const fields = "number,title,createdAt,mergedAt,closedAt,mergeCommit,files";
-  const search = `${qualifier}:>=${since}`;
-  const all = JSON.parse(run(["pr", "list", "--repo", REPO, "--state", "all", "--search", search,
-    "--limit", String(PR_SEARCH_LIMIT), "--json", fields]));
-  if (all.length >= PR_SEARCH_LIMIT) {
-    throw new Error(`board-data: the PR search "${search}" returned ${all.length} rows against a limit of `
-      + `${PR_SEARCH_LIMIT}, so it MAY BE TRUNCATED and this report would count part of the window as the `
-      + "whole. Narrow the window or raise the limit -- do not read a partial listing as complete.");
-  }
-  return all;
+  const select = "number title createdAt mergedAt closedAt mergeCommit{oid} files(first:100){nodes{path additions deletions}}";
+  const states = { created: ["OPEN", "CLOSED", "MERGED"], merged: ["MERGED"], closed: ["CLOSED"] } as const;
+  const field = { created: "createdAt", merged: "mergedAt", closed: "closedAt" } as const;
+  const from = Date.parse(since);
+  return readRowsSince({ run, ask: { kind: "pullRequests", states: states[qualifier], repo: REPO, select, since,
+    orderBy: qualifier === "created" ? "CREATED_AT" : "UPDATED_AT", maxPages: PR_WINDOW_LIMIT / SINCE_PAGE_SIZE } })
+    .filter((pr) => Date.parse(pr[field[qualifier]]) >= from).map(asListJson);
 }
 
 /** PRs OPENED in the window, by `createdAt`. @param {string} since @param {{run?: (args: string[]) => string}} [deps] */
@@ -643,8 +645,8 @@ export function composeConflictMetrics(since: string, { run }: { run?: (args: st
     .map((pr: any) => [pr.number, pr]));
   return {
     since,
-    method: "opened/merged/closed via `gh pr list --search <qualifier>:>=<since>` (created/merged/closed "
-      + "respectively), deduped by PR number for the hotspot table; lifetime is mergedAt-createdAt in "
+    method: "opened/merged/closed via the `pullRequests` connection read newest-first by createdAt (opened) or updatedAt (merged, "
+      + "closed) back to <since>, each kept by its own createdAt/mergedAt/closedAt >= <since>, deduped by PR number for the hotspot table; lifetime is mergedAt-createdAt in "
       + "minutes over PRs merged in the window; the conflict signal walks each merged PR's own merge "
       + "commit (`git show --format=%P`, `git merge-base`, `git log --merges base..branchTip`) for a merge "
       + "commit inside its own branch history -- a proxy for 'needed to reconcile with a diverged main', "

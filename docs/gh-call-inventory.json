@@ -1,16 +1,16 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 103,
+    "files": 104,
     "spawns": 137,
-    "calls": 412,
+    "calls": 397,
     "shapes": {
       "api rest": 159,
-      "api graphql": 41,
+      "api graphql": 42,
       "issue view": 34,
-      "pr list": 30,
-      "issue list": 28,
       "issue comment": 27,
+      "pr list": 23,
+      "issue list": 19,
       "pr view": 17,
       "issue edit": 16,
       "label create": 12,
@@ -91,8 +91,7 @@
       "spawns": 2,
       "calls": {
         "api graphql": 1,
-        "api rest": 2,
-        "pr list": 1
+        "api rest": 2
       },
       "labels": [
         "$META_LABEL",
@@ -155,8 +154,7 @@
     "src/board-snapshot.ts": {
       "spawns": 5,
       "calls": {
-        "api graphql": 1,
-        "issue list": 1
+        "api graphql": 1
       },
       "labels": [
         "$READY_LABEL"
@@ -296,7 +294,6 @@
         "issue comment": 1,
         "issue create": 1,
         "issue edit": 1,
-        "issue list": 1,
         "issue view": 1
       },
       "labels": [
@@ -309,8 +306,7 @@
       "spawns": 1,
       "calls": {
         "api graphql": 1,
-        "issue close": 1,
-        "pr list": 1
+        "issue close": 1
       },
       "labels": [],
       "parsesCloses": false
@@ -339,14 +335,10 @@
       "spawns": 2,
       "calls": {
         "api rest": 4,
-        "issue list": 1,
-        "pr list": 1,
         "pr view": 1,
         "repo view": 1
       },
-      "labels": [
-        "regression"
-      ],
+      "labels": [],
       "parsesCloses": false
     },
     "src/duplicate-row.ts": {
@@ -376,8 +368,7 @@
     "src/hand-fix-ledger.ts": {
       "spawns": 1,
       "calls": {
-        "api rest": 2,
-        "pr list": 1
+        "api rest": 2
       },
       "labels": [],
       "parsesCloses": false
@@ -491,9 +482,8 @@
       "spawns": 1,
       "calls": {
         "api rest": 1,
-        "issue list": 1,
         "issue view": 1,
-        "pr list": 2
+        "pr list": 1
       },
       "labels": [],
       "parsesCloses": false
@@ -517,8 +507,8 @@
     "src/org-retro.ts": {
       "spawns": 1,
       "calls": {
-        "issue list": 2,
-        "pr list": 4
+        "issue list": 1,
+        "pr list": 2
       },
       "labels": [
         "$CLAIM_LABEL",
@@ -578,7 +568,6 @@
     "src/provider-low-confidence.ts": {
       "spawns": 1,
       "calls": {
-        "issue list": 1,
         "label create": 1
       },
       "labels": [
@@ -617,7 +606,7 @@
       "calls": {
         "api graphql": 3,
         "api rest": 5,
-        "issue list": 6,
+        "issue list": 5,
         "pr list": 2
       },
       "labels": [
@@ -907,6 +896,14 @@
       ],
       "parsesCloses": false
     },
+    "src/ticket-port/rows-since.ts": {
+      "spawns": 0,
+      "calls": {
+        "api graphql": 1
+      },
+      "labels": [],
+      "parsesCloses": false
+    },
     "src/ticket-port/tests-first-reads.ts": {
       "spawns": 0,
       "calls": {
@@ -925,9 +922,7 @@
     },
     "src/trace/haiku-tier-report.ts": {
       "spawns": 1,
-      "calls": {
-        "issue list": 1
-      },
+      "calls": {},
       "labels": [
         "$HAIKU_TIER_LABEL"
       ],
@@ -1012,9 +1007,7 @@
     },
     "src/untiered-ready-rows.ts": {
       "spawns": 1,
-      "calls": {
-        "issue list": 1
-      },
+      "calls": {},
       "labels": [
         "$EXCLUDED_LABELS",
         "$HAIKU_TIER_LABEL",

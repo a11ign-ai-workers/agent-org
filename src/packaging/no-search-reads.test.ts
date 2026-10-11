@@ -24,6 +24,9 @@
  *   6. (#5074) SOURCE, widened again: the two other MEASURED spenders, `wake.ts` (the tick's three lists, run in-process) and `row-file.ts` (the filing's duplicate-title
  *      check), are walked, and each still lists something (a plain list), so the walk reads a file that lists. Their behaviour is pinned in
  *      `stuck-row-reask-filed.test.ts` (a search argv is refused there) and `row-file-board.test.ts`.
+ *   7. (#5076) SOURCE, widened a third time, and BEHAVIOUR: the twelve other readers of the table in #5074 are walked, each reads through `ticket-port/rows-by-label.ts` or
+ *      `rows-since.ts` (a marker that is tested in BOTH directions), and the new `rows-since.ts` reader answers a `run` that refuses every search argv, pages to the
+ *      first row before its window, REFUSES a window longer than its pages, and sits under the one refusal memory.
  */
 import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
@@ -34,8 +37,15 @@ import ts from "typescript";
 import { lookupClaimedRegions } from "../row-claim/file-overlap-rule.ts";
 import { readChairmanBlocked, readClaimedRowComments, readClosedAnswerRows, readClosedClaimLabelRows, readPromotableRows, readReadyRows, readRecentlyClosed,
   readTrackerLanes } from "../work-gate.ts";
-import { forgetRefusedReads, readClaimedRows } from "../ticket-port/rows-by-label.ts";
-import { closedAnswerConnection, connectionOf, readsClosedAnswerRows, readsRecentlyClosed, readsRowsByLabel, recentlyClosedConnection } from "./rows-by-label-fixtures.ts";
+import { forgetRefusedReads, readClaimedRows, readRowsByLabel } from "../ticket-port/rows-by-label.ts";
+import { foldPage, readMergedPullRequests, readRowsSince, SINCE_PAGE_SIZE, WindowCutShort, type SinceRead } from "../ticket-port/rows-since.ts";
+import { mergedPrsInWindow } from "../close-rows-sweep.ts";
+import { fetchReadyIssueNumbers } from "../board-snapshot.ts";
+import { ghReadyReader } from "../untiered-ready-rows.ts";
+import { readClosedRows } from "../trace/haiku-tier-report.ts";
+import { readMergedSince } from "../org-retro.ts";
+import { closedAnswerConnection, connectionOf, readsClosedAnswerRows, readsRecentlyClosed, readsRowsByLabel, readsRowsSince, recentlyClosedConnection,
+  sinceAnswer } from "./rows-by-label-fixtures.ts";
 
 beforeEach(() => forgetRefusedReads());
 
@@ -154,8 +164,11 @@ const COVERED = [
   "row-claim.ts", "sweep-window.ts", "ci-failure-class.ts",
   // #5050: the gate. `work-gate.ts` is where eleven of them were; the other two list nothing with a flag and stay walked so the first one added is seen.
   "work-gate.ts", "queue-table.ts", "work-tick.ts",
-  // #5074: the tick's wake and the filing tool. The rest of the table in the row (`ready-label-audit.ts`, `board-data.ts`, ...) is the row after it.
+  // #5074: the tick's wake and the filing tool.
   "wake.ts", "row-file.ts",
+  // #5076: the twelve other readers of the table in #5074 (`fleet-gated-nightly.ts`, which lists through `work-gate.ts`'s selector, is its own row).
+  "ready-label-audit.ts", "untiered-ready-rows.ts", "board-snapshot.ts", "board-data.ts", "close-rows-sweep.ts", "close-rows-for-merged-pr.ts", "hand-fix-ledger.ts", "dora.ts",
+  "org-retro.ts", "provider-low-confidence.ts", "messaging/watch.ts", "trace/haiku-tier-report.ts",
   ...readdirSync(join(SRC, "work-gate")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `work-gate/${f}`),
   ...readdirSync(join(SRC, "row-claim")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `row-claim/${f}`),
   ...readdirSync(join(SRC, "ticket-port")).filter((f) => f.endsWith(".ts") && !f.endsWith(".test.ts")).map((f) => `ticket-port/${f}`),
@@ -330,4 +343,128 @@ test("a label with MORE rows than one page of the connection is NOT answered fro
   const lanes = readTrackerLanes(run, batch as never);
   assert.equal(lanes.promotableRows?.length, 150, "the hundred and fifty rows: a first page folded and called whole would have returned 100");
   assert.ok(sent.some((args) => readsRowsByLabel(args)?.label === "backlog"), "the connection WAS asked, because the open list cannot say there is no second page");
+});
+
+// --- 7. (#5076) the twelve other readers, and the reader that serves a window ----------------------------------------------------------------------------------
+
+/** The twelve files of the table in #5074 that are neither the gate's nor `wake.ts`'s or `row-file.ts`'s. `fleet-gated-nightly.ts` lists through `work-gate.ts`'s selector and is its own row. */
+const TWELVE = ["ready-label-audit.ts", "untiered-ready-rows.ts", "board-snapshot.ts", "board-data.ts", "close-rows-sweep.ts", "close-rows-for-merged-pr.ts", "hand-fix-ledger.ts",
+  "dora.ts", "org-retro.ts", "provider-low-confidence.ts", "messaging/watch.ts", "trace/haiku-tier-report.ts"];
+
+/** Does this source read rows through one of the two connection readers? A marker, and tested in both directions below. */
+const readsThroughConnections = (source: string): boolean => /from "(?:\.\.?\/)+ticket-port\/rows-(?:by-label|since)\.ts"/.test(source);
+
+test("POSITIVE CONTROL (source, #5076): the twelve are walked, and each reads through a connection reader -- the marker is tested with the import there and with it removed", () => {
+  assert.ok(TWELVE.every((file) => COVERED.includes(file)), "the guard walks all twelve");
+  assert.equal(new Set(TWELVE).size, 12, "twelve distinct files: an empty or short list would pass for the wrong reason");
+  for (const file of TWELVE) {
+    const source = readFileSync(join(SRC, file), "utf8");
+    assert.ok(readsThroughConnections(source), `${file} reads through ticket-port/rows-by-label.ts or rows-since.ts`);
+    const without = source.replace(/^import .*ticket-port\/rows-(?:by-label|since)\.ts.*$/gm, "");
+    assert.equal(readsThroughConnections(without), false, `the marker notices the import gone from ${file}: it is not a marker that passes whatever is there`);
+  }
+});
+
+test("NEGATIVE CONTROL (source, #5076): a `--label` or `--search` list added to any of the twelve is SEEN by the walk", () => {
+  for (const file of TWELVE) {
+    const source = readFileSync(join(SRC, file), "utf8");
+    assert.deepEqual(searchBackedLists(source), [], `${file} lists nothing through a search today`);
+    const mutated = `${source}\nexport const regress = (run) => run(["issue", "list", "--repo", r, "--state", "open", "--label", "ready", "--json", "number"]);\n`;
+    assert.equal(searchBackedLists(mutated).length, 1, `${file} with a \`--label\` list appended turns the guard red`);
+  }
+});
+
+/** A GitHub whose SEARCH allowance is spent: every `--label`/`--search` argv is refused in the incident's words, and the two connection reads answer from `rows`. */
+function searchSpentGitHub(rows: Record<string, unknown>[]) {
+  const calls: string[][] = [];
+  const run = (args: string[]): string => {
+    calls.push(args);
+    if (args.includes("--label") || args.includes("--search")) throw new Error(LIMIT_TEXT);
+    if (readsRowsSince(args) !== null) return sinceAnswer(args, rows as never);
+    if (readsRowsByLabel(args) !== null) return connectionOf(rows as never);
+    throw new Error(`unexpected call: ${args.join(" ")}`);
+  };
+  return { run, calls };
+}
+const SINCE_ISO = "2026-10-11T10:00:00.000Z";
+const SINCE_MS = Date.parse(SINCE_ISO);
+const ago = (minutes: number): string => new Date(SINCE_MS + minutes * 60_000).toISOString();
+/** A pull request as a fake writes it: updated at `updated`, merged at `merged` (null for one that was not), into `base`. */
+const pull = (number: number, { merged, updated, base = "main" }: { merged: string | null; updated: string; base?: string; }) =>
+  ({ number, mergedAt: merged, updatedAt: updated, baseRefName: base, labels: [], files: [] });
+
+test("POSITIVE CONTROL: the converted readers answer while every search argv is refused -- and the fake DOES refuse one", () => {
+  const rows = [pull(3, { merged: ago(30), updated: ago(31) }), pull(2, { merged: ago(-90), updated: ago(20) }), pull(1, { merged: ago(-300), updated: ago(-299) })];
+  const { run, calls } = searchSpentGitHub(rows);
+  assert.throws(() => run(["pr", "list", "--search", "merged:>=2026-10-11"]), /rate limit already exceeded/, "the control: a pass below is not a fake that accepts anything");
+  calls.length = 0;
+  const merged = mergedPrsInWindow("a11ign/a11ign", 45, run);
+  assert.ok(Array.isArray(merged), "the sweep's window read answered");
+  assert.ok(calls.length >= 1 && calls.every((args) => !args.includes("--search") && !args.includes("--label")), "and none of its calls was a search");
+  assert.deepEqual(readClosedRows(SINCE_MS, SINCE_MS + 3_600_000, (args) => run(args)).length, 0, "the haiku report's closed rows answered (no closed row in the fake is in range)");
+  assert.equal(readMergedSince("a11ign/a11ign", SINCE_MS, (args) => JSON.parse(run(args)))?.length, 1, "the retrospective's merged list answered: only the row MERGED in the window");
+  assert.deepEqual(fetchReadyIssueNumbers({ run: (_cmd, args) => run(args) }), [3, 2, 1], "the board snapshot's ready list answered, from the by-label connection");
+  assert.deepEqual(ghReadyReader({ key: "", repo: "a11ign/a11ign" }, run).listRows().map((row) => row.number), [3, 2, 1], "and the untiered count's");
+});
+
+test("a read refused for a limit stops every other window read of the tick, and one that is not a limit does not (the shared refusal memory)", () => {
+  forgetRefusedReads();
+  const lines: string[] = [];
+  const probe = "HTTP/2.0 200 OK\r\nX-Ratelimit-Limit: 5000\r\nX-Ratelimit-Remaining: 3948\r\nX-Ratelimit-Resource: graphql\r\n\r\n{}";
+  const calls: string[][] = [];
+  const refusing = (args: string[]): string => { calls.push(args); if (args.includes("-i")) return probe; throw new Error(LIMIT_TEXT); };
+  const ask: SinceRead = { kind: "pullRequests", states: ["MERGED"], orderBy: "UPDATED_AT", repo: TRACKER, select: "number mergedAt", since: SINCE_ISO };
+  assert.throws(() => readRowsSince({ ask, run: refusing, log: (line) => lines.push(line) }), /rate limit already exceeded/);
+  const asked = calls.length;
+  assert.throws(() => readRowsSince({ ask, run: refusing }), /not asked again this tick/);
+  assert.throws(() => readRowsByLabel({ label: "ready", state: "OPEN", select: "number", run: refusing }), /not asked again this tick/, "a by-label read is under the same memory");
+  assert.equal(calls.length, asked, "no call was sent after the refusal");
+  assert.equal(lines.length, 1);
+  assert.match(lines[0], /the pullRequests of a11ign\/a11ign \(MERGED\), since 2026-10-11T10:00:00.000Z/, "and the line names what was asked");
+  forgetRefusedReads();
+  assert.throws(() => readRowsSince({ ask, run: () => { throw new Error("gh: 502"); } }), /502/);
+  assert.doesNotThrow(() => readRowsSince({ ask, run: (args) => sinceAnswer(args, []) }), "a refusal that is not a limit is not remembered: the next ask goes through");
+});
+
+test("the window ends at the first row before it, and no page past that is asked", () => {
+  const inside = Array.from({ length: 120 }, (_, i) => pull(1000 - i, { merged: ago(200 - i), updated: ago(200 - i) }));
+  const older = [pull(7, { merged: ago(-500), updated: ago(-500) }), pull(6, { merged: ago(-600), updated: ago(-600) })];
+  const { run, calls } = searchSpentGitHub([...inside, ...older, ...older, ...older]);
+  const rows = readRowsSince({ ask: { kind: "pullRequests", states: ["MERGED"], orderBy: "UPDATED_AT", repo: TRACKER, select: "number", since: SINCE_ISO }, run });
+  assert.equal(rows.length, 120, "every row of the window, none of the older ones");
+  assert.equal(calls.length, 2, "two pages: the second held the first older row, so a third was never asked");
+  assert.equal(rows.every((row) => Date.parse(row.updatedAt) >= SINCE_MS), true);
+});
+
+test("NEGATIVE CONTROL: a window longer than its pages is REFUSED, never returned in part -- and `newest` is the one that truncates, by its own name", () => {
+  const all = Array.from({ length: 3 * SINCE_PAGE_SIZE }, (_, i) => pull(5000 - i, { merged: ago(500 - i), updated: ago(500 - i) }));
+  const { run } = searchSpentGitHub(all);
+  const ask: SinceRead = { kind: "pullRequests", states: ["MERGED"], orderBy: "UPDATED_AT", repo: TRACKER, select: "number", since: SINCE_ISO };
+  assert.throws(() => readRowsSince({ ask: { ...ask, maxPages: 2 }, run }), (error: Error) => error instanceof WindowCutShort && /may be cut short/.test(error.message));
+  assert.equal(readRowsSince({ ask: { ...ask, maxPages: 3 }, run }).length, 300, "control: three pages hold it, and then it is read whole");
+  assert.equal(readRowsSince({ ask: { kind: "pullRequests", states: ["MERGED"], orderBy: "CREATED_AT", repo: TRACKER, select: "number", newest: 150 }, run }).length, 150, "`newest` stops at its count");
+  assert.throws(() => readRowsSince({ ask: { ...ask, since: undefined as never }, run }), /needs `since` or `newest`/, "and a read bounded by neither is refused");
+  assert.throws(() => readRowsSince({ ask: { ...ask, since: "yesterday-ish" }, run }), /is not a time/);
+  assert.throws(() => foldPage({ ask: { ...ask, maxPages: 1 }, rows: [], page: { nodes: [{ updatedAt: SINCE_ISO }], hasNextPage: true, endCursor: "c" }, pagesRead: 1 }), WindowCutShort);
+});
+
+test("a payload that is not a connection THROWS: `could not read` is never an empty window", () => {
+  const ask: SinceRead = { kind: "issues", states: ["CLOSED"], orderBy: "UPDATED_AT", repo: TRACKER, select: "number closedAt", since: SINCE_ISO };
+  assert.throws(() => readRowsSince({ ask, run: () => JSON.stringify({ errors: [{ message: "Could not resolve to a Repository" }] }) }), /did not come back as a connection: Could not resolve/);
+  forgetRefusedReads();
+  assert.throws(() => readRowsSince({ ask, run: () => "not json" }));
+  assert.deepEqual(readRowsSince({ ask, run: (args) => sinceAnswer(args, []) }), [], "control: an empty window that WAS read is `[]`");
+});
+
+test("merged pull requests are kept by their own `mergedAt` and `base`: a row merely UPDATED in the window, or merged elsewhere, is not a merge in it", () => {
+  const rows = [
+    pull(4, { merged: ago(50), updated: ago(50) }),
+    pull(3, { merged: ago(30), updated: ago(40), base: "release" }),
+    pull(2, { merged: ago(-3000), updated: ago(20) }),
+  ];
+  const { run } = searchSpentGitHub(rows);
+  const got = readMergedPullRequests({ repo: TRACKER, select: "number", run, window: { since: SINCE_ISO }, base: "main" });
+  assert.deepEqual(got.map((row) => row.number), [4], "the one merged into `main` inside the window");
+  assert.deepEqual(readMergedPullRequests({ repo: TRACKER, select: "number", run, window: { since: SINCE_ISO } }).map((row) => row.number), [4, 3],
+    "control: without `base` the release merge is in, and the one merged days ago and commented on today is out");
 });

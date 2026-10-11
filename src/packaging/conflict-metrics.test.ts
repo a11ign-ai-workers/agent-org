@@ -17,9 +17,10 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  mergeLifetimeMinutes, hotspotFiles, mergedPRNeededReconciliation, composeConflictMetrics, PR_SEARCH_LIMIT, REPO,
+  mergeLifetimeMinutes, hotspotFiles, mergedPRNeededReconciliation, composeConflictMetrics, PR_WINDOW_LIMIT, REPO,
 } from "../board-data.ts";
 import { readFileSync } from "node:fs";
+import { readsRowsSince, sinceAnswer } from "./rows-by-label-fixtures.ts";
 
 // --- mergeLifetimeMinutes: pure ---
 
@@ -120,29 +121,41 @@ test("mergedPRNeededReconciliation: a bogus sha is unresolvable (null), not thro
   assert.equal(mergedPRNeededReconciliation({ number: 1, mergeCommit: { oid: "0".repeat(40) } }), null);
 });
 
-// --- composeConflictMetrics: THE COMPOSED FIGURE, driven with recorded `gh pr list` answers (#1407) ---
+// --- composeConflictMetrics: THE COMPOSED FIGURE, driven with recorded `pullRequests` connection answers (#1407, #5076) ---
 //
 // It was live. `conflictMetrics(since)` ran `gh pr list --limit 500 --json ...files` searches on every local run
 // (worker-capture's census on #1275), and with no credentials it FAILED rather than skipped, because a refusal that
-// is not `gh auth login` was rethrown. The composition is now driven with a `run` that answers each search from a
-// listing this test writes, and every argv the composition sent is asserted.
+// is not `gh auth login` was rethrown. The composition is now driven with a `run` that answers each connection read from
+// a listing this test writes, and every argv the composition sent is asserted. #5076: the three windows are `pullRequests`
+// connections (`created` newest-created first; `merged` and `closed` newest-updated first), not `--search <q>:>=<since>`.
 //
-// WHAT THIS CANNOT CATCH: GitHub's real answer -- what a `created:>=` search returns, the field names `--json`
-// yields, paging behind `--limit`. That is still exercised where it always mattered: `board-report.ts` calls the
-// live `conflictMetrics` for every board edition. No local test reaches it any more, and that is the point.
+// WHAT THIS CANNOT CATCH: GitHub's real answer -- the field names the connection yields, how it orders rows it has updated.
+// That is still exercised where it always mattered: `board-report.ts` calls the live `conflictMetrics` for every board
+// edition. No local test reaches it any more, and that is the point.
 
 const SINCE = "2026-09-08T00:00:00.000Z";
-const FIELDS = "number,title,createdAt,mergedAt,closedAt,mergeCommit,files";
 
-/** A `run` answering each search from `byQualifier`, keeping every argv it was sent. */
-function listingRun(byQualifier: Record<string, unknown[]>) {
+/** Which of the three windows a request is: `created` reads every state by creation, `merged` the MERGED state, `closed` the CLOSED one. */
+function qualifierOf(args: string[]): string {
+  const asked = readsRowsSince(args);
+  if (asked === null) throw new Error(`no recorded listing for: ${args.join(" ")}`);
+  return asked.orderBy === "CREATED_AT" ? "created" : asked.states.join(",") === "MERGED" ? "merged" : "closed";
+}
+
+/** The newest-first order a connection answers in: by the field the window is read by. */
+const newestFirst = (rows: Record<string, unknown>[], field: string) => [...rows].sort((a, b) => Date.parse(String(b[field])) - Date.parse(String(a[field])));
+
+/** A `run` answering each window from `byQualifier` (the pull requests that window's states hold, in the shape `gh pr list --json` gave), keeping every argv. */
+function listingRun(byQualifier: Record<string, Record<string, unknown>[]>) {
   const calls: string[][] = [];
   const run = (args: string[]) => {
     calls.push(args);
-    const qualifier = (args[args.indexOf("--search") + 1] ?? "").split(":")[0];
+    const qualifier = qualifierOf(args);
     const answer = byQualifier[qualifier];
     if (!answer) throw new Error(`no recorded listing for: ${args.join(" ")}`);
-    return JSON.stringify(answer);
+    // a pull request is never updated before it merged or closed: `updatedAt` defaults to the latest of its own times
+    const stamped = answer.map((row) => ({ updatedAt: row.mergedAt ?? row.closedAt ?? row.createdAt, ...row }));
+    return sinceAnswer(args, newestFirst(stamped, qualifier === "created" ? "createdAt" : "updatedAt") as never);
   };
   return { run, calls };
 }
@@ -159,17 +172,19 @@ const NO_COMMIT = { number: 9001, title: "fixture", createdAt: "2026-09-08T00:00
 const CLOSED = { number: 9002, title: "fixture", createdAt: "2026-09-08T01:00:00Z", mergedAt: null,
   closedAt: "2026-09-08T01:05:00Z", mergeCommit: null, files: [{ path: "c.mjs" }] };
 
-test("composeConflictMetrics: THE COMPOSED SHAPE over recorded listings -- every search's argv, and every figure", () => {
+test("composeConflictMetrics: THE COMPOSED SHAPE over recorded listings -- every connection read, and every figure", () => {
   const { run, calls } = listingRun({
     created: [RECONCILED, CLEAN, NO_COMMIT, CLOSED],
     merged: [RECONCILED, CLEAN, NO_COMMIT],
-    closed: [RECONCILED, CLEAN, NO_COMMIT, CLOSED], // `closed:>=` returns merged PRs too
+    closed: [RECONCILED, CLEAN, NO_COMMIT, CLOSED], // a listing that carries merged PRs too: the caller keeps only those with no `mergedAt`
   });
   const result = composeConflictMetrics(SINCE, { run });
-  const search = (qualifier: string) => ["pr", "list", "--repo", REPO, "--state", "all", "--search",
-    `${qualifier}:>=${SINCE}`, "--limit", String(PR_SEARCH_LIMIT), "--json", FIELDS];
-  assert.deepEqual(calls, [search("created"), search("merged"), search("closed")],
-    "the three searches the live call makes, in order, each with its window and its limit");
+  assert.deepEqual(calls.map((args) => readsRowsSince(args)), [
+    { kind: "pullRequests", states: ["OPEN", "CLOSED", "MERGED"], orderBy: "CREATED_AT", label: null, repo: REPO, after: null },
+    { kind: "pullRequests", states: ["MERGED"], orderBy: "UPDATED_AT", label: null, repo: REPO, after: null },
+    { kind: "pullRequests", states: ["CLOSED"], orderBy: "UPDATED_AT", label: null, repo: REPO, after: null },
+  ], "the three connection reads the live call makes, in order, each with its states and its order");
+  assert.deepEqual(calls.filter((args) => args.includes("--search") || args.includes("--label")), [], "and none is a GitHub search (#5076)");
   assert.equal(result.since, SINCE);
   assert.ok(result.method.length > 20, "the method must be a real sentence, not a placeholder");
   assert.equal(result.opened, 4);
@@ -189,18 +204,22 @@ test("composeConflictMetrics: THE COMPOSED SHAPE over recorded listings -- every
   }
 });
 
-test("composeConflictMetrics with no run is REFUSED by name, before any search -- a defaulted run is a live gh", () => {
+test("composeConflictMetrics with no run is REFUSED by name, before any read -- a defaulted run is a live gh", () => {
   assert.throws(() => composeConflictMetrics(SINCE), /prsBy\("created"\) needs a run/);
   assert.throws(() => composeConflictMetrics(SINCE, {}), /prsBy\("created"\) needs a run/);
 });
 
-test("a listing AT the search limit is refused as possibly truncated; one row under it is read", () => {
-  const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ number: i + 1, files: [] }));
-  const at = listingRun({ created: rows(PR_SEARCH_LIMIT), merged: [], closed: [] });
-  assert.throws(() => composeConflictMetrics(SINCE, { run: at.run }), /MAY BE TRUNCATED/);
-  const under = listingRun({ created: rows(PR_SEARCH_LIMIT - 1), merged: [], closed: [] });
-  assert.equal(composeConflictMetrics(SINCE, { run: under.run }).opened, PR_SEARCH_LIMIT - 1,
-    "the positive control: the refusal is the limit's, not every large listing's");
+test("a window that needs more than PR_WINDOW_LIMIT rows is refused as possibly cut short; one that fits its pages is read (#5076)", () => {
+  // Each row is created inside the window, newest first, so the read keeps asking for pages until the window ends.
+  const rows = (n: number) => Array.from({ length: n }, (_, i) => ({ number: i + 1, files: [], createdAt: new Date(Date.parse(SINCE) + (n - i) * 1000).toISOString() }));
+  const pages = (n: number) => Math.ceil(n / 100);
+  const over = listingRun({ created: rows(PR_WINDOW_LIMIT + 1), merged: [], closed: [] });
+  assert.throws(() => composeConflictMetrics(SINCE, { run: over.run }), /may be cut short/);
+  assert.equal(over.calls.length, pages(PR_WINDOW_LIMIT), "it read its five pages and no more");
+  const at = listingRun({ created: rows(PR_WINDOW_LIMIT), merged: [], closed: [] });
+  assert.equal(composeConflictMetrics(SINCE, { run: at.run }).opened, PR_WINDOW_LIMIT,
+    "the positive control: exactly the limit is a whole window, which the connection can PROVE (no next page) where a bare list length could not");
+  assert.equal(at.calls.filter((args) => qualifierOf(args) === "created").length, pages(PR_WINDOW_LIMIT), "paged 100 at a time");
 });
 
 test("wiring: conflictMetrics is the live entry and hands in gh; the composition calls no gh of its own", () => {

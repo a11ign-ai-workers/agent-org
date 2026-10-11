@@ -26,6 +26,7 @@ import { stripComments } from "@a11ign/toolchain/lib/source-text";
 import { assertBaseIsLive, gatherChanges } from "../hand-fix-ledger.ts";
 import { REPO } from "../project-identity.ts";
 import { toolSources, type ToolFile } from "./tool-source.ts";
+import { readsRowsSince, sinceAnswer } from "./rows-by-label-fixtures.ts";
 
 // --- the parser -------------------------------------------------------------------------------------------------------------------
 
@@ -207,6 +208,7 @@ const WINDOW = () => ({ from: new Date(Date.now() - 14 * DAY_MS), to: new Date()
 /** `gh` answering for a project whose `main` is `liveHead` and whose every commit GitHub resolves to `login`. */
 const ghFor = (liveHead: string, shas: string[], login = "a11ign-ai-workers") => (args: string[]) => {
   if (args[0] === "api" && args[1] === `repos/${REPO}/commits/main`) return `${liveHead}\n`;
+  if (readsRowsSince(args) !== null) return sinceAnswer(args, []); // #5076: the merged pull requests are a connection read, and none merged in this sandbox
   if (args[0] === "api") return shas.map((sha) => `${sha}\t${login}\n`).join("");
   if (args[0] === "pr") return "[]";
   throw new Error(`unexpected gh ${args.join(" ")}`);

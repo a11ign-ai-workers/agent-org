@@ -55,6 +55,7 @@ import { pathToFileURL } from "node:url";
 import { refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { REPO } from "./project-identity.ts";
 import { READY_LABEL } from "./claim-labels.ts";
+import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: the ready list is a connection, never a search
 // #1275: the scoped half, PURE OF `gh` -- see that file's header. The constants live there and are re-exported above,
 // because a constant that file imported from here would carry this file's `token` into its closure.
 import { PROJECT_OWNER, PROJECT_NUMBER, SNAPSHOT_DIR, snapshotStamp, graphqlErrors, describeGraphqlErrors,
@@ -229,7 +230,7 @@ function parsePage(raw: string): {
 
 /**
  * Every OPEN issue carrying `ready` -- the independent population #747's floor checks the snapshot
- * against. Read with a PLAIN top-level `gh issue list`, deliberately never nested inside another
+ * against. Read with a PLAIN top-level `repository.issues(labels:)` connection (#5076: it was `gh issue list --label`, a GitHub SEARCH), deliberately never nested inside another
  * connection: the narrowing measured on `fieldValues` (and on `claim-provenance.ts`'s own #683
  * measurement of a nested `timelineItems`) only happens to a connection sharing a budget with sibling
  * rows in the SAME request, and a bare `issues(first: N)` at the top level is not that shape.
@@ -241,27 +242,16 @@ function parsePage(raw: string): {
  * @returns {number[]}
  */
 export function fetchReadyIssueNumbers({ run = defaultRun, limit = 500 }: { run?: typeof defaultRun; limit?: number; } = {}): number[] {
-  let raw: string;
+  let parsed: unknown[];
   try {
-    raw = run("gh", ["issue", "list", "--repo", REPO, "--state", "open", "--label", READY_LABEL,
-      "--limit", String(limit), "--json", "number"]);
+    // #5076: `repository.issues(labels:)`, a connection -- `gh issue list --label` was sent as a GitHub SEARCH, whose allowance the installation spent.
+    parsed = readRowsByLabel({ label: READY_LABEL, state: "OPEN", select: "number", repo: REPO, run: (args) => run("gh", args) });
   } catch (cause) {
     throw new Error(`board-snapshot: could not list open ${READY_LABEL} issues from ${REPO} -- refusing `
       + `to guess whether the snapshot's Status coverage is complete. `
       + `${(cause as Error).message}`, { cause });
   }
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(raw);
-  } catch (cause) {
-    throw new Error(`board-snapshot: gh's ${READY_LABEL}-issue list was not JSON -- refusing to guess. `
-      + `First 200 chars: ${raw.slice(0, 200)}`, { cause });
-  }
-  if (!Array.isArray(parsed)) {
-    throw new Error(`board-snapshot: gh's ${READY_LABEL}-issue list was not a list -- refusing to guess. `
-      + `Got: ${JSON.stringify(parsed).slice(0, 300)}`);
-  }
-  if (parsed.length === limit) {
+  if (parsed.length >= limit) {
     throw new Error(`board-snapshot: gh returned exactly the requested limit (${limit}) of open `
       + `${READY_LABEL} issues -- indistinguishable from a truncated result, refusing to check the `
       + `snapshot's Status coverage against a partial population. Raise the limit.`);

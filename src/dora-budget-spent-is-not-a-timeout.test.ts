@@ -43,13 +43,13 @@ const releaseRows = (count: number) => Array.from({ length: count }, (_, index) 
 const log = join(scratch, "calls.log");
 const bin = join(scratch, "bin");
 execFileSync("mkdir", ["-p", bin]);
-/** A `gh` that lists the releases from a file, answers a `commits/<tag>` at once, and takes `$FAKE_PR_SLEEP` seconds over `pr list`; every call is one line of the log. */
+/** A `gh` that lists the releases from a file, answers a `commits/<tag>` at once, and takes `$FAKE_PR_SLEEP` seconds over the merged list (`api graphql`, #5076: it was `pr list --search`); every call is one line of the log. */
 writeFileSync(join(bin, "gh"), `#!/bin/sh
 echo "$*" >> "${log}"
 case "$1 $2" in
   "api repos/a11ign/frequent/releases") cat "${scratch}/releases.json";;
   "api repos/a11ign/frequent/commits/"*) echo "${SHA} ${PARENT}";;
-  "pr list") exec sleep "\${FAKE_PR_SLEEP:-0}";;
+  "api graphql") exec sleep "\${FAKE_PR_SLEEP:-0}";;
   "repo view") echo '{"hasIssuesEnabled":false}';;
 esac
 `);
@@ -70,7 +70,7 @@ function readWith({ tags, budgetMs, timeoutMs, prSleep = 0 }: { tags: number; bu
   return { reading, calls: callsLogged() };
 }
 
-const NOT_STARTED = /^its merged pull requests could not be read \(gh pr list was not started: this repository's read budget is spent\)$/;
+const NOT_STARTED = /^its merged pull requests could not be read \(gh api graphql was not started: this repository's read budget is spent\)$/;
 
 test("the fixture is a repository that releases on every merge: at least 100 tags, each of them a call of its own when no clone answers", () => {
   assert.ok(TAGS >= MIN_TAGS);
@@ -82,22 +82,22 @@ test("a budget spent by the tag reads says `was not started: ... budget is spent
   const { reading, calls } = readWith({ tags: TAGS, budgetMs: TAGS * COMMIT_MS, timeoutMs: 5_000 });
   assert.equal(reading.status, "read");
   assert.match(reading.reasons.leadTime, NOT_STARTED);
-  assert.ok(!calls.some((line) => line.startsWith("pr list")), "the control: `gh pr list` really was not started");
+  assert.ok(!calls.some((line) => line.startsWith("api graphql")), "the control: the merged list (`gh api graphql`) really was not started");
   assert.equal(calls.filter((line) => line.includes("/commits/")).length, TAGS, "the control: the tag reads are what spent it");
   assert.doesNotMatch(reading.reasons.leadTime, /timed out/);
 });
 
-test("a `gh pr list` that runs past its OWN limit says `timed out after N s`, and not a word of the budget", () => {
+test("a merged-list read (`gh api graphql`) that runs past its OWN limit says `timed out after N s`, and not a word of the budget", () => {
   const { reading, calls } = readWith({ tags: 3, budgetMs: 10 * TAGS * COMMIT_MS, timeoutMs: 1_000, prSleep: 5 });
-  assert.ok(calls.some((line) => line.startsWith("pr list")), "the control: the list was started");
-  assert.match(reading.reasons.leadTime, /^its merged pull requests could not be read \(gh pr list timed out after 1 s\)$/);
+  assert.ok(calls.some((line) => line.startsWith("api graphql")), "the control: the list was started");
+  assert.match(reading.reasons.leadTime, /^its merged pull requests could not be read \(gh api graphql timed out after 1 s\)$/);
   assert.doesNotMatch(reading.reasons.leadTime, /budget/);
 });
 
-test("a `gh pr list` given only what was left of the budget says so, with its own limit beside it: neither of the two words above", () => {
+test("a merged-list read given only what was left of the budget says so, with its own limit beside it: neither of the two words above", () => {
   const { reading } = readWith({ tags: 3, budgetMs: 3 * COMMIT_MS + 1_000, timeoutMs: 5_000, prSleep: 8 });
   const reason: string = reading.reasons.leadTime;
-  assert.match(reason, /\(gh pr list timed out after 1 s, all that was left of this repository's read budget \(a call's own limit is 5 s\)\)$/);
+  assert.match(reason, /\(gh api graphql timed out after 1 s, all that was left of this repository's read budget \(a call's own limit is 5 s\)\)$/);
   assert.doesNotMatch(reason, NOT_STARTED);
 });
 

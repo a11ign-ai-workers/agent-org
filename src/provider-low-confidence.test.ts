@@ -16,6 +16,7 @@ import {
 import { bodyFromArgv, fileRefusalReason } from "./row-file.ts";
 import { tmpDirForFile } from "./lib/tmp-fixture.ts";
 import { HOME_CHECKOUT } from "./project-config.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -85,7 +86,10 @@ const TWO_LOW = [...LOW, ...decisions("model-routing", "subsystems", { total: 22
 
 type Tracked = { number: number; title: string; state: string; closedAt: string | null };
 
-/** A tracker that answers the one listing this module makes and records `label create`; it throws on any other call, so a reader that drifts is red. */
+/**
+ * A tracker that answers the one listing this module makes -- the OPEN and the CLOSED rows labelled with the class, as connection reads (#5076: `gh issue list --label` was a GitHub
+ * SEARCH) -- and records `label create`; it throws on any other call, and on any argv that is a search, so a reader that drifts is red.
+ */
 function tracker(rows: Tracked[], { listFails = "" }: { listFails?: string } = {}) {
   const calls: string[][] = [];
   const run = (args: string[]) => {
@@ -94,10 +98,12 @@ function tracker(rows: Tracked[], { listFails = "" }: { listFails?: string } = {
       assert.deepEqual(args.slice(0, 3), ["label", "create", `class:${CLASS_ID}`]);
       return "";
     }
-    assert.deepEqual(args.slice(0, 2), ["issue", "list"], `an unexpected gh call: ${args.join(" ")}`);
-    assert.equal(args[args.indexOf("--label") + 1], `class:${CLASS_ID}`);
+    assert.ok(!args.includes("--label") && !args.includes("--search"), `a search-backed list: ${args.join(" ")}`);
+    const asked = readsRowsByLabel(args);
+    assert.ok(asked !== null, `an unexpected gh call: ${args.join(" ")}`);
+    assert.equal(asked.label, `class:${CLASS_ID}`);
     if (listFails) throw new Error(listFails);
-    return JSON.stringify(rows);
+    return connectionOf(rows.filter((row) => row.state === asked.state));
   };
   return { run, calls };
 }

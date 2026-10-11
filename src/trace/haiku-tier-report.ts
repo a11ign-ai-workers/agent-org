@@ -23,6 +23,7 @@ import { eventsForRow, readStore, repriceEvents } from "./store.ts";
 import { defaultStore } from "./otel-receiver.ts";
 import { HAIKU_MODEL_ID, HAIKU_TIER_LABEL } from "../worker-profile.ts";
 import { REPO } from "../project-identity.ts";
+import { asListJson, readRowsSince, SINCE_PAGE_SIZE, type SinceRead } from "../ticket-port/rows-since.ts";
 
 export const MIN_RATE_ROWS = 8;
 export const WINDOW_HOURS = 72;
@@ -250,7 +251,7 @@ export function closedRowOf(issue: GhIssue): ClosedRow {
   return row;
 }
 
-/** `gh issue list --limit` is applied to the rows NEWEST CREATED first, and a search reaches at most this many (GitHub's own cap). A read that returns this many may have been cut. */
+/** The most closed rows UPDATED inside one window that the read holds (ten pages of a hundred). A window of more is refused, never cut: see `issuesClosedBetween`. */
 export const CLOSED_ROWS_LIMIT = 1000;
 const MS_PER_SECOND = 1000;
 
@@ -261,28 +262,29 @@ export function windowStartOf(events: TraceEvent[]): number | null {
   return starts.length === 0 ? null : Math.min(...starts);
 }
 
-/** A second-precision UTC timestamp, the form a `closed:` search qualifier takes. */
-const searchTime = (ms: number): string => new Date(Math.floor(ms / MS_PER_SECOND) * MS_PER_SECOND).toISOString().replace(/\.\d{3}Z$/, "Z");
-
-/** The `gh issue list` arguments for the rows CLOSED in `[from, to]`. `--limit` alone returns the newest CREATED, so a row opened before the cut and closed inside the window is
- * never read (agent-org#707); the `closed:` qualifier is what selects by closing time. */
-export function closedRowsArgs(from: number, to: number): string[] {
-  return ["issue", "list", "--repo", REPO, "--state", "closed", "--search", `closed:${searchTime(from)}..${searchTime(to)}`, "--limit", String(CLOSED_ROWS_LIMIT),
-    "--json", "number,labels,closedAt,closedByPullRequestsReferences"];
-}
-
 /** Runs `gh` and returns its stdout; injected so a test can stand in for it. */
 export type GhRunner = (args: string[]) => string;
 const ghOutput: GhRunner = (args) => execFileSync("gh", args, { encoding: "utf8" });
 
-/** Every row closed in `[from, to]`. A read that fills `CLOSED_ROWS_LIMIT` may have been cut, so its range is halved and read again; a one-second range that still fills it throws, rather than
- * report a count short by the rows it left behind. */
+/** The selection of one closed row, as `closedRowOrUnresolved` reads it: the labels, and the closing pull request with the repository's owner and name. */
+const CLOSED_ROW_SELECT = "number closedAt labels(first:50){nodes{name}} closedByPullRequestsReferences(first:10){nodes{number repository{name owner{login}}}}";
+
+/** The second a time falls in, in ms: GitHub's timestamps carry no more, and the window's ends are read to the second (the `closed:` qualifier this read replaced took seconds). */
+const toSecond = (ms: number): number => Math.floor(ms / MS_PER_SECOND) * MS_PER_SECOND;
+
+/**
+ * Every row closed in `[from, to]`, read as a CONNECTION (agent-org#5076: `--search closed:<from>..<to>` was a GitHub SEARCH, whose allowance the installation spent).
+ * A connection cannot filter by closing time, so the closed rows are read newest-UPDATED first back to `from` and each is kept by its own `closedAt`: a row closed at or after
+ * `from` was updated at or after it, so none is missed, and a row opened before the cut and closed inside the window is read (agent-org#707). A window of more than
+ * `CLOSED_ROWS_LIMIT` updated rows THROWS, rather than report a count short by the rows it left behind.
+ */
 function issuesClosedBetween(from: number, to: number, gh: GhRunner): GhIssue[] {
-  const issues = JSON.parse(gh(closedRowsArgs(from, to))) as GhIssue[];
-  if (issues.length < CLOSED_ROWS_LIMIT) return issues;
-  const mid = Math.floor((from + (to - from) / 2) / MS_PER_SECOND) * MS_PER_SECOND;
-  if (mid <= Math.floor(from / MS_PER_SECOND) * MS_PER_SECOND) throw new Error(`${CLOSED_ROWS_LIMIT} rows closed within one second at ${searchTime(from)}: the read cannot tell whether it is whole`);
-  return [...issuesClosedBetween(from, mid, gh), ...issuesClosedBetween(mid + MS_PER_SECOND, to, gh)];
+  const ask: SinceRead = { kind: "issues", states: ["CLOSED"], orderBy: "UPDATED_AT", repo: REPO, select: CLOSED_ROW_SELECT, since: new Date(toSecond(from)).toISOString(),
+    maxPages: CLOSED_ROWS_LIMIT / SINCE_PAGE_SIZE };
+  return readRowsSince({ ask, run: gh }).map(asListJson).filter((row) => {
+    const at = Date.parse(String(row.closedAt));
+    return at >= toSecond(from) && at <= toSecond(to);
+  }) as GhIssue[];
 }
 
 /** The closed rows with their labels and closing pull request, for the rows closed from `from` to `to`. */

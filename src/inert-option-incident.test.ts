@@ -12,6 +12,7 @@ import {
   CLOSED_ON_MERGE_NOT_OUTCOME, INERT_OPTION_MINUTES, inertOptionEvents, inertOptionIncidents, inertOptionSummary, type ConsumerFileReader, type MergedOptionPr,
 } from "./inert-option-incident.ts";
 import { buildReport, readInertOptions, renderReport } from "./org-retro.ts";
+import { readsRowsSince, sinceAnswer } from "./packaging/rows-by-label-fixtures.ts";
 
 const MIN = 60_000;
 const NOW = Date.parse("2026-10-11T12:00:00Z");
@@ -129,7 +130,8 @@ test("the summary is null for a read nobody made, and names the file, key, wante
 // ---- the live read, over fakes ----
 
 const declaration = { code: [{ repo: "a11ign/agent-org" }] } as any;
-const listing = (prs: any[]) => (args: string[]) => (args.includes("merged") ? prs : null);
+// #5076: the merged list is the `pullRequests` connection (it was `pr list --search merged:>=`); any other call is refused, as the old fake refused a non-merged list.
+const listing = (prs: any[]) => (args: string[]) => (readsRowsSince(args) !== null ? JSON.parse(sinceAnswer(args, prs.map((pr) => ({ updatedAt: pr.mergedAt, ...pr })))) : null);
 
 test("the live read reads the acceptance file AT THE MERGE COMMIT, never the default branch's current one, and reports through the retro", () => {
   const OID = "a".repeat(40);
