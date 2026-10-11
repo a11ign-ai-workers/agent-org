@@ -3472,14 +3472,16 @@ function amendedOrder({ row, session, markers }: { row: any; session: string; ma
  * its END (`readNewestComments`), in ONE batched call for all such rows and none on a tick where no row is at the cap. A row whose end could not be
  * read is LEFT OUT of the page: the claim-stall pass finds no claim record for it and SKIPS it, which costs a tick, where a release destroys a worktree's claim.
  *
+ * agent-org#747: `repo` is the tracker the claimed rows are of, which the capped re-read must ask too: `run` is already aimed at it, but the batched read names its
+ * repository in the query itself, and the ambient one would read the home tracker's rows of the same numbers.
  *
  * @returns `null` when refused, never `[]`
  */
-export function readClaimedRowComments(run: (args: string[]) => string = defaultRun): any[] | null {
+export function readClaimedRowComments(run: (args: string[]) => string = defaultRun, repo: string = repoNow()): any[] | null {
   try {
     const parsed = JSON.parse(run(["issue", "list", "--state", "open", "--label", CLAIM_LABEL,
       "--limit", "200", "--json", "number,comments"]));
-    return Array.isArray(parsed) ? withNewestCommentsOfCappedRows(parsed, run) : null;
+    return Array.isArray(parsed) ? withNewestCommentsOfCappedRows(parsed, run, repo) : null;
   } catch {
     return null;
   }
@@ -3492,10 +3494,10 @@ export const ISSUE_LIST_COMMENT_CAP = 100;
  * `rows` with each capped row's comments replaced by its LAST `ISSUE_LIST_COMMENT_CAP`, oldest first -- the shape `issue list` gives, so no reader changes --
  * and a capped row whose end could not be read dropped.
  */
-function withNewestCommentsOfCappedRows(rows: any[], run: (args: string[]) => string): any[] {
+function withNewestCommentsOfCappedRows(rows: any[], run: (args: string[]) => string, repo: string): any[] {
   const capped = rows.filter((row) => (row?.comments?.length ?? 0) >= ISSUE_LIST_COMMENT_CAP);
   if (capped.length === 0) return rows;
-  const newest = readNewestComments(capped.map((row) => Number(row.number)), run);
+  const newest = readNewestComments(capped.map((row) => Number(row.number)), run, repo);
   return rows.flatMap((row) => {
     if (!capped.includes(row)) return [row];
     const comments = newest?.get(Number(row.number));
@@ -3510,8 +3512,8 @@ function withNewestCommentsOfCappedRows(rows: any[], run: (args: string[]) => st
  * how many rows are capped), or `null` when the call was refused or its answer is not whole: `errors` beside `data` is refused too (#555), and a row the
  * answer does not carry is left out of the map, never filled with `[]`.
  */
-function readNewestComments(numbers: number[], run: (args: string[]) => string): Map<number, any[]> | null {
-  const [owner, name] = repoNow().split("/");
+function readNewestComments(numbers: number[], run: (args: string[]) => string, repo: string): Map<number, any[]> | null {
+  const [owner, name] = repo.split("/");
   const fields = numbers.map((n) => `r${n}: issue(number: ${Number(n)}) { number comments(last: ${ISSUE_LIST_COMMENT_CAP}) { nodes { id body createdAt author { login } } } }`);
   try {
     const parsed = JSON.parse(run(["api", "graphql", "-f", `query=query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${fields.join(" ")} } }`,
@@ -7457,11 +7459,31 @@ function reportClearingDrops({ openRows, prs, closings, claimFacts }: Parameters
  *
  * @param otherScopes the other repositories' lanes, already read this tick (#3566): their open lists are not asked again
  */
-function claimStallsWithFacts(rows: Parameters<typeof claimStallsNow>[0], claimedComments: Parameters<typeof claimStallsNow>[1], prs: Parameters<typeof claimStallsNow>[2], otherScopes: ReturnType<typeof readOtherScopes>): { claimStalls: ReturnType<typeof claimStallsNow>; claimFacts: import("./work-gate/claim-stall-tick.ts").ClaimFactsOfTick | null | undefined; } {
+export function claimStallsWithFacts(rows: Parameters<typeof claimStallsNow>[0], claimedComments: Parameters<typeof claimStallsNow>[1], prs: Parameters<typeof claimStallsNow>[2], otherScopes: ReturnType<typeof readOtherScopes>,
+  seams: Pick<NonNullable<Parameters<typeof claimStallsNow>[3]>, "tick" | "merged" | "elsewhere" | "log"> & { run?: (args: string[], repo?: string) => string; } = {}): { claimStalls: ReturnType<typeof claimStallsNow>; claimFacts: import("./work-gate/claim-stall-tick.ts").ClaimFactsOfTick | null | undefined; } {
   let claimFacts: import("./work-gate/claim-stall-tick.ts").ClaimFactsOfTick | null | undefined;
+  const { run, ...stubs } = seams;
+  // agent-org#747: `trackers` is every OTHER declared tracker's claimed rows, from the lanes already read, so the stall pass evaluates their holders too
   const claimStalls = claimStallsNow(rows, claimedComments, prs, { onFacts: (facts) => { claimFacts = facts; },
-    elsewhere: () => readElsewherePrs(undefined, undefined, otherScopes) });
+    elsewhere: () => readElsewherePrs(undefined, undefined, otherScopes), trackers: () => otherTrackerClaims(otherScopes, run), ...stubs });
   return { claimStalls, claimFacts };
+}
+
+/**
+ * agent-org#747: THE CLAIMED ROWS OF EVERY OTHER DECLARED TRACKER, which the stall pass evaluates beside the home tracker's. `rows` are the lanes' own open rows
+ * (already read this tick, and `null` for a refusal, which the pass says as unread); the comments of the claimed ones are one `issue list` of THAT tracker's
+ * repository, asked only for a tracker that holds a claimed row, so a quiet tracker costs nothing. A scope with no tracker of its own has no rows to claim.
+ *
+ * @param otherScopes the other repositories' lanes, already read this tick (#3566)
+ * @param [run] the `gh` seam, handed the repository to aim at as its second argument (a test stubs it)
+ */
+export function otherTrackerClaims(otherScopes: ReturnType<typeof readOtherScopes>, run: (args: string[], repo?: string) => string = defaultRun): import("./work-gate/claim-stall-tick.ts").TrackerClaims[] {
+  return otherScopes.flatMap(({ scope, read }) => {
+    if (scope.tracker === null) return [];
+    const { repo } = scope.tracker;
+    const claimed = read.openRows !== null && read.openRows.some((row) => labelsOf(row).includes(CLAIM_LABEL));
+    return [{ key: scope.key, repo, rows: read.openRows, claimedComments: claimed ? readClaimedRowComments((args) => run(args, repo), repo) : null }];
+  });
 }
 
 /**
