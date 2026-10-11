@@ -29,12 +29,13 @@
 // block) is today's composition, byte for byte. A `tier:<route>` label beats the provider for any configured route; a row nothing may lower is still never lowered.
 //
 // THE STATE IS STRUCTURED AND TRIMMED: the title, the Region's entries, the Acceptance's command text and the Done-when list. Never the row's body, which an agent wrote.
-import { readFileSync, realpathSync } from "node:fs";
+import { createHash } from "node:crypto";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { extractAcceptanceSection } from "./acceptance-commands.ts";
 import { FAILURE_LEDGER_FILE, recordFailures, type FailureEvent } from "./failure-ledger.ts";
 import { pathToFileURL } from "node:url";
-import { decide, decisionLogPathFrom, decisionsIn, readSwitches, recordOutcome, type Answer, type DecisionDeps, type Question, type ScoreLevels } from "./decision-provider.ts";
+import { decide, decisionLogPathFrom, decisionsIn, readSwitches, recordOutcome, type Answer, type Decision, type DecisionDeps, type Question, type ScoreLevels } from "./decision-provider.ts";
 import { stateEntryPath } from "./host-config.ts";
 import { LANE_PREFIX, NEEDS_CHAIRMAN_LABEL } from "./project-vocabulary.ts";
 import { extractLabeledSection, extractRegionSection, splitRegionEntry } from "./region-paths.ts";
@@ -507,8 +508,13 @@ function sizeWindow(routed: Routed, row: RouteRow, provided: Provided | null, de
  * route the fallback would have taken (`[fallback would be X]`), which the guard ({@link routeCostReading}) compares.
  */
 export async function routeEngineer(row: RouteRow, deps: RouteDeps): Promise<Routed> {
-  const { routed: chosen, provided } = await routeOnly(row, deps);
+  const { routed: chosen, provided, reused } = await routeOnly(row, deps);
   const routed = sizeWindow(chosen, row, provided, deps);
+  // A reused route was logged by the start that asked (#4990): this start spent nothing, so it writes one short line and no guard reads it.
+  if (reused === true) {
+    recordOutcome("model-routing", idOf(row), REUSED_LINE, deps);
+    return routed;
+  }
   const window = `${windowLabel(windowOf(routed))}${routed.windowWhy === undefined ? "" : ` (${routed.windowWhy})`}`;
   const wouldBe = routed.via === "jev" ? ` [fallback would be ${fallbackRoute(row)}]` : "";
   // `[fallback would be X]` stays LAST: `routeCostReading` anchors on it.
@@ -516,6 +522,62 @@ export async function routeEngineer(row: RouteRow, deps: RouteDeps): Promise<Rou
   recordOutcome("model-routing", idOf(row), `route ${routed.route} window ${window} via ${routed.via} (${routed.why})${picked}${wouldBe}`, deps, routed.reason);
   if (routed.via === "jev") guardRouteCost(deps);
   return routed;
+}
+
+/** The line a start writes when it reused a remembered provider answer (#4990): the route is the earlier start's line, and this start asked nobody. */
+export const REUSED_LINE = "route reused";
+
+/** One line per provider answer, beside the decision log: the key of what the provider was shown, and the answer it gave. */
+const ROUTE_MEMORY_FILE = "route-memory.jsonl";
+
+type Remembered = { key: string; decision: Decision };
+
+/**
+ * WHAT THE PROVIDER WAS SHOWN, hashed (#4990): the row's id, title, body and labels, and the questions as they were posted. A changed Region, label or guidance is another key and asks
+ * again; `routeState` is not hashed alone, because it clips the body and a change past the clip would then be read as the same row.
+ */
+const askedKey = (row: RouteRow, questions: unknown): string =>
+  createHash("sha256").update(JSON.stringify({ id: idOf(row), title: row.title, body: row.body, labels: [...row.labels], questions })).digest("hex");
+
+/** Where the memory is: beside the decision log, as the cost guard's ledger is. No log, no memory: a start with nowhere to remember asks every time. */
+const memoryPathOf = (deps: Pick<RouteDeps, "logPath">): string | undefined => (deps.logPath === undefined ? undefined : join(dirname(deps.logPath), ROUTE_MEMORY_FILE));
+
+/** The provider's answer remembered for this key, or `null`. A memory that cannot be read is `null` and says so: the start asks, which costs a call and never a route. */
+function rememberedDecision(key: string, deps: RouteDeps): Decision | null {
+  const path = memoryPathOf(deps);
+  if (path === undefined || !existsSync(path)) return null;
+  try {
+    const lines = String((deps.read ?? readFileSync)(path, "utf8")).split("\n").filter((line) => line !== "").map(jsonOrNothing) as (Partial<Remembered> | undefined)[];
+    return lines.filter((line) => line?.key === key).at(-1)?.decision ?? null;
+  } catch (err) {
+    (deps.diagnostic ?? printDiagnostic)(`agent-org: engineer-route: the route memory could not be read (${err instanceof Error ? err.message : String(err)}), so the route is asked again`);
+    return null;
+  }
+}
+
+/** Remembers a provider answer under its key. A memory that cannot be written costs the next start a call, so it is said, and never thrown. */
+function rememberDecision(key: string, decision: Decision, deps: RouteDeps): void {
+  const path = memoryPathOf(deps);
+  if (path === undefined) return;
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    appendFileSync(path, `${JSON.stringify({ key, decision } satisfies Remembered)}\n`);
+  } catch (err) {
+    (deps.diagnostic ?? printDiagnostic)(`agent-org: engineer-route: the route could not be remembered (${err instanceof Error ? err.message : String(err)}), so the next start asks again`);
+  }
+}
+
+/**
+ * THE PROVIDER ASKED ONCE PER ROW BODY (#4990). A start whose key matches a remembered provider answer reuses it and asks nothing. Any other start asks through `decide`, and only an
+ * answer the provider gave is remembered: a fallback is not, so the next start asks again. `reused` tells the caller the route is an earlier start's.
+ */
+async function decideOnce(row: RouteRow, questions: Readonly<Record<string, Question>>, deps: RouteDeps): Promise<{ decision: Decision; reused: boolean }> {
+  const key = askedKey(row, questions);
+  const remembered = rememberedDecision(key, deps);
+  if (remembered !== null) return { decision: remembered, reused: true };
+  const decision = await decide("model-routing", routeState(row), questions, { ...deps, id: idOf(row) });
+  if (decision.via === "jev") rememberDecision(key, decision, deps);
+  return { decision, reused: false };
 }
 
 /**
@@ -545,7 +607,7 @@ function jsonOrNothing(line: string): unknown {
   }
 }
 
-type Chosen = { routed: Routed; /** The provider's answers, when it gave any: the window reads them too. */ provided: Provided | null };
+type Chosen = { routed: Routed; /** The provider's answers, when it gave any: the window reads them too. */ provided: Provided | null; /** An earlier start's provider answer, reused (#4990). */ reused?: boolean };
 const alone = (routed: Routed): Chosen => ({ routed, provided: null });
 
 /** The project's `routing` block: the caller's, else the home declaration's. A declaration that cannot be read routes as before, and says so: the route lowers cost and must not cost a start. */
@@ -586,7 +648,7 @@ const atLeast = (route: Route, routes: readonly Route[]): Route => ROUTES.find((
 
 /** The `traits` composition, as it was before #4904 and byte for byte. */
 async function routeByTraits(row: RouteRow, routing: RoutingDeclaration, deps: RouteDeps): Promise<Chosen> {
-  const decision = await decide("model-routing", routeState(row), QUESTIONS, { ...deps, id: idOf(row) });
+  const { decision, reused } = await decideOnce(row, QUESTIONS, deps);
   if (decision.via === "none") return alone(withReason(profiled(fallbackRoute(row), "fallback", row, deps.haikuSwitchPath), decision.reason ?? "the provider gave no answer and no reason"));
   const composed = atLeast(composeRoute(readingsOf(decision.answers), { regionFiles: regionFileCount(row.body) }), routing.routes);
   const routed = profiled(composed, "jev", row, deps.haikuSwitchPath);
@@ -596,7 +658,7 @@ async function routeByTraits(row: RouteRow, routing: RoutingDeclaration, deps: R
   const why = `the provider's probabilities: ${readingLines(decision.answers).join(", ")}${refusedHaiku}`;
   const unread = (Object.keys(QUESTIONS) as (keyof Answers)[]).filter((name) => decision.answers[name].probabilities === undefined);
   const reason = unread.length === 0 ? {} : { reason: `probabilities not given (${unread.map((name) => `${name}: ${whyUnread(decision.answers[name])}`).join("; ")})` };
-  return { routed: { ...routed, why, ...reason }, provided: windowAnswers(decision.answers) };
+  return { routed: { ...routed, why, ...reason }, provided: windowAnswers(decision.answers), reused };
 }
 
 type Verdict = { route: Route; via: Via; because: Because; why: string };
@@ -638,7 +700,7 @@ async function routeByChoice(row: RouteRow, routing: RoutingDeclaration, deps: R
   const clock = deps.now ?? Date.now;
   const started = clock();
   const questions = { ...QUESTIONS, route: routeQuestion(routing, fallback) };
-  const decision = await decide("model-routing", routeState(row), questions, { ...deps, id: idOf(row) });
+  const { decision, reused } = await decideOnce(row, questions, deps);
   const ms = Math.max(0, clock() - started);
   if (decision.via === "none") {
     const routed = withReason(profiled(fallback, "fallback", row, deps.haikuSwitchPath), decision.reason ?? "the provider gave no answer and no reason");
@@ -649,7 +711,7 @@ async function routeByChoice(row: RouteRow, routing: RoutingDeclaration, deps: R
   const taken = takeVerdict(verdict, fallback, row, deps);
   const pick = verdict.because === "invalid-option" ? null : String(answer.value);
   const because = taken.route === verdict.route ? verdict.because : "fallback";
-  return { routed: { ...taken, picked: { pick, because, probabilities: answer.probabilities ?? null, ms } }, provided: windowAnswers(decision.answers) };
+  return { routed: { ...taken, picked: { pick, because, probabilities: answer.probabilities ?? null, ms } }, provided: windowAnswers(decision.answers), reused };
 }
 
 /** A `choice` decision's line always says why: the reasons that asked nobody (a label, a refusal, no provider) are the `via` itself, with nothing picked and nothing spent. */
