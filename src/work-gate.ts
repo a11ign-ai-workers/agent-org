@@ -8186,9 +8186,12 @@ function redPrsOf(prs: any[]): RedPr[] {
   })).filter((pr) => pr.checks.length > 0);
 }
 
-/** `ci-failure-class.ts`'s `sharedFailureTick`, on this tick's open PRs. Never throws. */
-function sharedFailuresNow(orders: any[], prs: any[]): any[] {
-  return sharedFailureTick(orders, { prs: redPrsOf(prs), run: defaultRun }).orders;
+/**
+ * `ci-failure-class.ts`'s `sharedFailureTick`, on this tick's open PRs. Never throws. #5098: exported with `run` and `nowMs` so a test reaches it from its real caller (a held order
+ * is released by a row's age and its closing, and neither can be driven without a clock).
+ */
+export function sharedFailuresNow(orders: any[], prs: any[], { run = defaultRun, nowMs }: { run?: typeof defaultRun; nowMs?: number } = {}): any[] {
+  return sharedFailureTick(orders, { prs: redPrsOf(prs), run, nowMs }).orders;
 }
 
 /**
