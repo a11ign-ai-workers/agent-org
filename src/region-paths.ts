@@ -518,6 +518,21 @@ export function regionCovers(entry: string, file: string) {
 
 const REGION_KEY_PREFIX = /^([a-z0-9][a-z0-9-]*):(?=[^:]*[/.])/;
 
+/** A Region path token, keyed or bare: the shape `unrecognisedRegionPaths` reads, plus the `key:` prefix it cannot see (#855). */
+const REGION_PATH_TOKEN = /(?:^|[\s`"'(])((?:[a-z0-9][a-z0-9-]*:)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)/g;
+
+/**
+ * #877: every path token of the body's `## Region` section as written, `key:` prefix kept -- the one reader of a keyed token, because
+ * `unrecognisedRegionPaths` and `declaredRegionFiles` cannot see one (a whitespace, backtick, quote or paren must precede the path).
+ * `[]` when the body has no Region section. Split each with {@link splitRegionEntry}.
+ * @param {string} body
+ * @returns {string[]}
+ */
+export function regionPathTokens(body: string): string[] {
+  const section = extractRegionSection(body);
+  return section === null ? [] : [...section.matchAll(REGION_PATH_TOKEN)].map((match) => match[1]);
+}
+
 /**
  * #2617: A Region entry as `{ key, path }` -- `key` the declared repository key it is prefixed with, `""` for a bare path, which
  * belongs to the project's first repository (the empty key, ADR 0040 decision 2). PURE, and the one place the prefix is read.

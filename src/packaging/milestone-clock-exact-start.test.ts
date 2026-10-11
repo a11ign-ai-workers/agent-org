@@ -20,9 +20,15 @@ const ago = (minutes: number) => NOW - minutes * MINUTE_MS;
 
 const PRIMARY = { number: 10, title: "v3 — Ready for a first outside adopter", dueOn: null, description: "THE PRIMARY GOAL.\n\nPrimary: yes" };
 
+// #4378: the project declares which repositories are `adopterFacing: false` (a11ign/a11ign at the pin), and from then on the primary milestone's clock counts a row only
+// when its Region names an adopter-facing path -- a row with no readable Region is "unknown", never counted, so the milestone reads as no open row. Every row here carries
+// one under `packages/cli/`, a releasable path of the project's own repository, so each is the adopter-facing row the clock was written to count.
+const ADOPTER_REGION = "## Region\n\n```\npackages/cli/src/example.ts\n```\n";
+const withRegion = (body: string) => (body === "" ? ADOPTER_REGION : `${body}\n\n${ADOPTER_REGION}`);
+
 type Row = Record<string, unknown> & { number: number };
 const row = (number: number, labels: string[], createdMinutesAgo: number): Row => ({
-  number, title: `row ${number}`, labels: labels.map((name) => ({ name })), body: "", milestone: PRIMARY, createdAt: iso(ago(createdMinutesAgo)), updatedAt: iso(ago(1)), blockedBy: { nodes: [] },
+  number, title: `row ${number}`, labels: labels.map((name) => ({ name })), body: withRegion(""), milestone: PRIMARY, createdAt: iso(ago(createdMinutesAgo)), updatedAt: iso(ago(1)), blockedBy: { nodes: [] },
 });
 /** Three unclaimed rows, the newest opened `idle` minutes ago. */
 const threeRows = (idle: number): Row[] => [row(101, ["parked", "lane:any"], idle + 300), row(102, ["backlog", "lane:any"], idle + 200), row(103, ["backlog", "lane:any"], idle)];
