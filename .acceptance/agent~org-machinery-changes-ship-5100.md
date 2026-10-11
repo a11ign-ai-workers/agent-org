@@ -1,0 +1,21 @@
+Org machinery changes ship behind a flag with a 1-hour live canary and auto-revert on named health signals, and every suppression the gate can see fails open in 15 minutes (a11ign/a11ign#5100). `src/org-health.ts`: `machineryCanaryTick`, `evaluateFlag`, `signalReading`, `expireSuppressions`, `parseCanaryOptions` and the `MACHINERY_SIGNALS`; `src/pr-open.ts`: `machineryRefusal`, `machineryDeclarationProblems`, wired into `main` before anything is sent; `src/work-gate.ts`: `machineryCanaryNow` (one call per tick), `incidentSuppressions`, `deferredWakeCount`.
+
+Acceptance:
+
+```bash
+bash -c 'cd ~/repos/agent-org-wt-5100 && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/machinery-canary.test.ts'
+```
+
+Closes a11ign/a11ign#5100
+
+Measured: the command above printed `VERDICT pass: 18 tests in 1 file` at this head, and the neighbouring suites that pin what this touches (`pr-open.test.ts`, `packaging/org-health.test.ts`, `packaging/work-gate.test.ts`, `org-health-release-failed.test.ts`, `gh-call-ratchet`, `gh-call-inventory`, `gh-call-ledger`, `work-gate-org-health-port.test.ts`, `host-config-events.test.ts`, `acceptance-prose.test.ts`, `acceptance-commands.test.ts`) printed `VERDICT pass: 849 tests in 11 files` together at this head. Writing the test found one defect in the first draft: a refused incident filing left `incident: "unfiled"` and the order to ceo printed `Incident: unfiled` instead of saying it is retried.
+
+Mutation: each run against this head and restored from a copy (byte-identical), each breaks its own tests: (1) the canary never degrades -- (1), (1b), (2c); (2) it always degrades -- (1), (1b), (2); (3) a suppression never expires -- (3), (3b), (3c); (4) it expires at once -- (3), (3b), (3c); (5) it expires even with a claimed row -- (3b) only; (6) `machineryRefusal` always null -- (4), (4c); (7) `main` does not call it -- (4c); (8) the `Revert:` line is not required -- (4); (9) an absent `wake-deferred` reads 0 -- (3d); (10) the gate drops the canary's orders -- the source pin only (`main` is not driven whole by any test).
+
+Outside-Region: `docs/gh-call-inventory.json` (generated, `node src/packaging/gh-call-inventory.ts`: one more `issue create`, the incident filer, and the `incident` label; `gh-call-baseline.json` is unchanged and `gh-call-ratchet.test.ts` passes); `src/org-health-release-failed.test.ts` (its pin of the call-site text now allows the capture of the same read, so the canary costs no second call); `.changeset/` is exempt.
+
+Not done: (a) done-when 2, the next machinery change shipping through this and quoting its two readings, cannot be done by the change that builds it. (b) Only ONE suppressor reports to `expireSuppressions` yet, the GitHub-incident hold of a red PR's order; the 15-minute expiry of the waker's deferrals (`wake.ts`), B4 shelving, and hold labels (`pr-hold-state.ts`) are outside this Region and filed as rows, and grouping already expires at 15 minutes (a11ign#5098). (c) `incidents-not-real` and `rate-limit-refusals` have no source in this tool and are recorded as `null` every tick, so a change that names one is told UNKNOWN, not that it passed. (d) Nothing sets a flag ON yet beyond `withMachineryFlag` on the state file: the setter command for a PR's merge is the next row, and until then the first machinery change turns its flag on by editing `machinery-canary.json`. (e) The daily retro's reading of held-then-released wakes is in `src/org-retro.ts`, outside this Region. (f) `gh-call-inventory.test.ts` and `machinery-canary.test.ts` needed `typescript` on the resolution path in this checkout, which has no top-level install; they pass with it.
+
+platform: the flag and the samples are one JSON file in the tick's state directory beside `wake-deferred` (the gate turns a flag off, so it cannot be a tracked file of the primary checkout); the incident is a GitHub issue labelled `incident`; the suppression times are read from that file's memo, nothing else is kept.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)

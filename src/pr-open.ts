@@ -70,6 +70,7 @@ import { gh as ghRead } from "./board-data.ts";
 import { VERIFY_STATE, readVerifyStamp, verifyRefusalLine } from "./verify-stamp.ts";
 import { QUEUED_EXIT, attachFollowUps } from "./gh-ledger.ts";
 import { claimedBranchReport, lookupClaimedRowsOfTrackers, trackerReposFor, type ClaimedRow, type ClaimedRows } from "./closes-mismatch-check.ts";
+import { STANDARD_MACHINERY_SIGNALS } from "./org-health.ts"; // a11ign#5100: the signals a `Health-signals:` line may name
 
 // The header's EXIT CODES, named because 1 and 3 ask a caller for opposite next steps.
 export const EXIT_NOTHING_SENT = 1;
@@ -1106,7 +1107,8 @@ export function main(argv: string[] = process.argv.slice(2),
   // #1344: BEFORE checkBody, because checkBody RUNS the Acceptance -- in this working tree, whatever --head says.
   // #2939: and a `Hand-fix:` line the ledger could not read, which it would silently not count. Pure, like the heads.
   const headRefused = headTreeRefusal(mode, rest, { git, crossRepo, branchHead }) ?? editTreeRefusal(mode, rest, { git, prHead })
-    ?? declarationRefusal(body) ?? draftRefusal(mode, rest, body) ?? authorshipRefusal(mode, rest, { git, login, lanes });
+    ?? declarationRefusal(body) ?? draftRefusal(mode, rest, body) ?? authorshipRefusal(mode, rest, { git, login, lanes })
+    ?? machineryRefusal(localDiffReading(rest, git), body); // a11ign#5100: after the cheap pure refusals, so the diff is read only for a body that survived them
   if (headRefused) {
     err(`${headRefused}\n`);
     return EXIT_NOTHING_SENT;
@@ -1465,6 +1467,68 @@ export function draftRefusal(mode: string, rest: string[], body: string): string
   return "pr-open: REFUSED -- `--draft` without a reason. An approved draft is a wait with no purpose, and the reviewer and the merge queue are "
     + "the gate, so open it READY (drop `--draft`). If it genuinely must not be reviewed yet, add a line to the body: "
     + "`Draft-because: <reason>`, for example `Draft-because: work in progress, do not review`. Nothing was sent (a11ign#5036).";
+}
+
+/**
+ * a11ign#5100: THE PATHS OF THE ORG'S OWN MACHINERY -- the gate, claims, the tick, waking, arming, releases and identities. A change to one ships behind a flag the gate can turn off
+ * (`org-health.ts`'s machinery canary), so the pull request must say which flag, what it could hurt and how to undo it. Tests, docs, acceptance records and changesets are not machinery:
+ * they change no behaviour a tick can show.
+ */
+export const MACHINERY_PATHS: readonly RegExp[] = Object.freeze([
+  /^src\/work-gate(\.ts|\/)/, /^src\/row-claim(\.ts|\/)/, /^src\/claim-[^/]+\.ts$/,
+  /^src\/work-tick[^/]*\.ts$/, /^host\/work-tick\./,
+  /^src\/(wake|wakes-per-row|prompt-session)\.ts$/,
+  /^src\/(arm-pr|auto-arm-sweep|pr-armed-state|pr-hold|pr-hold-state|merge-queue|merge-guard)\.ts$/, /^src\/merge-guard\//, /^\.github\/workflows\/auto-arm\.yml$/,
+  /^src\/release-[^/]+\.ts$/, /^src\/update-tool\.ts$/, /^\.github\/workflows\/release\.yml$/,
+  /^src\/host-config\.ts$/, /^host\/gh$/,
+]);
+
+const MACHINERY_EXEMPT = /\.test\.[cm]?[jt]sx?$|\.md$|^docs\/|^\.acceptance\/|^\.changeset\//;
+
+/** @returns the files of a diff that are machinery */
+export const machineryFilesIn = (files: readonly string[]): string[] => files.filter((file) => !MACHINERY_EXEMPT.test(file) && MACHINERY_PATHS.some((path) => path.test(file)));
+
+const MACHINERY_MAX_SIGNALS = 3;
+const FLAG_LINE = /^[ \t]*Flag:[ \t]*(.*)$/m;
+const SIGNALS_LINE = /^[ \t]*Health-signals:[ \t]*(.*)$/m;
+const REVERT_LINE = /^[ \t]*Revert:[ \t]*(.*)$/m;
+const NONE_WITH_REASON = /^none[ \t]*(?:—|--)[ \t]*\S.*$/;
+
+/**
+ * a11ign#5100: THE THREE LINES A MACHINERY CHANGE NAMES. `Flag: <name>` (the key it reads in `machinery-canary.json`; `Flag: none -- <reason>` for a change that cannot be gated, such as a fix whose OLD
+ * behaviour is the defect, which a reviewer may argue with as with `Closes: none`), `Health-signals:` one to three of the gate's standard signals (the ones it records, so a promise it cannot watch is
+ * refused), and `Revert:` how to undo it. PURE. @returns what is wrong, one string each; empty when the declaration is whole
+ */
+export function machineryDeclarationProblems(body: string): string[] {
+  const problems: string[] = [];
+  const flag = FLAG_LINE.exec(body)?.[1].trim() ?? "";
+  if (flag === "") problems.push("`Flag: <name>` is missing (or `Flag: none -- <reason>`)");
+  else if (/^none\b/i.test(flag) && !NONE_WITH_REASON.test(flag)) problems.push("`Flag: none` needs its reason: `Flag: none -- <reason>`");
+  const named = (SIGNALS_LINE.exec(body)?.[1] ?? "").split(",").map((signal) => signal.trim()).filter(Boolean);
+  if (named.length === 0) problems.push(`\`Health-signals: <one to ${MACHINERY_MAX_SIGNALS} of the standard signals>\` is missing`);
+  if (named.length > MACHINERY_MAX_SIGNALS) problems.push(`\`Health-signals:\` names ${named.length}; name the ${MACHINERY_MAX_SIGNALS} it could hurt most`);
+  const foreign = named.filter((signal) => !STANDARD_MACHINERY_SIGNALS.includes(signal));
+  if (foreign.length > 0) problems.push(`\`Health-signals:\` names ${foreign.map((signal) => `\`${signal}\``).join(", ")}, which the gate does not record (${STANDARD_MACHINERY_SIGNALS.join(", ")})`);
+  if ((REVERT_LINE.exec(body)?.[1].trim() ?? "").length < 3) problems.push("`Revert: <how it is undone>` is missing");
+  return problems;
+}
+
+/**
+ * a11ign#5100: A PULL REQUEST THAT TOUCHES THE MACHINERY IS REFUSED WITHOUT ITS FLAG, SIGNALS AND REVERT, before anything is sent. `null` is "go on": no machinery in the diff, or a whole declaration.
+ * AN UNREADABLE DIFF IS `null` TOO, and not a refusal: `checkBody`'s own read of it says `UNCHECKED` loudly, and a git hiccup is not the author's to fix (the rule `localDiffReading` documents).
+ * @param {import("./acceptance-commands.ts").DiffReading} diff @param {string} body
+ * @returns {string | null}
+ */
+export function machineryRefusal(diff: import("./acceptance-commands.ts").DiffReading, body: string): string | null {
+  if (!diff.ok) return null;
+  const touched = machineryFilesIn(diff.files);
+  if (touched.length === 0) return null;
+  const problems = machineryDeclarationProblems(body);
+  if (problems.length === 0) return null;
+  return `pr-open: REFUSED -- this change touches the org's machinery (${touched.slice(0, 3).join(", ")}${touched.length > 3 ? `, and ${touched.length - 3} more` : ""}), which ships behind a flag the gate `
+    + "watches for an hour and turns off if a named signal degrades (a11ign#5100). Four of the chairman's 2026-10-11 regressions were fixes green in tests and broken live. Missing:\n"
+    + `${problems.map((problem) => `  - ${problem}`).join("\n")}\n`
+    + "Add them to the body as lines of their own:\n  Flag: <name>\n  Health-signals: claims-refused, wakes-held\n  Revert: <turn the flag off, or revert this PR>\nNothing was sent.";
 }
 
 /**

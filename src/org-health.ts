@@ -52,14 +52,14 @@
 // A LEAF, RELATIVE IMPORTS ONLY, like `repeating-lines.ts`: `work-gate.ts` imports this, and it runs before any `pnpm install`/build.
 import { canStrip, describeBad, type NodeStripFact } from "./node-strips-types.ts";
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, readdirSync, statSync } from "node:fs";
+import { existsSync, mkdirSync, readFileSync, readdirSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { dirname, join, resolve } from "node:path";
 import { homedir } from "node:os";
 import { createHash } from "node:crypto";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./lib/git-env.ts";
 import { isAppLogin, spenderPhraseFor } from "./gh-ledger.ts";
-import { GITHUB_ROLES, homeHostConfig, roleIdentity, stateEntryPath, type HostConfig } from "./host-config.ts";
+import { GITHUB_ROLES, homeHostConfig, hostConfigPath, roleIdentity, stateEntryPath, type HostConfig } from "./host-config.ts";
 // A LEAF too (node builtins only): the append-only log of events that never become a closed row, where a refused claim is written and read back.
 import { FAILURE_LEDGER_FILE, parseFailureLedger } from "./failure-ledger.ts";
 // A LEAF (`claim-labels.ts` imports nothing), so the label is read from where it is declared, as `repeating-lines.ts` does.
@@ -1781,6 +1781,293 @@ export function orgHealthTick(facts: Parameters<typeof orgHealthReadings>[0], { 
     return orgHealthOrders(readings);
   } catch (err) {
     log(`org-health: could not run (${String((err as any)?.message ?? err).split("\n")[0].slice(0, MAX_REASON_CHARS)}) -- no order this tick.\n`);
+    return [];
+  }
+}
+
+// =====================================================================================================================
+// MACHINERY CANARY (a11ign#5100): A CHANGE TO THE ORG'S OWN MACHINERY SHIPS BEHIND A FLAG, AND THE GATE WATCHES THE HOUR AFTER IT TURNS ON.
+//
+// Four regressions on 2026-10-11 were fixes, each green in its tests and broken live, and each found by the chairman: the verify row ran 24 hours after the merge and nothing watched the first hour.
+//
+//   THE FLAG: a named record in `machinery-canary.json` (the state directory), DEFAULT OFF. A change that touches the gate, claims, the tick, waking, arming, releases or identities reads `machineryFlagOn`
+//   and keeps its old behaviour while it is off (`pr-open.ts` refuses such a pull request without a `Flag:`, `Health-signals:` and `Revert:` line). It is state beside the tick's other state rather than a key of a
+//   tracked file because THE GATE TURNS IT OFF, and a write to a file of the primary checkout would trip `primary-not-at-main` and could not land past the merge queue.
+//   THE SIGNALS: each tick appends ONE SAMPLE of the standard signals (`MACHINERY_SIGNALS`); a signal the tick could not read is `null`, which is not zero and is never counted as clean.
+//   THE CANARY: the tick a flag is read `on` with no `onAt` starts it. The hour BEFORE is read from the samples already recorded; the hour AFTER is read as it fills. A signal whose after-count reaches
+//   `degradeFactor` times its before-rate (and `minRise` more) turns the flag OFF, files an incident carrying both readings, and orders `ceo`. Counts only grow, so a degraded reading half way through the hour is
+//   degraded at its end, and the revert need not wait for the hour.
+//   THE EXPIRY (`expireSuppressions`): a suppression that keeps an order from its holder for `suppressionMinutes` with no claimed row working its reason hands the holder the reason and the original order.
+// =====================================================================================================================
+
+/** The signals every machinery change may name (the row's table). `Health-signals:` is checked against this list, so a signal the gate does not record cannot be promised. */
+export const MACHINERY_SIGNALS = Object.freeze({
+  CLAIMS_REFUSED: "claims-refused",
+  BLIND_TICKS: "blind-ticks",
+  WAKES_HELD: "wakes-held",
+  APPROVED_UNQUEUED: "approved-unqueued",
+  INCIDENTS_NOT_REAL: "incidents-not-real",
+  RATE_LIMIT_REFUSALS: "rate-limit-refusals",
+  RELEASE_FAILURES: "release-failures",
+});
+export const STANDARD_MACHINERY_SIGNALS: readonly string[] = Object.freeze(Object.values(MACHINERY_SIGNALS));
+/** The signals no source in this tool reads yet: recorded as `null` every tick, so a change that names one is told it is UNKNOWN and not that it passed. */
+export const UNSOURCED_MACHINERY_SIGNALS: readonly string[] = Object.freeze([MACHINERY_SIGNALS.INCIDENTS_NOT_REAL, MACHINERY_SIGNALS.RATE_LIMIT_REFUSALS]);
+
+export const CANARY_STATE_FILE = "machinery-canary.json";
+/** The key of `host.json` that carries the options; read as raw JSON so a host that never set it is unchanged. */
+export const CANARY_OPTIONS_KEY = "machineryCanary";
+/** How long a green, approved pull request may stand unqueued before it counts toward `approved-unqueued` (the row's figure). */
+export const UNQUEUED_MINUTES = 15;
+/** How long a canary's revert order is repeated, as every org-health order is: two hours, then it is the incident that carries it. */
+const CANARY_ORDER_HOURS = 2;
+/** The samples kept: the hour before and the hour after, and one more hour for a flag turned on late in a tick. */
+const SAMPLE_WINDOWS_KEPT = 3;
+
+export type CanaryOptions = { enabled: boolean, windowMinutes: number, degradeFactor: number, minRise: number, suppressionMinutes: number };
+/** ON BY DEFAULT, because it protects any adopter (the row, change 4). */
+export const DEFAULT_CANARY_OPTIONS: Readonly<CanaryOptions> = Object.freeze({ enabled: true, windowMinutes: 60, degradeFactor: 2, minRise: 3, suppressionMinutes: 15 });
+const OPTION_BOUNDS: Readonly<Record<string, readonly [number, number]>> = Object.freeze({ windowMinutes: [5, 1440], degradeFactor: [1, 100], minRise: [1, 100000], suppressionMinutes: [1, 1440] });
+
+/**
+ * The options of a `host.json`'s text: `machineryCanary: { enabled?, windowMinutes?, degradeFactor?, minRise?, suppressionMinutes? }`. A key that is not one of them, or a value out of its bounds, is a
+ * `problem` and the DEFAULTS stand, because a mistyped threshold ignored in silence is a canary that never bites (`project-config.ts`'s rule for `routing`). Absent is the defaults, with no problem.
+ */
+export function parseCanaryOptions(text: string | null): { options: Readonly<CanaryOptions>, problem: string | null } {
+  const fallback = (problem: string | null) => ({ options: DEFAULT_CANARY_OPTIONS, problem });
+  if (text === null) return fallback(null);
+  let block: unknown;
+  try {
+    block = (JSON.parse(text) as Record<string, unknown>)[CANARY_OPTIONS_KEY];
+  } catch (error) {
+    return fallback(`host.json is not JSON (${String((error as Error).message).slice(0, MAX_REASON_CHARS)})`);
+  }
+  if (block === undefined) return fallback(null);
+  if (typeof block !== "object" || block === null || Array.isArray(block)) return fallback(`${CANARY_OPTIONS_KEY} is not an object`);
+  const given = block as Record<string, unknown>;
+  const unknownKey = Object.keys(given).find((key) => key !== "enabled" && OPTION_BOUNDS[key] === undefined);
+  if (unknownKey !== undefined) return fallback(`${CANARY_OPTIONS_KEY}.${unknownKey} is not an option (${["enabled", ...Object.keys(OPTION_BOUNDS)].join(", ")})`);
+  if (given.enabled !== undefined && typeof given.enabled !== "boolean") return fallback(`${CANARY_OPTIONS_KEY}.enabled is not true or false`);
+  const outOfBounds = Object.keys(OPTION_BOUNDS).find((key) => given[key] !== undefined && !(typeof given[key] === "number" && given[key] >= OPTION_BOUNDS[key][0] && given[key] <= OPTION_BOUNDS[key][1]));
+  if (outOfBounds !== undefined) return fallback(`${CANARY_OPTIONS_KEY}.${outOfBounds} must be a number from ${OPTION_BOUNDS[outOfBounds][0]} to ${OPTION_BOUNDS[outOfBounds][1]}`);
+  return { options: { ...DEFAULT_CANARY_OPTIONS, ...given } as CanaryOptions, problem: null };
+}
+
+/** @returns the options of the host's `host.json`, and the problem with them if there is one; an unreadable file is the defaults and says so. */
+export function readCanaryOptions({ path = hostConfigPath(), read = (file) => readFileSync(file, "utf8") }: { path?: string; read?: (path: string) => string; } = {}): { options: Readonly<CanaryOptions>, problem: string | null } {
+  try {
+    return parseCanaryOptions(read(path));
+  } catch (error) {
+    return { options: DEFAULT_CANARY_OPTIONS, problem: `${path} could not be read (${String((error as Error).message).split("\n")[0].slice(0, MAX_REASON_CHARS)})` };
+  }
+}
+
+/** One tick's reading of each signal over the span `from`..`to`; `null` is "not read", never zero. */
+export type CanarySample = { from: number, to: number, values: Record<string, number | null> };
+export type SignalReading = { signal: string, status: "degraded" | "ok" | "unknown", before: number | null, after: number, detail: string };
+export type FlagRecord = {
+  on: boolean, signals: string[], onAt: number | null, verdict: "watching" | "passed" | "reverted" | null, decidedAt: number | null, readings: SignalReading[], incident: string | null,
+};
+export type CanaryState = { flags: Record<string, FlagRecord>, samples: CanarySample[], memo: Record<string, number> };
+
+export const emptyCanaryState = (): CanaryState => ({ flags: {}, samples: [], memo: {} });
+
+/** @returns the state of a file's text; an absent file is empty, and one that is not the shape THROWS (a state read wrong would forget a flag that is on). */
+export function parseCanaryState(text: string | null): CanaryState {
+  if (text === null || text.trim() === "") return emptyCanaryState();
+  const raw = JSON.parse(text) as Partial<CanaryState>;
+  if (typeof raw !== "object" || raw === null || typeof raw.flags !== "object" || !Array.isArray(raw.samples)) throw new Error(`${CANARY_STATE_FILE} is not { flags, samples, memo }`);
+  return { flags: raw.flags ?? {}, samples: raw.samples, memo: raw.memo ?? {} };
+}
+
+/** @returns whether a flag is ON: a flag nobody turned on, or one the gate turned off, is OFF. Absence of the record is OFF, so a change reads `false` until it is switched on. */
+export const machineryFlagOn = (state: CanaryState, name: string): boolean => state.flags[name]?.on === true;
+
+/** Turn a flag on or off. Turning it ON starts a fresh canary (`onAt` is set by the gate's next tick, which is when the hour begins). PURE. */
+export function withMachineryFlag(state: CanaryState, { name, on, signals = STANDARD_MACHINERY_SIGNALS }: { name: string; on: boolean; signals?: readonly string[]; }): CanaryState {
+  const record: FlagRecord = { on, signals: [...signals], onAt: null, verdict: null, decidedAt: null, readings: [], incident: null };
+  return { ...state, flags: { ...state.flags, [name]: record } };
+}
+
+/** The recorded counts of `signal` over `(lo, hi]`, by the sample's end, and the span of that window the samples actually cover. */
+function windowOf(samples: CanarySample[], signal: string, [lo, hi]: [number, number]): { sum: number; coveredMs: number; } {
+  const read = samples.filter((sample) => sample.to > lo && sample.to <= hi && typeof sample.values[signal] === "number");
+  return {
+    sum: read.reduce((total, sample) => total + (sample.values[signal] as number), 0),
+    coveredMs: read.reduce((total, sample) => total + Math.min(sample.to, hi) - Math.max(sample.from, lo), 0),
+  };
+}
+
+const oneDecimal = (n: number): number => Math.round(n * 10) / 10;
+
+/**
+ * ONE SIGNAL, BEFORE AND AFTER. `before` is the count per window of the hour before `onAt`, scaled by how much of that hour was recorded (and UNKNOWN when less than half of it was: a rate from ten minutes
+ * is not a baseline). DEGRADED when the after-count so far reaches `degradeFactor` times that and `minRise` more. Because the count only grows, degraded at minute 20 is degraded at minute 60.
+ * A signal read as `null` for the whole of a window is UNKNOWN, which is neither degraded nor clean.
+ */
+export function signalReading({ signal, samples, onAt, now, options }: { signal: string; samples: CanarySample[]; onAt: number; now: number; options: CanaryOptions; }): SignalReading {
+  const windowMs = options.windowMinutes * MS_PER_MINUTE;
+  const before = windowOf(samples, signal, [onAt - windowMs, onAt]);
+  const after = windowOf(samples, signal, [onAt, now]);
+  const minutes = (ms: number) => Math.round(ms / MS_PER_MINUTE);
+  if (before.coveredMs < windowMs / 2) {
+    return { signal, status: "unknown", before: null, after: after.sum, detail: `${minutes(before.coveredMs)} of the ${options.windowMinutes} min before was recorded, which is not a baseline` };
+  }
+  const perWindow = (before.sum * windowMs) / before.coveredMs;
+  const limit = Math.max(perWindow * options.degradeFactor, perWindow + options.minRise);
+  const status = after.sum >= limit ? "degraded" : now - onAt >= windowMs && after.coveredMs === 0 ? "unknown" : "ok";
+  const why = status === "degraded" ? `reached ${oneDecimal(limit)} (${options.degradeFactor}x and +${options.minRise})` : status === "unknown" ? "was not read in the hour after" : `stayed under ${oneDecimal(limit)}`;
+  return { signal, status, before: oneDecimal(perWindow), after: after.sum, detail: `${oneDecimal(perWindow)} in the hour before, ${after.sum} since (${minutes(now - onAt)} min): ${why}` };
+}
+
+/**
+ * ONE FLAG'S NEXT RECORD. ON with no `onAt` starts the hour; WATCHING is read against the samples and ends REVERTED (turned off, readings kept) or, an hour on with nothing degraded, PASSED. A flag somebody
+ * turned off while it was watched is simply not watched any more. PURE.
+ */
+export function evaluateFlag({ record, samples, now, options }: { record: FlagRecord; samples: CanarySample[]; now: number; options: CanaryOptions; }): FlagRecord {
+  if (!record.on) return record.verdict === "watching" ? { ...record, onAt: null, verdict: null } : record;
+  if (record.verdict === "passed") return record;
+  const started = record.onAt === null ? { ...record, onAt: now, verdict: "watching" as const } : record;
+  const onAt = started.onAt as number;
+  const readings = started.signals.map((signal) => signalReading({ signal, samples, onAt, now, options }));
+  if (readings.some((reading) => reading.status === "degraded")) return { ...started, on: false, verdict: "reverted", decidedAt: now, readings };
+  if (now - onAt >= options.windowMinutes * MS_PER_MINUTE) return { ...started, verdict: "passed", decidedAt: now, readings };
+  return { ...started, verdict: "watching", readings };
+}
+
+/** What a tick read: each is `null` when that read was refused or not made, which a sample records as unread. `unarmed` are the numbers of the green, approved pull requests not in the queue. */
+export type CanaryFacts = {
+  claimRefusals: ClaimRefusal[] | null; unread: string[] | null; deferredWakes: number | null; unarmed: number[] | null; releaseRuns: ReleaseRuns | null;
+};
+
+/** The standard signals of one tick over `(since, now]`. A pull request counts as unqueued once the memo has seen it unarmed for `UNQUEUED_MINUTES`; the memo is returned with the departed dropped. */
+export function machineryValues({ facts, since, now, memo }: { facts: CanaryFacts; since: number; now: number; memo: Record<string, number>; }): { values: Record<string, number | null>; memo: Record<string, number>; } {
+  const inSpan = (at: number) => at > since && at <= now;
+  const failedRuns = facts.releaseRuns?.runs.filter((run) => run.conclusion === "failure" && inSpan(Date.parse(run.updatedAt))).length ?? null;
+  const kept = Object.fromEntries(Object.entries(memo).filter(([key]) => !key.startsWith("unarmed:")));
+  const seen = Object.fromEntries((facts.unarmed ?? []).map((pr) => [`unarmed:${pr}`, memo[`unarmed:${pr}`] ?? now]));
+  const unqueued = facts.unarmed === null ? null : Object.values(seen).filter((first) => now - first >= UNQUEUED_MINUTES * MS_PER_MINUTE).length;
+  return {
+    memo: { ...kept, ...seen },
+    values: {
+      [MACHINERY_SIGNALS.CLAIMS_REFUSED]: facts.claimRefusals === null ? null : facts.claimRefusals.filter((refusal) => inSpan(refusal.at)).length,
+      [MACHINERY_SIGNALS.BLIND_TICKS]: facts.unread === null ? null : facts.unread.length > 0 ? 1 : 0,
+      [MACHINERY_SIGNALS.WAKES_HELD]: facts.deferredWakes,
+      [MACHINERY_SIGNALS.APPROVED_UNQUEUED]: unqueued,
+      [MACHINERY_SIGNALS.INCIDENTS_NOT_REAL]: null,
+      [MACHINERY_SIGNALS.RATE_LIMIT_REFUSALS]: null,
+      [MACHINERY_SIGNALS.RELEASE_FAILURES]: failedRuns,
+    },
+  };
+}
+
+/** A flag's two readings, one line a signal: what the incident row and the order to `ceo` both carry. */
+export const readingsText = (readings: SignalReading[]): string => readings.map((reading) => `- \`${reading.signal}\` ${reading.status.toUpperCase()}: ${reading.detail}`).join("\n");
+
+export function canaryIncidentText({ name, record }: { name: string; record: FlagRecord; }): { title: string; body: string; } {
+  return {
+    title: `Machinery flag \`${name}\` was turned off by the canary: ${record.readings.filter((r) => r.status === "degraded").map((r) => r.signal).join(", ")} degraded`,
+    body: `The gate turned \`${name}\` OFF at ${isoOf(record.decidedAt as number)}, ${Math.round(((record.decidedAt as number) - (record.onAt as number)) / MS_PER_MINUTE)} minutes after it was turned on at ${isoOf(record.onAt as number)}.\n\n`
+      + `BOTH READINGS (the hour before, then what has been counted since):\n${readingsText(record.readings)}\n\nThe change stays in the code and is OFF. The flag is turned back on by whoever fixed the cause, `
+      + "which starts a new hour; the pull request that shipped it names its revert. The 24-hour verify row stays as the second reading.\n",
+  };
+}
+
+/** The order to `ceo` for a flag the gate turned off. Keyed on the flag and the tick it was turned on, so a second revert of the same flag is a second order. */
+export function canaryOrder({ name, record }: { name: string; record: FlagRecord; }) {
+  return {
+    session: OFFERED_TO, cause: "machinery-canary", subject: name, discriminator: `${name}@${record.onAt}`, causeKey: `${OFFERED_TO}/machinery-canary/${name}@${record.onAt}`,
+    prompt: `MACHINERY CANARY: THE GATE TURNED \`${name}\` OFF at ${isoOf(record.decidedAt as number)}. A named health signal degraded in the hour after the flag was turned on:\n${readingsText(record.readings)}\n`
+      + `${record.incident === null || record.incident === "unfiled" ? "The incident row could not be filed this tick and is retried." : `Incident: ${record.incident}`}\n`
+      + "Nothing here is a decision yet: the flag is off, so the machinery is as it was before the change. Read both readings, then fix the cause forward or leave the change off, and say on #928 which. "
+      + "It holds for two hours unchanged.",
+  };
+}
+
+/** One thing that keeps an order from its holder: a hold, deferral, shelving, grouping or a hold label. `order` is the one that was kept back, when the suppressor still has it. */
+export type Suppression = { key: string, kind: "hold" | "deferral" | "shelving" | "grouping" | "hold-label", holder: string, reason: string, order: Record<string, any> | null, claimedRow: number | null };
+
+const HELD_PREFIX = "held:";
+
+/**
+ * EVERY SUPPRESSION FAILS OPEN. A suppression first seen `minutes` ago with NO CLAIMED ROW working its reason is released: the holder is ordered with the reason and the ORIGINAL ORDER. A suppression with a
+ * claimed row is the org working it and is left, however long it stands. The memo is returned holding exactly the suppressions seen this tick, so one that ended starts its clock again if it comes back. PURE.
+ * @returns `released` orders to put with the tick's own, and the `memo` to keep
+ */
+export function expireSuppressions({ suppressed, memo, now, minutes }: { suppressed: Suppression[]; memo: Record<string, number>; now: number; minutes: number; }): { released: Record<string, any>[]; memo: Record<string, number>; } {
+  const kept = Object.fromEntries(Object.entries(memo).filter(([key]) => !key.startsWith(HELD_PREFIX)));
+  const seen = Object.fromEntries(suppressed.map((entry) => [`${HELD_PREFIX}${entry.key}`, memo[`${HELD_PREFIX}${entry.key}`] ?? now]));
+  const due = suppressed.filter((entry) => entry.claimedRow === null && now - seen[`${HELD_PREFIX}${entry.key}`] >= minutes * MS_PER_MINUTE);
+  const released = due.map((entry) => {
+    const since = seen[`${HELD_PREFIX}${entry.key}`];
+    const said = `A ${entry.kind.toUpperCase()} KEPT THIS FROM YOU FOR ${Math.round((now - since) / MS_PER_MINUTE)} MINUTES and nothing claimed was working its reason: ${entry.reason}. THE ORIGINAL ORDER FOLLOWS.\n`;
+    if (entry.order !== null) return { ...entry.order, prompt: `${said}${entry.order.prompt ?? ""}` };
+    return { session: entry.holder, cause: "suppression-expired", subject: entry.key, discriminator: entry.key, causeKey: `${entry.holder}/suppression-expired/${entry.key}`, prompt: said };
+  });
+  return { released, memo: { ...kept, ...seen } };
+}
+
+/** The tick's ports: file reads and writes, the incident filer and a way to say something. Each is replaced by a table in a test. */
+export type CanaryIo = { read: (path: string) => string | null; write: (path: string, text: string) => void; fileIncident: (title: string, body: string) => string; log: (line: string) => void };
+
+/** @returns the IO of a real tick: an absent file is `null`, a write goes through a rename so a killed tick leaves the old file whole. */
+export function realCanaryIo({ fileIncident, log = (line) => process.stderr.write(line) }: { fileIncident: CanaryIo["fileIncident"]; log?: CanaryIo["log"]; }): CanaryIo {
+  return {
+    fileIncident, log,
+    read: (path) => (existsSync(path) ? readFileSync(path, "utf8") : null),
+    write: (path, text) => {
+      mkdirSync(dirname(path), { recursive: true });
+      writeFileSync(`${path}.tmp`, text);
+      renameSync(`${path}.tmp`, path);
+    },
+  };
+}
+
+/** The incident of a flag the gate turned off, once: `null` when it is filed already, the reference when it is filed now, `"unfiled"` when the filer refused (retried next tick). */
+function filedIncident({ name, record, io }: { name: string; record: FlagRecord; io: CanaryIo; }): string | null {
+  if (record.verdict !== "reverted" || (record.incident !== null && record.incident !== "unfiled")) return null;
+  try {
+    const { title, body } = canaryIncidentText({ name, record });
+    return io.fileIncident(title, body).trim() || "unfiled";
+  } catch (error) {
+    io.log(`machinery-canary: could not file the incident for ${name} (${String((error as Error).message).split("\n")[0].slice(0, MAX_REASON_CHARS)}); the next tick retries.\n`);
+    return "unfiled";
+  }
+}
+
+/** @returns the state with this tick's sample appended and every flag evaluated, and the flags that moved to a verdict this tick. */
+function advance({ state, facts, now, options }: { state: CanaryState; facts: CanaryFacts; now: number; options: CanaryOptions; }): CanaryState {
+  const windowMs = options.windowMinutes * MS_PER_MINUTE;
+  const since = state.samples.at(-1)?.to ?? now - windowMs; // the first sample backfills one window of the events it can date
+  const { values, memo } = machineryValues({ facts, since, now, memo: state.memo });
+  const samples = [...state.samples, { from: since, to: now, values }].filter((sample) => sample.to > now - SAMPLE_WINDOWS_KEPT * windowMs);
+  const flags = Object.fromEntries(Object.entries(state.flags).map(([name, record]) => [name, evaluateFlag({ record, samples, now, options })]));
+  return { flags, samples, memo };
+}
+
+/**
+ * THE GATE'S ONE CALL, PER TICK: sample the signals, evaluate every flag, file the incident of a revert, expire the suppressions, and return the orders. NEVER THROWS -- a canary that can crash the gate
+ * stops every order behind it (`orgHealthTick`'s rule). A state file that cannot be read stops the canary this tick and says so; a flag is OFF unless the state says on, so the failure is the safe one.
+ * @param tick `suppressed` is what the tick's own suppressors report they are keeping back
+ */
+export function machineryCanaryTick({ now, facts, suppressed = [], dir, options, io }: {
+  now: number; facts: CanaryFacts; suppressed?: Suppression[]; dir: string; options: CanaryOptions; io: CanaryIo;
+}): Record<string, any>[] {
+  if (!options.enabled) return [];
+  const path = `${dir}/${CANARY_STATE_FILE}`;
+  try {
+    const before = parseCanaryState(io.read(path));
+    const moved = advance({ state: before, facts, now, options });
+    const flags = Object.fromEntries(Object.entries(moved.flags).map(([name, record]) => {
+      const incident = filedIncident({ name, record, io });
+      return [name, incident === null ? record : { ...record, incident }];
+    }));
+    const { released, memo } = expireSuppressions({ suppressed, memo: moved.memo, now, minutes: options.suppressionMinutes });
+    io.write(path, `${JSON.stringify({ flags, samples: moved.samples, memo }, null, 1)}\n`);
+    const standing = Object.entries(flags).filter(([, record]) => record.verdict === "reverted" && now - (record.decidedAt as number) < CANARY_ORDER_HOURS * MS_PER_HOUR);
+    return [...standing.map(([name, record]) => canaryOrder({ name, record })), ...released];
+  } catch (error) {
+    io.log(`machinery-canary: could not run (${String((error as Error).message).split("\n")[0].slice(0, MAX_REASON_CHARS)}) -- nothing is sampled this tick, and every flag reads as it was set.\n`);
     return [];
   }
 }
