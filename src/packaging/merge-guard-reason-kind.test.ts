@@ -1,3 +1,4 @@
+// no-token: gh -- every input is injected; the TESTS-FIRST reasons are asked about facts, and no lookup reaches GitHub.
 /**
  * WHICH reason a refusal is, not just that there was one -- #455's split into
  * `packages/agent-org/src/merge-guard/reason-kind.ts`. Kept as ONE list rather than distributed per rule: "the guard
@@ -7,6 +8,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { reasonKind } from "../merge-guard/reason-kind.ts";
+import { testsFirstEditReasons } from "../merge-guard.ts";
+
+const TEST_PATH = "src/packaging/merge-guard-reason-kind.test.ts";
 
 test("reasonKind classifies every reason shape the rule modules actually produce", () => {
   // A reason this cannot classify is worth knowing about immediately, not discovering later in a log
@@ -24,6 +28,18 @@ test("reasonKind classifies every reason shape the rule modules actually produce
     ["GITHUB'S HEAD IS NOT THE BRANCH TIP: GitHub recorded abc, the branch's real tip is def.", "HEAD_MISMATCH"],
   ];
   for (const [reason, expected] of cases) assert.equal(reasonKind(reason), expected, reason);
+});
+
+test("a TESTS-FIRST reason that a PR moved its named tests is TESTS_FIRST_TESTS_MOVED, not UNCLASSIFIED", () => {
+  const reasons = testsFirstEditReasons(7, { paths: [TEST_PATH], firstCommitFiles: [TEST_PATH], changedSinceFirst: [TEST_PATH], approvedBy: [] });
+  assert.equal(reasons.length, 1);
+  assert.equal(reasonKind(reasons[0]), "TESTS_FIRST_TESTS_MOVED", reasons[0]);
+});
+
+test("a TESTS-FIRST reason that the first commit lacks the named tests is TESTS_FIRST_NOT_IN_FIRST_COMMIT, not UNCLASSIFIED", () => {
+  const reasons = testsFirstEditReasons(7, { paths: [TEST_PATH], firstCommitFiles: [], changedSinceFirst: [], approvedBy: [] });
+  assert.equal(reasons.length, 1);
+  assert.equal(reasonKind(reasons[0]), "TESTS_FIRST_NOT_IN_FIRST_COMMIT", reasons[0]);
 });
 
 test("an unrecognised reason is UNCLASSIFIED, never silently matched to the wrong kind", () => {
