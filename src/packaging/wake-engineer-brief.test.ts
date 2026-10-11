@@ -14,6 +14,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync, existsSync } from "node:fs";
+import { dirname, relative } from "node:path";
 import { fileURLToPath } from "node:url";
 import { addressed, deliver, engineerRoles, ENGINEER_BRIEF } from "../wake.ts";
 import { HOME_CHECKOUT } from "../project-config.ts";
@@ -131,8 +132,10 @@ function banBlock(text: string): string {
   for (let i = start; i < lines.length && lines[i].startsWith(">"); i++) block.push(lines[i]);
   return block.join("\n");
 }
-/** Every command family the block names: `fleet:*`, `training:capture*`, `evidence:check`, ... */
-const families = (block: string) => [...block.matchAll(/`([a-z]+:[a-z*][a-z:*-]*)`/g)].map((m) => m[1]);
+/** Every command family the block names: `fleet:*`, `training:capture*`, `evidence:check`, ... A family may be spelled as the command a
+ * person types, `pnpm run worker:*` (a11ign#4961 wrote it that way so the ban cannot be read as covering `agent-org worker:state`), and
+ * the family is what follows the `pnpm run `. */
+const families = (block: string) => [...block.matchAll(/`(?:pnpm run )?([a-z]+:[a-z*][a-z:*-]*)`/g)].map((m) => m[1]);
 /** The one command #1828 lets a routed pool run; it is never copied into the shared brief (#1817). */
 const EXCEPTION = "lab:job";
 
@@ -215,7 +218,11 @@ for (const { file, heading, governs } of NESTED) {
     const head = text.slice(at).split("\n").slice(0, 4).join("\n");
     for (const path of governs) {
       assert.ok(existsSync(`${ROOT}/${path}`), `${path} is a real path`);
-      assert.ok(head.includes(path), `the section's first lines name ${path}`);
+      // The lab's CLAUDE.md is laid from the lab's own repository (a11ign/lab, from v0.1.28), where it names its paths from the package's
+      // root (`src/capture/**`), so a path is named either from the repository's root or from the directory the file sits in.
+      const fromItsDirectory = relative(dirname(file), path);
+      assert.ok(head.includes(path) || head.includes(fromItsDirectory),
+        `the section's first lines name ${path} (or ${fromItsDirectory}, from the file's own directory)`);
     }
   });
 

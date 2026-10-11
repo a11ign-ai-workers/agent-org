@@ -210,11 +210,11 @@ test("the messaging sources' label literals equal the vocabulary's", () => {
 });
 
 /**
- * Files the walk skips whole, each with its reason. `project-vocabulary.ts` is where the literals are declared. `prefix-pins.mjs` is the project's
+ * Files the walk skips whole, each with its reason. `project-vocabulary.ts` is where the literals are declared. `prefix-pins.ts` (`.mjs` until a11ign#4393 renamed it, which the lab carries from v0.1.28) is the project's
  * lab helper, which the gate copies in beside the tests (`rsync` from `packages/lab/src/packaging/`, ci.yml) so that `packaging/` tests that import it
  * can run; it pins the `lane:` prefix for the project's own lab tests, is no part of the tool, and is not in this repository.
  */
-const WALK_SKIPS = new Set(["project-vocabulary.ts", "prefix-pins.mjs"]);
+const WALK_SKIPS = new Set(["project-vocabulary.ts", "prefix-pins.ts"]);
 
 /** Every distinct (file, literal) the walk of `srcDir` finds, named relative to it. */
 function vocabularyEntries(srcDir: string): string[] {

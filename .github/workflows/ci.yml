@@ -22,7 +22,7 @@ name: ci
 #
 # THE TESTS' SIBLINGS COME FROM THE LAB: the tool's tests were extracted from the lab package (`project/packages/lab/src/packaging/`), where they sat beside helper
 # modules and fixtures that were not extracted. a11ign/a11ign deleted that package (#3505) and takes a11ign/lab as a pinned tag, so the job lays the lab at the tag the project's
-# `layers.json` pins AT `PROJECT_REF` (the project's own `project/scripts/lay-layer.mjs`) and copies those siblings (never a test) beside the tests, without overwriting anything this repository has.
+# `layers.json` pins AT `PROJECT_REF` (the project's own `project/scripts/lay-layer.ts`) and copies those siblings (never a test) beside the tests, without overwriting anything this repository has.
 #
 # NODE IS PINNED TO 24.21.0, NOT `24`, and it must be 24: Node 24 strips types itself, and a `.ts` run by a plain `node` (every ExecStart, every package script, `leak-scan.ts`'s import) needs it
 # (a11ign/a11ign#4389; the distro 22 cannot). The pin was 22.22.1 because on 22.23.3 the suite's tree-walking observer saw the old loader probe `<name>.mts` beside every import: the loader is gone, so that
@@ -37,9 +37,9 @@ name: ci
 # an exclusion is a test that does not run, so a defect in what it guards would have gone unseen.
 
 env:
-  # a11ign/a11ign at the commit the tool's suite was last run against (1d11a3726, 2026-10-09, which contains #4287's Octo STS `auto-arm.yml` that `auto-arm-token.test.ts` pins (a11ign/a11ign#4288); before it 4649f4d93, 2026-10-08, the #4177 merge, which carries the `ceo.md` bound for `unwaitedStockRows` that `org-retro.test.ts` requires (#4175); before it 4da77f552, after #4089 rewrote `examples/workflow.yml`; moved from 9915703d6 of 2026-10-06 because `public-claim.test.ts` reads that
+  # a11ign/a11ign at the commit the tool's suite was last run against (eaebb69cd, 2026-10-11, the a11ign/a11ign#4960 merge, which carries the `ceo.md` bound for `idleClaimedHours` that `org-retro.test.ts` reads (agent-org#862, advanced by agent-org#884); before it 1d11a3726, 2026-10-09, which contains #4287's Octo STS `auto-arm.yml` that `auto-arm-token.test.ts` pins (a11ign/a11ign#4288); before it 4649f4d93, 2026-10-08, the #4177 merge, which carries the `ceo.md` bound for `unwaitedStockRows` that `org-retro.test.ts` requires (#4175); before it 4da77f552, after #4089 rewrote `examples/workflow.yml`; moved from 9915703d6 of 2026-10-06 because `public-claim.test.ts` reads that
   # file and no allow-list entry matches both versions). A sha and never a branch: a branch moves under a pull request that did not touch it.
-  PROJECT_REF: 1d11a372687d052e5d44ed769e6cb5764d3c665d
+  PROJECT_REF: eaebb69cd37fa053b78e2fee2fe152a545fe8ae7
 
 on:
   pull_request:
@@ -80,11 +80,11 @@ jobs:
           # The suite reads the project's git history (merge-base, branch tips, recorded commits), so a shallow clone would fail it for the wrong reason.
           fetch-depth: 0
           persist-credentials: false
-      # THE LAB, LAID BY THE PROJECT'S OWN COMMAND (a11ign/a11ign#3505, `project/scripts/lay-layer.mjs`): `lab` left the project's tree for the pinned tag `layers.json` declares at `PROJECT_REF`, and this lays its
+      # THE LAB, LAID BY THE PROJECT'S OWN COMMAND (a11ign/a11ign#3505, `project/scripts/lay-layer.ts`): `lab` left the project's tree for the pinned tag `layers.json` declares at `PROJECT_REF`, and this lays its
       # `src/` (less its tests), scripts, baselines, `rule-ownership.json` and `CLAUDE.md` at `project/packages/lab`, where the tests' siblings and the tests that read the lab by path expect them.
       - name: The lab at the tag the project pins, laid at project/packages/lab
         working-directory: project
-        run: node scripts/lay-layer.mjs lab # in-project
+        run: node scripts/lay-layer.ts lab # in-project
       # `yaml` and `typescript` are the tool's own; `@rstest/core` and `@a11ign/toolchain` are the runner (a11ign/a11ign#3738). The ranges repeat `package.json`'s devDependencies,
       # because this job installs by name and not from it: move them together.
       # `@a11ign/toolchain` is EXACT, not a range (a11ign/a11ign#4308): 0.1.6 was published with no `dist/`, so the `^0.1.2` install resolved it and every `merge_group` run failed with
