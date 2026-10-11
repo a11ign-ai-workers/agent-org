@@ -9,6 +9,8 @@ bash -c 'cd ~/repos/agent-org-wt-5009 && AGENT_ORG_HOST=/home/agent/repos/a11y-w
 
 Closes a11ign/a11ign#5009
 
+Mutation: six mutations of `src/b4-cycle.ts` (the first sighting makes no wake; it escalates too; the second tick never escalates; the escalation is not remembered; the detector always fires; the detector never fires), each run, each turning its own tests red, and each restored byte-identical.
+
 Measured: the command above printed `VERDICT pass: 48 tests in 3 files` at this head, and `npx tsc --noEmit -p tsconfig.json` printed nothing. Mutations, each run and restored byte-identical (`diff` of the copy): (1) the first sighting makes no wake -- the #878 test and two more fail; (2) the first sighting escalates too -- the #878 test, the escalates-once test and two more fail; (3) the second tick never escalates -- the escalation test and the daily-count test fail; (4) the escalation is not remembered -- the same two fail on the third tick; (5) the detector always fires -- the plain-shelf test, the #878 test (its #874 and #888 would be woken) and 12 more fail; (6) the detector never fires -- the #878 test, the escalation test and 12 more fail.
 
 Full suite, measured with `npx rstest run --config scripts/rstest/rstest.config.ts`: `60 of 9659 tests failed in 539 files`, in 13 files none of which imports `blocking-impact.ts` or `b4-cycle.ts`; the same 13 files on a clean `origin/main` checkout print `60 of 388 tests failed in 13 files`, so the 60 are not this change's.
