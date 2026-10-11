@@ -87,7 +87,7 @@ test("#3466: a `gh api graphql` call appends ONE line naming account, resource, 
   } finally { rmSync(h.root, { recursive: true, force: true }); }
 });
 
-test("#3589: the line carries the session id of the session that made the call as its LAST field, Claude's first, then Codex's, and `-` (read as no id) when there is none", () => {
+test("#3589: the line carries the session id of the session that made the call as its 9th field, Claude's first, then Codex's, and `-` (read as no id) when there is none", () => {
   const h = host();
   try {
     const CLAUDE = "593792d3-21f4-4deb-baa9-12403b79ecfe";
@@ -99,8 +99,8 @@ test("#3589: the line carries the session id of the session that made the call a
     h.run({ CLAUDE_CODE_SESSION_ID: "a b\tc;$(x)" }, "pr", "list");
     const raw = h.lines();
     assert.equal(raw.length, 5, "POSITIVE CONTROL: every call wrote a line");
-    assert.ok(raw.every((l) => l.split("\t").length === 9), "nine fields on every line, so a hostile id cannot add or remove one");
-    assert.deepEqual(raw.map((l) => l.split("\t")[8]), [CLAUDE, CODEX, CLAUDE, "-", "abcx"], "the id is the last field; only [A-Za-z0-9-] survive (`a b<tab>c;$(x)` leaves `abcx`)");
+    assert.ok(raw.every((l) => l.split("\t").length === 10), "ten fields on every line (the 10th is the read cache's verdict, agent-org#742; a `pr list` is a read it looked at), so a hostile id cannot add or remove one");
+    assert.deepEqual(raw.map((l) => l.split("\t")[8]), [CLAUDE, CODEX, CLAUDE, "-", "abcx"], "the id is the 9th field, before the cache verdict; only [A-Za-z0-9-] survive (`a b<tab>c;$(x)` leaves `abcx`)");
     assert.deepEqual(h.lines().map((l) => parseLine(l)?.sessionId), [CLAUDE, CODEX, CLAUDE, undefined, "abcx"], "the reader reads it, and a `-` is no id");
   } finally { rmSync(h.root, { recursive: true, force: true }); }
 });
