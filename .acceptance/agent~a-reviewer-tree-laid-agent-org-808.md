@@ -12,6 +12,8 @@ Evidence: `keyed-repo-review.test.ts` 20 of 20 (18 existing, 2 new: `#808 (posit
 
 Not done: Done-when 2 (no `UNDELIVERED reviewer-agent-org-782` line across the next release that changes a dependency) is a live reading of the tick journal and cannot be made before the release; the row's Open-check covers it.
 
+Class: derived-tree-outlives-its-source — a tree built from links into a checkout that is later re-installed keeps links the source no longer holds, and the next write through one fails far from the cause; the same shape is `linkReviewDependencies`' primary-tree links (read, not changed: it relinks every entry with `relink`, which replaces a link rather than writing through it, so it does not `mkdir` through one); guard: `clearDanglingLinks` before `installIntoTree`'s install, and the `#808` positive and control tests.
+
 Closes: a11ign/agent-org#808
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
