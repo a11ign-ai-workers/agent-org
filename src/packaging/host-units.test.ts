@@ -3044,6 +3044,17 @@ test("#3464: a `beforeTick` naming a tool command runs it from the tool, one tha
   assert.throws(() => pre("agent-org"), HostConfigRefusal, "and so does a bare `agent-org`");
 });
 
+test("#920: the work-tick unit weighs more than the default CPUWeight and the three maintenance units keep their Nice=", () => {
+  const rendered = (template: string) => renderTemplate(readFileSync(join(SHIPPED_DIR, template), "utf8"), templateValues(plainHost3443(), readUnitsDeclaration()), template.replace(/\.service\.in$/, ""));
+  const weight = /^CPUWeight=(\d+)$/m.exec(rendered("work-tick.service.in"));
+  assert.ok(weight, "the work-tick unit declares a CPUWeight=");
+  assert.ok(Number(weight[1]) > 100, `a weight above the default 100 (it is ${weight[1]})`);
+  for (const [template, nice] of [["tmp-prune.service.in", "19"], ["worktree-prune.service.in", "19"], ["shadow-window.service.in", "10"]]) {
+    assert.match(rendered(template), new RegExp(`^Nice=${nice}$`, "m"), `${template} keeps Nice=${nice}`);
+    assert.doesNotMatch(rendered(template), /^CPUWeight=/m, `${template} is slowed by Nice, not made heavier`);
+  }
+});
+
 test("#3464: a tool command is the same command however its words are separated -- a tab or a run of spaces is accepted by parseBeforeTick, so it must not fall back to the project's pinned copy", () => {
   const rendered = renderTemplate(readFileSync(join(SHIPPED_DIR, "work-tick.service.in"), "utf8"), templateValues(plainHost3443(), readUnitsDeclaration()), "work-tick");
   const pre = (command: string) => workTickToolForm(rendered, TOOL_3443, [{ checkout: PROJECT_ROOT, command }]).split("\n").filter((line) => line.startsWith("ExecStartPre=")).slice(1);

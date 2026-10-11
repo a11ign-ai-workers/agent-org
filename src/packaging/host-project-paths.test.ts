@@ -109,7 +109,8 @@ const TODAYS_TEXT = {
   // #2974 MOVED THIS ONE, deliberately: the cut-over moved its `primary:update` line from `/usr/bin/npm` to the pnpm shim and its header comment off the monorepo path (`units-run-pnpm.test.ts`).
   // #3038 MOVED THIS ONE, deliberately: `ExecStart` runs under the crash-exit preload and the header says why `SuccessExitStatus` lists 1.
   // #4389 MOVED THIS ONE, deliberately: `ExecStart` runs `%h/.local/bin/node` on the `.ts` with no `--import tsx`; the host Node strips the types itself.
-  "a11ign-work-tick.service": "6f128077955f11e824ec1956fc377ed1944f85590a70e387672c7756c56c68b9",
+  // #920 MOVED THIS ONE, deliberately: the unit declares `CPUWeight=400`, so a tick outweighs the engineers' builds on a busy host.
+  "a11ign-work-tick.service": "1b1e446961eda27b22f54163c9c52370119a722b5093d3aebb396661551be6f9",
   "a11ign-work-tick.timer": "7daa5c14c8c1db69424b7f5dfac22c8168858f2fd9f8eaaa95530a07b3e0b931",
   // #2782 MOVED THIS ONE, deliberately: the prune unit now declares `GH_CONFIG_DIR` (it reads a row's claim before removing a tree). The
   // installed copy reads STALE until `host:install` runs, which is a host action and not this row's.
