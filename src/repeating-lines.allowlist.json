@@ -35,6 +35,10 @@
       "reason": "the package manager's echo of the ExecStartPre command, written on every tick by the runner itself. npm printed `> name@version script`; pnpm, which the tick unit runs since a11ign/a11ign#2974's cut-over 3, appends the checkout path (`... primary:update /home/agent/repos/a11y-witness`), and the entry's `$` anchor rejected that form: 75 consecutive ticks were offered to orchestrator on 2026-10-02. The SECOND line pnpm prints is the script body: `node packages/agent-org/src/update-primary.ts` until a11ign/a11ign#3097's cut-over 4, `agent-org primary:update` since, and that body was offered after 30 ticks on 2026-10-03."
     },
     {
+      "pattern": "^claim-stall: tracker `\\S+` \\(\\S+\\): N claimed rows, N evaluated\\.$",
+      "reason": "work-gate/claim-stall-tick.ts's count of a keyed tracker's claimed rows and of the ones the pass evaluated (agent-org#941), printed once per keyed tracker per tick while it holds a claimed row. It is a position reading, the twin of the version banner and the checkout lines: the count changes with the rows (3 to 11 measured on 2026-10-11) and normaliseLine turns every number to N, so one line repeated for 30 ticks was offered to orchestrator as a fault. The faulting forms are NOT allowlisted and print their own lines: `... -- not evaluated.` (a row it cannot read, or one that carries no session label), `... -- its claimed rows were NOT evaluated this tick (UNREAD ...)` (a tracker it cannot read), `NO claim was evaluated this tick` (comments it cannot read), `is HELD, not released`, and `claim-stall: could not run (...)`."
+    },
+    {
       "pattern": "^aNign-work-tick\\.service: Consumed ",
       "reason": "systemd's per-run resource accounting line, written after every tick."
     }

@@ -75,6 +75,14 @@ ExecStartPre=-%h/.local/bin/pnpm run primary:update
 ExecStart=%h/.local/bin/node --import=./packages/agent-org/src/lib/crash-exit.ts packages/agent-org/src/work-tick.ts
 SuccessExitStatus=0 1 2
 
+# THE TICK OUTWEIGHS THE ENGINEERS' BUILDS ON A BUSY HOST -- #920. Three overruns of the 180 s limit ran at host load 15 to 16 with
+# `pnpm -r run build`, `typecheck` and `trace.ts --map` the top CPU users, and the tick spent most of its wall waiting
+# (`gate` 147 s wall for 48 s CPU). A cgroup weight is relative: it changes nothing on an idle host and, under contention, gives
+# the tick four shares to a build's one. The host has 16 cores and the user manager delegates the cpu controller. The maintenance
+# units go the other way (`Nice=19` on tmp-prune and worktree-prune, `Nice=10` on shadow-window). One line to revert, and
+# `prestartSteps` on the tick-cost line says what is left if it does not help.
+CPUWeight=400
+
 # A rebuild after a lockfile change can outlast the interval; systemd will not start a second copy while
 # this one runs, so ticks skip rather than pile up. The timeout bounds a hung `gh` or npm.
 TimeoutStartSec=600

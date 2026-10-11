@@ -194,25 +194,60 @@ export function createMeter({ clock = () => performance.now(), cpu = readCpu, up
   };
 }
 
+/** One `ExecStartPre` command of the unit and how long it ran: `wallMs` is `null` when its start or exit time cannot be read, which is not zero. */
+export type PrestartStep = { command: string; wallMs: number | null };
+
+/**
+ * `systemctl --timestamp=us+utc` prints `Sun 2026-10-11 16:25:20.953680 UTC` (whole seconds without the fraction), the one form that is both
+ * microsecond-exact and the same zone on every host; `[n/a]` and a missing field are `null`.
+ * @param {string | undefined} text @returns {number | null} epoch milliseconds
+ */
+function parseSystemdTime(text: string | undefined): number | null {
+  const parts = /(\d{4}-\d\d-\d\d) (\d\d:\d\d:\d\d)(?:\.(\d+))? UTC/.exec(text ?? "");
+  if (!parts) return null;
+  const whole = Date.parse(`${parts[1]}T${parts[2]}Z`);
+  return Number.isFinite(whole) ? whole + Number(`0.${parts[3] ?? "0"}`) * MS_PER_SECOND : null;
+}
+
+/**
+ * Each `ExecStartPre=` line of `systemctl show` (one per command, in the order they ran) as its command and wall. The line is
+ * `{ path=... ; argv[]=<command> ; ignore_errors=yes ; start_time=[...] ; stop_time=[...] ; pid=... ; code=exited ; status=0 }`.
+ * @param {string} shown @returns {PrestartStep[]}
+ */
+export function parsePrestartSteps(shown: string): PrestartStep[] {
+  const field = /^(?:path|ignore_errors|start_time|stop_time|pid|code|status)=/;
+  return shown.split("\n").filter((line) => line.startsWith("ExecStartPre=") && line.length > "ExecStartPre=".length).map((line) => {
+    const items = line.slice("ExecStartPre=".length).replace(/^\{\s*/, "").replace(/\s*\}$/, "").split(" ; ");
+    const at = Object.fromEntries(items.filter((item) => field.test(item)).map((item) => [item.slice(0, item.indexOf("=")), item.slice(item.indexOf("=") + 1).replace(/^\[(.*)\]$/, "$1")]));
+    const from = items.findIndex((item) => item.startsWith("argv[]="));
+    const stop = items.findIndex((item, index) => index > from && field.test(item));
+    const command = from < 0 ? (at.path ?? "") : items.slice(from, stop < 0 ? undefined : stop).join(" ; ").slice("argv[]=".length);
+    const [start, exit] = [parseSystemdTime(at.start_time), parseSystemdTime(at.stop_time)];
+    return { command, wallMs: start !== null && exit !== null && exit >= start ? round(exit - start) : null };
+  });
+}
+
 /**
  * What only systemd knows about this run: how long `ExecStartPre` took (the gap between the unit starting to activate and its main process being
- * forked, which no line of this file can time because it runs before this process exists) and the unit's peak memory, the figure the row's table
- * quotes. `null` for both off systemd or when either cannot be read, said on stderr: an unknown is not zero.
+ * forked, which no line of this file can time because it runs before this process exists), each of its commands' own wall (`prestartSteps`, so
+ * `primary:update` and the tool update are told apart, #920) and the unit's peak memory, the figure the row's table quotes. `null` for all off
+ * systemd or when the reading cannot be made, said on stderr: an unknown is not zero. A step whose start or exit time is not in the output has a `null` wall of its own.
  * @param {{ env?: NodeJS.ProcessEnv, readText?: (path: string) => string, run?: (file: string, args: string[]) => string }} [sources]
- * @returns {{ prestartMs: number | null, cgroupPeakKb: number | null }}
+ * @returns {{ prestartMs: number | null, prestartSteps: PrestartStep[] | null, cgroupPeakKb: number | null }}
  */
 export function readUnitFacts({ env = process.env, readText = (path) => readFileSync(path, "utf8"),
-  run = (file, args) => execFileSync(file, args, { encoding: "utf8" }) }: { env?: NodeJS.ProcessEnv; readText?: (path: string) => string; run?: (file: string, args: string[]) => string; } = {}): { prestartMs: number | null; cgroupPeakKb: number | null; } {
-  const unknown = { prestartMs: null, cgroupPeakKb: null };
+  run = (file, args) => execFileSync(file, args, { encoding: "utf8" }) }: { env?: NodeJS.ProcessEnv; readText?: (path: string) => string; run?: (file: string, args: string[]) => string; } = {}): { prestartMs: number | null; prestartSteps: PrestartStep[] | null; cgroupPeakKb: number | null; } {
+  const unknown = { prestartMs: null, prestartSteps: null, cgroupPeakKb: null };
   if (!env.INVOCATION_ID) return unknown;
   try {
     const cgroup = readText("/proc/self/cgroup").split("\n").map((line) => line.split("::")[1]).find(Boolean) ?? "";
     const unit = basenameOf(cgroup);
-    const shown = run("systemctl", ["--user", "show", unit, "--property=InactiveExitTimestampMonotonic", "--property=ExecMainStartTimestampMonotonic"]);
-    const at = Object.fromEntries(shown.trim().split("\n").map((line) => line.split("=")));
+    const shown = run("systemctl", ["--user", "--timestamp=us+utc", "show", unit, "--property=InactiveExitTimestampMonotonic", "--property=ExecMainStartTimestampMonotonic", "--property=ExecStartPre"]);
+    const at = Object.fromEntries(shown.trim().split("\n").filter((line) => !line.startsWith("ExecStartPre=")).map((line) => line.split("=")));
     const prestartMs = (Number(at.ExecMainStartTimestampMonotonic) - Number(at.InactiveExitTimestampMonotonic)) / MICROSECONDS_PER_MS;
     const peakBytes = Number(readText(`/sys/fs/cgroup${cgroup}/memory.peak`));
-    return { prestartMs: Number.isFinite(prestartMs) ? round(prestartMs) : null, cgroupPeakKb: Number.isFinite(peakBytes) ? round(peakBytes / KB) : null };
+    const steps = parsePrestartSteps(shown);
+    return { prestartMs: Number.isFinite(prestartMs) ? round(prestartMs) : null, prestartSteps: steps, cgroupPeakKb: Number.isFinite(peakBytes) ? round(peakBytes / KB) : null };
   } catch (error) {
     process.stderr.write(`TICK COST: systemd's own figures could not be read (${String((error as any)?.message ?? error).split("\n")[0]}).\n`);
     return unknown;

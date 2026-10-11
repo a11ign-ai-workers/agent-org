@@ -14,7 +14,7 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { EXIT, TICK_COST_BYTES, TICK_COST_FILE, appendTickCost, childrenCpuMs, createMeter, tickCostPath } from "./work-tick.ts";
+import { EXIT, TICK_COST_BYTES, TICK_COST_FILE, appendTickCost, childrenCpuMs, createMeter, readUnitFacts, tickCostPath } from "./work-tick.ts";
 import { CENSUS_ENV, currentCensusPhase, describeSpawn, summariseCensus } from "./lib/spawn-census.ts";
 import { sandboxGitEnv } from "./lib/git-env.ts";
 import { readElsewherePrs } from "./work-gate.ts";
@@ -529,4 +529,39 @@ test("#3730 CONTROL: a gate that says no such line, or one whose wall was not re
     assert.equal(lines.length, 1, "the cost line is still written");
     assert.equal("github-status" in lines[0].phases, false, JSON.stringify(lines[0].phases));
   }
+});
+
+/** The two `ExecStartPre` lines `systemctl --user --timestamp=us+utc show` printed on this host (2026-10-11), the second with its exit time cut. */
+const SHOWN = [
+  "InactiveExitTimestampMonotonic=294018254587",
+  "ExecMainStartTimestampMonotonic=294022254587",
+  "ExecStartPre={ path=/home/agent/.local/bin/node ; argv[]=/home/agent/.local/bin/node --import=./src/lib/crash-exit.ts src/update-tool.ts ; ignore_errors=yes ; start_time=[Sun 2026-10-11 16:25:20.953680 UTC] ; stop_time=[Sun 2026-10-11 16:25:21.579646 UTC] ; pid=127448 ; code=exited ; status=0 }",
+  "ExecStartPre={ path=/usr/bin/env ; argv[]=/usr/bin/env -C /home/agent/repos/a11y-witness /home/agent/.local/bin/node update-primary.ts ; ignore_errors=yes ; start_time=[Sun 2026-10-11 16:25:21.579806 UTC] ; stop_time=[n/a] ; pid=127676 ; code=exited ; status=0 }",
+].join("\n");
+
+const unitFacts = (shown: string) => readUnitFacts({
+  env: { INVOCATION_ID: "x" }, readText: (path) => (path === "/proc/self/cgroup" ? "0::/user.slice/a11ign-work-tick.service\n" : "1048576"),
+  run: (_file, args) => { assert.ok(args.includes("--timestamp=us+utc") && args.includes("--property=ExecStartPre"), `asked for the steps in microseconds: ${args}`); return shown; },
+});
+
+test("#920: readUnitFacts reads each ExecStartPre command's wall, and a step with no exit time is null for that step only", () => {
+  const facts = unitFacts(SHOWN);
+  assert.equal(facts.prestartMs, 4000, "prestartMs is still the one systemd subtraction");
+  assert.equal(facts.cgroupPeakKb, 1024);
+  assert.deepEqual(facts.prestartSteps, [
+    { command: "/home/agent/.local/bin/node --import=./src/lib/crash-exit.ts src/update-tool.ts", wallMs: 626 },
+    { command: "/usr/bin/env -C /home/agent/repos/a11y-witness /home/agent/.local/bin/node update-primary.ts", wallMs: null },
+  ]);
+  assert.deepEqual(unitFacts("InactiveExitTimestampMonotonic=1\nExecMainStartTimestampMonotonic=2\nExecStartPre=\n").prestartSteps, [], "a unit with no ExecStartPre has no steps, which is not an unreadable one");
+});
+
+test("#920: off systemd every unit fact is null, and the steps with them", () => {
+  assert.deepEqual(readUnitFacts({ env: {} }), { prestartMs: null, prestartSteps: null, cgroupPeakKb: null });
+});
+
+test("#920: the tick-cost line a tick writes carries prestartSteps (null off systemd, never absent)", () => {
+  const { lines } = runTick({ gate: "process.exit(0);" });
+  assert.equal(lines.length, 1);
+  assert.ok("prestartSteps" in lines[0], `the line has the field: ${Object.keys(lines[0])}`);
+  assert.equal(lines[0].prestartSteps, null, "off systemd the steps are unknown, not an empty list");
 });

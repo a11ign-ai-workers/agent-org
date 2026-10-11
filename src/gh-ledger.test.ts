@@ -15,8 +15,8 @@ import { join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpDir, tmpDirForFile } from "./lib/tmp-fixture.ts";
 import {
-  ALARM_FRACTION, NO_CALLER, POOL_POINTS, QUEUED_EXIT, QUEUE_DIR, alarmLine, attachFollowUps, callerScript, dueCalls, ghQueueTick, parseLedger, parseRollup,
-  perHour, perHourCallers, poolAlarms, readQueue, recordPoolAlarms, refusalKind, retryDue, rollupPathOf, type QueuedCall, type RunQueued,
+  ALARM_FRACTION, NO_CALLER, NO_VERDICT, POOL_POINTS, QUEUED_EXIT, QUEUE_DIR, alarmLine, attachFollowUps, callerScript, dueCalls, ghQueueTick, parseLedger, parseRollup,
+  perHour, perHourCallers, poolAlarms, readGroups, readQueue, recordPoolAlarms, refusalKind, renderByRead, retryDue, rollupPathOf, verdictOf, type QueuedCall, type RunQueued,
 } from "./gh-ledger.ts";
 
 const WRAPPER_TEXT = readFileSync(fileURLToPath(new URL("../host/gh", import.meta.url)), "utf8");
@@ -481,4 +481,79 @@ test("#4148 residual: a six-field rollup line is read as it always was, kept six
   assert.deepEqual(hour.callers.map((c) => [c.caller, c.calls]), [[NO_CALLER, 400], ["work-tick.ts", 43]]);
   assert.deepEqual(perHour([], rollup, { account: ACCOUNT, resource: "graphql" }), [{ hour: "2026-10-10T17", calls: 443, read: 0, floor: 443 }], "the hour's total never depended on the caller");
   assert.match(readHours(h.ledger, "--account", ACCOUNT, "--resource", "graphql", "--top", "5"), /^ +400 floor points \( +0 read\) +400 calls +\(caller not recorded\)$/m);
+});
+
+// #4148 residual (agent-org#742): --by-read. A ledger line as `host/gh` writes it with its verdict (the 10th field); `cache` omitted = a line from before it.
+const READ_DIGEST = "3f9a01bc";
+const readLine = (cache: string | undefined, over: { resource?: string; command?: string; caller?: string; time?: string; cost?: number | "" } = {}) =>
+  [over.time ?? "2026-10-10T17:00:00Z", ACCOUNT, over.resource ?? "graphql?", over.cost ?? 1, "0", over.command ?? "pr list", "w1",
+    over.caller ?? "node /x/src/work-gate.ts", "-", ...(cache === undefined ? [] : [cache])].join("\t");
+
+test("#4148 residual: verdictOf reads the wrapper's verdict and refuses any other shape", () => {
+  assert.deepEqual(verdictOf("miss-generation-moved:3f9a01bc:77d0e2a4:a11ign_a11ign"),
+    { outcome: "miss", why: "generation-moved", argv: "3f9a01bc", repository: "a11ign_a11ign" });
+  assert.deepEqual(verdictOf("hit-ttl:3f9a01bc:77d0e2a4:default"), { outcome: "hit", why: "ttl", argv: "3f9a01bc", repository: "default" });
+  assert.equal(verdictOf("-"), null, "a call the cache did not look at has no verdict");
+  assert.equal(verdictOf("miss-absent:3f9a01bc:77d0e2a4:a11ign_a11ign\tinjected"), null, "a tab inside the field is refused, never guessed");
+  assert.equal(verdictOf("miss-absent:3F9A01BC:77d0e2a4:a11ign_a11ign"), null, "digests are lowercase hex only");
+});
+
+test("#4148 residual: --by-read groups reads by caller, subcommand, repository and argument digest, whatever their key digests", () => {
+  const entries = parseLedger([
+    readLine(`miss-generation-moved:${READ_DIGEST}:77d0e2a4:a11ign_a11ign`),
+    readLine(`miss-absent:${READ_DIGEST}:11111111:a11ign_a11ign`),
+    readLine(`miss-absent:${READ_DIGEST}:22222222:a11ign_a11ign`),
+    readLine(`miss-absent:deadbeef:22222222:a11ign_a11ign`, { command: "issue view" }),
+  ].join("\n"));
+  const report = readGroups(entries);
+  assert.equal(report.groups.length, 2, "three key digests on one question are one group; another question is another");
+  const [same, other] = report.groups;
+  assert.deepEqual([same.caller, same.command, same.repository, same.digest], ["work-gate.ts", "pr list", "a11ign_a11ign", READ_DIGEST]);
+  assert.equal(same.calls, 3);
+  assert.deepEqual(same.misses, { "generation-moved": 1, absent: 2 });
+  assert.deepEqual([other.command, other.digest, other.calls], ["issue view", "deadbeef", 1]);
+  assert.deepEqual([report.calls, report.misses, report.hits, report.unknown, report.uncached], [4, 4, 0, 0, 0]);
+});
+
+test("#4148 residual: --by-read counts a hit with the group its call made, and under --resource only when that call spent the pool named", () => {
+  const hit = readLine(`hit-ttl:${READ_DIGEST}:77d0e2a4:a11ign_a11ign`, { resource: "cache", cost: "" });
+  const entries = parseLedger([readLine(`miss-absent:${READ_DIGEST}:77d0e2a4:a11ign_a11ign`), hit].join("\n"));
+  assert.deepEqual(readGroups(entries).groups.map((g) => [g.calls, g.hits]), [[2, 1]], "the hit joins its group");
+  assert.deepEqual(readGroups(entries, { resource: "graphql" }).groups.map((g) => [g.calls, g.hits]), [[2, 1]], "its call spent graphql, so the hit is in scope");
+  const coreOnly = parseLedger(readLine(`hit-ttl:${READ_DIGEST}:77d0e2a4:a11ign_a11ign`, { resource: "cache", cost: "" }));
+  assert.deepEqual(readGroups(coreOnly, { resource: "graphql" }).groups, [], "a hit whose group spent no graphql is not a graphql read");
+  assert.deepEqual(readGroups(entries, { resource: "core" }).groups, [], "and nothing spent core here");
+});
+
+test("#4148 residual: a line with no 10th field is counted as (no verdict), with its caller and command intact", () => {
+  const entries = parseLedger([readLine(undefined), readLine(`miss-absent:${READ_DIGEST}:77d0e2a4:a11ign_a11ign`)].join("\n"));
+  const report = readGroups(entries);
+  assert.equal(report.unknown, 1);
+  const [unknown] = report.groups.filter((g) => g.unknown > 0);
+  assert.deepEqual([unknown.caller, unknown.command, unknown.repository, unknown.digest, unknown.unknown], ["work-gate.ts", "pr list", NO_VERDICT, "-", 1]);
+  const text = renderByRead(report);
+  assert.match(text.split("\n")[0], /: 0 hits, 1 misses, 1 with no verdict; 0 calls the cache did not look at$/);
+  assert.match(text, /^ {5}1 calls +0 hits {2}work-gate\.ts {2}\[pr list\] {2}\(no verdict\) {2}- {2}misses: \(no verdict\) 1$/m);
+});
+
+test("#4148 residual: a '-' line (the cache did not look) is counted only as uncached, never as a read", () => {
+  const report = readGroups(parseLedger(readLine("-")));
+  assert.deepEqual([report.calls, report.groups.length, report.uncached], [0, 0, 1]);
+  assert.equal(renderByRead(report), "gh ledger: no reads recorded; 1 calls the cache did not look at\n");
+});
+
+test("#4148 residual: a hostile verdict field holding a tab is refused as (no verdict), and the fields around it are read as they were", () => {
+  const hostile = readLine(`miss-absent:${READ_DIGEST}:77d0e2a4:a11ign_a11ign\tinjected`, { command: "api repos/x", caller: "node /x/src/work-tick.ts", cost: 3 });
+  const [entry] = parseLedger(hostile);
+  assert.deepEqual([entry.command, entry.caller, entry.cost, entry.status, entry.resource], ["api repos/x", "node /x/src/work-tick.ts", 3, 0, "graphql?"], "the other fields are not shifted");
+  const report = readGroups([entry]);
+  assert.deepEqual([report.misses, report.unknown, report.groups[0].repository, report.groups[0].digest], [0, 1, NO_VERDICT, "-"], "it is not a miss, and nothing is guessed from it");
+});
+
+test("#4148 residual: renderByRead prints the header with the window and the scope, and says so when there are no reads", () => {
+  const report = readGroups(parseLedger([readLine(`miss-absent:${READ_DIGEST}:77d0e2a4:a11ign_a11ign`), readLine("-")].join("\n")), { account: ACCOUNT, resource: "graphql" });
+  assert.equal(renderByRead(report, { account: ACCOUNT, resource: "graphql" }),
+    `gh ledger reads: 1 reads, 2026-10-10T17:00:00Z .. 2026-10-10T17:00:00Z, account ${ACCOUNT}, resource graphql: 0 hits, 1 misses, 0 with no verdict; 1 calls the cache did not look at\n` +
+    `     1 calls       0 hits  work-gate.ts  [pr list]  a11ign_a11ign  ${READ_DIGEST}  misses: absent 1\n`);
+  assert.equal(renderByRead(readGroups([]), { account: ACCOUNT }), `gh ledger: no reads recorded, account ${ACCOUNT}; 0 calls the cache did not look at\n`);
 });

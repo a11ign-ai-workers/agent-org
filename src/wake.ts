@@ -42,8 +42,8 @@ import { refuseUnknownFlags, flagValue } from "./lib/cli-flags.ts";
 import { pnpmCliInvocation } from "./lib/npm-cli-executable.ts"; // #3386: a bare `pnpm` spawn is `pnpm.cmd` on Windows, which CVE-2024-27980 refuses
 import { blastTail, readBlockingRecord } from "./blast-tail.ts";
 import type { BlockingRecord } from "./blocking-impact.ts";
-import { routeEngineer, type Routed } from "./engineer-route.ts";
-import { ESCALATION_KIND, ESCALATION_USE, claimFacts, escalationLogLine, escalationNote, haikuStarts, shouldEscalate, transcriptCounts } from "./engineer-escalation.ts";
+import { HAIKU_DEFAULT_CI_FAILURES, haikuDefaultOn, routeEngineer, type Routed } from "./engineer-route.ts";
+import { DEFAULT_CAPS, ESCALATION_KIND, ESCALATION_USE, claimFacts, escalationLogLine, escalationNote, haikuStarts, isHaiku, shouldEscalate, transcriptCounts } from "./engineer-escalation.ts";
 import { decisionLogPathFrom, decisionSwitchesPath } from "./decision-provider.ts";
 import { classifyCiFailure, classLine, classNote, readCiFailure, type Gh } from "./ci-failure-class.ts";
 import { depthEffort, depthLine, readDepthState, reviewDepth, type Depth } from "./review-depth.ts";
@@ -66,6 +66,7 @@ import { engineerBriefSentence, briefRoleSentence } from "./spawn-role-brief.ts"
 // re-export of `waiting-condition.ts`'s own field, so it is not re-imported here.
 import { SESSION_PREFIX, READY_LABEL, OUT_OF_RELEASE_LABEL } from "./project-vocabulary.ts";
 import { PARKED_LABEL } from "./wait-condition.ts"; // #4727: the state a filed stuck-cause row is born in
+import { readRowsByLabel, readUnlessRefused } from "./ticket-port/rows-by-label.ts"; // #5074: the tick's row lists are connections, never a search
 import { inBuildReason, isInBuild, unansweredRefusal, lookupHeldRows, lookupOtherHeldIssues }
   from "./row-claim/own-pr-health-rule.ts";
 import { parseWorktreeList, isPrimaryWorktree, isWorkingTreeClean, mergeStatus, detachedMergeStatus }
@@ -4425,7 +4426,7 @@ function boardFiledRow({ url, number }: { url: string; number: number; }, board:
  */
 function fileRepositoryRow({ ref, repo, key, board }: { ref: string; repo: string; key: string; board: Board | null; }, run: (args: string[]) => string): number | null {
   const { title, body } = stuckRowWording({ ref, repo, key });
-  const open = JSON.parse(run(["issue", "list", "--state", "open", "--label", ESCALATION_LABEL, "--limit", "100", "--json", "number,title"]));
+  const open = readRowsByLabel({ label: ESCALATION_LABEL, state: "OPEN", select: "number title", run });
   const existing = open.find((row: { title: string; }) => row.title === title);
   if (existing !== undefined) return existing.number;
   const made = run(["issue", "create", "--title", title, "--body", body, ...FILED_STUCK_ROW_LABELS.flatMap((label) => ["--label", label])]);
@@ -4454,8 +4455,9 @@ function fileRepositoryRow({ ref, repo, key, board }: { ref: string; repo: strin
 function closeAnsweredRow({ title, key }: { title: string; key: string; }, { run, log }: { run: (args: string[]) => string; log: (line: string) => void; }): number[] {
   const closed: number[] = [];
   try {
-    const parked: { number: number; title: string; labels: { name: string; }[]; }[] = JSON.parse(
-      run(["issue", "list", "--state", "open", "--label", PARKED_LABEL, "--limit", "100", "--json", "number,title,labels"]));
+    const parked: { number: number; title: string; labels: { name: string; }[]; }[] = readRowsByLabel(
+      { label: PARKED_LABEL, state: "OPEN", select: "number title labels(first:50){nodes{name}}", run })
+      .map((row) => ({ number: row.number, title: row.title, labels: row.labels.nodes }));
     const filed = parked.filter((row) => row.title === title);
     if (filed.some((row) => row.labels.some((label) => label.name.startsWith(ANSWER_PREFIX)))) return closed;
     for (const row of filed) {
@@ -4467,6 +4469,26 @@ function closeAnsweredRow({ title, key }: { title: string; key: string; }, { run
     log(`COULD NOT CLOSE ANSWERED ROW (${key}): ${String(err?.message ?? err).split("\n")[0].slice(0, 90)}\n`);
   }
   return closed;
+}
+
+/** #5074: how many of the NEWEST closed parked rows, and newest open rows, {@link rowsTitled} reads (two connection pages each). */
+const TITLED_READ_NEWEST = 200;
+
+/**
+ * Every row of `title`, open or closed, WITHOUT a search (#5074: `--state all --search` was sent as a GitHub SEARCH, whose allowance the installation spent).
+ * A filed stuck-cause row is born {@link PARKED_LABEL} and is closed still carrying it ({@link closeAnsweredRow}), so the closed rows are the newest
+ * closed parked ones; an OPEN row of the title is any open parked one, or one of the newest open rows (it may have left `parked`). A title older than
+ * both windows is not seen, which for the closed side means "not asked again" and for the open side a duplicate: the price of no search, said here.
+ * A read that fails THROWS, so the caller reports it and never takes it for "no row".
+ */
+function rowsTitled(title: string, run: (args: string[]) => string): { number: number; title: string; state: string; closedAt: string | null; }[] {
+  const closed = readRowsByLabel({ label: PARKED_LABEL, state: "CLOSED", select: "number title closedAt", newest: TITLED_READ_NEWEST, run });
+  const parked = readRowsByLabel({ label: PARKED_LABEL, state: "OPEN", select: "number title", run });
+  const newest: { number: number; title: string; }[] = JSON.parse(readUnlessRefused({ what: `the ${TITLED_READ_NEWEST} newest open rows`, run,
+    read: () => run(["issue", "list", "--state", "open", "--limit", String(TITLED_READ_NEWEST), "--json", "number,title"]) }));
+  const open = new Map([...parked, ...newest].map((row) => [row.number, row]));
+  return [...closed.map((row) => ({ ...row, state: "CLOSED" })), ...[...open.values()].map((row) => ({ ...row, state: "OPEN", closedAt: null }))]
+    .filter((row) => row.title === title);
 }
 
 /**
@@ -4486,9 +4508,7 @@ function closeAnsweredRow({ title, key }: { title: string; key: string; }, { run
 function reaskFiledRow({ title, key, place }: { title: string; key: string; place: (run: (args: string[]) => string) => number | null; },
   { run, log, ask }: { run: (args: string[]) => string; log: (line: string) => void; ask: Asker; }): number | null {
   try {
-    const found: { number: number; title: string; state: string; closedAt: string | null; }[] = JSON.parse(run(
-      ["issue", "list", "--state", "all", "--search", `"${title.replace(/"/g, " ")}" in:title`, "--limit", "100", "--json", "number,title,state,closedAt"]));
-    const titled = found.filter((row) => row.title === title);
+    const titled = rowsTitled(title, run);
     if (titled.length !== 1 || titled[0].state !== "CLOSED") return null;
     const [closed] = titled;
     const elapsed = ask.now() - Date.parse(String(closed.closedAt));
@@ -7928,15 +7948,36 @@ export type Escalation = { row: number; session: string; reason: string };
  * WHICH OF THE LIVE HAIKU STARTS HAVE REACHED A CAP, from the claim-orders record and a read of each one's transcript. Pure given those reads: `counts` is the seam
  * ({@link instanceCounts}), `null` meaning no transcript names the session -- a figure that could not be read, which never escalates.
  */
-export function escalationsNow(recordText: string, live: readonly string[], counts: (label: string) => { turns: number | null; compactions: number | null; } | null): Escalation[] {
+export function escalationsNow(recordText: string, live: readonly string[], counts: (label: string) => { turns: number | null; compactions: number | null; } | null, haikuDefault: HaikuDefaultEvidence = {}): Escalation[] {
   const found: Escalation[] = [];
+  // `routing.haikuDefault` (a11ign#5110): a Haiku start is the default, so it is given a third failing head before it moves, and a refusal moves it at once. Off, both are as before.
+  const caps = haikuDefault.on === true ? { ...DEFAULT_CAPS, ciFailures: HAIKU_DEFAULT_CI_FAILURES } : DEFAULT_CAPS;
   for (const { session, row } of haikuStarts(recordText, live)) {
     const facts = claimFacts(recordText, row);
     const read = counts(session);
-    const verdict = shouldEscalate({ model: facts.model, ciFailures: facts.ciFailures, turns: read?.turns ?? null, compactions: read?.compactions ?? null, escalated: facts.escalated });
+    const verdict = shouldEscalate({ model: facts.model, ciFailures: facts.ciFailures, turns: read?.turns ?? null, compactions: read?.compactions ?? null, escalated: facts.escalated }, caps);
     if (verdict.action === "escalate") found.push({ row, session, reason: verdict.reason });
+    else if (haikuDefault.on === true && !facts.escalated && isHaiku(facts.model) && haikuDefault.refused?.(session) === true) found.push({ row, session, reason: "it was refused (its latest response ended in a refusal)" });
   }
   return found;
+}
+
+/** The evidence a Haiku-default start moves up on beyond the caps: the flag, and whether a session's transcript ends in a refusal. */
+export type HaikuDefaultEvidence = { on?: boolean; refused?: (label: string) => boolean };
+
+/** The `stop_reason` of the LATEST assistant response in a transcript: a refusal earlier in the session, followed by a normal end, is not a refusal now. `null` when none is named. */
+function latestStopReason(text: string): string | null {
+  let latest: string | null = null;
+  for (const line of text.split("\n")) {
+    const found = /"stop_reason"\s*:\s*"([^"]*)"/.exec(line);
+    if (found !== null) latest = found[1];
+  }
+  return latest;
+}
+
+/** A session's newest transcript, read for a refusal: the API's `stop_reason` of `refusal`. `false` is "none seen", and a transcript that cannot be read is no evidence either way. */
+export function instanceRefused(label: string, root: string = join(process.env.HOME ?? "", ".claude", "projects"), reader: { readText: (file: string) => string; readHead: (file: string) => string; } = TRANSCRIPT_READER): boolean {
+  return newestTranscriptRead(label, root, reader, (text) => latestStopReason(text) === "refusal" ? true : null) === true;
 }
 
 /** What {@link performEscalations} needs from the host, every one a seam so the whole of it is tested without one. */
@@ -8016,7 +8057,7 @@ function restartOnSonnet(escalation: Escalation, deps: EscalationDeps): { line: 
  *
  * @returns one line per escalation, and the labels it restarted: they are working NOW, so no order of this tick is routed to them
  */
-export function performEscalations(live: readonly string[], deps: EscalationDeps & { counts?: (label: string) => { turns: number | null; compactions: number | null; } | null; }): { lines: string[]; busied: string[]; } {
+export function performEscalations(live: readonly string[], deps: EscalationDeps & { counts?: (label: string) => { turns: number | null; compactions: number | null; } | null; haikuDefault?: HaikuDefaultEvidence; }): { lines: string[]; busied: string[]; } {
   const lines: string[] = [];
   const busied: string[] = [];
   let recordText: string;
@@ -8025,7 +8066,7 @@ export function performEscalations(live: readonly string[], deps: EscalationDeps
   } catch (err) {
     return { lines: [`escalation: the claim-orders record could not be read (${firstLine(err)}) -- nothing is escalated this tick`], busied };
   }
-  for (const escalation of escalationsNow(recordText, live, deps.counts ?? ((label) => instanceCounts(label)))) {
+  for (const escalation of escalationsNow(recordText, live, deps.counts ?? ((label) => instanceCounts(label)), deps.haikuDefault)) {
     try {
       const { line, restarted } = restartOnSonnet(escalation, deps);
       lines.push(line);
@@ -8283,7 +8324,8 @@ async function main() {
   if (agents === null) exitCannotAsk(gateOrders.length, handoffs);
   const { orders, failed: releasesNotDone, goneSeats: released } = performReleases(gateOrders, agents, { ledgerPath, hostLayout });
   // #4630: A HAIKU START THAT HAS NOT COPED IS RESTARTED ON SONNET before anything is delivered, and what it restarted is working NOW (`free` below).
-  const escalated = performEscalations(agents.map((a) => a.label), { run: defaultRun, gh: defaultGh, post: guardedGh, ledgerPath, worktreesDir: hostLayout.worktreesDir, launch: hostLayout });
+  const escalated = performEscalations(agents.map((a) => a.label), { run: defaultRun, gh: defaultGh, post: guardedGh, ledgerPath, worktreesDir: hostLayout.worktreesDir, launch: hostLayout,
+    haikuDefault: { on: haikuDefaultOn({ switchesPath: decisionSwitchesPath(PRIMARY_CHECKOUT) }), refused: (label) => instanceRefused(label) } });
   for (const line of escalated.lines) process.stdout.write(`${line}\n`);
 
   const queued = settleEndedOrders(handoffs, agents, { queuePath, ledgerPath });
