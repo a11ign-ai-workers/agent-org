@@ -110,6 +110,8 @@ export const TOOL_ENTRIES = Object.freeze([
   "tmp-prune.service.in", "tmp-prune.timer.in", "a11ign-tmp.tmpfiles.conf.in",
   // a11ign/a11ign#4071: the OTel receiver's service, a long-running one (`LONG_RUNNING_TEMPLATES`) with no timer, as the chairman listener's is.
   "otel-receiver.service.in",
+  // agent-org#980: the GitHub event receiver's service, long-running with no timer, and OPTIONAL on the HOST's declaration (`HOST_OPTIONAL_UNITS`): shipped only for `events.source: webhook`.
+  "event-receiver.service.in",
   // a11ign/a11ign#4053: the drained kernel reboot's pair. The service runs `host-kernel.ts --reboot`; the timer is the hour `ceo` named and has NO `Requires=`, so `host:install` never reboots.
   "kernel-reboot.service.in", "kernel-reboot.timer.in",
   // a11ign#4879: the daily confidence reading's pair. The service runs `decision-confidence-post.ts`, which posts once per UTC day and dedupes itself; the timer is only a clock.
@@ -128,6 +130,16 @@ export const OPTIONAL_UNITS = (Object.freeze({
   "chairman-watch.service.in": "messaging", "chairman-watch.timer.in": "messaging",
   "chairman-listen.service.in": "messaging",
 }) as Readonly<Record<string, string>>);
+
+/**
+ * TEMPLATES THAT SHIP ONLY FOR A HOST THAT ASKS FOR THEM (agent-org#980): template -> a predicate over the host declaration's `events`. `OPTIONAL_UNITS` keys on the PROJECT's
+ * `project.json`, which is the wrong file for a fact about the HOST (a project is served by many hosts, and a host by many projects). Read by `shippedUnits` the same way: when the
+ * predicate says no, the unit is not in `shippedUnits`, `host:check` neither lists nor misses it, `host:install` does not write it, and an installed copy is an orphan the install
+ * removes. A host with no `events` block is `poll`, the default, so the off switch is one line, `"source": "poll"`, and `host:install`.
+ */
+export const HOST_OPTIONAL_UNITS = (Object.freeze({
+  "event-receiver.service.in": (events: Readonly<EventsDeclaration> | undefined) => events?.source === "webhook",
+}) as Readonly<Record<string, (events: Readonly<EventsDeclaration> | undefined) => boolean>>);
 
 // SERVICES NO CLOCK STARTS (#3025): see `LONG_RUNNING_TEMPLATES`, which lives in `host-config.ts` (#3443: `update-tool.ts` restarts them, and must not import this
 // file to name them, since its history readers would put them in the closure of the test that runs `update-tool`).
@@ -162,6 +174,7 @@ export const INSTALLED_DIR = `${process.env.HOME ?? ""}/.config/systemd/user`;
 
 export type HostConfig = import("./host-config.ts").HostConfig;
 export type UnitsDeclaration = import("./host-config.ts").UnitsDeclaration;
+export type EventsDeclaration = import("./host-config.ts").EventsDeclaration;
 
 /**
  * `declaredKeys` stands in for the project's top-level keys, which decide `OPTIONAL_UNITS`; a fixture directory declares none. `projectUnitsDir` is the project's own units: the real one when `shippedDir` is left to default, and NONE when a test hands its own `shippedDir`, so a fixture directory is never silently joined by a11ign's eight units. `host` and `units` stand in for the two declarations a template is rendered from.
@@ -176,10 +189,21 @@ export type ShippedDeps = { shippedDir?: string, projectUnitsDir?: string | null
  * @param {string} [dir] @param {{ read?: typeof readdirSync, projectUnitsDir?: string | null, prefix?: string, declaredKeys?: ReadonlySet<string> }} [deps]
  * @returns {string[]}
  */
-export function shippedUnits(dir: string = SHIPPED_DIR, { read = readdirSync, projectUnitsDir, prefix, declaredKeys }: { read?: typeof readdirSync; projectUnitsDir?: string | null; prefix?: string; declaredKeys?: ReadonlySet<string>; } = {}): string[] {
+export function shippedUnits(dir: string = SHIPPED_DIR, { read = readdirSync, projectUnitsDir, prefix, declaredKeys, host }: { read?: typeof readdirSync; projectUnitsDir?: string | null; prefix?: string; declaredKeys?: ReadonlySet<string>; host?: HostConfig; } = {}): string[] {
   const projectDir = projectUnitsDir !== undefined ? projectUnitsDir : dir === SHIPPED_DIR ? PROJECT_UNITS_DIR : null;
   let keys: ReadonlySet<string> | undefined = declaredKeys;
+  // THE HOST'S EVENTS, read on first need: the real host's for the real directory (or the `host` handed in), and none -- `poll` -- for a fixture's, as for `declaredKeys`.
+  let hostRead = false;
+  let events: Readonly<EventsDeclaration> | undefined;
+  const hostAsks = (name: string) => {
+    if (!hostRead) {
+      events = (host ?? (dir === SHIPPED_DIR ? homeHostConfig() : undefined))?.events;
+      hostRead = true;
+    }
+    return HOST_OPTIONAL_UNITS[name](events);
+  };
   const asked = (name: string) => {
+    if (Object.hasOwn(HOST_OPTIONAL_UNITS, name) && !hostAsks(name)) return false;
     if (!Object.hasOwn(OPTIONAL_UNITS, name)) return true;
     keys ??= dir === SHIPPED_DIR ? declaredProjectKeys() : new Set();
     return keys.has(OPTIONAL_UNITS[name]);
@@ -398,6 +422,10 @@ const OTHER_TOOL_FORMS: Readonly<Record<string, ReadonlyArray<readonly [RegExp, 
   "otel-receiver.service.in": [
     [/^ExecStart=%h\/\.local\/bin\/node packages\/agent-org\/src\/trace\/otel-receiver\.ts$/m, "ExecStart=%h/.local/bin/node src/trace/otel-receiver.ts"],
   ],
+  // THE GITHUB EVENT RECEIVER (agent-org#980): run from the tool's checkout, like the OTel receiver; the flags after the program are rendered from the host's declaration.
+  "event-receiver.service.in": [
+    [/^ExecStart=%h\/\.local\/bin\/node packages\/agent-org\/src\/event-receiver\.ts /m, "ExecStart=%h/.local/bin/node src/event-receiver.ts "],
+  ],
   // THE DRAINED KERNEL REBOOT (a11ign/a11ign#4053): run from the tool's checkout, like the receiver above.
   "kernel-reboot.service.in": [
     [/^ExecStart=%h\/\.local\/bin\/node packages\/agent-org\/src\/host-kernel\.ts --reboot$/m, "ExecStart=%h/.local/bin/node src/host-kernel.ts --reboot"],
@@ -447,8 +475,8 @@ function replaceOnce(text: string, anchor: RegExp, line: string) {
  * The shipped unit names, for a caller holding the whole `deps` bag its own function takes.
  * @param {ShippedDeps} [deps]
  */
-function shippedUnitNames({ shippedDir = SHIPPED_DIR, readDir = readdirSync, projectUnitsDir, units, declaredKeys }: ShippedDeps = {}) {
-  return shippedUnits(shippedDir, { read: readDir, projectUnitsDir, prefix: units?.prefix, declaredKeys });
+function shippedUnitNames({ shippedDir = SHIPPED_DIR, readDir = readdirSync, projectUnitsDir, units, declaredKeys, host }: ShippedDeps = {}) {
+  return shippedUnits(shippedDir, { read: readDir, projectUnitsDir, prefix: units?.prefix, declaredKeys, host });
 }
 
 /** The unit-name prefix of the project this tool serves: the project's own declaration says it. @param {ShippedDeps} [deps] */

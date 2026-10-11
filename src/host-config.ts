@@ -32,7 +32,7 @@ export const HOST_DECLARATION_PATH = ".agent-org/host.json";
  * that runs it. Everything else `host-units.ts` asks "enabled? active?" of is a timer; these get the same two questions, and the same remedy.
  * Named here rather than read off an `[Install]` section because `work-tick.service` carries one too and is a oneshot its timer starts.
  */
-export const LONG_RUNNING_TEMPLATES = Object.freeze(["chairman-listen.service.in", "otel-receiver.service.in"]);
+export const LONG_RUNNING_TEMPLATES = Object.freeze(["chairman-listen.service.in", "otel-receiver.service.in", "event-receiver.service.in"]);
 
 /** A template is this suffix on the shipped name; the rendered name is `<prefix><name>` without it. */
 export const TEMPLATE_SUFFIX = ".in";
@@ -615,7 +615,30 @@ export function templateValues(host: HostConfig, units: UnitsDeclaration): Recor
     leadsDir: host.gh.leads,
     prefix: units.prefix,
     ...appTokenValues(host, primary.checkout),
+    ...eventReceiverValues(host),
   };
+}
+
+/** Where the receiver's queue is, under the host's state directory (agent-org#980). */
+export const EVENT_QUEUE_ENTRY = "events/queue.jsonl";
+
+/**
+ * What `event-receiver.service.in` is rendered from (agent-org#980): the port and secret path of `host.events.receiver` (#977) and the queue under the state directory. A host
+ * that is not `webhook` has none of the three, so the template, which no such host ships, is REFUSED by `renderTemplate` if something renders it anyway. The values are written
+ * onto an `ExecStart=` line, where a space or a systemd specifier would change what runs, so a path that holds one is refused by field name, as `checkToolForm` does for `tool`.
+ * @param {HostConfig} host @returns {Record<string, string>}
+ */
+function eventReceiverValues(host: HostConfig): Record<string, string> {
+  const events = host.events;
+  if (events === undefined || events.source !== "webhook") return {};
+  const { port, secretPath } = events.receiver;
+  const queue = stateEntryPath(EVENT_QUEUE_ENTRY, { host, home: host.home, env: {} });
+  for (const [field, path] of [["events.receiver.secretPath", secretPath], ["events.queue", queue]] as const) {
+    if (!UNIT_SAFE_PATH.test(path)) {
+      throw new HostConfigRefusal(field, `it is written into the receiver's unit line, so it may not hold a space or a systemd specifier, not ${JSON.stringify(path)}`, HOST_DECLARATION_PATH);
+    }
+  }
+  return { eventsPort: String(port), eventsSecretFile: secretPath, eventsQueue: queue };
 }
 
 /** A word a `sh` single-quoted string carries exactly, whatever the declaration holds. */
