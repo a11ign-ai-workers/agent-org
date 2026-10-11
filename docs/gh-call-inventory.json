@@ -1,11 +1,11 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 101,
+    "files": 102,
     "spawns": 137,
-    "calls": 406,
+    "calls": 407,
     "shapes": {
-      "api rest": 153,
+      "api rest": 154,
       "api graphql": 41,
       "issue view": 34,
       "issue list": 30,
@@ -847,6 +847,14 @@
       "spawns": 0,
       "calls": {
         "api rest": 2
+      },
+      "labels": [],
+      "parsesCloses": false
+    },
+    "src/ticket-port/comments-since.ts": {
+      "spawns": 0,
+      "calls": {
+        "api rest": 1
       },
       "labels": [],
       "parsesCloses": false

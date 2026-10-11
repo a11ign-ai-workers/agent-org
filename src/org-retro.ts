@@ -56,6 +56,9 @@ import { homeProjectDeclaration } from "./project-config.ts";
 import { unwaitedStockRows, unwaitedLines, ghTrackerReader } from "./unwaited-stock-rows.ts";
 import { untieredReadyRows, untieredLines, ghReadyReader, untieredOffer, untieredSweepKey, parseUntieredMemory, UNTIERED_MEMORY_FILE, type UntieredRow } from "./untiered-ready-rows.ts";
 import { HAIKU_TIER_LABEL } from "./worker-profile.ts";
+// THE "UNDERSPECIFIED" FEEDBACK LOOP (a11ign#5117): a leaf, so the retro stays importable before any install.
+import { underspecifiedLines, underspecifiedReading, underspecifiedStops, type UnderspecifiedReading } from "./spec-lint.ts";
+import { commentsSince } from "./ticket-port/comments-since.ts";
 
 /** The cause this file feeds (`cause-declaration.ts` declares it), addressed to `ceo`. */
 export const RETRO_CAUSE = "org-retrospective";
@@ -353,6 +356,7 @@ export function buildReport(reads: {
         merged: any[] | null; mergedRepositories?: ReturnType<typeof readMerged> | null; openPrs: any[] | null; journal: string | null; ledger: string | null;
         turns: any[] | null; handFixes: ReturnType<typeof readHandFixLedger> | null; readings?: Readings; dora?: ReturnType<typeof readDora> | null;
         unwaited?: ReturnType<typeof unwaitedStockRows> | null; untiered?: ReturnType<typeof untieredReadyRows> | null; failureLedger?: string | null; blockingRecord?: string | null; idleClaims?: IdleClaimIncident[] | null; idleClaimedHours?: IdleClaimedHours | null; mergedRowOpen?: MergedRowOpenIncident[] | null; inertOptions?: InertOptionReading | null; safetyDenials?: SafetyCheckDenialReading | null;
+        underspecified?: UnderspecifiedReading | null;
     }, now: number) {
   const window = { since: now - WINDOW_MS, until: now };
   const lines = reads.journal === null ? null : journalLines(reads.journal, window);
@@ -378,6 +382,7 @@ export function buildReport(reads: {
     mergedRowOpen: mergedRowOpenSummary(reads.mergedRowOpen),
     inertOptions: inertOptionSummary(reads.inertOptions),
     safetyDenials: safetyCheckDenialSummary(reads.safetyDenials),
+    underspecified: reads.underspecified ?? null, // a read nobody made or that was refused is `unknown` in the report, never `none`
     dora: reads.dora,
   };
   // `readings` absent is a read nobody made, which says `unknown` and never `no baseline`: only a read that found no file may say that.
@@ -715,7 +720,7 @@ export function renderReport(report: ReturnType<typeof buildReport>): string {
   const from = new Date(report.window.since).toISOString();
   const to = new Date(report.window.until).toISOString();
   return [`ORG RETROSPECTIVE ${report.date} -- the 24 hours ${from} to ${to}`, "",
-    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
+    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...underspecifiedLines(report.underspecified), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
 }
 
 /**
@@ -1108,6 +1113,18 @@ export function readIdleClaimedHours({ now, stateDir, declaration = homeProjectD
 }
 
 /**
+ * THE "UNDERSPECIFIED" STOPS BY FIELD (a11ign#5117): every declared tracker's issue comments since the window opened, in ONE paginated call each
+ * (`commentsSince`, in the port's directory so this file gains no `gh` call), and the lines `Underspecified: <field>` in them (`underspecifiedStops`).
+ * `null` when ANY tracker's list was refused (`unknown`, never 0). `read` is the seam (`ghJson` by default).
+ */
+export function readUnderspecified({ now, declaration = homeProjectDeclaration(), read = ghJson }: { now: number; declaration?: ReturnType<typeof homeProjectDeclaration>; read?: (args: string[]) => any[] | null; }): UnderspecifiedReading | null {
+  const since = now - WINDOW_MS;
+  const lists = declaration.tracker.map(({ repo }) => commentsSince({ repo, since, run: read }));
+  if (lists.includes(null)) return null;
+  return underspecifiedReading(underspecifiedStops(lists.flat(), { since, until: now }));
+}
+
+/**
  * Every read the report wants, once. `stateDir` holds the wake ledger. THE HAND-FIX COUNT IS NOT A FILE IN IT: `hand-fix-ledger.ts` derives
  * it from git and gh (#2939), and this line read a path nothing wrote for as long as the report existed (#2954). `readHandFixes` is the seam.
  * THE IDLE-CLAIM READ (#4642) is {@link readIdleClaims}: the gate's own idle memory, the herdr listing (`readAgentListing` is its seam) and the open-PR list already read here.
@@ -1125,11 +1142,13 @@ export function readAll({ now, stateDir, unit = "a11ign-work-tick.service",
   readUntiered = () => untieredReadyRows({ trackers: homeProjectDeclaration().tracker.map((tracker) => ghReadyReader(tracker)) }),
   readDoraReport = readDeclaredDora, readAgentListing = () => readAgents(), readIdleHours = (at) => attemptDora(() => readIdleClaimedHours({ now: at, stateDir })), readOpenRowIncidents = (at) => attemptDora(() => readMergedRowOpen({ now: at })),
   readInertOptionReading = (at, recorded) => attemptDora(() => readInertOptions({ now: at, recorded })),
-  readDenials = (at) => readSafetyCheckDenials({ since: at - WINDOW_MS }) }: {
+  readDenials = (at) => readSafetyCheckDenials({ since: at - WINDOW_MS }),
+  readUnderspecifiedStops = (at) => attemptDora(() => readUnderspecified({ now: at })) }: {
         now: number; stateDir: string; unit?: string; readHandFixes?: (now: number) => ReturnType<typeof readHandFixLedger>;
         readDoraReport?: (now: number) => ReturnType<typeof readDora> | null; readUnwaited?: (now: number) => ReturnType<typeof unwaitedStockRows>; readUntiered?: () => ReturnType<typeof untieredReadyRows>; readMergedRepositories?: (now: number) => ReturnType<typeof readMerged>;
         readAgentListing?: () => Agent[] | null; readIdleHours?: (now: number) => IdleClaimedHours | null; readOpenRowIncidents?: (now: number) => MergedRowOpenIncident[] | null;
         readInertOptionReading?: (now: number, recorded: string[]) => InertOptionReading | null; readDenials?: (now: number) => SafetyCheckDenialReading | null;
+        readUnderspecifiedStops?: (now: number) => UnderspecifiedReading | null;
     }) {
   const since = now - WINDOW_MS;
   const mergedRepositories = attemptDora(() => readMergedRepositories(now));
@@ -1144,6 +1163,7 @@ export function readAll({ now, stateDir, unit = "a11ign-work-tick.service",
     mergedRowOpen: readOpenRowIncidents(now),
     inertOptions: readInertOptionReading(now, recordedRefs(failureLedger, CLOSED_ON_MERGE_NOT_OUTCOME)),
     safetyDenials: readDenials(now),
+    underspecified: readUnderspecifiedStops(now),
     journal: readJournal(unit),
     ledger: readText(`${stateDir}/wake-ledger`),
     failureLedger,
