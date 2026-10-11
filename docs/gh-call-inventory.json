@@ -3,9 +3,9 @@
   "summary": {
     "files": 100,
     "spawns": 137,
-    "calls": 411,
+    "calls": 413,
     "shapes": {
-      "api rest": 148,
+      "api rest": 150,
       "issue list": 43,
       "api graphql": 38,
       "issue view": 34,
