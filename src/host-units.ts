@@ -46,7 +46,7 @@ import { SPAWNS_GH, agentOrgCommand } from "./acceptance-commands.ts";
 import { COMMANDS, FIXED_ARGS } from "./commands.ts";
 import { pnpmDrift } from "./host-pnpm.ts";
 import { codexClientDaemonDrift } from "./codex-drift.ts";
-import { HOME_CHECKOUT, PROJECT_DECLARATION_PATH, ProjectDeclarationRefusal } from "./project-config.ts";
+import { HOME_CHECKOUT, PROJECT_DECLARATION_PATH, ProjectDeclarationRefusal, homeProjectDeclaration } from "./project-config.ts";
 import { CLAUDE_EFFORTS, DECLARED_CLAUDE_MODELS, HAIKU_MODEL_ID, HAIKU_TIER_LABEL } from "./worker-profile.ts";
 import { REPO } from "./project-identity.ts";
 import { appRoleSilent, appRoleSilentEvents, type LedgerSource, type SilentRole } from "./app-role-silent.ts";
@@ -2979,7 +2979,9 @@ export function liveClaudeSessions(run: (args: string[]) => string = (args) => e
   }
 }
 
-export type SessionModelDeps = { sessions?: ReturnType<typeof liveClaudeSessions>, projectsDir?: string, tail?: (path: string) => string, declared?: Record<string, { id: string }>, rowLabels?: (row: number) => readonly string[] | null, seatModels?: () => Readonly<Record<string, string>> | null };
+export type SessionModelDeps = { sessions?: ReturnType<typeof liveClaudeSessions>, projectsDir?: string, tail?: (path: string) => string, declared?: Record<string, { id: string }>, rowLabels?: (row: number) => readonly string[] | null, seatModels?: () => Readonly<Record<string, string>> | null,
+  /** The keys of the trackers beyond the first that the project declares: the only keys a `worker-<key>-<n>` can carry. Defaults to the declaration's own, {@link readTrackerKeys}. */
+  trackerKeys?: () => readonly string[] };
 /**
  * A RESUMED SESSION KEEPS ITS SAVED MODEL (#2783). 2026-09-29: the chairman moved the org to Sonnet 5.5 and the three
  * standing sessions, restarted with `--resume`, came back on Sonnet 5 -- `settings.json`'s `model` is read for a FRESH
@@ -3022,8 +3024,36 @@ function readRowLabels(row: number): string[] | null {
     const out = execFileSync("gh", ["api", `repos/${REPO}/issues/${row}`, "--jq", "[.labels[].name]"], { encoding: "utf8", timeout: 30_000 });
     return JSON.parse(out);
   } catch {
-    return null;  // unreadable is not "unlabelled": the caller keeps the plain comparison, which fails toward the finding
+    return null;  // unreadable is not "unlabelled": the caller does not take a tier from it, and judges the worker as any other
   }
+}
+
+/**
+ * The keys of the trackers beyond the first that the project declares, or `[]` when the declaration could not be read: an unreadable declaration
+ * is "no key is known", so a keyed name is judged against the org's models alone, which fails toward the finding. Read lazily and on a keyed name only.
+ * @returns {readonly string[]}
+ */
+function readTrackerKeys(): readonly string[] {
+  try {
+    return homeProjectDeclaration().tracker.map((tracker) => tracker.key).filter((key) => key !== "");
+  } catch {
+    return [];
+  }
+}
+
+/**
+ * The (tracker key, row) an engineer instance is named for, or `null` when the name is none: `worker-<n>` for the first tracker's row (key `""`) and
+ * `worker-<key>-<n>` for a declared tracker's, the grammar `row-claim`'s `claimNames` writes. A key is never one that ends in `-<digits>`, so a name
+ * cannot parse two ways, and a key no tracker declares (`worker-capture-2407`) names no worker's row.
+ * @param {string} name @param {() => readonly string[]} trackerKeys
+ * @returns {{ key: string, number: number } | null}
+ */
+function workerInstance(name: string, trackerKeys: () => readonly string[]): { key: string; number: number } | null {
+  const found = /^worker-(?:([a-z0-9-]+)-)?([1-9][0-9]*)$/.exec(name);
+  if (found === null) return null;
+  const key = found[1] ?? "";
+  if (key !== "" && (/-[0-9]+$/.test(key) || !trackerKeys().includes(key))) return null;
+  return { key, number: Number(found[2]) };
 }
 
 /**
@@ -3055,11 +3085,12 @@ function declaredModelId(model: string, declared: Record<string, { id: string }>
 
 type ExpectedModels =
   | { ids: string[]; source: "org" }
+  | { ids: string[]; source: "worker" }
   | { ids: string[]; source: "tier"; row: number }
   | { ids: string[]; source: "roster"; declaredAs: string };
 
 /**
- * THE MODEL A SESSION IS EXPECTED TO RUN. Three things decide it, the most specific first:
+ * THE MODEL A SESSION IS EXPECTED TO RUN. Four things decide it, the most specific first:
  *
  * - **Its roster entry (#4762).** A persistent seat whose entry declares a `model` is expected on THAT model alone (#4740: a11ign#4760 declared the
  *   liaison on Haiku, and judging it against Sonnet called the declared state drift, with a remedy that would have undone the declaration). A declared
@@ -3067,20 +3098,26 @@ type ExpectedModels =
  * - **Its row's tier (#4457).** A `tier:haiku` row gets a `claude-haiku-5-5` worker BY DESIGN (`HAIKU_TIER_LABEL`), so judging that worker against
  *   Sonnet alone called the intended state drift, and its remedy (`/model sonnet`) would have undone the saving the tier is for. A worker is named
  *   for its row, so the row's labels decide.
- * - **The org's declared models.** Every other session, a seat declaring nothing, and a worker whose row could not be read.
+ * - **Its start (agent-org#795).** An engineer instance (`worker-<n>`, or `worker-<key>-<n>` for another tracker's row) is STARTED by the gate on a profile the router
+ *   chose (`routeOnly`, `engineer-route.ts`): Sonnet (the org's declared model) or `HAIKU_MODEL_ID`, and a routed row carries no label saying which. So it is
+ *   expected on the org's models OR Haiku. That is for engineer instances ONLY: a standing seat on Haiku is still the resumed-session drift this finding
+ *   exists for (#2783), and the roster entry above is how a seat declares Haiku. A keyed worker's row is another tracker's, which `readRowLabels` cannot read
+ *   (it would read the first tracker's row of that number), so it takes no tier from a label. A name that is not one of these is judged below.
+ * - **The org's declared models.** Every other session, a seat declaring nothing.
  * @param {string} name @param {SessionModelDeps} deps @param {Record<string, string> | null} seatModels {@link readSeatModels}, read once per check
  * @returns {ExpectedModels | null}
  */
-function expectedModels(name: string, { declared = DECLARED_CLAUDE_MODELS, rowLabels = readRowLabels }: SessionModelDeps, seatModels: Readonly<Record<string, string>> | null): ExpectedModels | null {
+function expectedModels(name: string, { declared = DECLARED_CLAUDE_MODELS, rowLabels = readRowLabels, trackerKeys = readTrackerKeys }: SessionModelDeps, seatModels: Readonly<Record<string, string>> | null): ExpectedModels | null {
   const seatModel = seatModels?.[name];
   if (seatModel !== undefined) {
     const id = declaredModelId(seatModel, declared);
     return id === null ? null : { ids: [id], source: "roster", declaredAs: seatModel };
   }
-  const worker = /^worker-([1-9][0-9]*)$/.exec(name);
-  const row = worker === null ? null : Number(worker[1]);
-  if (row !== null && rowLabels(row)?.includes(HAIKU_TIER_LABEL)) return { ids: [HAIKU_MODEL_ID], source: "tier", row };
-  return { ids: Object.values(declared).map((m) => m.id), source: "org" };
+  const orgIds = Object.values(declared).map((m) => m.id);
+  const worker = workerInstance(name, trackerKeys);
+  if (worker === null) return { ids: orgIds, source: "org" };
+  if (worker.key === "" && rowLabels(worker.number)?.includes(HAIKU_TIER_LABEL)) return { ids: [HAIKU_MODEL_ID], source: "tier", row: worker.number };
+  return { ids: [...orgIds, HAIKU_MODEL_ID], source: "worker" };
 }
 
 /** What the finding says about where the expectation came from and what, if anything, the reader can do. */
@@ -3093,6 +3130,9 @@ function modelDriftDetail(model: string, expected: ExpectedModels): string {
         + `Run \`/model ${expected.declaredAs}\` in that session: this check reads and cannot switch it.`;
     case "tier":
       return `${found}; row #${expected.row} carries \`${HAIKU_TIER_LABEL}\`, so the tier expects ${ids}. The tier was not applied to this worker; this check reads and cannot switch it.`;
+    case "worker":
+      return `${found}; the org declares ${expected.ids.filter((id) => id !== HAIKU_MODEL_ID).map((i) => `\`${i}\``).join(", ")}, and a worker may also be on \`${HAIKU_MODEL_ID}\` when the router chose it at its start. `
+        + "A resumed session keeps its saved model, not settings.json's. Run `/model <alias>` in that session: this check reads and cannot switch it.";
     default:
       return `${found}; the org declares ${ids}. A resumed session keeps its saved model, not settings.json's. Run \`/model <alias>\` in that session: this check reads and cannot switch it.`;
   }
