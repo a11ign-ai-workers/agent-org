@@ -15,7 +15,7 @@ Acceptance:
 bash -c 'git grep -q "POSITIVE CONTROL" -- src/packaging/no-search-reads.test.ts && git grep -q "NEGATIVE CONTROL" -- src/packaging/no-search-reads.test.ts && npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/no-search-reads.test.ts src/work-gate.test.ts src/packaging/work-gate.test.ts src/packaging/closed-pr-answer-owed.test.ts src/work-gate-lane-reads.test.ts'
 ```
 
-Measured: that command printed `VERDICT pass: 471 tests in 5 files` at this head. The whole `npx rstest run --config scripts/rstest/rstest.config.ts` printed `7 of 9800 tests failed in 553 files`; the failing files are `ci-changeset-on-push`, `auto-arm-token`, `auto-arm-workflow-honours-hold`, `host-install-agent-org-launcher`, `live-tree-independence`, `messaging-units-start`, `release-safety`, `release-tag-on-merge`, `release-triggers-itself`, `release-consumer-check`, `work-gate-other-scopes-concurrent` and `worker-stop-hook`, and every one of them fails identically on a clean worktree of `origin/main` at `81ed04c1` (the first ten for a missing `yaml`/environment, the last two for host state: a 24-hour `trunk-workflow-*` marker in `~/.cache/a11ign` and an unset `AGENT_ORG_HOST`). `tsc --noEmit -p tsconfig.json` reports nothing but the missing `yaml` and `@rstest/core` modules of this host's partial install.
+Measured: that command printed `VERDICT pass: 471 tests in 5 files` at this head. The whole `npx rstest run --config scripts/rstest/rstest.config.ts` printed `7 of 9800 tests failed in 553 files`; the failing files are `ci-changeset-on-push`, `auto-arm-token`, `auto-arm-workflow-honours-hold`, `host-install-agent-org-launcher`, `live-tree-independence`, `messaging-units-start`, `release-safety`, `release-tag-on-merge`, `release-triggers-itself`, `release-consumer-check`, `work-gate-other-scopes-concurrent` and `worker-stop-hook`, and every one of them fails identically on a clean worktree of `origin/main` at `81ed04c1` (the first ten were not diagnosed beyond that: `yaml` is not installed in this host's partial `node_modules`; the last two are host state, a 24-hour `trunk-workflow-*` marker in `~/.cache/a11ign` and an unset `AGENT_ORG_HOST`, as their own failure text says). `tsc --noEmit -p tsconfig.json` reports nothing but the missing `yaml` and `@rstest/core` modules of this host's partial install.
 
 Mutation (eight, each run by a script that copies the file aside, mutates, runs `no-search-reads.test.ts`, `work-gate.test.ts` and `work-gate-lane-reads.test.ts`, restores, and asserts the restore byte-identical):
 1. a `["issue", "list", "--state", "open", "--label", "ready", ...]` added to `work-gate.ts`: 1 red, the source guard's NEGATIVE CONTROL (done-when 1).
@@ -35,26 +35,26 @@ Not done in this change, and why:
 
 Closes: a11ign/a11ign#5050
 
-Outside-Region: `src/ticket-port/rows-by-label.ts` — `readUnlessRefused` exposes the one refusal memory the gate's other connection reads must share, and `readRowsByLabel` is rewritten over it.
-Outside-Region: `src/packaging/rows-by-label-fixtures.ts` — the fakes' half of the new reads (`readsClosedAnswerRows`, `readsRecentlyClosed`, `connectionOfSelected`).
-Outside-Region: `src/packaging/work-gate.test.ts` — the fakes of the readers converted here (and `beforeEach(forgetRefusedReads)`).
-Outside-Region: `src/work-gate.test.ts` — the fold's tests read the connection's argv.
-Outside-Region: `src/work-gate-lane-reads.test.ts` — the lanes' fakes answer connections.
-Outside-Region: `src/work-gate-stale-blocker-cleared.test.ts` — the closings read is a connection.
-Outside-Region: `src/closed-answer-rows-reason.test.ts` — the closed answer reads are aliased connections.
-Outside-Region: `src/packaging/closed-pr-answer-owed.test.ts` — the closed answer reads are aliased connections.
-Outside-Region: `src/packaging/closed-row-ends-instance.test.ts` — the closed claim-label read is a connection.
-Outside-Region: `src/packaging/claimed-row-comments.test.ts` — the claimed rows' comments read is a connection.
-Outside-Region: `src/packaging/gate-b4-repo-scope.test.ts` — the Ready list is a connection.
-Outside-Region: `src/packaging/multi-board-gate.test.ts` — the Ready list is a connection.
-Outside-Region: `src/packaging/outcome-clock-feed.test.ts` — the claimed rows' read is a connection.
-Outside-Region: `src/packaging/repeating-lines.test.ts` — the backlog read is a connection.
-Outside-Region: `src/work-gate-chairman-answered.test.ts` — the `needs:chairman` list is a connection.
-Outside-Region: `src/work-gate-claim-stall-other-tracker.test.ts` — the claimed rows' read is a connection.
-Outside-Region: `src/work-gate-cross-repo-pr-owner.test.ts` — the resolver-defect read is a connection.
-Outside-Region: `src/work-gate-one-wave.test.ts` — the label reads are connections.
-Outside-Region: `src/work-gate-other-scopes-concurrent.test.ts` — the label reads are connections.
-Outside-Region: `docs/gh-call-inventory.json` — generated, regenerated with `node src/packaging/gh-call-inventory.ts`.
-Outside-Region: `.changeset/the-gate-makes-no-search-backed-reads.md` — a merge with no changeset is never live.
+Outside-Region: src/ticket-port/rows-by-label.ts — `readUnlessRefused` exposes the one refusal memory the gate's other connection reads must share, and `readRowsByLabel` is rewritten over it.
+Outside-Region: src/packaging/rows-by-label-fixtures.ts — the fakes' half of the new reads (`readsClosedAnswerRows`, `readsRecentlyClosed`, `connectionOfSelected`).
+Outside-Region: src/packaging/work-gate.test.ts — the fakes of the readers converted here (and `beforeEach(forgetRefusedReads)`).
+Outside-Region: src/work-gate.test.ts — the fold's tests read the connection's argv.
+Outside-Region: src/work-gate-lane-reads.test.ts — the lanes' fakes answer connections.
+Outside-Region: src/work-gate-stale-blocker-cleared.test.ts — the closings read is a connection.
+Outside-Region: src/closed-answer-rows-reason.test.ts — the closed answer reads are aliased connections.
+Outside-Region: src/packaging/closed-pr-answer-owed.test.ts — the closed answer reads are aliased connections.
+Outside-Region: src/packaging/closed-row-ends-instance.test.ts — the closed claim-label read is a connection.
+Outside-Region: src/packaging/claimed-row-comments.test.ts — the claimed rows' comments read is a connection.
+Outside-Region: src/packaging/gate-b4-repo-scope.test.ts — the Ready list is a connection.
+Outside-Region: src/packaging/multi-board-gate.test.ts — the Ready list is a connection.
+Outside-Region: src/packaging/outcome-clock-feed.test.ts — the claimed rows' read is a connection.
+Outside-Region: src/packaging/repeating-lines.test.ts — the backlog read is a connection.
+Outside-Region: src/work-gate-chairman-answered.test.ts — the `needs:chairman` list is a connection.
+Outside-Region: src/work-gate-claim-stall-other-tracker.test.ts — the claimed rows' read is a connection.
+Outside-Region: src/work-gate-cross-repo-pr-owner.test.ts — the resolver-defect read is a connection.
+Outside-Region: src/work-gate-one-wave.test.ts — the label reads are connections.
+Outside-Region: src/work-gate-other-scopes-concurrent.test.ts — the label reads are connections.
+Outside-Region: docs/gh-call-inventory.json — generated, regenerated with `node src/packaging/gh-call-inventory.ts`.
+Outside-Region: .changeset/the-gate-makes-no-search-backed-reads.md — a merge with no changeset is never live.
 
-platform: GitHub's own GraphQL connections (`repository.issues(labels:)`, `Label`-less aliased `issues`/`pullRequests`, `orderBy: UPDATED_AT`) and the existing `host/gh` 20-second identical-read cache; nothing built beside them. ETag/`If-None-Match` was checked: `gh api graphql` has no conditional request, and the REST `issues?labels=` list the row names costs a core-pool call per list where one connection costs about one GraphQL point, so it was not taken.
+platform: GitHub's own GraphQL connections (`repository.issues(labels:)`, `Label`-less aliased `issues`/`pullRequests`, `orderBy: UPDATED_AT`) and the existing `host/gh` 20-second identical-read cache; nothing built beside them. ETag/`If-None-Match` was NOT taken (inferred, not measured): a GraphQL POST has no conditional request, and the REST `issues?labels=` list the row names would be one core-pool call per list where a connection is one GraphQL read the gate already budgets.
