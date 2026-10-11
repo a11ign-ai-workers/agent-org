@@ -14,7 +14,14 @@ Closes a11ign/agent-org#791
 - **`README.md`**: the `github.identity` section names `slug` and the answer.
 - **`src/gh-identity.ts` is not touched.** It answers "which `hosts.yml` account would this process use" for the gate's CANNOT ASK report and is read only on that refusal path; the row's change is the wrapper's answer. Noted so the Region entry is not read as an omission.
 
-Outside-Region: src/packaging/host-project-paths.test.ts — pins the sha256 of the rendered `host/gh`, which this row changes; its digest is derived from the tree (the failing run printed the new one) and moved in the same PR, as #817's `b35f93f5` did.
+The row's Region lists its five paths without the `agent-org:` key (rows #826 and #828 write them keyed), so with `--repo a11ign/agent-org` the check reads each as outside. They are in the row's Region; each is declared below, with that reason, so the refusal's remedy is not read as a widening.
+
+Outside-Region: host/gh — the row's Region lists it without the `agent-org:` key, so `pr:open` reads it as a path of the first declared repository (a11ign/a11ign), and this tree is a11ign/agent-org (`--repo a11ign/agent-org`); the file IS in the row's Region
+Outside-Region: src/gh-identity.test.ts — the row's Region lists it without the `agent-org:` key, so `pr:open` reads it as a path of the first declared repository (a11ign/a11ign), and this tree is a11ign/agent-org (`--repo a11ign/agent-org`); the file IS in the row's Region
+Outside-Region: src/app-token.ts — the row's Region lists it without the `agent-org:` key, so `pr:open` reads it as a path of the first declared repository (a11ign/a11ign), and this tree is a11ign/agent-org (`--repo a11ign/agent-org`); the file IS in the row's Region; widened in by the product-manager's option-1 amendment
+Outside-Region: src/host-config.ts — the row's Region lists it without the `agent-org:` key, so `pr:open` reads it as a path of the first declared repository (a11ign/a11ign), and this tree is a11ign/agent-org (`--repo a11ign/agent-org`); the file IS in the row's Region; widened in by the product-manager's option-1 amendment
+Outside-Region: README.md — the `github.identity` section documents the new `slug` field and the answer; not in the row's Region, a documentation line for the field this row adds
+Outside-Region: src/packaging/host-project-paths.test.ts — pins the sha256 of the rendered `host/gh`, which this row changes; its digest is derived from the tree (the failing run printed the new one) and moved in the same PR, as #817's `b35f93f5` did
 
 ## How you verified it
 
