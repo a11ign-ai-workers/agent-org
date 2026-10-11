@@ -133,9 +133,12 @@ function rig(opts: { triage?: unknown; switches?: string; body?: unknown; haikuS
   }) as unknown as typeof fetch;
   const logPath = decisionLogPathFrom(join(dir, "state", "wake-ledger"));
   const reads: string[] = [];
-  const deps: DecisionDeps & { haikuSwitchPath: string } = {
+  // `routing` is PINNED to the absent declaration (the four traits, composed): left out, `routeEngineer` reads the HOME project's `routing` block, and a11ign/a11ign set
+  // `routing: { question: "choice" }` in the #4953 ruling, so every test here that drives the four traits was reading a project fact and not the thing it names. A test
+  // that means the one-question form spreads `CHOICE` over these deps, as the `choose` helper below does.
+  const deps: DecisionDeps & { haikuSwitchPath: string; routing: RoutingDeclaration } = {
     host: withTriage(opts.triage), fetch: fn, state: freshState(), timeoutMs: 50, diagnostic: () => {}, switchesPath: decisionSwitchesPath(dir), logPath, now: () => 1_000,
-    readKey: (path) => { reads.push(path); return "tsk-FAKE"; }, haikuSwitchPath: haikuSwitch,
+    readKey: (path) => { reads.push(path); return "tsk-FAKE"; }, haikuSwitchPath: haikuSwitch, routing: ABSENT_ROUTING,
   };
   const log = () => (existsSync(logPath) ? readFileSync(logPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
   return { deps, calls: () => calls, sent, reads, log, logPath };

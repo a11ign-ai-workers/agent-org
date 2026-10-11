@@ -89,7 +89,10 @@ const CLOSURE_PROJECT: Record<string, string> = {
 /** A tracked directory one level under a top-level name: `docs/` is one in the project, and the tool's own checkout has no `docs/adr`. */
 const DIRECTORY_PROJECT: Record<string, string> = { "docs/adr/0001-record.md": "x\n" };
 
-const COMPLETE_BODY = "## Region\n\npackages/lab/src/packaging/foo.ts\n\n"
+// The Region also names a PRODUCT path, under `packages/cli/`, a `releasablePaths` entry of the project's own `dora` repository: since a11ign#4082
+// the project declares a second tracker and `rowTracker` files a row with no product path in its Region in the ORG tracker (`a11ign/agent-org`,
+// board 2, no milestone). These filings are about the mechanics of filing in the project's own tracker, and a row with ANY product entry goes there.
+const COMPLETE_BODY = "## Region\n\npackages/lab/src/packaging/foo.ts\npackages/cli/src/foo.ts\n\n"
   + "## Acceptance\n\n```\nnpx tsx --test x\n```\n\n"
   + "## Open-check\n\n```\ngh issue view 735 --json state\n```\n";
 
