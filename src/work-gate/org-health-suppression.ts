@@ -62,6 +62,8 @@ export const ORG_HEALTH_CLASSES: Readonly<Record<string, { severity: "page"; } |
   "ruling-not-taken": PAGE,
   "chairman-ask-raised-order": PAGE,
   "chairman-ask-malformed-order": PAGE,
+  "machinery-canary": PAGE, // a11ign#5100: a flag was turned OFF on a degraded signal and an incident filed; PAGE because each is one revert with a decision to take, and its key (`<flag>@<onAt>`) is stable per canary
+  "suppression-expired": PAGE, // a11ign#5100: a held order released after 15 minutes; PAGE because the release must not be held again -- a suppression that fails open is delivered once, per held order
   "overdue": DIGEST,
   "runner-behind-newest-release": DIGEST,
   "order-deferred-too-long": DIGEST,

@@ -78,7 +78,7 @@ import { hostConfigPath, stateEntryPath } from "./host-config.ts"; // #2799; #50
 // #2848: THE REPEATING-LINE QUESTION, in its own leaf for the reason `disk-headroom.ts` is one: it reads the journal, not GitHub.
 import { REPEAT_TICKS, normaliseLine, repeatingLinesTick, type RepeatingGroup } from "./repeating-lines.ts";
 // #2936: THE ORG-HEALTH QUESTION, in its own leaf for the same reason: relative imports only, so the gate keeps the property its own header states.
-import { redSinceOf, readToolAgreement, readReleaseRuns, readFleetBuildIncidents, SIGNALS as ORG_HEALTH_SIGNALS } from "./org-health.ts";
+import { redSinceOf, readToolAgreement, readReleaseRuns, readFleetBuildIncidents, SIGNALS as ORG_HEALTH_SIGNALS, machineryCanaryTick, readCanaryOptions, realCanaryIo, readClaimRefusals, type ReleaseRuns, type Suppression, type CanaryIo } from "./org-health.ts"; // a11ign#5100: the machinery canary
 import { ghQueueTick } from "./gh-ledger.ts"; // #4898
 import { readNodeStrips } from "./node-strips-types.ts";
 import { liveClassRepeatIo, readClassRepeat } from "./class-repeat.ts";
@@ -8206,7 +8206,43 @@ function holdForIncidentNow(status: { settle: () => GithubIncident; }, orders: a
   if (incident.state === "unknown") process.stderr.write(`github-status: UNKNOWN (${incident.why}; ${wall}) -- nothing is held, the gate reads as it always did.\n`);
   else if (incident.state === "clear") process.stderr.write(`github-status: operational (call ${wall}).\n`);
   else process.stderr.write(`GITHUB INCIDENT: ${incident.name} (call ${wall}); holding ${held.length} runner-start order(s)${held.map((h) => ` ${h.subject}`).join("")}.\n`);
-  return { orders: kept, held, signal: githubIncidentOrder(incident, held) };
+  return { orders: kept, held, suppressions: incidentSuppressions(held, orders), signal: githubIncidentOrder(incident, held) };
+}
+
+/**
+ * a11ign#5100: THE RUNNER-OUTAGE HOLD, AS THE SUPPRESSION IT IS. `holdForGithubIncident` keeps a red PR's order from its owner while GitHub reports an incident and the failure is a runner that never started;
+ * the canary's expiry hands that order back after `suppressionMinutes` (15), because an outage that outlasts the hold must not leave a PR unowned. No row can be "working" a GitHub incident, so none excuses it.
+ */
+export function incidentSuppressions(held: { subject: string; session: string; why: string; }[], orders: any[]): Suppression[] {
+  return held.map((entry) => {
+    const order = orders.find((candidate) => candidate.session === entry.session && candidate.subject === entry.subject && candidate.cause === "pr-checks-failing") ?? null;
+    return { key: String(order?.causeKey ?? `${entry.session}/${entry.subject}`), kind: "hold", holder: entry.session, reason: `GitHub reports an incident and the failure is a runner that never started (${entry.why})`, order, claimedRow: null };
+  });
+}
+
+/** The deferred wakes the waker left in `wake-deferred` (`<causeKey>\t<first deferred, ms>` a line); `null` is a file that is not there, which is not "none deferred". */
+export function deferredWakeCount(dir: string, read: (path: string) => string = (path) => readFileSync(path, "utf8")): number | null {
+  try {
+    return read(`${dir}/wake-deferred`).split("\n").filter((line) => line.trim() !== "").length;
+  } catch {
+    return null; // not written yet (or unreadable): the sample records the signal as unread, never as zero
+  }
+}
+
+/**
+ * a11ign#5100: THE MACHINERY CANARY'S ONE CALL IN THE TICK -- sample the standard signals, watch every flag turned on in the last hour, file the incident of a revert, and hand back what a suppression has
+ * kept from its holder for 15 minutes. `org-health.ts`'s `machineryCanaryTick` is the logic; this is the facts it is given and the incident it files (`incident` label, as the fleet-build one is).
+ * Reads NO new GitHub list: the signals are the lists this tick already read, the local failure ledger and the waker's own file. Never throws.
+ */
+export function machineryCanaryNow({ unread, unarmed, releaseRuns, suppressions = [], now = Date.now(), dir = REVIEWER_STATE_DIR, run = defaultRun, io }: {
+  unread: string[] | null; unarmed: number[] | UnarmedFacts | null; releaseRuns: ReleaseRuns | null; suppressions?: Suppression[]; now?: number; dir?: string; run?: typeof defaultRun; io?: CanaryIo;
+}): any[] {
+  const { options, problem } = readCanaryOptions();
+  if (problem !== null) process.stderr.write(`machinery-canary: ${problem}; the defaults stand.\n`);
+  const numbers = unarmed === null ? null : Array.isArray(unarmed) ? unarmed : unarmed.numbers; // the gate's bare list or the counted facts: either way, the numbers
+  const fileIncident = (title: string, body: string) => run(["issue", "create", "--title", title, "--label", "incident", "--body", body]);
+  return machineryCanaryTick({ now, dir, options, suppressed: suppressions, io: io ?? realCanaryIo({ fileIncident }),
+    facts: { claimRefusals: readClaimRefusals(), unread, deferredWakes: deferredWakeCount(dir), unarmed: numbers, releaseRuns } });
 }
 
 /**
@@ -8874,9 +8910,11 @@ function main() {
   const keyedTrackers = otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [[scope.tracker.repo, read.openRows ?? []] as const])); // agent-org#695: each keyed tracker's rows by repository, which its shelvings' bare numbers are among
   const shelvedElsewhere = others.flatMap((tick, at) => tick.blocked.map((row) => ({ ...row, repo: otherScopes[at].scope.tracker?.repo })));
   orders.push(...blockingImpactOrders({ shelved: [...shelvedHere, ...shelvedElsewhere], openRows: allOpen, trackers: Object.fromEntries(keyedTrackers), prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], stateDir: REVIEWER_STATE_DIR }));
-  orders.push(...reviewerAuthTick({ orders }), ...repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) }), ...orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => readReleaseRuns(defaultRun, repoNow()), readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) }),
+  const releaseSeen: { runs?: ReleaseRuns | null } = {}; // a11ign#5100: the release read `orgHealthNow` makes, kept for the canary, so it costs no second call
+  orders.push(...reviewerAuthTick({ orders }), ...repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) }), ...orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => (releaseSeen.runs = readReleaseRuns(defaultRun, repoNow())), readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) }),
     ...rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() }), ...chairmanAsksNow(openRowsRead),
     ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
+  orders.push(...machineryCanaryNow({ unread: unreadLanes({ prs, readyRows, others }), unarmed: armingSplit === null ? null : armingSplit.unarmed, releaseRuns: releaseSeen.runs ?? null, suppressions: incident.suppressions })); // a11ign#5100
   // FIRST OF ALL, AND ON PURPOSE (#2163): `wake` delivers in this order and records each delivery with a write, so
   // on a full disk the tick can end partway. The order that says the disk is full must not be the one behind it.
   orders.unshift(...diskOrders);

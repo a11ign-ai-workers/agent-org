@@ -156,8 +156,8 @@ const SECOND = "a11ign/second-half";
 const CODE = [{ key: "agent-org", repo: REPO }, { key: "second", repo: SECOND }];
 const ROW = `${REPO}#923`;
 const regionRow = (paths: string[]) => `## What it is\n\nx\n\n## Region\n\n\`\`\`\n${paths.join("\n")}\n\`\`\`\n\n## Acceptance\n\nx\n`;
-const SPANS = regionRow(["agent-org:src/pr-open.ts", "second:src/other.ts"]);
-const ONE_REPO = regionRow(["agent-org:src/pr-open.ts"]);
+const SPANS = regionRow(["agent-org:src/row-file.ts", "second:src/other.ts"]);
+const ONE_REPO = regionRow(["agent-org:src/row-file.ts"]);
 const ACCEPTANCE_FILE_923 = ".acceptance/agent~pr-open-refuses-a-agent-org-923.md";
 type Pull = { number: number; body: string; };
 const openIn = (repo: string, pulls: Pull[]) => (asked: string): Pull[] | null => (asked === repo ? pulls : []);
@@ -172,7 +172,7 @@ const gitFor923 = (changed: string[]) => (args: string[]) => {
   return "deadbeef";
 };
 
-const checkWith = (openPulls: (repo: string) => Pull[] | null, { body = SPANS, changed = ["src/pr-open.ts"] } = {}) =>
+const checkWith = (openPulls: (repo: string) => Pull[] | null, { body = SPANS, changed = ["src/row-file.ts"] } = {}) =>
   checkRegion("Closes #923\n", ["--repo", REPO], { git: gitFor923(changed), rowBody: () => body, rootFiles: new Set(), code: CODE, openPulls });
 
 test("#923 done-when 1 (POSITIVE CONTROL): a Closes of a two-repository row, with an open pull request in the other repository naming the row, is REFUSED, "
@@ -220,7 +220,7 @@ test("#923 POSITIVE CONTROL (main): `create` of that Closes is refused by pr-ope
   let acceptance = 0;
   const code = main(argv, {
     run: (args: string[]) => { sent.push(args); },
-    git: gitFor923(["src/pr-open.ts"]),
+    git: gitFor923(["src/row-file.ts"]),
     prHead: () => ({ ref: "agent/pr-open-refuses-a-agent-org-923", oid: "deadbeef" }),
     runAcceptance: () => { acceptance += 1; return 0; },
     readFile: () => body,

@@ -196,5 +196,5 @@ test("orgHealthNow offers the order from the reader it is given, and nothing whe
 test("the gate's call site passes the real reader and the read is counted, so the signal is not dead for want of a fact (#2980's lesson)", () => {
   assert.ok(GH_READS.unconditional.some((r: string) => r.includes("readReleaseRuns") && r.includes("release.yml/runs")), "the read is counted where reads are counted");
   const gate = readFileSync(fileURLToPath(new URL("./work-gate.ts", import.meta.url)), "utf8");
-  assert.match(gate, /readReleaseRuns: \(\) => readReleaseRuns\(defaultRun, repoNow\(\)\)/);
+  assert.match(gate, /readReleaseRuns: \(\) => \(releaseSeen\.runs = readReleaseRuns\(defaultRun, repoNow\(\)\)\)/); // a11ign#5100: the same read, kept for the machinery canary so it costs no second call
 });
