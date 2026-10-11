@@ -10,7 +10,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { execFileSync } from "node:child_process";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { stripComments } from "../lib/local-import-closure.ts";
@@ -43,11 +44,78 @@ function tree(files: Record<string, string>): { root: string; done: () => void }
   return { root, done: () => rmSync(root, { recursive: true, force: true }) };
 }
 
-test("the committed inventory equals the regenerated one", () => {
+test("the inventory is generated and never committed: its path is ignored, no tracked file holds it, and two scans of one tree are byte-identical", () => {
   const root = judgedRoot();
-  const committed = readFileSync(join(root, INVENTORY_PATH), "utf8");
-  assert.equal(committed, render(buildInventory(root)),
-    `${INVENTORY_PATH} is stale: run \`node --import tsx src/packaging/gh-call-inventory.ts\` and commit the result`);
+  const ignored = readFileSync(join(root, ".gitignore"), "utf8").split("\n").map((line) => line.trim());
+  assert.ok(ignored.includes(INVENTORY_PATH), `.gitignore must list ${INVENTORY_PATH}: a committed copy is rewritten by every pull request that adds a call, and they conflict (a11ign/a11ign#5126)`);
+  if (existsSync(join(root, ".git"))) {
+    const tracked = execFileSync("git", ["ls-files", "--", INVENTORY_PATH], { cwd: root, encoding: "utf8" });
+    assert.equal(tracked.trim(), "", `${INVENTORY_PATH} is tracked: \`git rm --cached\` it; run \`node --import tsx src/packaging/gh-call-inventory.ts\` to read it on demand`);
+  }
+  const first = render(buildInventory(root));
+  assert.equal(first, render(buildInventory(root)));
+  assert.equal(JSON.parse(first).generatedBy, "src/packaging/gh-call-inventory.ts");
+});
+
+/** Runs `git` in a throwaway repository, with an identity and no signing, and returns whether it exited 0. */
+function gitSucceeds(cwd: string, ...args: string[]): boolean {
+  try {
+    execFileSync("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args], { cwd, stdio: "ignore" });
+    return true;
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * Two branches off one base each ADD a call in a file of their own, and are merged into `main` in each order. `committed` is the arrangement this file
+ * replaced: the inventory is a tracked file, regenerated on each branch the way the old test told a pull request to. Returns whether each order merged clean.
+ */
+function mergesInBothOrders({ committed }: { committed: boolean }): { aThenB: boolean; bThenA: boolean } {
+  const { root, done } = tree({
+    ".gitignore": committed ? "" : `${INVENTORY_PATH}\n`,
+    "src/base.ts": spawn("execFileSync", ["issue", "list"]),
+  });
+  try {
+    const regenerate = (): void => {
+      if (committed) {
+        mkdirSync(join(root, "docs"), { recursive: true });
+        writeFileSync(join(root, INVENTORY_PATH), render(buildInventory(root)));
+      }
+    };
+    gitSucceeds(root, "init", "-q", "-b", "main");
+    regenerate();
+    gitSucceeds(root, "add", "-A");
+    assert.ok(gitSucceeds(root, "commit", "-q", "-m", "base"), "the base commits");
+    const branch = (name: string, file: string, args: string[]): void => {
+      assert.ok(gitSucceeds(root, "checkout", "-q", "-b", name, "main"));
+      writeFileSync(join(root, file), spawn("spawnSync", args));
+      regenerate();
+      gitSucceeds(root, "add", "-A");
+      assert.ok(gitSucceeds(root, "commit", "-q", "-m", name), `${name} commits`);
+    };
+    branch("a", "src/a.ts", ["pr", "view"]);
+    branch("b", "src/b.ts", ["run", "list"]);
+    const merge = (first: string, second: string): boolean => {
+      assert.ok(gitSucceeds(root, "checkout", "-q", "-B", `${first}-then-${second}`, "main"));
+      const clean = gitSucceeds(root, "merge", "--no-edit", first) && gitSucceeds(root, "merge", "--no-edit", second);
+      if (!clean) gitSucceeds(root, "merge", "--abort");
+      return clean;
+    };
+    return { aThenB: merge("a", "b"), bThenA: merge("b", "a") };
+  } finally {
+    done();
+  }
+}
+
+test("two pull requests that each add a gh call merge in either order with no conflict (a11ign/a11ign#5126)", () => {
+  assert.deepEqual(mergesInBothOrders({ committed: false }), { aThenB: true, bThenA: true });
+});
+
+test("negative control: the same two branches conflict when the inventory is a committed file, so the experiment above can fail", () => {
+  const outcome = mergesInBothOrders({ committed: true });
+  assert.equal(outcome.aThenB, false, "the committed file conflicts when merged a then b");
+  assert.equal(outcome.bThenA, false, "and when merged b then a");
 });
 
 test("every non-test file that spawns the command is listed, and the reading is not vacuous", () => {
