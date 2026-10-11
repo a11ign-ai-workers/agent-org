@@ -20,7 +20,7 @@ import { CLAIM_LABEL } from "./claim-labels.ts";
 
 /** Region says the deliverable is not a commit, so the body passes the filing rule in any checkout. */
 const CLAIMABLE_BODY = "## Region\n\nits deliverable is not a commit\n\n"
-  + "## Acceptance\n\n```\nnode --import tsx --test x\n```\n\n"
+  + "## Acceptance\n\n```\nnode --test x\n```\n\n"
   + "## Open-check\n\n```\ngh issue view 3329 --json state\n```\n";
 const NO_OPEN_CHECK = CLAIMABLE_BODY.replace(/## Open-check[\s\S]*$/, "");
 
