@@ -1,5 +1,6 @@
+// no-token: GhRun
 // agent-org#982: a repository that changed with no event behind it at a reconcile is reported once as a missed delivery.
-// Every test drives `refreshTickSnapshot` itself (the real reconcile), with the filer and `gh` injected.
+// Every test drives `refreshTickSnapshot` itself (the real reconcile) with `run` and the filer injected, so the default `ghRun` is never reached (hence the `no-token` line above).
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { cpSync, writeFileSync } from "node:fs";
