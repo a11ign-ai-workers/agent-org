@@ -20,10 +20,25 @@ name: auto-arm
 # NOT COPIED, AND WHY: the sweep, the stalled report and update-branch jobs of the original call a11ign's own scripts and need its board; this
 # repository holds only the tool. They are added when something here needs them, not before.
 
+# AN APPROVING REVIEW MARKS A DRAFT READY AND ARMS IT, WITH NO WORKER TURN (a11ign/a11ign#4969, chairman 2026-10-11). `arm` ignores drafts and no
+# event of its own fires on a review, so a draft approved while still a draft waited for a worker to flip it (agent-org#782: 117 minutes).
+# `pull_request_review` runs THE BRANCH'S copy of the file, exactly the shape the paragraph above forbids a minting job, so it carries ONE job,
+# `relay`, which mints nothing and dispatches `main`'s copy with the PR number. `arm-approved` is the `workflow_dispatch` half: it runs as
+# `main`'s copy (the policy admits that event on `refs/heads/main`), re-reads the PR as the minted token and acts only on
+# `reviewDecision == APPROVED` for an open, same-repository PR against `main` that carries no `hold:` label. Nothing the dispatch says is trusted.
+
 on:
   pull_request_target:
     branches: [main]
     types: [opened, ready_for_review, reopened, synchronize]
+  pull_request_review:
+    types: [submitted]
+  workflow_dispatch:
+    inputs:
+      pr:
+        description: "Pull request number to mark ready (if still a draft) and arm, when it is approved (a11ign/a11ign#4969)"
+        required: true
+        type: string
 
 jobs:
   arm:
@@ -60,5 +75,63 @@ jobs:
             echo "AUTO-ARM: not arming #${PULL_REQUEST} in ${REPOSITORY}: held by ${holders} (armabilityOf, src/pr-hold-state.ts: a ${HOLD_PREFIX} label IS the hold)"
             exit 0
           fi
+          echo "AUTO-ARM: arming #${PULL_REQUEST} in ${REPOSITORY} with the Octo STS token"
+          gh pr merge "$PULL_REQUEST" --repo "$REPOSITORY" --auto --merge
+
+  relay:
+    # A CHANGES_REQUESTED or COMMENTED review, a fork's head and a base other than `main` (`pull_request_review` has no `branches:` filter) do nothing. This job runs the BRANCH's copy of the file and so holds no
+    # `id-token` and mints nothing; `actions: write` is what dispatching `main`'s copy takes (a dispatch made with `GITHUB_TOKEN` starts a run).
+    if: github.event_name == 'pull_request_review' && github.event.review.state == 'approved' && github.event.pull_request.base.ref == 'main' && github.event.pull_request.head.repo.full_name == github.repository
+    permissions:
+      actions: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Hand the approved pull request to `main`'s copy of this workflow (a11ign/a11ign#4969)
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PULL_REQUEST: ${{ github.event.pull_request.number }}
+          REPOSITORY: ${{ github.repository }}
+        run: gh workflow run auto-arm.yml --repo "$REPOSITORY" --ref main -f pr="$PULL_REQUEST"
+
+  arm-approved:
+    if: github.event_name == 'workflow_dispatch' && github.ref == 'refs/heads/main'
+    permissions:
+      id-token: write
+    runs-on: ubuntu-latest
+    steps:
+      - name: Mint the arming token (Octo STS, `auto-arm.sts.yaml`) -- no fallback to `GITHUB_TOKEN`, see the header (a11ign/a11ign#4199)
+        id: octo-sts
+        uses: octo-sts/action@f603d3be9d8dd9871a265776e625a27b00effe05 # v1.1.1
+        with:
+          scope: ${{ github.repository }}
+          identity: auto-arm
+      - name: Mark an approved draft ready and arm it -- unless held, forked, closed or not against main (a11ign/a11ign#4969)
+        env:
+          GH_TOKEN: ${{ steps.octo-sts.outputs.token }}
+          PULL_REQUEST: ${{ github.event.inputs.pr }}
+          REPOSITORY: ${{ github.repository }}
+          # MIRRORS `HOLD_PREFIX` in src/pr-hold-state.ts, as `arm` does above; `auto-arm-workflow-honours-hold.test.ts` fails if the two drift.
+          HOLD_PREFIX: "hold:"
+        run: |
+          case "$PULL_REQUEST" in ''|*[!0-9]*) echo "::error::AUTO-ARM: pr input '$PULL_REQUEST' is not a pull request number"; exit 1;; esac
+          # An approval is readable a moment after the review event, so a dispatch that outruns it asks again before it refuses.
+          for attempt in 1 2 3; do
+            pr=$(gh pr view "$PULL_REQUEST" --repo "$REPOSITORY" --json state,baseRefName,isCrossRepository,reviewDecision,isDraft,labels)
+            [ "$(jq -r .reviewDecision <<<"$pr")" = APPROVED ] && break
+            sleep 5
+          done
+          verdict=$(jq -r --arg prefix "$HOLD_PREFIX" '
+            [.labels[].name | select(startswith($prefix))] as $holds
+            | if .state != "OPEN" then "skip: the pull request is " + .state
+              elif .baseRefName != "main" then "skip: its base is " + .baseRefName + ", not main"
+              elif .isCrossRepository then "skip: its head is in a fork"
+              elif .reviewDecision != "APPROVED" then "skip: reviewDecision is \(.reviewDecision | if . == "" then "empty" else . end), not APPROVED"
+              elif ($holds | length) > 0 then "skip: held by " + ($holds | join(", "))
+              elif .isDraft then "ready"
+              else "arm" end' <<<"$pr")
+          case "$verdict" in
+            skip:*) echo "AUTO-ARM: leaving #${PULL_REQUEST} in ${REPOSITORY} untouched -- ${verdict#skip: }"; exit 0;;
+            ready) echo "AUTO-ARM: #${PULL_REQUEST} is an approved draft: marking it ready"; gh pr ready "$PULL_REQUEST" --repo "$REPOSITORY";;
+          esac
           echo "AUTO-ARM: arming #${PULL_REQUEST} in ${REPOSITORY} with the Octo STS token"
           gh pr merge "$PULL_REQUEST" --repo "$REPOSITORY" --auto --merge
