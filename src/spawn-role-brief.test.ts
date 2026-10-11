@@ -13,8 +13,8 @@ import assert from "node:assert/strict";
 import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { addressed } from "./wake.ts";
-import { SPAWN_BRIEF_ROLES, ENGINEER_BRIEF_SENTENCE, briefRoleSentence } from "./spawn-role-brief.ts";
+import { addressed, ENGINEER_BRIEF } from "./wake.ts";
+import { SPAWN_BRIEF_ROLES, engineerBriefSentence, briefRoleSentence } from "./spawn-role-brief.ts";
 
 const ORDER = { session: "engineers", prompt: "claim row 1 as `<you>`", cause: "ready-row-unclaimed" };
 const SPAWNED = { row: 828, branch: "agent/a-spawned-seat-828", worktree: "/tmp/wt-828", launchDir: "/tmp/wt-828" };
@@ -35,7 +35,7 @@ function fixtureRoot(files: string[]): string {
 
 test("the default is the engineer's, and its sentence is the text at origin/main, byte for byte", () => {
   assert.ok(Buffer.byteLength(MAIN_SENTENCE) > 100, "the pinned sentence is not empty, so an empty sentence cannot pass");
-  assert.equal(ENGINEER_BRIEF_SENTENCE, MAIN_SENTENCE);
+  assert.equal(engineerBriefSentence(ENGINEER_BRIEF), MAIN_SENTENCE);
   assert.equal(briefRoleSentence(), MAIN_SENTENCE);
   assert.equal(briefRoleSentence("engineer"), MAIN_SENTENCE);
   assert.equal(spawn(), spawn({ briefRole: "engineer" }));

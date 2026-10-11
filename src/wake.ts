@@ -61,7 +61,7 @@ import { HOME_CHECKOUT, homeProjectDeclaration } from "./project-config.ts";
 import { stateEntryPath, hostConfigPath, readHostConfig } from "./host-config.ts"; // #2799; the other two for #2969's `clones`, read by host-config since #2991
 import { REPO } from "./project-identity.ts";
 import { roleBriefPath } from "./project-roles.ts";
-import { ENGINEER_BRIEF_SENTENCE, briefRoleSentence } from "./spawn-role-brief.ts"; // #828: the sentence that sends a spawned seat to a role brief
+import { engineerBriefSentence, briefRoleSentence } from "./spawn-role-brief.ts"; // #828: the sentence that sends a spawned seat to a role brief
 // #2619 (child 3d of #69): `session:`/`ready` -- `answer:` already arrives via `work-gate.ts`'s
 // re-export of `waiting-condition.ts`'s own field, so it is not re-imported here.
 import { SESSION_PREFIX, READY_LABEL, OUT_OF_RELEASE_LABEL } from "./project-vocabulary.ts";
@@ -3600,6 +3600,9 @@ function engineerBriefLine(label: string, engineers: string[], families: readonl
   if (!engineers.includes(label) && familyMember(label, families) === null) return "";
   return `${ENGINEER_BRIEF_SENTENCE}\n\n`;
 }
+
+/** The one sentence that sends an engineer to {@link ENGINEER_BRIEF}; a spawned order carries it WITHOUT the roster test (#3444). Its text is `spawn-role-brief.ts`'s (#828). */
+const ENGINEER_BRIEF_SENTENCE = engineerBriefSentence(ENGINEER_BRIEF);
 
 /**
  * The prompt as the woken session receives it: the order's text, prefixed with WHO IT IS.

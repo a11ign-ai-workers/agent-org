@@ -27,8 +27,14 @@ const BRIEF_CONTENTS: Readonly<Record<string, string>> = Object.freeze({
 const sentenceFor = (role: string, brief: string) =>
   `Before you start, read \`${brief}\`: ${BRIEF_CONTENTS[role]}. Nothing else tells you them.`;
 
-/** The engineer's sentence, from the home checkout's declared roles directory; no file is read, as before (#3444). */
-export const ENGINEER_BRIEF_SENTENCE = sentenceFor("engineer", roleBriefPath("engineer.md").relative);
+/**
+ * The engineer's sentence for the brief path `wake.ts` already holds (`ENGINEER_BRIEF`); no file is read, as before (#3444).
+ *
+ * A FUNCTION, NOT A CONSTANT, ON PURPOSE: this module is imported by `wake.ts`, which sits in an import cycle with
+ * `project-config.ts` (`HOME_CHECKOUT`). A top-level `roleBriefPath` call here ran BEFORE `HOME_CHECKOUT` was initialized
+ * (`Cannot access 'HOME_CHECKOUT' before initialization`, review of #831), so nothing in this module's body reads the declaration.
+ */
+export const engineerBriefSentence = (brief: string): string => sentenceFor("engineer", brief);
 
 /**
  * The sentence that sends a spawned seat to `role`'s brief.
