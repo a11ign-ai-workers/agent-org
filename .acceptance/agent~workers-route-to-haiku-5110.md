@@ -11,7 +11,7 @@ Evidence: `src/engineer-route.test.ts` 77 of 77 with `src/engineer-escalation.te
 
 Acceptance: `bash -c 'cd ~/repos/agent-org && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/engineer-route.test.ts'`
 
-Closes: none -- Done-when 2 (the 24h reading) is a live reading after the flag is turned on, and the underspecified move-up is unwired.
+Closes a11ign/a11ign#5110. What remains is filed as its own rows: the 24h reading (Done-when 2, live after the flag is on) and the worker declaring a row underspecified (needs `worker:state`, outside this Region).
 
 Outside-Region: .changeset/workers-route-to-haiku-by-default.md — the entry a project that pins a tag reads.
 
