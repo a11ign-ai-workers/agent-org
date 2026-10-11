@@ -47,6 +47,7 @@ import { newestPerName } from "./newest-check-run.ts";
 import { holdersOf } from "./pr-hold-state.ts";
 import { brokenChecks } from "./red-pr.ts";
 import { armedFromApi } from "./pr-armed-state.ts";
+import { readRequiredContexts } from "./work-gate.ts";
 // `poolFromHeaders` WAS DEFINED HERE until #2003, and its `Pool` shape with it. `work-gate.ts` needs the
 // same reading on its refusal path and may not import this file, so the reader is a leaf now.
 import { poolFromHeaders } from "./api-pool.ts";
@@ -562,13 +563,10 @@ export function checksOnSha(sha: string, run: (args: string[]) => string = gh): 
  * direction understates the problem.
  */
 export function requiredContexts() {
-  return ask(() => {
-    // `branches/main`, not `branches/main/protection`: the latter is repository-ADMIN only, so it 404s for
-    // every agent credential and printed "unknown" for exactly the sessions that read this table (#2331).
-    const contexts = JSON.parse(gh(["api", `repos/${REPO}/branches/main`]))
-      .protection?.required_status_checks?.contexts;
-    return Array.isArray(contexts) ? contexts : null;
-  });
+  // THE ONE READER IS THE GATE'S (#5020): classic protection is gone on every repo and the list lives in the
+  // rulesets, so a private copy of the classic read printed "unknown" here exactly as `requiredCheckNames`
+  // failed open there. `branches/main`, never `branches/main/protection`, is still the classic fallback (#2331).
+  return readRequiredContexts(gh, REPO).contexts;
 }
 
 /**
