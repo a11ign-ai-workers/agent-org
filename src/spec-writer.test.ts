@@ -9,9 +9,9 @@
  * Behind `rows.specWriter` in `.agent-org/project.json`, absent meaning OFF; every refusal below has a twin on the same fixture that is
  * promoted, so a refusal that fires always cannot pass.
  */
-import { test } from "node:test";
+import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, mkdirSync, writeFileSync } from "node:fs";
+import { mkdtempSync, mkdirSync, writeFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import {
@@ -30,8 +30,12 @@ const DRAFT: SpecDraft = {
 const EXAMPLE = (n: number) => `### Example ${n}\n\nspec: ...\n`;
 const promptText = (examples: number) => `# Spec writer\n\nWrite the spec.\n\n## Examples\n\n${Array.from({ length: examples }, (_, i) => EXAMPLE(i + 1)).join("\n")}`;
 
+const made: string[] = [];
+after(() => { for (const dir of made) rmSync(dir, { recursive: true, force: true }); });
+
 function checkoutWith(prompt: string | null): string {
   const root = mkdtempSync(join(tmpdir(), "spec-writer-"));
+  made.push(root);
   if (prompt !== null) {
     mkdirSync(join(root, ".agent-org/roles"), { recursive: true });
     writeFileSync(join(root, SPEC_WRITER_PROMPT_PATH), prompt);
