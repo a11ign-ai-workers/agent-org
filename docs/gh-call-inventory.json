@@ -3,9 +3,9 @@
   "summary": {
     "files": 96,
     "spawns": 136,
-    "calls": 394,
+    "calls": 395,
     "shapes": {
-      "api rest": 138,
+      "api rest": 139,
       "issue list": 42,
       "api graphql": 38,
       "issue view": 34,
@@ -313,7 +313,7 @@
       "spawns": 0,
       "calls": {
         "api graphql": 1,
-        "api rest": 1
+        "api rest": 2
       },
       "labels": [
         "$CLAIM_LABEL"
