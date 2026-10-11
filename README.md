@@ -33,7 +33,7 @@ The tool reads `.agent-org/project.json` of the project it serves, and never ans
 {
   "github": {
     "identity": {
-      "scheduler": { "mode": "github-apps", "appId": 1234567, "keyPath": "/home/agent/.config/agent-org/apps/scheduler.pem" },
+      "scheduler": { "mode": "github-apps", "appId": 1234567, "slug": "my-scheduler", "keyPath": "/home/agent/.config/agent-org/apps/scheduler.pem" },
       "workers": { "mode": "user-accounts" }
     }
   }
@@ -43,7 +43,7 @@ The tool reads `.agent-org/project.json` of the project it serves, and never ans
 | mode | what the role calls as | what it needs |
 |---|---|---|
 | `user-accounts` (the default, and what a role left out gets) | the personal account whose `gh` config directory the host already routes the role to | nothing; a host with no `github` key behaves exactly as before |
-| `github-apps` | `<app>[bot]`, with a one-hour installation token minted from the app's private key and cached | `appId` and an absolute `keyPath` (a mode-600 `.pem`); `installationId` only when the app is installed in more than one place |
+| `github-apps` | `<app>[bot]`, with a one-hour installation token minted from the app's private key and cached | `appId` and an absolute `keyPath` (a mode-600 `.pem`); `installationId` only when the app is installed in more than one place; `slug` (the app's name in `github.com/apps/<slug>`, without `[bot]`) for `gh api user` to be answered |
 
 The roles are chosen one at a time, so a host can move the scheduler first and leave the rest (`scheduler` is the role whose shared pool starved: the gate hit GitHub's secondary
 limit as the workers' account). A role that is not one of the three, a `github-apps` role without `appId` and `keyPath`, and a `user-accounts` role that names an app are refused by
@@ -57,6 +57,9 @@ How it behaves:
 - **A failed mint falls back to today's account**, so the call still goes through, and records one ledger line with resource `incident` naming the stage that failed (`key`,
   `installation` or `token`). The role is not asked again for a minute.
 - **An explicit `GH_TOKEN` or `GITHUB_TOKEN` wins**: a CI runner or a person who named a credential is not re-routed.
+- **`gh api user` is answered from the declaration.** An installation token is refused `GET /user`, so for a call that goes out as a role's app, `gh api user` and
+  `gh api user --jq .login` print `<slug>[bot]` without calling GitHub (ledger resource `declared`). A role whose app declares no `slug`, any other `api user` form (another filter,
+  `-i`, `-H`), a failed mint and an explicit token are sent to GitHub as they were.
 
 The trade-offs, which are why this is an option and not the default:
 

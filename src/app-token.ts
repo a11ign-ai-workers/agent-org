@@ -36,8 +36,12 @@ const HTTP_CREATED = 201;
 /** The three callers of `gh` that may each hold their own GitHub App: the gate and scripts, the engineer sessions, the decision-holders. */
 export const GITHUB_ROLES = Object.freeze(["scheduler", "workers", "managers"] as const);
 export type GithubRole = typeof GITHUB_ROLES[number];
-/** What mints a token: the app, the file its private key is in (a path, never the key) and, when it has several, the installation to use. */
-export type AppIdentity = { appId: string, keyPath: string, installationId?: string };
+/**
+ * What mints a token: the app, the file its private key is in (a path, never the key) and, when it has several, the installation to use.
+ * `slug` is the app's URL name, which the minter never reads: it is what `host/gh` answers `gh api user` with (`<slug>[bot]`, the login the app's
+ * writes are authored as), because an installation token is refused `GET /user`. Absent, the wrapper answers nothing and the call goes through.
+ */
+export type AppIdentity = { appId: string, keyPath: string, installationId?: string, slug?: string };
 /** An installation token and when it dies, in epoch seconds. */
 export type InstallationToken = { token: string, expiresAt: number };
 export type Reply = { status: number, text: () => Promise<string> };
