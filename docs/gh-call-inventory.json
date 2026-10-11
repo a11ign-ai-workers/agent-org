@@ -3,9 +3,9 @@
   "summary": {
     "files": 101,
     "spawns": 137,
-    "calls": 405,
+    "calls": 406,
     "shapes": {
-      "api rest": 152,
+      "api rest": 153,
       "api graphql": 41,
       "issue view": 34,
       "issue list": 30,
@@ -217,12 +217,13 @@
     "src/ci-failure-class.ts": {
       "spawns": 0,
       "calls": {
-        "api rest": 8,
+        "api rest": 9,
         "issue create": 1,
         "issue edit": 2,
         "label create": 1
       },
       "labels": [
+        "$CLAIM_LABEL",
         "$SHARED_FAILURE_LABEL"
       ],
       "parsesCloses": false
