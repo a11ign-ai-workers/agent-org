@@ -40,6 +40,9 @@ function tickOver(ps: () => string, openRowsRead: unknown[] | null = []) {
       now: NOW, lastMergedAt: () => NOW - HOUR_MS, log: (line: string) => said.push(line), 
       readCaptures: (() => IDLE_FLEET) as never,
       readLabJobs: () => dispatchedLabJobsOrSay(() => readDispatchedLabJobs({ run: ps })),
+      // #5157: no host reads: unset, the tick reads the failure ledger and the declared copies of the checkout it runs in, so a busy or drifted host trips here
+      readRefusals: () => [],
+      readCopies: () => null,
       // #3672: no remote: a project that declares `teamAccess` would otherwise make the live `gh api` read here, and this file asserts nothing about it
       teamAccess: () => undefined,
     },
