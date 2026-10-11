@@ -6,10 +6,10 @@ Acceptance:
 ```bash
 git grep -q "POSITIVE CONTROL" -- src/packaging/cross-repo-red-refusal.test.ts
 git grep -q "NEGATIVE CONTROL" -- src/packaging/cross-repo-red-refusal.test.ts
-bash -c 'cd /home/agent/repos/wt-agent-org-992 && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/cross-repo-red-refusal.test.ts'
+AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/cross-repo-red-refusal.test.ts
 ```
 
-The row's third command says `cd ~/repos/agent-org`, the host's checkout (detached at the last release), which does not hold this branch; it is run in this branch's worktree, as a11ign/agent-org#620's and #955's were. Printed `VERDICT pass: 20 tests in 1 file`.
+The row's third command says `cd ~/repos/agent-org`, the host's checkout (detached at the last release), which does not hold this branch. The command here has no `cd`: it runs in the checkout it is executed from, so it tests that checkout's commit (a first version named this branch's worktree and so did not test a reviewer's checkout; NOT CONVINCED at `7a0377f5`). `AGENT_ORG_HOST` names the host's config, which the tool's checkout resolution requires and which is not a checkout of this repository. Printed `VERDICT pass: 20 tests in 1 file`.
 
 Mutation:
 Each applied to a copy of the one line, the test file run, the file restored from the copy and compared byte-identical.
