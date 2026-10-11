@@ -13,11 +13,11 @@ Evidence: `src/pr-hold.test.ts` 17 of 17. The five pins the new cause touches pa
 
 Live reading (pure function over real facts, NOT a gate tick: the production gate acts): agent-org#866 was held by `worker-agent-org-747` at 08:09:28Z on 2026-10-11 (`Waiting-for: merged a11ign/agent-org#845`), approved 08:14:17Z, lifted by the gate at 08:43:41Z and merged 08:50:46Z. Replayed from the hold with the holder assumed idle (herdr keeps no history), the rule wakes `worker-agent-org-747` at 08:39:28Z, 4 minutes before the gate's own lift, and asks `orchestrator` at no point. Right now no pull request in either repository carries a `hold:*` label, and the real listing and state directory give no order.
 
-Not done: item 4 of the row (the daily #928 reading of approved pull requests unqueued over 15 minutes, p90 approval-to-queue, and the 2-day incident), and a live gate tick showing the first real wake; this change does not close the row.
+Not done, filed as its own row: item 4 of the row (the daily #928 reading of approved pull requests unqueued over 15 minutes, p90 approval-to-queue, and the 2-day incident) is a11ign/agent-org#893. Not seen: a live gate tick's first real wake (none has been due since this branch exists); the live reading above is the pure function over the real facts of agent-org#866, not the production gate.
 
 Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/pr-hold.test.ts`
 
-Closes: none -- a11ign/a11ign#4970's item 4 (the daily #928 reading) is not built here and its Done-when 2 asks for a live reading the production gate must make after this merges; the row stays open for both.
+Closes: a11ign/a11ign#4970
 
 Outside-Region: src/cause-declaration.ts — the new cause `hold-holder-idle` is declared where every cause is, with its model and effort.
 Outside-Region: src/packaging/project-roles.test.ts — the pinned cause list and count (43 to 44) and the FINISH classification.
