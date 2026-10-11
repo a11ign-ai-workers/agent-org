@@ -557,3 +557,62 @@ test("#4148 residual: renderByRead prints the header with the window and the sco
     `     1 calls       0 hits  work-gate.ts  [pr list]  a11ign_a11ign  ${READ_DIGEST}  misses: absent 1\n`);
   assert.equal(renderByRead(readGroups([]), { account: ACCOUNT }), `gh ledger: no reads recorded, account ${ACCOUNT}; 0 calls the cache did not look at\n`);
 });
+
+// ---- (a11ign#4777) the app-token mint, run through the wrapper -------------------------------------------------------------------------
+// The wrapper is rendered with a `managers` App declared, and the minter is a stub the test writes; `gh-real` prints the `GH_TOKEN` it was
+// handed, so the test sees which token the call went out on, and the incident line is read back from the ledger.
+const APP_WRAPPER = (() => {
+  const rendered = join(tmpDirForFile("gh-ledger-4777-render-"), "gh");
+  const declared = `case "$1" in managers) app_id=1; app_key=/nonexistent/managers.pem; app_inst=2; app_slug=a11ign-managers ;; *) return 1 ;; esac`;
+  writeFileSync(rendered, WRAPPER_TEXT.replace(/@@([A-Za-z0-9]+)@@/g, (_, name: string) => (name === "appDeclared" ? declared : `/nonexistent/${name}`)), { mode: 0o755 });
+  return rendered;
+})();
+
+/** One `pr list` through the wrapper as `managers`, with a minter whose body is `minter` (sh). Returns the stdout and the incident lines. */
+function appCall(minter: string) {
+  const root = tmpDir("gh-ledger-4777-");
+  mkdirSync(join(root, "cfg"));
+  writeFileSync(join(root, "cfg", "hosts.yml"), "github.com:\n    user: a11ign-ai-leads\n    oauth_token: not-a-token\n");
+  const stub = join(root, "gh-real");
+  writeFileSync(stub, "#!/bin/sh\necho \"token=${GH_TOKEN:-none}\"\n", { mode: 0o755 });
+  const script = join(root, "mint.sh");
+  writeFileSync(script, `#!/bin/sh\ncat > /dev/null\n${minter}\n`, { mode: 0o755 });
+  const ledger = join(root, "cfg", "gh-calls.tsv");
+  const r = spawnSync("sh", [APP_WRAPPER, "pr", "list"], { encoding: "utf8", cwd: root, env: {
+    PATH: process.env.PATH ?? "", A11Y_GH_REAL: stub, GH_CONFIG_DIR: join(root, "cfg"), HERDR_WORKSPACE_ID: "w9", AGENT_ORG_GH_ROLE: "managers",
+    A11Y_APP_ROLES: "managers", A11Y_APP_TOKEN_DIR: join(root, "tokens"), A11Y_APP_NODE: "sh", A11Y_APP_TOKEN_SCRIPT: script,
+    A11Y_GH_READ_CACHE: "off", A11Y_GH_LEDGER: ledger,
+  } });
+  const incidents = existsSync(ledger) ? parseLedger(readFileSync(ledger, "utf8")).filter((e) => e.resource === "incident") : [];
+  return { stdout: r.stdout, incidents };
+}
+
+test("a11ign#4777: a token the minter prints is used when it carries dots, as GitHub's installation tokens do, and a mint that worked is no incident", () => {
+  const call = appCall("printf %s 'ghs_ab.cd-ef_12.34'");
+  assert.equal(call.stdout, "token=ghs_ab.cd-ef_12.34\n", "the call went out on the App's minted token, not the account's");
+  assert.deepEqual(call.incidents, [], "no incident for a mint that worked");
+});
+
+test("a11ign#4777: a mint that exits with nothing on stderr is an incident that names its exit status, never the bare 'no reason given'", () => {
+  const call = appCall("exit 124");
+  assert.equal(call.stdout, "token=none\n", "the call went through as the account, as it always did");
+  assert.equal(call.incidents.length, 1, "one incident for the one failed mint");
+  const caller = call.incidents[0]?.caller ?? "";
+  assert.match(caller, /app-token managers failed, fell back to the account: nothing on stderr \(exit 124\)$/);
+  assert.doesNotMatch(caller, /no reason given/);
+});
+
+test("a11ign#4777: the reason is the first stderr line that says anything, with a token-shaped word blanked, and the exit status follows it", () => {
+  const call = appCall("printf '\\nminter: POST answered 401 for ghs_secret.word-1\\n' >&2; exit 1");
+  assert.equal(call.incidents.length, 1, "one incident");
+  const caller = call.incidents[0]?.caller ?? "";
+  assert.match(caller, /fell back to the account: minter: POST answered 401 for <token> \(exit 1\)$/, "the blank first line is skipped and the exit status is named");
+  assert.doesNotMatch(caller, /ghs_secret/, "a token is never written to the ledger");
+});
+
+test("a11ign#4777: a minter that exits 0 but prints no usable token is an incident that says so, with its real exit status", () => {
+  const call = appCall("exit 0");
+  assert.equal(call.stdout, "token=none\n");
+  assert.equal(call.incidents.length, 1, "one incident");
+  assert.match(call.incidents[0]?.caller ?? "", /exited 0 but printed no usable token \(exit 0\)$/);
+});

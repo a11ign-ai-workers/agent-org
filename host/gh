@@ -408,7 +408,7 @@ read_cache_store() { # the stdout copy, the generation read BEFORE the call ran
 #   - THE TOKEN is read from the cache file `agent-org`'s minter writes (`<expiry epoch> <token>`), in shell and with no process, while it has
 #     more than 5 minutes left; only a stale one starts `app-token.ts`, once an hour per role.
 #   - A MINT THAT FAILS FALLS BACK TO TODAY'S ACCOUNT, and the call goes through as it always did. It is recorded as ONE ledger line with
-#     resource `incident`, status 1, the command `app-token <role>` and the minter's reason in the caller field (`gh-ledger.ts`
+#     resource `incident`, status 1, the command `app-token <role>` and the minter's first stderr line and exit status in the caller field (`gh-ledger.ts`
 #     reads it, at no points), and the role is not asked again for 60 seconds, so an outage costs one process a minute and not one per call.
 #   - THE MINTER NEVER SEES THE CALL'S STDIN (`</dev/null`): `gh pr create --body-file -` reads it, and a minter that consumed it would
 #     post an empty body. Its stderr goes to a file beside the token, never to the caller's.
@@ -461,18 +461,25 @@ app_token() {
       "$app_cmd" "$app_script" "$1" 2>"$app_err" < /dev/null)
   fi
   app_status=$?
-  case "$app_tok" in ''|*[!A-Za-z0-9_-]*) [ "$app_status" -eq 0 ] && app_status=1 ;; esac
+  app_exit=$app_status
+  # THE TOKEN IS OPAQUE, so the test is only that it is there and is one word: GitHub's installation tokens carry dots (a minted one measured
+  # 2026-10-11 had two), and a stricter shape here refused every real mint and sent each hour's call to the account (a11ign#4777).
+  case "$app_tok" in ''|*[[:space:]]*) [ "$app_status" -eq 0 ] && app_status=1 ;; esac
   if [ "$app_status" -eq 0 ]; then
     rm -f "${app_dir:?}/$1.failed" 2>/dev/null
     printf %s "$app_tok"
     return 0
   fi
   printf '%s\n' "$now_s" > "$app_dir/$1.failed" 2>/dev/null
-  reason=$(head -n 1 "$app_err" 2>/dev/null | tr '\0\t\n' '   ' | cut -c1-160)
+  # the first stderr line that says anything, with any token-shaped word blanked out; with none, the exit status is the only reason there is
+  reason=$(grep -m 1 '[^[:space:]]' "$app_err" 2>/dev/null | tr '\0\t' '  ' | sed -E 's/gh[a-z]_[A-Za-z0-9_.-]+/<token>/g' | cut -c1-160)
+  if [ -z "$reason" ]; then
+    if [ "$app_exit" -eq 0 ]; then reason="exited 0 but printed no usable token"; else reason="nothing on stderr"; fi
+  fi
   # a subshell, so the three settings below cannot outlive the incident line (a prefix assignment on a function call is not portable)
   (
     LEDGER_RESOURCE=incident
-    LEDGER_CALLER="app-token $1 failed, fell back to the account: ${reason:-no reason given}"
+    LEDGER_CALLER="app-token $1 failed, fell back to the account: $reason (exit $app_exit)"
     app_account=
     ledger_record "$app_status" "" app-token "$1"
   ) 2>/dev/null || :
