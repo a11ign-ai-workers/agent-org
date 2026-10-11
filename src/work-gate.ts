@@ -162,7 +162,7 @@ import { stallOrdersOrNone, claimStallsNow, closedClaimsNow } from "./work-gate/
 import { readAgents, listingIsComplete } from "./herdr-agents.ts";
 // #3883: THE STRIP A CLOSED ROW'S CLAIM LABELS TAKE, from the leaf both it and `close-rows-for-merged-pr.ts` import -- never a second copy of the label list.
 import { stripClaimLabelsVia } from "./claim-label-strip.ts";
-import { armedAlready, EXIT as ARM_EXIT, familyNumber, runArmPr } from "./arm-pr.ts"; // agent-org#488: `runArmPr` is the command the order names, run by the gate
+import { armedAlready, EXIT as ARM_EXIT, familyMember, familyNumber, undeclaredFamilyKey, runArmPr } from "./arm-pr.ts"; // agent-org#488: `runArmPr` is the command the order names, run by the gate
 export { claimStallTick, claimStallsNow, closedClaimsNow } from "./work-gate/claim-stall-tick.ts";
 export { ROW_CALL_COUNT_SPLIT_THRESHOLD, claimedRowSession, rowCallCountSignals, ROW_CALL_COUNT_ASSESSED_MARKER,
   rowCallCountAssessedCalls, formatRowCallCountAssessment, rowCallCountOrders } from "./work-gate/row-call-count-orders.ts";
@@ -682,7 +682,7 @@ export const GH_READS = Object.freeze({
   // #3883: ONE CALL, EVERY TICK THAT HAS A COMPLETE HERDR LISTING (always, on a live org): the CLOSED rows still carrying `in-progress`, `number,labels` only, filtered
   // server-side, so what comes back is the claim debris and nothing else (the 25 live-seat rows plus whatever a hand close left since the last tick), never 264 rows' comments.
   conditionalOnCompleteHerdrListing: "issue list --state closed --label in-progress --limit 1000 --json number,labels,closedAt (readClosedClaimLabelRows, once per declared tracker -- a closed row's claim labels, stripped when the holder is not listed, or is an idle worker past ten minutes)",
-  conditionalOnListedWorker: "api graphql repository { issue(number: <each listed worker-<n>>) { state labels comments } } (readClosedClaimedRows -- a closed row's claim)",
+  conditionalOnListedWorker: "api graphql repository { issue(number: <each listed worker-<n>, and each worker-<key>-<n> in its own tracker>) { state labels comments } } (readClosedClaimedRows -- a closed row's claim, one call per tracker a listed instance is of)",
   // #3390: TWO REST CALLS PER ROW LABELLED `needs:chairman` (its `labeled` events, and its comments), and NONE when nothing carries the label.
   conditionalOnChairmanLabelledRow: "api repos/{owner}/{repo}/issues/{n}/events and /comments (withChairmanEventTimes -- chairman-answered)",
   // #3079: THREE REST CALLS PER NON-PRIMARY CODE REPOSITORY, every tick (agent-org#539; it was one) -- the newest push runs and the newest schedule runs of its `ci.yml` on
@@ -3573,25 +3573,32 @@ function readNewestComments(numbers: number[], run: (args: string[]) => string, 
  * is exactly the population whose instance can still be stopped.
  *
  * `null` FOR A REFUSAL, NEVER `[]` (#1286): an unread list is not "no closed claim", and `closedClaimOrders` says it was unread.
+ * agent-org#757: A KEYED INSTANCE (`worker-agent-org-<n>`) HOLDS A ROW OF ITS OWN TRACKER, so `tracker` aims the read there and tags each row it returns with the tracker's key and
+ * repository (`closedClaimsWhenWorkerListed` asks once per tracker). Absent, the read is the home tracker's, made exactly as it always was.
  * @param numbers the rows of the listed per-row instances
+ * @param [tracker] the declared tracker the numbers are rows of, `undefined` being the home tracker
  */
-export function readClosedClaimedRows(numbers: number[], run: (args: string[]) => string = defaultRun): import("./claim-stall.ts").ClosedClaimedRow[] | null {
-  const [owner, name] = repoNow().split("/");
+export function readClosedClaimedRows(numbers: number[], run: (args: string[], repo?: string) => string = defaultRun, tracker?: { key: string; repo: string; }): KeyedClosedClaimedRow[] | null {
+  const [owner, name] = (tracker?.repo ?? repoNow()).split("/");
   const row = "number state closedByPullRequestsReferences(first: 5) { nodes { number headRefName title } } labels(first: 50) { nodes { name } }"
     + " comments(last: 100) { nodes { body createdAt author { login } } }";
   const query = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${numbers.map((n) => `r${n}: issue(number: ${n}) { ${row} }`).join(" ")} } }`;
   try {
-    const repository = JSON.parse(run(["api", "graphql", "-f", `query=${query}`, "-F", `owner=${owner}`, "-F", `name=${name}`]))?.data?.repository;
+    const args = ["api", "graphql", "-f", `query=${query}`, "-F", `owner=${owner}`, "-F", `name=${name}`];
+    const repository = JSON.parse(tracker === undefined ? run(args) : run(args, tracker.repo))?.data?.repository;
     if (repository === null || typeof repository !== "object") return null;
     const issues: any[] = Object.values(repository);
     return issues
       .filter((issue) => issue !== null && issue.state === "CLOSED" && issue.labels.nodes.some((l: { name: string; }) => l.name === CLAIM_LABEL))
       .map((issue) => ({ number: issue.number, labels: issue.labels.nodes, comments: issue.comments.nodes,
-        closedByPullRequestsReferences: issue.closedByPullRequestsReferences.nodes }));
+        closedByPullRequestsReferences: issue.closedByPullRequestsReferences.nodes, ...(tracker === undefined ? {} : { tracker }) }));
   } catch {
     return null;
   }
 }
+
+/** A closed claimed row as `readClosedClaimedRows` returns it; `tracker` is set for a row of a tracker other than the home one (agent-org#757). */
+type KeyedClosedClaimedRow = import("./claim-stall.ts").ClosedClaimedRow & { tracker?: { key: string; repo: string; }; };
 
 /** How many closed rows carrying the claim label one read asks for: the row's own acceptance asks for the same page, and a capped read strips the rest on the next tick. */
 const CLOSED_CLAIM_LABEL_LIMIT = 1000;
@@ -3662,7 +3669,7 @@ const BETWEEN_TURNS = ["idle", "done"];
  */
 function holdsClosedRow(holder: string, closedAt: unknown, nowMs: number, status?: string) {
   const closedMs = typeof closedAt === "string" ? Date.parse(closedAt) : NaN;
-  if (familyNumber(holder) === null) return !(nowMs - closedMs > STANDING_SEAT_GRACE_MS);
+  if (familyMember(holder) === null) return !(nowMs - closedMs > STANDING_SEAT_GRACE_MS); // agent-org#757: a KEYED instance is a worker pane, not a standing seat
   if (status === undefined || !BETWEEN_TURNS.includes(status)) return true;
   return !(nowMs - closedMs > WORKER_GRACE_MS);
 }
@@ -7526,8 +7533,42 @@ export function otherTrackerClaims(otherScopes: ReturnType<typeof readOtherScope
  * #3535: A CLOSED ROW'S CLAIM RIDES THE SAME ORDERS as the open claims': the release (and the interrupt) is one more `claim-stalled` order. The read was made with the
  * follow-ups (`closedClaimsWhenWorkerListed`), so this costs no call; `claimFacts` is untouched, because it describes the OPEN claims the blocker-cleared reading is about.
  */
-function withClosedClaims(stalls: ReturnType<typeof claimStallsWithFacts>, closedClaims: ReturnType<typeof closedClaimsWhenWorkerListed>): ReturnType<typeof claimStallsWithFacts> {
-  return { ...stalls, claimStalls: [...stalls.claimStalls, ...closedClaimsNow(closedClaims, { trackerRepo: repoNow() })] };
+export function withClosedClaims(stalls: ReturnType<typeof claimStallsWithFacts>, read: ReturnType<typeof closedClaimsWhenWorkerListed>): ReturnType<typeof claimStallsWithFacts> {
+  const { home: closedClaims, keyed } = splitClosedClaimsByTracker(read);
+  return { ...stalls, claimStalls: [...stalls.claimStalls, ...closedClaimsNow(closedClaims, { trackerRepo: repoNow() }), ...keyedClosedClaimOrders(keyed)] };
+}
+
+/**
+ * agent-org#757: THE CLOSED CLAIMS OF THE HOME TRACKER, and those of each OTHER tracker by key. The home part keeps `rows: null` (an unread list, said by `closedClaimOrders`) and
+ * the listing it was decided from; a keyed row is never decided as the home tracker's of the same number.
+ */
+function splitClosedClaimsByTracker(read: ReturnType<typeof closedClaimsWhenWorkerListed>): { home: ReturnType<typeof closedClaimsWhenWorkerListed>; keyed: Map<string, { repo: string; rows: KeyedClosedClaimedRow[]; agents: { label: string; status: string; }[] | null; }>; } {
+  const keyed = new Map<string, { repo: string; rows: KeyedClosedClaimedRow[]; agents: { label: string; status: string; }[] | null; }>();
+  if (read === null || read.rows === null) return { home: read, keyed };
+  for (const row of read.rows) {
+    if (row.tracker === undefined) continue;
+    const entry = keyed.get(row.tracker.key) ?? { repo: row.tracker.repo, rows: [], agents: read.agents };
+    entry.rows.push(row);
+    keyed.set(row.tracker.key, entry);
+  }
+  return { home: { ...read, rows: read.rows.filter((row) => row.tracker === undefined) }, keyed };
+}
+
+/**
+ * agent-org#757: A KEYED INSTANCE'S CLOSED ROW ENDS ITS CLAIM IN THE SAME PASS as a bare-number one's. The decision is `closedClaimsNow`'s own, asked of that tracker's repository
+ * (the `ownsPr` rungs name a pull request by it) with a keyed label counted as the per-row instance it is (`familyMember`, so a `working` one is interrupted). The release carries the
+ * tracker's key (agent-org#834), which is how `performRelease` reads, comments on and declines the row in THAT tracker; its subject and delivery key are spelled as the stall
+ * pass spells another tracker's row (`agent-org#730`), so the two passes' orders for one row are one entry in the ledger.
+ */
+function keyedClosedClaimOrders(keyed: ReturnType<typeof splitClosedClaimsByTracker>["keyed"]): import("./claim-stall.ts").StallOrder[] {
+  return [...keyed].flatMap(([key, { repo, rows, agents }]) => closedClaimsNow({ rows, agents }, { trackerRepo: repo, isInstance: (session) => familyMember(session) !== null })
+    .map((order) => {
+      const row = /^row-(\d+)$/.exec(order.subject)?.[1];
+      const ref = row === undefined ? null : subjectRef(key, Number(row));
+      return { ...order, ...(ref === null ? {} : { subject: `row-${ref}`, causeKey: order.causeKey.replace(/\/row-(\d+)\//, `/row-${ref}/`),
+        prompt: `${order.prompt}\n\nTHIS ROW IS \`${ref}\` OF \`${repo}\`, NOT THE PRIMARY'S #${row}: put \`--repo ${repo}\` on every \`gh\` command that names it, and read its number as \`${ref}\`.` }),
+      ...(order.release === undefined ? {} : { release: { ...order.release, tracker: key } }) };
+    }));
 }
 
 /**
@@ -7820,11 +7861,36 @@ export function readLanesAfterOutageCheck(run: (args: string[], repo?: string) =
  * be read, so whether an instance exists is unknown), and `{ rows }` is the closed rows read. The listing rides along because the interrupt is decided from it.
  * @param agents herdr's own listing, or `null` when herdr could not be asked
  */
-export function closedClaimsWhenWorkerListed(agents: { label: string; status: string; }[] | null, run: (args: string[]) => string = defaultRun): { rows: import("./claim-stall.ts").ClosedClaimedRow[] | null; agents: { label: string; status: string; }[] | null; } | null {
+export function closedClaimsWhenWorkerListed(agents: { label: string; status: string; }[] | null, run: (args: string[], repo?: string) => string = defaultRun,
+  log: (line: string) => void = (line) => process.stderr.write(line)): { rows: KeyedClosedClaimedRow[] | null; agents: { label: string; status: string; }[] | null; } | null {
   if (agents === null) return { rows: null, agents };
-  const numbers = agents.flatMap((a) => familyNumber(a.label) ?? []);
-  if (numbers.length === 0) return null;
-  return { rows: readClosedClaimedRows(numbers, run), agents };
+  // agent-org#757: ONE READ PER TRACKER a listed instance is of. `familyMember` names a keyed label's row and tracker (`worker-agent-org-730` is row 730 of `agent-org`), where
+  // `familyNumber` is `null` for it BY DESIGN (730 alone would name the home tracker's row 730) and so asked about no row at all.
+  const asked = new Map<string, number[]>();
+  for (const { label } of agents) {
+    const member = familyMember(label);
+    if (member !== null) {
+      asked.set(member.key, [...(asked.get(member.key) ?? []), member.number]);
+      continue;
+    }
+    const undeclared = undeclaredFamilyKey(label);
+    if (undeclared !== null) log(`closed-claim: ${label} names tracker \`${undeclared}\`, which the project does not declare -- its row was NOT read (nothing says whose row it holds).\n`);
+  }
+  if (asked.size === 0) return null;
+  const rows: KeyedClosedClaimedRow[] = [];
+  let answered = 0;
+  for (const [key, numbers] of asked) {
+    const tracker = key === "" ? undefined : homeProjectDeclaration().tracker.find((t) => t.key === key);
+    const read = tracker === undefined && key !== "" ? null : readClosedClaimedRows(numbers, run, tracker);
+    if (read === null) {
+      if (asked.size > 1) log(`closed-claim: the closed rows of ${key === "" ? "the home tracker" : `tracker \`${key}\``} were NOT read this tick (UNREAD, which is not "no closed claim").\n`);
+      continue;
+    }
+    answered++;
+    rows.push(...read);
+  }
+  // `null` ONLY WHEN EVERY READ WAS REFUSED: one tracker's refusal must not hold another's closed rows, and is said above.
+  return { rows: answered === 0 ? null : rows, agents };
 }
 
 /**
