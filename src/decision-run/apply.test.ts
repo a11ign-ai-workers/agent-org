@@ -150,6 +150,18 @@ test("NEGATIVE CONTROL: a stale lease being taken by another run (its lock is he
   assert.deepEqual(leaseItem(dir, REF, "run-3", now + LEASE_MS), { held: true, by: "run-2" });
 });
 
+test("NEGATIVE CONTROL: releaseItem while a takeover holds the lock removes nothing, and leaves no lock of its own", () => {
+  const dir = leaseDir();
+  leaseItem(dir, REF, "run-1", Date.now());
+  const lock = `${leasePath(dir, REF)}.lock`;
+  writeFileSync(lock, String(Date.now()));
+  assert.equal(releaseItem(dir, REF, "run-1"), false);
+  assert.equal(existsSync(leasePath(dir, REF)), true);
+  rmSync(lock);
+  assert.equal(releaseItem(dir, REF, "run-1"), true);
+  assert.equal(existsSync(lock), false);
+});
+
 test("releaseItem by a run that does not hold the lease removes nothing; by the holder removes it", () => {
   const dir = leaseDir();
   leaseItem(dir, REF, "run-1", 1_000);

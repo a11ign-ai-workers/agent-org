@@ -96,16 +96,28 @@ function takeLock(lock: string, nowMs: number): boolean {
   return false;
 }
 
-/** Removes the lease only when `runId` holds it. Returns whether a lease was removed. */
+/**
+ * Removes the lease only when `runId` holds it. Returns whether a lease was removed. The ownership read and the unlink happen under the same
+ * `.lock` a takeover uses, so a run that took the lease between the two cannot have its lease removed. When the lock is held by another taker
+ * nothing is removed (false): the lease then ends by its own age, which is the safe direction.
+ */
 export function releaseItem(stateDir: string, ref: ItemRef, runId: string): boolean {
   const path = leasePath(stateDir, ref);
-  const existing = readLease(path);
-  if (!existing || existing.runId !== runId) return false;
+  const lock = `${path}.lock`;
+  if (readLease(path)?.runId !== runId) return false;
+  if (!takeLock(lock, Date.now())) return false;
   try {
+    if (readLease(path)?.runId !== runId) return false;
     unlinkSync(path);
     return true;
   } catch {
     return false;
+  } finally {
+    try {
+      unlinkSync(lock);
+    } catch {
+      // already gone: nothing to release.
+    }
   }
 }
 

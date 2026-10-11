@@ -6,7 +6,9 @@ Mutation: the staleness check made never fire (`if (false) return`) turns 2 test
 
 Rework (reviewer-agent-org-926, concurrent stale-lease takers): replacing a stale or unreadable lease is now done under an exclusive `.lock` file and the lease is read again inside it, so the second taker answers `held`. Mutation: the lock bypassed (`if (false) return`) turns 1 test red (`a stale lease being taken by another run ... is not also taken`); restore byte-identical.
 
-Evidence: `src/decision-run/apply.test.ts` 12 of 12 measured at this head; `tsc --noEmit` reports nothing in `src/decision-run`.
+Rework 2 (reviewer-agent-org-926, release vs takeover): `releaseItem` reads ownership and unlinks under the same `.lock`, and removes nothing when the lock is held. Mutation: the lock skipped in `releaseItem` turns 1 test red (`releaseItem while a takeover holds the lock removes nothing`); restore byte-identical.
+
+Evidence: `src/decision-run/apply.test.ts` 13 of 13 measured at this head; `tsc --noEmit` reports nothing in `src/decision-run`.
 
 Acceptance:
 git grep -q "POSITIVE CONTROL" -- src/decision-run/apply.test.ts
