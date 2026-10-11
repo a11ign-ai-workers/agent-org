@@ -32,7 +32,8 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { SWEEP_WAIT_ENV } from "../auto-arm-sweep.ts";
 import { laneLabelsFor } from "../row-file.ts";
-import { laneAuthorshipRefusal, ownsReviewOnlyLane, reviewOnlyPathsIn, authorshipVerdict, ROLE_LOGIN } from "../lane-ownership.ts";
+import { laneAuthorshipRefusal, ownsReviewOnlyLane, reviewOnlyPathsIn, authorshipVerdict, ROLE_LOGIN, APP_ROLE_LANE_OWNER } from "../lane-ownership.ts";
+import { GITHUB_ROLES } from "../app-token.ts";
 import { runArmPr, EXIT } from "../arm-pr.ts";
 import { main, EXIT_NOTHING_SENT, loginThrough } from "../pr-open.ts";
 
@@ -78,7 +79,7 @@ test("#3254 (2): the owner's login authoring a PR that touches a non-carved-out 
   assert.match(refusal, /#3254/);
   assert.match(refusal, /#1756 Ruling item 7/);
   assert.match(refusal, /\.github\/workflows\/ci\.yml/, "it names the path that did it");
-  assert.equal(ROLE_LOGIN.ceo, LEADS, "ceo's login is the one the org's leads session acts as");
+  assert.ok(ROLE_LOGIN.ceo.includes(LEADS), "ceo's login is the one the org's leads session acts as");
 });
 
 test("#3254 (3) POSITIVE CONTROLS, each its own case: the same PR from the workers login is NOT refused", () => {
@@ -293,6 +294,41 @@ test("#811 (4): a user token pays ONE call -- `api user` answering means the vie
   assert.equal(loginThrough(empty.gh), BOT, "an empty `api user` answer is a failure, so the viewer is asked");
 });
 
+// --- #816: the managers App's bot login owns `ceo`'s lane; the workers' does not ---
+
+const MANAGERS_BOT = "a11ign-managers[bot]";
+const MANAGERS_BARE = "a11ign-managers"; // a GraphQL `Bot` author without the suffix
+
+test("#816 (1): the managers App's login, in each spelling, authoring into .github/workflows/ is refused at pr:open", () => {
+  for (const login of [MANAGERS_BOT, MANAGERS_BARE]) {
+    const { gh } = fakeGh({ user: refuses403, viewer: login });
+    const out = drivePrOpen([WORKFLOW], () => loginThrough(gh));
+    assert.equal(out.code, EXIT_NOTHING_SENT, login);
+    assert.deepEqual(out.sent, []);
+    assert.match(out.said, /#1756 Ruling item 7/, login);
+  }
+});
+
+test("#816 (2): the same spellings are refused by the predicate and the workers' bot is not", () => {
+  for (const login of [MANAGERS_BOT, MANAGERS_BARE]) {
+    assert.ok(laneAuthorshipRefusal({ author: login, files: [WORKFLOW], lanes: LANES }), login);
+    assert.equal(laneAuthorshipRefusal({ author: login, files: [CARVED_OUT], lanes: LANES }), null, login);
+  }
+  for (const login of [BOT, "a11ign-workers", "a11ign-scheduler[bot]"]) {
+    assert.equal(laneAuthorshipRefusal({ author: login, files: [WORKFLOW], lanes: LANES }), null, login);
+  }
+});
+
+test("#816 (3): every App role is accounted for -- its bot login owns a role in ROLE_LOGIN, or is declared not to", () => {
+  assert.deepEqual([...Object.keys(APP_ROLE_LANE_OWNER)].sort(), [...GITHUB_ROLES].sort(), "a new App role must be listed");
+  for (const [role, owner] of Object.entries(APP_ROLE_LANE_OWNER)) {
+    const bot = `a11ign-${role}[bot]`;
+    const owned = Object.values(ROLE_LOGIN).some((logins) => logins.includes(bot));
+    assert.equal(owned, owner !== null, `${role}: ${bot}`);
+    if (owner !== null) assert.ok(ROLE_LOGIN[owner].includes(bot), `${role} -> ${owner}`);
+  }
+});
+
 // --- the sweep: the same predicate, or arm-pr's refusal is undone one job later ---
 
 const SWEEP = fileURLToPath(new URL("../auto-arm-sweep.ts", import.meta.url));
@@ -342,6 +378,24 @@ test("#3254 (2): the SWEEP, a second unattended door that arms, refuses the lead
   assert.equal(out.merged, false, out.said);
   assert.match(out.said, /SKIPPED/);
   assert.match(out.said, /#1756 Ruling item 7/);
+});
+
+test("#816: arm-pr refuses the managers App's login in both spellings, and arms the workers' bot", () => {
+  for (const author of [MANAGERS_BOT, MANAGERS_BARE]) {
+    const out = driveArm({ author, files: [WORKFLOW] });
+    assert.equal(out.code, EXIT.REFUSED, author);
+    assert.equal(out.merged, false, author);
+  }
+  assert.equal(driveArm({ author: BOT, files: [WORKFLOW] }).merged, true);
+});
+
+test("#816: the SWEEP refuses the managers App's login in both spellings", () => {
+  for (const author of [MANAGERS_BOT, MANAGERS_BARE]) {
+    const out = driveSweep(author, [WORKFLOW]);
+    assert.equal(out.merged, false, out.said);
+    assert.match(out.said, /#1756 Ruling item 7/);
+  }
+  assert.equal(driveSweep(BOT, [WORKFLOW]).merged, true);
 });
 
 test("#3254 (3) POSITIVE CONTROLS at the sweep: the workers login, and a leads PR off the pipeline, ARE armed", () => {
