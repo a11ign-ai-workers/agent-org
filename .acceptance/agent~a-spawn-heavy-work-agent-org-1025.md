@@ -10,8 +10,12 @@ Closes a11ign/agent-org#1025
 
 ## Acceptance
 ```bash
-bash -c 'cd ~/repos/agent-org && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --test src/packaging/wake-start-budget.test.ts'
+AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --test src/packaging/wake-start-budget.test.ts
 ```
+
+The row's own command is the same with `cd ~/repos/agent-org &&` in front; that is the primary clone, which holds the new test file only once this merges, so the PR's job runs it in the PR's own checkout.
+
+Class: serial-blocking-start-in-one-tick -- any other loop that runs `herdr agent start` (or another call with `defaultRun`'s 30 s timeout) once per item inside a tick waits item x 30 s; guard: `wake-start-budget.test.ts` pins the budget for `deliver`'s starts, and the one other such loop, `startAbsentSeats` (the `seats` phase), is filed as agent-org#1052 with its own test.
 
 ## Evidence
 - `src/packaging/wake-start-budget.test.ts` (new): 10 pass, 0 fail. `pnpm run typecheck` clean. `pnpm test`: 12 of 10,258 fail, the same 12 of 80 in the seven files they sit in with `origin/main`'s `wake.ts` and `spawn-census.ts` swapped in (git-spawn-classification, live-tree-independence, org-health-queued-lab-jobs, release-tag-on-merge, wait-condition, work-gate-other-scopes-concurrent, worker-stop-hook): an environment failure (`AGENT_ORG_HOST` unset in their subprocesses), not this change.
