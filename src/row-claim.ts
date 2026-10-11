@@ -1975,6 +1975,42 @@ function undoCreatedWorktree({ branch, worktree }: { branch: string; worktree: s
 }
 
 /**
+ * agent-org#1036: THE MOST LIVE WORKTREES A CHECKOUT MAY HOLD before a claim that would create one is refused. Measured 2026-10-11 (`git worktree
+ * list | wc -l` on the primary checkout, the main one included, a11ign/a11ign#3870 reading 3): 97, down from 356 on 2026-10-06 (#3850), so a cap of
+ * 100 leaves three claims of room. Only the prune brings the count down; a claim never removes a worktree to make room for itself.
+ */
+export const WORKTREE_CAP = 100;
+
+/**
+ * agent-org#1036: THE LIVE WORKTREE COUNT of the checkout `run` is in, the main one included -- one `worktree` line per entry of
+ * `git worktree list --porcelain`. A listing git cannot give THROWS, as {@link rowBranchesOnOrigin} does: a count that cannot be read is
+ * not a count under the cap, so the claim refuses to create a tree on a guess.
+ * @param {typeof defaultRun} run
+ * @returns {number}
+ */
+function liveWorktreeCount(run: typeof defaultRun): number {
+  let listing: string;
+  try {
+    listing = String(run("git", ["worktree", "list", "--porcelain"]));
+  } catch (cause) {
+    throw new Error(`row-claim: could not count the live worktrees -- refusing to create one on a guess. ${(cause as Error).message}`, { cause });
+  }
+  return listing.split("\n").filter((line) => line.startsWith("worktree ")).length;
+}
+
+/**
+ * agent-org#1036: THE REFUSAL AT THE CAP, before any write. It names the count and the prune: a claim creates a worktree, so the only way
+ * under the cap is for the prune to remove some.
+ * @param {number} live
+ * @returns {string}
+ */
+function worktreeCapReason(live: number): string {
+  return `this checkout holds ${live} live worktrees, at or over the cap of ${WORKTREE_CAP} (agent-org#1036). Refusing before any write: `
+    + "a claim creates a worktree, and the count falls only when the prune removes some. Run the prune "
+    + "(`pnpm run worktrees:prune -- --apply`, the form the hourly unit runs), then claim again.";
+}
+
+/**
  * #1432: CLAIM, CREATING THE WORKTREE -- `row-claim claim --branch=<b> --worktree=<p>`. In order: refuse if the path or
  * branch exists, or (#2014) if origin already holds a branch for THIS ROW; fetch; `git worktree add -b <b> <p>
  * origin/main`; stamp it; claim. A claim that is refused or loses
@@ -2009,6 +2045,9 @@ export function claimWithWorktree(issueNumber: number, mySession: string, { bran
   const refusal = worktreeTargetReason({ branch, worktree: tree, issueNumber, adopt, mySession }, { run, exists, owner });
   if (refusal) return { claimed: false, reason: refusal };
   if (adopt !== undefined) return adoptWorktree(issueNumber, mySession, { branch, worktree: tree, adopt, run: ranIn, stamp, claim, claimDeps });
+  // agent-org#1036: a claim that would create a tree is refused at the cap, before the fetch or any write.
+  const live = liveWorktreeCount(run);
+  if (live >= WORKTREE_CAP) return { claimed: false, reason: worktreeCapReason(live) };
   const landed: string[] = [];
   return withLandedWrites(issueNumber, landed, () => {
     run("git", ["fetch", "--quiet", "origin"]);
