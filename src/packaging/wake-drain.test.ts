@@ -26,6 +26,8 @@ const FIXTURE_DIR = mkdtempSync(join(tmpdir(), "wake-drain-roster-"));
 after(() => rmSync(FIXTURE_DIR, { recursive: true, force: true }));
 const PROJECT = join(FIXTURE_DIR, "project");
 cpSync(fileURLToPath(new URL("./fixtures/wake-drain/project", import.meta.url)), PROJECT, { recursive: true });
+// A SPAWN IS REFUSED BEFORE THE CLAIM WHEN THE ENGINEER BRIEF IS NOT AT ITS ABSOLUTE PATH (#869): the recorded project holds a one-line one.
+writeFileSync(join(PROJECT, ".agent-org/roles/engineer.md"), "# engineer brief (a fixture's one line)\n");
 // The project is a REPOSITORY tracking `packages/`, because `trackedTopLevelDirs` asks git in the PROJECT's checkout (#3366): a Region path such as
 // `packages/agent-org/src/wake.ts` below is read as a path only when its first directory is tracked THERE, and a directory that is no repository
 // answers nothing, so the claim's Region lookup failed open and every "refused" test below spawned.

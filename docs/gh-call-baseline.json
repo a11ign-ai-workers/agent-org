@@ -95,7 +95,7 @@
     },
     "src/closes-mismatch-check.ts": {
       "spawns": 0,
-      "calls": 2
+      "calls": 3
     },
     "src/decision-confidence-post.ts": {
       "spawns": 1,
@@ -372,6 +372,10 @@
     "src/worker-state.ts": {
       "spawns": 1,
       "calls": 4
+    },
+    "src/worker-stop-hook.ts": {
+      "spawns": 1,
+      "calls": 1
     },
     "src/workflow-run-liveness.ts": {
       "spawns": 0,

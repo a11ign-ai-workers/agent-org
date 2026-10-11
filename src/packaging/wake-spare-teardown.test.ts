@@ -20,6 +20,7 @@ import { spareRoles, spareInstances, spareDecision, cycleVerdict, consecutiveCle
   readSpareCycles, sparePathsFrom, registerSpawn, spareWorktrees, SPARE_CLAIM_BOUND_MS, WORKERS_GH_CONFIG_DIR }
   from "../wake.ts";
 import { startedPanes, STUB_STARTED_PANE } from "./started-pane.ts";
+import { hostConfigPath } from "../host-config.ts"; // #850: the pane carries the host the gate resolved
 /** #2546: a test that is not ABOUT the clear's five-second settle does not wait it; `wake-clear-settle.test.ts` pins the delay. */
 const noSettle = () => {};
 const deliver: typeof settlingDeliver = (orders, agents, roster, deps) => settlingDeliver(orders, agents, roster, { ...deps, sleep: noSettle });
@@ -244,17 +245,17 @@ test("#2323: an unreadable ledger line is a FAILED cycle, so a corrupt line cann
 
 test("#2323 (4): the spawn's workspace carries GH_CONFIG_DIR=/home/agent/workers/gh, and an explicit override wins", () => {
   assert.equal(WORKERS_GH_CONFIG_DIR, "/home/agent/workers/gh");
-  assert.deepEqual(spawnEnvironment(), { GH_CONFIG_DIR: "/home/agent/workers/gh" });
-  assert.deepEqual(spawnEnvironment({ GH_CONFIG_DIR: "/home/agent/leads/gh" }), { GH_CONFIG_DIR: "/home/agent/leads/gh" });
+  assert.deepEqual(spawnEnvironment(), { GH_CONFIG_DIR: "/home/agent/workers/gh", AGENT_ORG_HOST: hostConfigPath() });
+  assert.deepEqual(spawnEnvironment({ GH_CONFIG_DIR: "/home/agent/leads/gh" }), { GH_CONFIG_DIR: "/home/agent/leads/gh", AGENT_ORG_HOST: hostConfigPath() });
 
   const h = recordingHerdr();
   deliver([ROW_ORDER], NOBODY, ROSTER, { run: h.run });
   assert.deepEqual(h.said("workspace create"),
-    ["--session org workspace create --label worker-capture --no-focus --env GH_CONFIG_DIR=/home/agent/workers/gh"],
+    [`--session org workspace create --label worker-capture --no-focus --env GH_CONFIG_DIR=/home/agent/workers/gh --env AGENT_ORG_HOST=${hostConfigPath()}`],
     "through the production entry: the env is on the call that creates the shell the agent starts in");
   const over = recordingHerdr();
   deliver([ROW_ORDER], NOBODY, ROSTER, { run: over.run, env: spawnEnvironment({ GH_CONFIG_DIR: "/elsewhere" }) });
-  assert.match(over.said("workspace create")[0], / --env GH_CONFIG_DIR=\/elsewhere$/);
+  assert.match(over.said("workspace create")[0], / --env GH_CONFIG_DIR=\/elsewhere /);
   assert.ok(!over.said("workspace create")[0].includes("workers/gh"));
 });
 

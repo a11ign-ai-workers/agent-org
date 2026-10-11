@@ -555,6 +555,17 @@ export const TOOL_CAUSE_DECLARATIONS = Object.freeze([
     why: "the gate has already read the claim and named what has not moved; the output is one commit, push or comment, "
       + "or a declared wait, by a session that is mid-build with its context loaded",
   }),
+  declareCause("hold-holder-idle", GROUPS.ACTION, {
+    kind: "claude",
+    // SONNET AND MEDIUM, `claim-stalled`'s PROFILE (#4970): one cause for two recipients. The first is the HOLDER, a session that exists and has its context loaded; the woken
+    // turn releases the hold or names why it stands in a field. The second is the seat that decides (`orchestrator`), who reads a pull request, its hold and what was already
+    // asked, and either releases it with a reason on the pull request or takes the work over. Both are a short judgment over facts the order states; neither is a build.
+    // ACTION, NOT JUDGMENT: the subject is a pull request the org already holds, so a drain does not withhold it.
+    model: "sonnet",
+    effort: "medium",
+    why: "the gate has read the hold, its holder's status and what was declared; the output is a release or a field naming the wait, "
+      + "or a decision on the pull request with its reason written there",
+  }),
   declareCause("row-off-board", GROUPS.JUDGMENT, {
     kind: "claude",
     model: "sonnet",

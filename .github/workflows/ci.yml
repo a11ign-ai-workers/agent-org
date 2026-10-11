@@ -104,6 +104,22 @@ jobs:
           # rewritten to reach the tool (`board-document-chrome-resolver.test.ts`) is this repository's own now, and imports `../board-document.mjs` as it stands: nothing to rewrite.
           # The tool's tests list the project's files with `git ls-files`. The laid-out copy joins the project checkout's index so they see the tool as they did when it was tracked.
           git -C project add --force --intent-to-add packages/agent-org # in-project
+      # WHAT THE BODY DECLARES MUST MATCH WHAT GITHUB WILL CLOSE, FOR THIS REPOSITORY'S OWN PULL REQUESTS (a11ign/agent-org#863). The check ran only in a11ign/a11ign's `ci.yml`, whose
+      # `prRepo` defaults to a11ign/a11ign, so an agent-org pull request was never put to it: a11ign/a11ign#4904 and #4906 were both agent-org pull requests (#782, #770) closed on merge and not
+      # on outcome, and the refusal agent-org#838 builds could not have reached them. It is a step of `suite` and not a job of its own because `gate` already needs `suite` (a skipped or failed
+      # step is a `suite` that is not `success`), and because only here is the tool laid in a project: it resolves the project's declaration at import and REFUSES, naming the field, from a bare
+      # checkout of this repository. The SECOND ARGUMENT is the point: left off, the check judges the pull request number against a11ign/a11ign, a different pull request, and says "REFUSED" about
+      # a body that is right here (measured 2026-10-11: #856's own body, refused without it and `ok` with it).
+      # `pull_request` only: a `merge_group` or `push` run has no pull request body or number, and the pull request's own run decided before it entered the queue. `edited` is in `on:`, so a
+      # body edit re-runs it. The body goes by `env:` and never argv, which is the CLI's own rule (an author's text is one opaque string). Lookup failure exits 2 (CANNOT ASK) and fails the job:
+      # the check does not go quiet when the API is unwell.
+      - name: The declared Closes matches what GitHub will actually close, for this repository's own pull requests (agent-org#863)
+        if: github.event_name == 'pull_request'
+        working-directory: project
+        env:
+          GH_TOKEN: ${{ github.token }}
+          PR_BODY: ${{ github.event.pull_request.body }}
+        run: node packages/agent-org/src/closes-mismatch-check.ts ${{ github.event.pull_request.number }} ${{ github.repository }} # in-project
       - name: pnpm, which `packaging/installed-layout.test.ts` installs the tool through as a project would (a runner image carries npm, not pnpm)
         run: npm install --global pnpm@10.34.5
       # THE RUNNER IS RSTEST (a11ign/a11ign#3738, ADR 0043 Decision 3, #3549 item 3). `scripts/rstest/rstest.config.ts` is a thin call into `@a11ign/toolchain`'s shared config, run from the

@@ -95,7 +95,7 @@ import {
   acceptancePathsReason, classifyCommand, extractAcceptanceSection, fleetOrLabAcceptance, jobCapabilities,
   unmetClosureRequirements, untrimmedFleetMention, declarationDisagreement, handRunAcceptanceReason, labFetchPathReason,
 } from "./acceptance-commands.ts";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { flagValue, refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { leakRefusalReason } from "./lib/leak-patterns.ts";
@@ -107,9 +107,12 @@ import { PROJECT_OWNER, PROJECT_NUMBER } from "./board-snapshot.ts";
 import { launchGate } from "./board-snapshot-scope.ts";
 import { REPO } from "./project-identity.ts";
 import { DEFECT_LABEL } from "./defect-class-line.ts"; // #4123
-import { declaredRegionFiles, declaresNoCommit, directoryReservations, extractLabeledSection, slashlessDirectoryEntries, splitRegionEntry, unrecognisedRegionPaths } from "./region-paths.ts";
-import { homeProjectDeclaration } from "./project-config.ts";
+import { declaredRegionFiles, declaresNoCommit, directoryReservations, extractLabeledSection, extractRegionSection, slashlessDirectoryEntries, splitRegionEntry, unrecognisedRegionPaths } from "./region-paths.ts";
+import { HOME_CHECKOUT, homeProjectDeclaration } from "./project-config.ts";
+import { cloneOfKey } from "./claim-stall.ts"; // #855: a keyed Region entry is checked against its own clone
+import { sandboxGitEnv } from "./lib/git-env.ts";
 import { rowTracker, trackerNamed } from "./row-tracker.ts"; // #4078
+import { builtInCheckoutOf } from "./built-in-checkout.ts"; // #852
 import { adopterFacingDeclared, adopterRowKind } from "./work-gate/org-health.ts"; // #4378
 import { PRIMARY_MILESTONE_LINE } from "./org-health.ts"; // #4378
 import { parseWaits, umbrellaEdge } from "./wait-condition.ts";
@@ -351,6 +354,82 @@ export function bareKeyedRegionReason(body: string, { code = homeProjectDeclarat
   return `REFUSING to file -- the body says its repository is ${keyed.repo}, but ${bare.length} \`## Region\` entr(ies) are spelled bare: `
     + `${bare.join(", ")}. A bare path is the project's FIRST repository's tree, so \`pr-open --repo ${keyed.repo}\` would read every `
     + `changed path of the PR as outside the Region. Prefix each with the repository's key: \`${example}\` (#3056).`;
+}
+
+/**
+ * #855: A `--ready` ROW'S REGION NAMES A DIRECTORY ITS REPOSITORY HAS, or it is refused here, before `gh` runs. Measured on a11ign#4957
+ * (cause 5): a row filed with Region `packages/guards/src/x.test.ts` into a repository with no `packages/` was accepted, claimed and
+ * worked before anyone read the path back -- the silence the Region parser exists to end.
+ *
+ * ONE QUESTION PER PATH: does the top-level directory the path begins with exist on `origin/main` of the repository the entry is
+ * keyed to (`""`, the project's first repository, is `HOME_CHECKOUT`; `key:` is that key's clone, from `host.json`)? A single new file
+ * at the root (`src/new-file.test.ts` is not that -- its `src/` exists) is not a directory, so it is never read here.
+ *
+ * WHY THIS READS THE KEYED TOKENS ITSELF: `unrecognisedRegionPaths` only sees a path that a whitespace, backtick, quote or paren
+ * precedes, so `nvda-worker:packages/...` is invisible to it and to `declaredRegionFiles`. Measured 2026-10-11 with a declared key:
+ * both came back empty. The section is still read by `extractRegionSection` and each token split by `splitRegionEntry`; only the
+ * token shape is read here, because `region-paths.ts` is outside this row's Region. The owner of that file should move the keyed
+ * shape there (see the row's report).
+ *
+ * A KEYED ENTRY whose repository has NO CLONE DECLARED on this host is not read (`host.json`'s `clones` is absent until a host moves to the
+ * installed form, #2623, and refusing there would stop every keyed row filing as it does today). A key the project does not declare is not
+ * read either. An UNREADABLE clone is a refusal, not a pass: `git ls-tree` failing is "could not tell", and this file refuses on silence.
+ * @param {string} body
+ * @param {{ code?: readonly { key: string, repo: string }[], trackerRepo?: string, checkoutOf?: (key: string) => string | null,
+ *   hasTopLevel?: (checkout: string, top: string) => boolean | null, present?: (checkout: string) => boolean }} [deps] every read is injectable; absent, it is the real one
+ * @returns {string | null}
+ */
+export function absentRegionTopDirReason(body: string, { code = homeProjectDeclaration().code, trackerRepo = homeProjectDeclaration().repo,
+  checkoutOf = checkoutOfKey, hasTopLevel = repoHasTopLevelDir, present = existsSync }: { code?: readonly { key: string; repo: string; }[]; trackerRepo?: string;
+  checkoutOf?: (key: string) => string | null; hasTopLevel?: (checkout: string, top: string) => boolean | null;
+  present?: (checkout: string) => boolean; } = {}): string | null {
+  const section = extractRegionSection(body);
+  if (section === null) return null;
+  for (const [, token] of section.matchAll(REGION_PATH_TOKEN)) {
+    const { key, path } = splitRegionEntry(token);
+    const top = path.split("/")[0];
+    const repo = code.find((entry) => entry.key === key);
+    if (repo === undefined) continue;
+    // A clone that is not on this disk (the CI runner has no ~/repos/agent-org) cannot be read at all: skipped, as an undeclared clone is (#2623).
+    const checkout = checkoutOf(key);
+    if (checkout === null || !present(checkout)) continue;
+    const has = hasTopLevel(checkout, top);
+    if (has === null) {
+      return `REFUSING to file --ready -- could not read origin/main of ${repo.repo} to see whether it has \`${top}/\`, so \`${token}\` `
+        + "cannot be checked (#855). Fetch origin, then file again.";
+    }
+    if (has) continue;
+    const holders = code.filter((other) => other.key !== key).filter((other) => {
+      const found = checkoutOf(other.key);
+      return found !== null && hasTopLevel(found, top) === true;
+    }).map((other) => other.repo);
+    const where = holders.length === 0
+      ? `No declared repository has \`${top}/\`, so the path is wrong, not in another repository.`
+      : `${holders.join(", ")} ${holders.length === 1 ? "has" : "have"} \`${top}/\`: file the row there, or key the path to that repository.`;
+    return `REFUSING to file --ready -- the \`## Region\` names \`${token}\`, but ${repo.repo} (the repository this entry builds in) has no `
+      + `top-level \`${top}/\`. The tracker is ${trackerRepo}. ${where} (#855).`;
+  }
+  return null;
+}
+
+/** A Region path token, keyed or bare: the shape `unrecognisedRegionPaths` reads, plus the `key:` prefix it cannot see (#855). */
+const REGION_PATH_TOKEN = /(?:^|[\s`"'(])((?:[a-z0-9][a-z0-9-]*:)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)/g;
+
+/** Where a repository's clone is: the project's first repository is `HOME_CHECKOUT`; a keyed one is `host.json`'s `clones.<key>`, or `null`. */
+function checkoutOfKey(key: string): string | null {
+  if (key === "") return HOME_CHECKOUT;
+  const clone = cloneOfKey(key);
+  return "clone" in clone ? clone.clone : null;
+}
+
+/** Does `origin/main` of the checkout have `top` at its root? `null` when git cannot say (never a silent `false`). */
+function repoHasTopLevelDir(checkout: string, top: string): boolean | null {
+  try {
+    return execFileSync("git", ["-C", checkout, "ls-tree", "--name-only", "origin/main", "--", top],
+      { encoding: "utf8", env: sandboxGitEnv() }).trim() !== "";
+  } catch {
+    return null;
+  }
 }
 
 /**
@@ -740,7 +819,7 @@ export function fileRefusalReason(body: string | null): string | null {
   // standing in, available here for the cost of a `stat`, and measured twice in one day (#1939, #1936)
   // as the thing nothing asked. Last, because a whole-suite command names no path and must be refused
   // for what it is rather than for naming nothing.
-  const paths = acceptancePathsReason(body, "row-file");
+  const paths = acceptancePathsReason(body, "row-file", { builtInCheckout: builtInCheckoutOf(body) }); // #852
   if (paths) return paths;
   // #1973: AND THE PATHS THAT EXIST BUT ARE THE WRONG ONES. The check above asks whether a named file is
   // there; this asks whether a row that fetches an artifact then reads it named the LAB's copy instead of
@@ -1932,6 +2011,14 @@ export function createIssue(argv: string[], deps: {
   if ("refusal" in chosen) {
     process.stderr.write(`${chosen.refusal}\n`);
     return 1;
+  }
+  // #855: a `--ready` row names only directories its repository has. Backlog rows are not read: a judgement that can wait for pickup.
+  if (boardingFor(argv).status === "Ready") {
+    const absent = absentRegionTopDirReason(body as string, { code: declaration.code, trackerRepo: chosen.tracker.repo });
+    if (absent) {
+      process.stderr.write(`${absent}\n`);
+      return 1;
+    }
   }
   const { tracker } = chosen;
   if (chosen.note !== null) process.stderr.write(`${chosen.note}\n`);

@@ -52,6 +52,10 @@
 //      EXCEPT when every refusal is `project-unreadable` (the token cannot read the Project, #546): that exits 0
 //      with a DEGRADED line naming the rows -- `closeRowsExit`'s bridge, shared with the immediate path.
 //
+// A `Closes: none` THAT NAMES THE PR'S OWN ROW IS READ HERE TOO (a11ign/agent-org#750), through the SAME `planClosesNone` the dispatch path calls: when GitHub resolved nothing, the
+// PR's reason names the row its branch was built for, and that row is claimed, the row closes as built and its verify row carries what the reason left. Only that reading --
+// the dispatch path's #2822 `Closes #N` body fallback is not part of this sweep and is not added to it.
+//
 // THE VERIFY ROW IS FILED HERE TOO (a11ign/agent-org#719). `trunk.yml` runs THIS on every push to main and the dispatch path only on a manual dispatch, so a verify row
 // filed by the dispatch path alone was filed for no normal merge (measured 2026-10-10: ~60 merged rows, no `<!-- verify-row: build #N -->` marker). `closeOnePr` calls
 // the same `fileVerifyRowsFor` the dispatch path does, for the rows it closed AND the rows it found closed, off the build rows the one lookup already carries.
@@ -65,7 +69,7 @@ import { pathToFileURL } from "node:url";
 import { refuseUnknownFlags, flagValue } from "./lib/cli-flags.ts";
 // #1227: `settleClosedStatus` is imported rather than re-derived, for the reason this file's own header
 // gives about `stripClaimLabels`: a second copy of that decision is the "fact stated twice" shape.
-import { closurePlan, stripClaimLabels, closeRowsExit, LIVE_SETTLE_DEPS, logRateLimit, fileVerifyRowsFor, liveVerifyEffects }
+import { closurePlan, planClosesNone, stripClaimLabels, closeRowsExit, LIVE_SETTLE_DEPS, logRateLimit, fileVerifyRowsFor, liveVerifyEffects }
   from "./close-rows-for-merged-pr.ts";
 import type { BuildRow, VerifyEffects } from "./verify-row.ts";
 import { settleClosedStatus } from "./settle-closed-status.ts";
@@ -78,6 +82,9 @@ export const DEFAULT_WINDOW_MINUTES = 45;
 
 /** @param {string[]} args */
 const gh = (args: string[]) => execFileSync("gh", args, { encoding: "utf8" }).trim();
+
+/** The sweep's one GraphQL read, so the PR lookup and the `Closes: none` row lookup (a11ign/agent-org#750) are ONE `gh` call site, not two (gh-call-baseline.json only goes down). */
+const graphqlRead = (gh_: (args: string[]) => string, query: string, jq: string): string => gh_(["api", "graphql", "-f", `query=${query}`, "--jq", jq]);
 
 /**
  * Every PR merged into `main` within the last `windowMinutes`, via GitHub's own search -- never inferred
@@ -133,7 +140,7 @@ export function closeOnePr(number: number, repo: string, { gh_ = gh, strip = str
         settle?: (n: number) => SettleOutcome; verify?: VerifyEffects;
     } = {}): SweepOutcome {
   const [owner, name] = repo.split("/");
-  let issues, sha, prMergedAt;
+  let issues, sha, prMergedAt, headRefName: string | null, prBody: string;
   const builds = new Map<number, BuildRow | null>();
   try {
     // `labels(first:20){nodes{name}}` added for #754, same reason as the immediate path's identical
@@ -141,12 +148,11 @@ export function closeOnePr(number: number, repo: string, { gh_ = gh, strip = str
     // #1877: `mergedAt` and each issue's last `ReopenedEvent` -- see close-rows-for-merged-pr.ts's
     // `closurePlan` for what this backs (the sweep drives the identical, imported decision).
     const query = `{repository(owner:"${owner}",name:"${name}"){pullRequest(number:${number}){`
-      + `mergedAt mergeCommit{oid} closingIssuesReferences(first:20){nodes{number state `
+      + `mergedAt headRefName body mergeCommit{oid} closingIssuesReferences(first:20){nodes{number state `
       + `title body milestone{title} parent{number} `
       + `labels(first:20){nodes{name}} timelineItems(itemTypes:[REOPENED_EVENT],last:1){nodes{`
       + `... on ReopenedEvent{createdAt}}}}}}}}`;
-    const pr = JSON.parse(gh_(["api", "graphql", "-f", `query=${query}`,
-      "--jq", ".data.repository.pullRequest"]));
+    const pr = JSON.parse(graphqlRead(gh_, query, ".data.repository.pullRequest"));
     const nodes: {
         number: number; state: string; labels: { nodes: { name: string; }[]; };
         timelineItems: { nodes: { createdAt: string; }[]; };
@@ -163,15 +169,25 @@ export function closeOnePr(number: number, repo: string, { gh_ = gh, strip = str
     }
     sha = pr.mergeCommit?.oid ?? "unknown";
     prMergedAt = pr.mergedAt ?? null;
+    headRefName = pr.headRefName ?? null;
+    prBody = pr.body ?? "";
   } catch (cause) {
     console.log(`SWEEP: #${number} CANNOT ASK -- ${cause instanceof Error ? cause.message : cause}`);
     return { failed: [number], unsettled: [], skipped: [] };
   }
 
-  const { close, already, skip, none } = closurePlan(issues, { prMergedAt });
+  let { close, already, skip, none } = closurePlan(issues, { prMergedAt });
+  let leftover: { number: number; reason: string; } | undefined;
+  const unreadable: number[] = [];
   if (none) {
-    console.log(`SWEEP: #${number} declared NO closing references.`);
-    return { failed: [], unsettled: [], skipped: [] };
+    const own = closesNoneOwnRowPlan({ number, repo, prMergedAt, headRefName, prBody }, gh_, builds);
+    if (own === null) {
+      console.log(`SWEEP: #${number} declared NO closing references.`);
+      return { failed: [], unsettled: [], skipped: [] };
+    }
+    ({ close, already, skip, none } = own.plan);
+    unreadable.push(...own.unreadable);
+    leftover = own.leftover;
   }
   // #776/#791: the identical fix as close-rows-for-merged-pr.ts's own already loop -- GitHub can close a
   // row NATIVELY, before either path runs, and its claim is exactly as stale as one this script closes.
@@ -185,10 +201,12 @@ export function closeOnePr(number: number, repo: string, { gh_ = gh, strip = str
     return n;
   });
 
-  const failed: number[] = [];
+  // "could not read" is never "closed" (#2822): a row the `Closes: none` named and the sweep could not read is named, and fails the sweep.
+  const failed: number[] = [...unreadable];
   for (const { number: n, labels } of close) {
+    const declaration = leftover?.number === n ? "`Closes: none` with a reason that names this row as the PR's own (a11ign/agent-org#750)" : `\`Closes #${n}\``;
     const sentence = `Closed by the pipeline's sweep: PR #${number} merged as \`${sha}\` and declared `
-      + `\`Closes #${n}\`, but the immediate pull_request:closed trigger did not fire for it (#394).\n\n`
+      + `${declaration}, but the immediate pull_request:closed trigger did not fire for it (#394).\n\n`
       + `If the work did not land, reopen and say so on the row: \`git show ${sha}\` is what actually `
       + "merged.";
     try {
@@ -206,8 +224,43 @@ export function closeOnePr(number: number, repo: string, { gh_ = gh, strip = str
     unsettled.push(...settle(n).refused);
   }
   const lost = fileVerifyRows([...close.map((row) => row.number).filter((n) => !failed.includes(n)), ...already.map((row) => row.number)],
-    { pr: String(number), mergedAt: prMergedAt, builds, effects: verify ?? liveVerifyEffects(repo) });
+    { pr: String(number), mergedAt: prMergedAt, builds, effects: verify ?? liveVerifyEffects(repo), leftover });
   return { failed, unsettled, skipped, ...(lost.length ? { lost } : {}) };
+}
+
+/**
+ * a11ign/agent-org#750: THE SWEEP'S READING OF A `Closes: none` THAT NAMES THE PR'S OWN ROW. Reads the row the branch names through `gh_` (state, labels, last `ReopenedEvent`, and
+ * the fields of its build row, kept in `builds` for the verify row) and weighs it with the dispatch path's own `planClosesNone`. `null` when the PR names no row of its own, or
+ * names one nobody holds (open, no claim label: logged, left alone).
+ * @returns {{ plan: ReturnType<typeof closurePlan>, leftover: { number: number, reason: string }, unreadable: number[] } | null}
+ */
+function closesNoneOwnRowPlan({ number, repo, prMergedAt, headRefName, prBody }: { number: number; repo: string; prMergedAt: string | null; headRefName: string | null; prBody: string; },
+  gh_: (args: string[]) => string, builds: Map<number, BuildRow | null>): { plan: ReturnType<typeof closurePlan>; leftover: { number: number; reason: string; }; unreadable: number[]; } | null {
+  const [owner, name] = repo.split("/");
+  const lookupRow = (n: number) => {
+    const query = `{repository(owner:"${owner}",name:"${name}"){issue(number:${n}){number state title body milestone{title} parent{number} `
+      + `labels(first:20){nodes{name}} timelineItems(itemTypes:[REOPENED_EVENT],last:1){nodes{... on ReopenedEvent{createdAt}}}}}}`;
+    try {
+      const issue = JSON.parse(graphqlRead(gh_, query, ".data.repository.issue"));
+      if (issue === null) return null;
+      const labels: string[] = (issue.labels?.nodes ?? []).map((l: { name: string; }) => l.name);
+      builds.set(issue.number, typeof issue.title !== "string" ? null : { number: issue.number, title: issue.title, body: issue.body ?? "", labels,
+        milestone: issue.milestone?.title ?? null, parent: issue.parent?.number ?? null });
+      return { number: issue.number as number, state: issue.state as string, labels, reopenedAt: (issue.timelineItems?.nodes?.[0]?.createdAt ?? null) as string | null };
+    } catch (cause) {
+      console.log(`SWEEP: could not read declared #${n} -- ${cause instanceof Error ? cause.message : cause}`);
+      return null;
+    }
+  };
+  const own = planClosesNone({ prMergedAt, prBody, headRefName, prRepo: repo, rowsRepo: repo }, lookupRow);
+  if (own.kind === "none") return null;
+  if (own.kind === "unclaimed") {
+    console.log(`SWEEP: #${number}'s \`Closes: none\` names #${own.number}, which is open and not claimed -- nobody holds it, so it is left (a11ign/agent-org#750).`);
+    return null;
+  }
+  console.log(`SWEEP: #${number} GitHub resolved NO closing reference, but its \`Closes: none\` reason names #${own.leftover.number}, the row this branch was built for.`);
+  for (const n of own.unreadable) console.log(`SWEEP: #${n} COULD NOT BE READ -- declared, not closed.`);
+  return { plan: own.plan, leftover: own.leftover, unreadable: own.unreadable };
 }
 
 /**
@@ -215,13 +268,13 @@ export function closeOnePr(number: number, repo: string, { gh_ = gh, strip = str
  * merge time read files nothing and says so: a closed row whose reading it could not place is NOT CHECKED, never "has none".
  * @returns {number[]} the closed builds with a live reading whose verify row could not be filed
  */
-function fileVerifyRows(closed: number[], { pr, mergedAt, builds, effects }: { pr: string; mergedAt: string | null; builds: Map<number, BuildRow | null>; effects: VerifyEffects; }): number[] {
+function fileVerifyRows(closed: number[], { pr, mergedAt, builds, effects, leftover }: { pr: string; mergedAt: string | null; builds: Map<number, BuildRow | null>; effects: VerifyEffects; leftover?: { number: number; reason: string; }; }): number[] {
   if (closed.length === 0) return [];
   if (mergedAt === null) {
     console.log(`SWEEP: PR #${pr} merge time was not read, so ${closed.map((n) => `#${n}`).join(" ")} NOT CHECKED for a verify row.`);
     return [];
   }
-  return fileVerifyRowsFor(closed, { prNumber: pr, mergedAt }, { read: (n) => builds.get(n) ?? null, effects, say: (line) => console.log(`SWEEP: ${line}`) });
+  return fileVerifyRowsFor(closed, { prNumber: pr, mergedAt, ...(leftover ? { leftover } : {}) }, { read: (n) => builds.get(n) ?? null, effects, say: (line) => console.log(`SWEEP: ${line}`) });
 }
 
 /**

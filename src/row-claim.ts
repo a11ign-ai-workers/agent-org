@@ -59,8 +59,9 @@
 // failures, and conflating them would make a full disk read as an unreadable board.
 import { execFileSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { existsSync, realpathSync, readFileSync, writeFileSync, renameSync } from "node:fs";
-import { basename, dirname, resolve } from "node:path";
+import { existsSync, realpathSync, readFileSync, writeFileSync, renameSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 // RELATIVE, NOT the `@a11ign/screenreader-fleet/cli-flags` package specifier: that export map
 // points at `dist/`, so it needs both `node_modules` AND a completed build. This file is reachable
@@ -92,6 +93,7 @@ import { staleRuleReason } from "./row-claim/stale-rule-guard.ts";
 // below, which still throws -- because the gate's is deliberately different.
 import { LS_REMOTE_ARGS, branchesForRow } from "./row-claim/row-branch-rule.ts";
 import { sandboxGitEnv } from "./lib/git-env.ts";
+import { pnpmCliInvocation } from "./lib/npm-cli-executable.ts";
 import { primaryWorktreeOf, unverifiedRecords } from "./prune-worktrees.ts";
 import { claimRefusal, recordRemoval } from "./worktree-removal.ts";
 
@@ -1944,15 +1946,18 @@ function undoCreatedWorktree({ branch, worktree }: { branch: string; worktree: s
  * @param {string} mySession
  * @param {{ branch: string, worktree: string, adopt?: string, run?: typeof defaultRun, exists?: (path: string) => boolean,
  *   owner?: (worktree: string) => string | null, stamp?: (worktree: string, session: string) => void,
- *   claim?: typeof claimRow, claimDeps?: Parameters<typeof claimRow>[2], clone?: string, release?: typeof declineRow }} args
- *   `adopt` (#2470) claims the EXISTING tree of the session it names, in place -- see {@link adoptionReason}
+ *   claim?: typeof claimRow, claimDeps?: Parameters<typeof claimRow>[2], clone?: string, release?: typeof declineRow,
+ *   exec?: typeof defaultExec }} args
+ *   `adopt` (#2470) claims the EXISTING tree of the session it names, in place -- see {@link adoptionReason}. `exec` (agent-org#871) runs
+ *   {@link installLockedDependencies}'s `pnpm install` IN the tree, which `run` cannot say: it names no directory
  * @returns {ReturnType<typeof claimRow>}
  */
 export function claimWithWorktree(issueNumber: number, mySession: string, { branch, worktree, adopt, run: ranIn = defaultRun, exists = existsSync,
-  owner = worktreeOwner, stamp = stampWorktree, claim = claimRow, claimDeps = {}, clone, release = declineRow }: {
+  owner = worktreeOwner, stamp = stampWorktree, claim = claimRow, claimDeps = {}, clone, release = declineRow, exec = defaultExec }: {
         branch: string; worktree: string; adopt?: string; run?: typeof defaultRun; exists?: (path: string) => boolean;
         owner?: (worktree: string) => string | null; stamp?: (worktree: string, session: string) => void;
         claim?: typeof claimRow; claimDeps?: Parameters<typeof claimRow>[2]; clone?: string; release?: typeof declineRow;
+        exec?: typeof defaultExec;
     }): ReturnType<typeof claimRow> {
   // The keyed claim's git calls name their checkout (`-C`), as `git-reads-name-their-checkout.test.ts` asks of every read; `gh` is untouched.
   const run: typeof defaultRun = clone === undefined ? ranIn : (cmd, args) => ranIn(cmd, cmd === "git" ? ["-C", clone, ...args] : args);
@@ -1976,8 +1981,11 @@ export function claimWithWorktree(issueNumber: number, mySession: string, { bran
       if (claimDeps.tracker === undefined) throw cause;
       throw takenBack(cause, { issueNumber, mySession, branch, worktree: tree, run, tracker: claimDeps.tracker, release, landed });
     }
-    if (result.claimed) return replaced ? { ...result, replacedTip: replaced } : result;
-    return { claimed: false, reason: `${result.reason} -- and ${undoCreatedWorktree({ branch, worktree: tree }, run)}` };
+    if (!result.claimed) return { claimed: false, reason: `${result.reason} -- and ${undoCreatedWorktree({ branch, worktree: tree }, run)}` };
+    // agent-org#871: the claim stands first; an install that fails is a line in its report, never a reason to take the row back.
+    const install = installLockedDependencies(tree, { exec, exists });
+    const made = replaced ? { ...result, replacedTip: replaced } : result;
+    return install === null ? made : { ...made, install };
   });
 }
 
@@ -2030,6 +2038,63 @@ function replacedMergedTip(branch: string, run: typeof defaultRun): string | nul
   if (reading.exists && reading.free) return tip;
   throw new Error(`row-claim: --branch=${branch} exists locally and is not free to recreate after the fetch: `
     + `${reading.exists ? reading.why : "it vanished"}. Nothing was written.`);
+}
+
+/** agent-org#871: a command run IN a directory, which `defaultRun` cannot be: it takes no `cwd`, and a `git -C` is not an install. */
+const defaultExec: (cmd: string, args: string[], where: { cwd: string; }) => string = (cmd, args, { cwd }): string =>
+  execFileSync(cmd, args, { cwd, encoding: "utf8", env: sandboxGitEnv(), stdio: ["ignore", "pipe", "pipe"], timeout: 10 * 60 * 1000 });
+
+/** The first line of a failure that says what went wrong: an error-looking line of stderr, stdout or the message, else the first line there is. */
+function firstErrorLine(cause: unknown): string {
+  const failed = cause as { stderr?: unknown; stdout?: unknown; message?: unknown; };
+  const lines = [failed.stderr, failed.stdout, failed.message].flatMap((text) => String(text ?? "").split("\n").map((line) => line.trim()).filter(Boolean));
+  return (lines.find((line) => /\bERR(?:_|!|\b)|error/i.test(line)) ?? lines[0] ?? "no output").slice(0, 200);
+}
+
+/**
+ * The readiness probe (agent-org#871): what a worker's first command needs. `node_modules/.bin/rstest` exists, and a trivial `node --test` file runs
+ * in the tree (Node 24 strips types, so `tsx`, which is not a dependency, is not the probe). Answers what failed, or `null` when the tree is ready.
+ * The probe file lives in a scratch directory, never in the tree: a claim leaves the worktree clean.
+ */
+function notReadyReason(tree: string, { exec, exists }: { exec: typeof defaultExec; exists: (path: string) => boolean; }): string | null {
+  if (!exists(join(tree, "node_modules", ".bin", "rstest"))) return "node_modules/.bin/rstest is missing";
+  const scratch = mkdtempSync(join(tmpdir(), "row-claim-probe-"));
+  try {
+    const probe = join(scratch, "ready.test.mjs");
+    writeFileSync(probe, "import { test } from \"node:test\";\ntest(\"ready\", () => {});\n");
+    exec(process.execPath, ["--test", probe], { cwd: tree });
+    return null;
+  } catch (cause) {
+    return `\`node --test\` did not run: ${firstErrorLine(cause)}`;
+  } finally {
+    rmSync(scratch, { recursive: true, force: true });
+  }
+}
+
+/**
+ * agent-org#871 (a11ign#4957 cause 2; replaces #851's npm form): A WORKTREE THE CLAIM MAKES IS PROVISIONED FROM THE COMMITTED PNPM LOCKFILE.
+ * `git worktree add` makes a tree with no `node_modules`, so a fresh worker's Acceptance (`node --test`, `rstest`) exited 1 before it tested
+ * anything and agent-org#816 stopped on exactly that. Runs `pnpm install --frozen-lockfile --ignore-scripts` in `tree` -- through `pnpmCliInvocation`,
+ * as `update-primary.ts` does, never a bare spawn -- when the tree HAS a `pnpm-lock.yaml` and NO `node_modules`, then the readiness probe, and answers
+ * the word the claim's line carries: `installed`, `install failed: <first error line>` or `not ready: <what failed>`. A repository with no lockfile,
+ * or a tree that already has its modules, answers `null` and is claimed exactly as before.
+ *
+ * NEVER THROWS: the claim is already made and the row is the worker's, so a failed install is REPORTED, where it is the worker's first command that
+ * would otherwise have failed with no word of why. `--ignore-scripts`: a claim must not run a package's lifecycle scripts as a side effect.
+ * @param {string} tree
+ * @param {{ exec: typeof defaultExec, exists: (path: string) => boolean }} deps
+ * @returns {string | null}
+ */
+export function installLockedDependencies(tree: string, { exec, exists }: { exec: typeof defaultExec; exists: (path: string) => boolean; }): string | null {
+  if (!exists(join(tree, "pnpm-lock.yaml")) || exists(join(tree, "node_modules"))) return null;
+  try {
+    const { command, args } = pnpmCliInvocation(["install", "--frozen-lockfile", "--ignore-scripts"]);
+    exec(command, args, { cwd: tree });
+  } catch (cause) {
+    return `install failed: ${firstErrorLine(cause)}`;
+  }
+  const reason = notReadyReason(tree, { exec, exists });
+  return reason === null ? "installed" : `not ready: ${reason}`;
 }
 
 /**
@@ -2791,11 +2856,12 @@ function renderTrackerStatus(tracker: Tracker, { issueNumber, title, status, bod
  * @param {"dispatch" | "claim"} mode
  * @param {number} issueNumber
  * @param {string} mySession
- * @param {{ branch?: string, worktree?: string, adopt?: string, replacedTip?: string, key?: string }} record `key` (agent-org#575) names a row of a
+ * @param {{ branch?: string, worktree?: string, adopt?: string, replacedTip?: string, install?: string, key?: string }} record `install` (agent-org#871) is
+ *   `installed`, `install failed: <line>` or `not ready: <what>`, said after the worktree; `key` (agent-org#575) names a row of a
  *   tracker that is not the first `<key>#<n>`, as `check` does, so two trackers' row 7 read as two rows
  * @returns {string}
  */
-export function claimLineFor(mode: "dispatch" | "claim", issueNumber: number, mySession: string, { branch, worktree, adopt, replacedTip, key = "" }: { branch?: string; worktree?: string; adopt?: string; replacedTip?: string; key?: string; }): string {
+export function claimLineFor(mode: "dispatch" | "claim", issueNumber: number, mySession: string, { branch, worktree, adopt, replacedTip, install, key = "" }: { branch?: string; worktree?: string; adopt?: string; replacedTip?: string; install?: string; key?: string; }): string {
   const label = mode === "dispatch" ? "DISPATCHED" : "STARTED";
   const startedSuffix = mode === "claim" ? ` / ${STARTED_LABEL}` : "";
   // #987: `branch <name>`, not `branch:<name>` -- the colon form named a LABEL, and this claim no longer
@@ -2805,8 +2871,10 @@ export function claimLineFor(mode: "dispatch" | "claim", issueNumber: number, my
   const worktreeSuffix = mode === "claim" && worktree ? ` / worktree ${worktree}${adopt ? ` (ADOPTED from ${adopt}, work kept)` : ""}` : "";
   // #3745: the leftover branch's tip, so a reader can find what the name held; it is an ancestor of origin/main by construction.
   const replacedSuffix = replacedTip ? ` (recreated over a leftover branch merged into origin/main, old tip ${replacedTip})` : "";
+  // agent-org#871: what installing the new tree's lockfile came to, so the worker's first failing command is not a mystery.
+  const installSuffix = mode === "claim" && install ? ` / ${install}` : "";
   return `${label} -- ${key}#${issueNumber} is now ${CLAIM_LABEL} / session:${mySession}`
-    + `${startedSuffix}${branchSuffix}${worktreeSuffix}${replacedSuffix}`;
+    + `${startedSuffix}${branchSuffix}${worktreeSuffix}${replacedSuffix}${installSuffix}`;
 }
 
 /**
@@ -3047,7 +3115,8 @@ function runDispatchOrClaim(mode: "dispatch" | "claim", issueNumber: number, res
       // recording it would leave an entry no release removes, refusing the worker's later legitimate claim.
       if (mode === "claim") recordHeldRow(mySession, issueNumber);
       const claimLine = claimLineFor(mode, issueNumber, mySession, { branch, worktree, adopt,
-        replacedTip: (result as { replacedTip?: string }).replacedTip, ...(key === "" ? {} : { key }) });
+        replacedTip: (result as { replacedTip?: string }).replacedTip, install: (result as { install?: string }).install,
+        ...(key === "" ? {} : { key }) });
       if (result.statusMoved) {
         process.stdout.write(`${claimLine}\n`);
         process.exitCode = 0;
