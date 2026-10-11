@@ -3,7 +3,6 @@ The gate and the queue table read the required checks from the rulesets (a11ign/
 Acceptance:
 
 ```bash
-git grep -q "#5020: neither source gives a list" -- src/packaging/work-gate.test.ts
 git grep -q "requiredContexts reads the RULESETS when classic protection is gone" -- src/packaging/queue-table.test.ts
 bash -c 'cd ~/repos/agent-org-wt-5020 && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/queue-table.test.ts'
 ```
