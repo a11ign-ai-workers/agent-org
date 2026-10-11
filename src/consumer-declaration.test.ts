@@ -1,4 +1,4 @@
-// no-token: every read of a consumer's file is an injected function or a fake `gh` first on PATH that answers from files; nothing here reaches GitHub
+// no-token: none -- every read of a consumer's file is an injected function or a fake `gh` first on PATH that answers from files; nothing here reaches GitHub
 // agent-org#873 (class `closed-on-merge-not-outcome`, a11ign/a11ign#4953). THE GRAMMAR (`consumer-declaration.ts`) AND THE REFUSAL
 // (`consumerDeclarationReport` in `closes-mismatch-check.ts`) THAT READS IT.
 //
