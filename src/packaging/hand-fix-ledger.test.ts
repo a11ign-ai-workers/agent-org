@@ -190,7 +190,7 @@ test("#2939 pr-open REFUSES a malformed Hand-fix line, naming the format, and se
     const err: string[] = [];
     let acceptance = 0;
     const body = "## Acceptance\n\nnode -e \"process.exit(0)\"\n\nCloses #2939\nHand-fix: the gate did not file it - hyphen\n";
-    const code = prOpen([mode, ...(mode === "create" ? ["--draft"] : ["7"]), "--body", body], {
+    const code = prOpen([mode, ...(mode === "create" ? ["--draft"] : ["7"]), "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`], {
       run: (a: string[]) => { sent.push(a); }, git: () => "x", prHead: () => ({ ref: "x", oid: "x" }),
       runAcceptance: () => { acceptance += 1; return 0; }, owner: () => "ceo",
       out: (l: string) => { out.push(l); }, err: (l: string) => { err.push(l); },
@@ -209,7 +209,7 @@ test("#2939 pr-open ACCEPTS a well-formed Hand-fix line, and a body with none is
   assert.equal(declarationRefusal(`Closes #1\nHand-fix: a ${EM} b\n`), null);
   const sent: string[][] = [];
   const body = `## Acceptance\n\nnode -e "process.exit(0)"\n\nCloses #2939\nHand-fix: the gate should have filed it ${EM} work-gate.ts\n`;
-  const code = prOpen(["create", "--draft", "--body", body], {
+  const code = prOpen(["create", "--draft", "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`], {
     run: (a: string[]) => { sent.push(a); }, ...withAcceptanceFile(body), prHead: () => ({ ref: "x", oid: "x" }),
     runAcceptance: () => 0, runMutation: () => 0, owner: () => "ceo", out: () => {}, err: () => {},
   });
