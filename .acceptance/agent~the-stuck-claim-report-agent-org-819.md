@@ -13,7 +13,7 @@ Mutation: the name made `wt-<number>` again: 3 of 4 fail. Source restored with `
 
 Not done here: Done-when 2 (the live `ready-row-unclaimable` count for agent-org#724) needs the change deployed. The `kept` map is still keyed by the bare number, so a keyed row can read an unkeyed row's kept record; not changed (not in this row's text).
 
-Class: a reader that rebuilds a name `row-claim.ts` owns, ignoring the repository key — the `kept` map in the same function is still keyed by the bare row number; guard: the pin test here for the worktree name, nothing yet for `kept` (out of this row's Region, to be filed).
+Class: keyed-row-read-as-unkeyed — `claimRefusalOf`'s `kept` lookup is still keyed by the bare row number, so a keyed row can read an unkeyed row's kept record; guard: the pin test here covers the worktree name only, the `kept` key is out of this row's Region and to be filed as its own row.
 
 Acceptance: `node --import tsx --test src/work-gate-claim-refusal-keyed.test.ts`
 
