@@ -46,6 +46,7 @@ const EXEMPT: Record<string, { lines: number; why: string }> = {
   "src/host-units.ts": { lines: 2, why: "recognisers: an installed unit that still says `npm`/`npx` is followed to its program, as `pnpm` is" },
   "src/update-primary.ts": { lines: 2, why: "records: names `npm ci` as the one command the primary must never run (it deletes `node_modules` from under every worktree)" },
   "src/wake.ts": { lines: 3, why: "records: #2376, a reviewer's `npx` died writing `~/.npm`; the sentence is about what npx did" },
+  "src/haiku-brief.ts": { lines: 1, why: "records: Anthropic's published Haiku 5.5 text, copied verbatim and sha256-pinned (`wake-haiku-brief.test.ts`); its `e.g. npm install` is an example in their sentence, not a remedy the tool prints" },
   "host/board-report.service.in": { lines: 2, why: "digest-pinned unit bytes (`host-project-paths.test.ts`): comment lines, see the header" },
   "host/gh": { lines: 1, why: "digest-pinned wrapper bytes (`host-project-paths.test.ts`): a comment line, see the header" },
   "host/work-tick.service.in": { lines: 1, why: "digest-pinned unit bytes (`host-project-paths.test.ts`): a comment line, see the header" },

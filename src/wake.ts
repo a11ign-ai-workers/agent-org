@@ -41,6 +41,7 @@ import { createHash } from "node:crypto";
 import { refuseUnknownFlags, flagValue } from "./lib/cli-flags.ts";
 import { pnpmCliInvocation } from "./lib/npm-cli-executable.ts"; // #3386: a bare `pnpm` spawn is `pnpm.cmd` on Windows, which CVE-2024-27980 refuses
 import { blastTail, readBlockingRecord } from "./blast-tail.ts";
+import { haikuBriefTail } from "./haiku-brief.ts";
 import type { BlockingRecord } from "./blocking-impact.ts";
 import { HAIKU_DEFAULT_CI_FAILURES, haikuDefaultOn, routeEngineer, type Routed } from "./engineer-route.ts";
 import { DEFAULT_CAPS, ESCALATION_KIND, ESCALATION_USE, claimFacts, escalationLogLine, escalationNote, haikuStarts, isHaiku, shouldEscalate, transcriptCounts } from "./engineer-escalation.ts";
@@ -3683,11 +3684,12 @@ const ENGINEER_BRIEF_SENTENCE = engineerBriefSentence(ENGINEER_BRIEF_ABSOLUTE);
  * `briefRole` (#828) is the role brief a SPAWNED seat is sent to, the engineer's by default (byte-identical to the sentence before #828); it is read on the `spawned` branch only, and nothing passes it yet.
  * `blocking` (#4605) is the gate's last count of shelved rows, which `blastTail` turns into the spawned order's `your claim blocks N rows` line; absent, no line, so a caller that does not read it is never the one that invents one.
  * `orderId` (#4068) is the wake id the follow-up header names and the ledger line for this delivery records; see {@link FOLLOW_UP_HEADER}.
+ * `model` (#5113) is the model a SPAWNED seat was started on; a Haiku one gets {@link haikuBriefTail} when `workers.haikuBrief` is on, and absent it, nothing is added.
  */
 export function addressed(order: { session: string; prompt: string; title?: string; causeKey?: string; cause?: string; }, label: string,
   { spawned, followUp = false, context, orderId, blocking = null, now = Date.now(), engineers = engineerRoles(), families = SPARE_FAMILIES,
-    briefRole = "engineer", ...launch }: LaunchFacts & {
-      spawned?: ClaimedRow; followUp?: boolean; context?: string; orderId?: string; engineers?: string[]; blocking?: BlockingRecord | null; now?: number;
+    briefRole = "engineer", model, ...launch }: LaunchFacts & {
+      spawned?: ClaimedRow; followUp?: boolean; context?: string; orderId?: string; engineers?: string[]; blocking?: BlockingRecord | null; now?: number; model?: string;
       families?: readonly import("./arm-pr.ts").SpareFamily[]; briefRole?: string;
   } = {}) {
   // `<you>` SUBSTITUTED, not merely explained: the order's own command text carries the placeholder, and
@@ -3701,7 +3703,7 @@ export function addressed(order: { session: string; prompt: string; title?: stri
     + `asks which session you are (\`--session=${label}\`).\n\n`;
   if (spawned) {
     const brief = briefRole === "engineer" ? ENGINEER_BRIEF_SENTENCE : briefRoleSentence(briefRole);
-    return `${identity}${prompt}\n\n${brief}${calmTail(spawned.row)}${tripsTail(spawned.row)}${blastTail(spawned.row, blocking, now)}`;
+    return `${identity}${prompt}\n\n${brief}${calmTail(spawned.row)}${tripsTail(spawned.row)}${blastTail(spawned.row, blocking, now)}${haikuBriefTail(model)}`;
   }
   return `${identity}${prompt}\n\n${engineerBriefLine(label, engineers, families)}${autonomyParagraphs(order, label)}`;
 }
@@ -5438,7 +5440,7 @@ function promptTarget(order: { causeKey: string; session: string; prompt: string
   try {
     run(["--session", "org", "agent", "prompt", target.label,
       addressed(carriedOrder(order, target), target.label,
-        { ...launch, spawned: target.claimed, followUp: isFollowUp(target, context), context, orderId, blocking: blocking() })]);
+        { ...launch, spawned: target.claimed, followUp: isFollowUp(target, context), context, orderId, blocking: blocking(), model: (target.profile as { model?: string } | undefined)?.model })]);
   } catch (err) {
     // A STARTED PROCESS IS LEFT RUNNING HERE, and the causeKey is NOT recorded. It is a healthy, idle
     // session under a roster label, so the next tick's `route` offers it this same order by the ordinary
