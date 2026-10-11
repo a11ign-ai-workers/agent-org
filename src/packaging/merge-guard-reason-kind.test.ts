@@ -1,3 +1,4 @@
+// no-token: gh -- every input is injected; the TESTS-FIRST reasons are asked about facts, and no lookup reaches GitHub.
 /**
  * WHICH reason a refusal is, not just that there was one -- #455's split into
  * `packages/agent-org/src/merge-guard/reason-kind.ts`. Kept as ONE list rather than distributed per rule: "the guard
