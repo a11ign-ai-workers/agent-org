@@ -12,7 +12,7 @@ Evidence: `src/spec-writer.test.ts` 13 of 13 (the file was the first commit of t
 
 Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/spec-writer.test.ts`
 
-Closes: a11ign/a11ign#5116
+Closes: none -- first half of a11ign/a11ign#5116 (the module); the prompt half is its claimed PR and closes the row
 
 Outside-Region: .changeset/one-spec-writer-produces-every-build-spec.md — the entry a project that pins a tag reads.
 
