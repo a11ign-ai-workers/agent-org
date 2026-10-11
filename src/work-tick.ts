@@ -29,7 +29,9 @@ import { fileURLToPath } from "node:url";
 import { refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { tellBlocked, BLOCKED_TOLD_FILE } from "./worker-state.ts";
 import { EVENT_QUEUE_ENTRY, homeHostConfig, stateEntryPath, type HostConfig } from "./host-config.ts";
-import { ackThrough, changedRepos, readNewEvents } from "./event-queue.ts";
+import { ackThrough, changedRepos, readNewEvents, scopesOf, type Scope } from "./event-queue.ts";
+import { dueRepos, readDueIndex } from "./due-index.ts";
+import { writeTickScopes } from "./tick-scopes.ts";
 import { defaultRun, promptOrQueue, STANCE, EXIT as PROMPT_EXIT } from "./prompt-session.ts";
 import { PANE_DIALOG_RAISED_FILE, raisePaneDialogs, readRaised, writeRaised } from "./pane-dialog.ts";
 import { homeProjectDeclaration } from "./project-config.ts";
@@ -538,13 +540,71 @@ function heartbeatAgeSeconds(path: string, nowMs: number): number | null {
   }
 }
 
+/** The scopes the tick hands the gate (`tick-scopes.ts`), named in `A11Y_TICK_SCOPES_FILE` only for a webhook tick that hand over one. */
+export const TICK_SCOPES_ENTRY = "tick-scopes.json";
+export const TICK_SCOPES_VARIABLE = "A11Y_TICK_SCOPES_FILE";
+/** The due-index the gate writes (`due-index.ts`), and beside it the time the last webhook tick looked at it, in ms. */
+export const DUE_INDEX_ENTRY = "due-index.json";
+export const DUE_TICK_ENTRY = "due-index.last-tick";
+
+/** The time the previous webhook tick looked at the due-index, or null for the first tick and for a file that is not a whole number of ms. Null counts every passed instant once: fail towards reading. */
+function previousTickMs(host: HostConfig): number | null {
+  try {
+    const at = Number(readFileSync(stateEntryPath(DUE_TICK_ENTRY, { host, home: host.home }), "utf8").trim());
+    return Number.isSafeInteger(at) ? at : null;
+  } catch {
+    return null;
+  }
+}
+
+/** The declared repositories with a dated wait that came due since the previous tick. A corrupt index says nothing about what passed, so every declared repository is due. */
+function dueRepositories({ host, repos, nowMs }: { host: HostConfig; repos: string[]; nowMs: number; }): string[] {
+  const read = readDueIndex(stateEntryPath(DUE_INDEX_ENTRY, { host, home: host.home }));
+  if (read.status === "corrupt") return repos;
+  return dueRepos({ index: read.index, afterMs: previousTickMs(host), nowMs }).filter((repo) => repos.includes(repo));
+}
+
+/**
+ * Writes the scopes and names the file in `env` for the gate. `null` scopes (not known) hand nothing over, so the gate reads whole. A failed write also leaves
+ * the variable unset and says so, because the file it would leave is the previous tick's scopes. Returns a say fragment only on failure.
+ */
+function handOverScopes({ host, scopes, env }: { host: HostConfig; scopes: Scope[] | null; env: NodeJS.ProcessEnv; }): string | null {
+  if (scopes === null) return null;
+  const path = stateEntryPath(TICK_SCOPES_ENTRY, { host, home: host.home });
+  try {
+    writeTickScopes({ path, scopes });
+  } catch (err) {
+    return `SCOPES NOT HANDED (${whatGhSaid(err)}): the gate reads whole`;
+  }
+  env[TICK_SCOPES_VARIABLE] = path;
+  return null;
+}
+
+/**
+ * Keeps this tick's time for the next tick's due window. Called after the ack, and whether or not the ack moved the cursor: the repositories due in this tick are
+ * already in its `changed` set. Returns a say fragment only on failure, which costs the next tick a re-look at this window (harmless).
+ */
+function recordTickTime({ host, nowMs }: { host: HostConfig; nowMs: number; }): string | null {
+  const path = stateEntryPath(DUE_TICK_ENTRY, { host, home: host.home });
+  const partial = `${path}.${process.pid}.tmp`;
+  try {
+    mkdirSync(dirname(path), { recursive: true });
+    writeFileSync(partial, `${nowMs}\n`);
+    renameSync(partial, path);
+    return null;
+  } catch (err) {
+    return `DUE TICK NOT RECORDED (${whatGhSaid(err)}): the next tick looks at this window again`;
+  }
+}
+
 /**
  * (agent-org#981) WHAT THE EVENT QUEUE SAYS THIS TICK, for a host whose `events.source` is `webhook`; null for `poll` or no block, which passes no `events` and is today's behaviour.
  * Events are read and handed over even when the receiver looks dead (the probes then cover them; the cursor still moves). An event that names no repository, or a queue line that did not
  * parse, cannot say WHICH repository moved, so it names all of them: fail towards reading. `ack` is for the caller to run only AFTER the generations are written (agent-org#979).
- * @returns {{ events: TickEvents, say: string, ack: () => string | null } | null}
+ * `scopes` is what the gate is told about (see `handOverScopes`); the repositories whose dated wait came due are added to `changed`.
+ * @returns {{ events: TickEvents, say: string, ack: () => string | null, scopes: Scope[] | null } | null}
  */
-export function eventsForTick({ host, repos, nowMs }: { host: HostConfig; repos: string[]; nowMs: number; }): { events: TickEvents; say: string; ack: () => string | null; } | null {
+export function eventsForTick({ host, repos, nowMs }: { host: HostConfig; repos: string[]; nowMs: number; }): { events: TickEvents; say: string; ack: () => string | null; scopes: Scope[] | null; } | null {
   const declared = host.events;
   if (declared === undefined || declared.source !== "webhook") return null;
   const queuePath = stateEntryPath(EVENT_QUEUE_ENTRY, { host, home: host.home });
@@ -558,14 +618,16 @@ export function eventsForTick({ host, repos, nowMs }: { host: HostConfig; repos:
   try {
     read = readNewEvents({ queuePath, cursorPath });
   } catch (err) {
-    return { events: { changed: new Set(), healthy: false, reconcileEverySeconds }, say: unhealthy(`queue unreadable: ${whatGhSaid(err)}`), ack: () => null };
+    return { events: { changed: new Set(), healthy: false, reconcileEverySeconds }, say: unhealthy(`queue unreadable: ${whatGhSaid(err)}`), ack: () => null, scopes: null };
   }
   const everything = read.unreadable > 0 || read.events.some((event) => typeof event.repo !== "string" || event.repo === "");
-  const changed = new Set(everything ? repos : changedRepos(read.events));
+  const due = dueRepositories({ host, repos, nowMs });
+  const changed = new Set([...(everything ? repos : changedRepos(read.events)), ...due]);
   const stamps = read.events.map((event) => Date.parse(event.receivedAt)).filter((at) => !Number.isNaN(at));
   const waited = stamps.length === 0 ? "" : `, oldest event waited ${Math.max(0, Math.floor((nowMs - Math.min(...stamps)) / 1000))}s`;
   const count = read.events.length;
-  const say = !healthy ? unhealthy(heartbeat) : count === 0 ? "EVENTS no events" : `EVENTS ${count} event${count === 1 ? "" : "s"}${waited}`;
+  const dueNote = due.length === 0 ? "" : `; due ${due.join(", ")}`;
+  const say = (!healthy ? unhealthy(heartbeat) : count === 0 ? "EVENTS no events" : `EVENTS ${count} event${count === 1 ? "" : "s"}${waited}`) + dueNote;
   const consumed = count + read.unreadable > 0;
   const ack = () => {
     if (!consumed) return null;
@@ -576,7 +638,10 @@ export function eventsForTick({ host, repos, nowMs }: { host: HostConfig; repos:
       return `EVENTS cursor not moved (${whatGhSaid(err)}): the events are read again next tick`; // generations are already written, so the snapshot stands; a re-bump is harmless
     }
   };
-  return { events: { changed, healthy, reconcileEverySeconds }, say, ack };
+  // The scopes name the pull requests the events named, and they are trusted only from a live receiver that lost nothing: a dead one delivers no events, so
+  // `[]` would tell the gate that nothing changed. `null` is "not known", and the gate reads whole.
+  const scopes = healthy && !everything ? scopesOf(read.events) : null;
+  return { events: { changed, healthy, reconcileEverySeconds }, say, ack, scopes };
 }
 
 /**
@@ -590,6 +655,7 @@ export function eventsForTick({ host, repos, nowMs }: { host: HostConfig; repos:
  */
 export function refreshSnapshotOrSay({ declaration = homeProjectDeclaration, configDir = process.env.GH_CONFIG_DIR, refresh = refreshTickSnapshot, env = process.env, host = pollingHostOrUndefined, nowMs = Date.now() }: { declaration?: () => import("./project-config.ts").ProjectDeclaration; configDir?: string | undefined; refresh?: typeof refreshTickSnapshot; env?: NodeJS.ProcessEnv; host?: () => HostConfig | undefined; nowMs?: number; } = {}): string {
   delete env.A11Y_TICK_SNAPSHOT;
+  delete env[TICK_SCOPES_VARIABLE];
   if (configDir === undefined || configDir === "") return "SNAPSHOT OFF: GH_CONFIG_DIR is unset, so there is no account store to hold one; every read goes to GitHub this tick.";
   try {
     const project = declaration();
@@ -598,10 +664,12 @@ export function refreshSnapshotOrSay({ declaration = homeProjectDeclaration, con
     const tick = declaredHost === undefined ? null : eventsForTick({ host: declaredHost, repos, nowMs });
     const lines = tick === null ? refresh({ repos, homeRepo: project.repo, configDir }) : refresh({ repos, homeRepo: project.repo, configDir, nowMs, events: tick.events });
     env.A11Y_TICK_SNAPSHOT = "1";
+    const notHanded = tick === null || declaredHost === undefined ? null : handOverScopes({ host: declaredHost, scopes: tick.scopes, env });
     const notAcked = tick?.ack() ?? null;
+    const notRecorded = tick === null || declaredHost === undefined ? null : recordTickTime({ host: declaredHost, nowMs });
     const changed = lines.filter((line) => line.includes(": CHANGED"));
     const base = `SNAPSHOT ${repos.length} repositories, ${changed.length} changed${changed.length > 0 ? ` (${changed.map((line) => line.split(":")[0]).join(", ")})` : ""}`;
-    return tick === null ? base : [base, tick.say, notAcked].filter((part) => part !== null).join("; ");
+    return tick === null ? base : [base, tick.say, notHanded, notAcked, notRecorded].filter((part) => part !== null).join("; ");
   } catch (err) {
     return `SNAPSHOT NOT REFRESHED (${whatGhSaid(err)}): every read goes to GitHub this tick.`;
   }
