@@ -70,7 +70,8 @@ import { REPO } from "./project-identity.ts";
 import { SESSION_PREFIX } from "./project-vocabulary.ts";
 
 import { reasonKind } from "./merge-guard/reason-kind.ts";
-import { gh, lookup, lookupRequiredContexts, lookupBranchTip, lookupCheckRuns, lookupClosingIssues }
+import { gh, lookup, lookupRequiredContexts, lookupBranchTip, lookupCheckRuns, lookupClosingIssues,
+  lookupApprovalFacts }
   from "./merge-guard/lookups.ts";
 import { baseReason } from "./merge-guard/base-rule.ts";
 import { headTipMismatchReason } from "./merge-guard/head-tip-rule.ts";
@@ -81,6 +82,7 @@ import {
   closingClaimReasons, claimedCloseCoveredBy, applyAllowClaimedClose,
 } from "./merge-guard/claimed-row-rule.ts";
 import { prHoldReasons } from "./merge-guard/pr-hold-rule.ts";
+import { approvalHeadReasons, type ApprovalFacts } from "./merge-guard/approval-head-rule.ts";
 import { holdersOf, HOLD_PREFIX } from "./pr-hold-state.ts";
 import { racesAnArmedMerge, lookupArmedPrStatus } from "./merge-guard/armed-race-rule.ts";
 import {
@@ -95,7 +97,7 @@ export {
   reasonKind,
   gh, lookup, lookupRequiredContexts, lookupBranchTip, lookupCheckRuns, lookupClosingIssues,
   baseReason, headTipMismatchReason, SATISFIED, checkReasons, stalenessReason, ancestryReason,
-  closingClaimReasons, claimedCloseCoveredBy, prHoldReasons,
+  closingClaimReasons, claimedCloseCoveredBy, prHoldReasons, approvalHeadReasons, lookupApprovalFacts,
   racesAnArmedMerge, lookupArmedPrStatus,
   appendJsonl, gitCommonDir, verdictLogPath, agreementLogPath, recordVerdict, latestVerdictFor,
   realOutcomeFor, reconcile,
@@ -142,9 +144,9 @@ const EXIT = { READY: 0, REFUSED: 1, CANNOT_ASK: 2 };
  *   prLabels?: string[] | null}} facts
  * @returns {{code: number, reasons: string[]}}
  */
-export function mergeSafetyVerdict({ pr, branchTip, prLabels = [] }: {
+export function mergeSafetyVerdict({ pr, branchTip, prLabels = [], approvals }: {
         pr: { headRefOid: string; number?: number; state?: string; }; branchTip: string | null;
-        prLabels?: string[] | null;
+        prLabels?: string[] | null; approvals?: ApprovalFacts | null;
     }): { code: number; reasons: string[]; } {
   if (branchTip === null) {
     return { code: EXIT.CANNOT_ASK, reasons: [
@@ -180,7 +182,16 @@ export function mergeSafetyVerdict({ pr, branchTip, prLabels = [] }: {
       + `\`${SESSION_PREFIX}<name>\` label is OWNERSHIP and is deliberately not read here.`,
     ] };
   }
-  const reasons = headTipMismatchReason(pr, branchTip);
+  // `undefined` is "the caller did not ask" (the pre-#5038 callers); `null` is "asked and could not read",
+  // which is INCONCLUSIVE, never "covered".
+  if (approvals === null) {
+    return { code: EXIT.CANNOT_ASK, reasons: [
+      `CANNOT SAY whether an approval covers #${pr.number ?? "?"}'s head: its reviews or commits could not be read.\n`
+      + "  This is INCONCLUSIVE, not covered.",
+    ] };
+  }
+  const reasons = [...headTipMismatchReason(pr, branchTip),
+    ...(approvals === undefined || pr.state === "closed" ? [] : approvalHeadReasons(pr.headRefOid, approvals))];
   return { code: reasons.length > 0 ? EXIT.REFUSED : EXIT.READY, reasons };
 }
 
@@ -205,7 +216,7 @@ export function mergeSafetyVerdict({ pr, branchTip, prLabels = [] }: {
  */
 export function mergeReadiness({ pr, required, runs, mainTipIso, behindBy, branchTip, closes = [],
   prLabels = [],
-  session = null }: {
+  session = null, approvals = undefined }: {
         pr: { number: number; state: string; baseRefName: string; headRefOid: string; };
         required: string[] | null;
         runs: { name: string; status: string; conclusion: string | null; completedAt: string | null; }[] | null;
@@ -215,6 +226,7 @@ export function mergeReadiness({ pr, required, runs, mainTipIso, behindBy, branc
         closes?: { number: number; title?: string; labels: string[]; }[] | null;
         prLabels?: string[] | null;
         session?: string | null;
+        approvals?: ApprovalFacts | null;
     }): { code: number; reasons: string[]; notes: string[]; } {
   const missingLookups = [
     required === null && "the required status checks for `main` (branch protection)",
@@ -226,6 +238,7 @@ export function mergeReadiness({ pr, required, runs, mainTipIso, behindBy, branc
     branchTip === null && "the branch's real tip (`git ls-remote`)",
     closes === null && "which rows this PR would close (the closingIssuesReferences lookup)",
     prLabels === null && "this PR's own labels (which say whether somebody is holding it)",
+    approvals === null && "this PR's reviews and the commits since each approval (#5038)",
   ].filter(Boolean);
   if (missingLookups.length > 0) {
     return { code: EXIT.CANNOT_ASK, notes: [], reasons: [
@@ -247,7 +260,8 @@ export function mergeReadiness({ pr, required, runs, mainTipIso, behindBy, branc
   const reasons = [...baseReason(pr), ...headTipMismatchReason(pr, knownBranchTip),
     ...checkReasons(pr, knownRequired, knownRuns),
     ...ancestryReason(behindBy), ...stalenessReason(knownRuns, knownMainTipIso),
-    ...closingClaimReasons(knownCloses, session), ...prHoldReasons(pr, knownPrLabels, session)];
+    ...closingClaimReasons(knownCloses, session), ...prHoldReasons(pr, knownPrLabels, session),
+    ...(approvals ? approvalHeadReasons(pr.headRefOid, approvals) : [])];
   return { code: reasons.length > 0 ? EXIT.REFUSED : EXIT.READY, reasons, notes };
 }
 
@@ -289,7 +303,8 @@ function ciGateFacts(number: number) {
     ? (names as string[])
     : null;
   const branchTip = lookupBranchTip(pr.headRefName);
-  return { pr, branchTip, prLabels };
+  const approvals = lookupApprovalFacts(pr.number, pr.headRefOid);
+  return { pr, branchTip, prLabels, approvals };
 }
 
 /**
@@ -336,7 +351,8 @@ function facts(number: number) {
   });
   const branchTip = lookupBranchTip(pr.headRefName);
   const closes = lookupClosingIssues(number);
-  return { pr, required, runs, mainTipIso, behindBy, branchTip, closes, prLabels };
+  const approvals = lookupApprovalFacts(number, pr.headRefOid);
+  return { pr, required, runs, mainTipIso, behindBy, branchTip, closes, prLabels, approvals };
 }
 
 /**
