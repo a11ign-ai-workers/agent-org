@@ -30,7 +30,7 @@ import {
 import { unknownFlags } from "./lib/cli-flags.ts";
 import { CLAIM_RECORD_MARKER } from "./claim-labels.ts";
 import {
-  CLAIM_STALLED, STALL_INTERVAL_MS, STALL_UNTOLD_RELEASE_MS, INTERRUPTED_SETTLE_MS, GONE_CONFIRM_MS, nudgeKey, nudgeDeliveredAt, claimRecordOf, commentMove, workAtRisk, fileMove, claimReading,
+  CLAIM_STALLED, STALL_INTERVAL_MS, STALL_UNTOLD_RELEASE_MS, INTERRUPTED_SETTLE_MS, GONE_CONFIRM_MS, nudgeKey, nudgeDeliveredAt, claimRecordOf, commentMove, decidedBy, workAtRisk, fileMove, claimReading,
   claimFactsFrom, readClaim, nextStallState, claimStalledOrders, paneInterrupted, paneThrashed, killedDeliveries, readHerdrRestart,
   RESTART_RESEND_WINDOW_MS, INTERRUPTED_TEXT, THRASH_TEXT, gitRun, gitInvocation, newestOwnCommit, statMtime, pathExists,
 } from "./claim-stall.ts";
@@ -174,11 +174,63 @@ test("#2470 the claim record round-trips through the REAL writer, and a RELEASE 
 
 test("#2470 a row comment counts only from the claim's OWN account and only after the claim; a claim record is not a comment", () => {
   const record = claimRecordOf([claim(300)])!;
-  assert.equal(commentMove([claim(300), said(200)], record), ago(200));
-  assert.equal(commentMove([claim(300), said(200, "a11ign-ai-leads")], record), null, "product-manager's audit is not the holder moving (#2416's '0h')");
-  assert.equal(commentMove([said(400), claim(300)], record), null, "a comment BEFORE the claim is not a move on it");
+  assert.equal(commentMove([claim(300), said(200)], record, "worker-7"), ago(200));
+  assert.equal(commentMove([claim(300), said(200, "a11ign-ai-leads")], record, "worker-7"), null, "product-manager's audit is not the holder moving (#2416's '0h')");
+  assert.equal(commentMove([said(400), claim(300)], record, "worker-7"), null, "a comment BEFORE the claim is not a move on it");
   const second = { body: `${CLAIM_RECORD_MARKER}\n**Claim record** -- claimed by \`x\`.`, createdAt: iso(ago(100)), author: { login: "a11ign-ai-workers" } };
-  assert.equal(commentMove([claim(300), second], record), null);
+  assert.equal(commentMove([claim(300), second], record, "worker-7"), null);
+});
+
+// --- agent-org#913: the holder's comment is a move whatever account the claim record was written under -------------------------------
+
+const SCHEDULER = "a11ign-scheduler[bot]";
+const WORKERS = "a11ign-workers[bot]";
+/** A comment as `host/gh` posts it: the author's text, then the trailing `decided-by` line naming the seat and its run. */
+const marked = (minutesAgo: number, role: string, author = WORKERS, text = "the reading, as asked"): Comment =>
+  said(minutesAgo, author, `${text}\n\n<!-- decided-by: ${role} run: 0b7a1c52-9d3e -->`);
+
+test("#913 (1) a claim record by account A and a holder comment by account B marked with the holder's session IS a move, at the comment's own time", () => {
+  const record = claimRecordOf([claim(300, { author: SCHEDULER })])!;
+  assert.equal(record.author, SCHEDULER);
+  assert.equal(commentMove([claim(300, { author: SCHEDULER }), marked(200, "worker-7")], record, "worker-7"), ago(200));
+  assert.equal(commentMove([claim(300, { author: SCHEDULER }), said(200, WORKERS)], record, "worker-7"), null,
+    "the SAME comment with no marker is still not a move: the account differs and nothing says whose it is");
+  assert.equal(commentMove([claim(300, { author: SCHEDULER }), marked(200, "worker-7"), marked(90, "worker-7")], record, "worker-7"), ago(90), "the newest one");
+});
+
+test("#913 (2) a comment marked with ANOTHER session, one older than the claim record, and a record itself are not moves", () => {
+  const record = claimRecordOf([claim(300, { author: SCHEDULER })])!;
+  const base = claim(300, { author: SCHEDULER });
+  assert.equal(commentMove([base, marked(200, "product-manager", "a11ign-ai-leads")], record, "worker-7"), null, "product-manager's audit is not the holder moving");
+  assert.equal(commentMove([base, marked(200, "worker-70")], record, "worker-7"), null, "a role that merely STARTS with the session's name is not the session");
+  assert.equal(commentMove([marked(400, "worker-7"), base], record, "worker-7"), null, "a comment BEFORE the claim record is not a move on it");
+  const quoted = said(200, WORKERS, "<!-- decided-by: worker-7 run: x -->\nquoting it\n\n<!-- decided-by: ceo run: y -->");
+  assert.equal(commentMove([base, quoted], record, "worker-7"), null, "the wrapper's own LAST line speaks for the comment, not a marker quoted above it");
+  const second = { ...marked(100, "worker-7"), body: `${CLAIM_RECORD_MARKER}\n**Claim record** -- claimed by \`worker-7\`.\n\n<!-- decided-by: worker-7 -->` };
+  assert.equal(commentMove([base, second], record, "worker-7"), null, "a claim record carrying the marker is still a record");
+  assert.equal(decidedBy("no marker here"), null);
+  assert.equal(decidedBy("x\n\n<!-- decided-by: worker-7 -->"), "worker-7", "the run-less spelling host/gh writes when it has no run id");
+});
+
+test("#913 (3) through the REAL claimFactsFrom and claimReading: a nudge recorded BEFORE the marked comment is answered, and without it the same row releases", () => {
+  const h = host({ commit: null });
+  const nudgedAt = NOW - STALL_INTERVAL_MS - 10 * MIN;
+  const ctx = { now: NOW, restartAt: null, nudge: { nudgedAt, deliveredAt: nudgedAt + MIN } };
+  const readOf = (comments: Comment[]) => {
+    const facts = claimFactsFrom({ row: 2407, session: "worker-7", waiting: null, blockedBy: [], comments, openPrs: [], mergedPrs: null, repo: REPO }, h.io);
+    assert.ok(!("skip" in facts), "the row is evaluated");
+    return claimReading(facts as Facts, ctx);
+  };
+  const base = claim(N_MIN * 4, { author: SCHEDULER });
+  const stalled = readOf([base]);
+  assert.deepEqual([stalled.kind, (stalled as { why?: string }).why], ["release", "stalled"], "CONTROL: a delivered nudge and nothing since is the second reading");
+  const answeredAt = (NOW - nudgedAt) / MIN - 5; // five minutes after the nudge
+  for (const comment of [marked(answeredAt, "worker-7"), marked(1, "worker-7")]) {
+    const reading = readOf([base, comment]);
+    assert.notEqual(reading.kind, "release", "the holder's marked comment AFTER the nudge answers it");
+  }
+  const audited = readOf([base, marked(1, "product-manager", "a11ign-ai-leads")]);
+  assert.deepEqual([audited.kind, (audited as { why?: string }).why], ["release", "stalled"], "another seat's comment on the row answers nothing");
 });
 
 // --- Done-when 3 & Acceptance 1: the nudge fires on a claimed, unmoved row and NOT on one with a commit inside N ---------------------

@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CI_FAILURE_CLASSES, MAX_ERROR_LINES, classLine, classifyCiFailure, fallbackClass, readCiFailure, routeFor, trimErrorLines,
-  holdSharedFailures, notedAs, refreshFixed, sharedFailureTick, type CiFailure, type CiFailureClass, type RedPr, type Run,
+  holdSharedFailures, notedAs, readSignature, refreshFixed, sharedFailureGroups, sharedFailureTick, type CiFailure, type FailureSignature, type RedCheck, type CiFailureClass, type RedPr, type Run,
 } from "./ci-failure-class.ts";
 import { MAX_STATE_BYTES, type DecisionDeps } from "./decision-provider.ts";
 import { parseHostConfig } from "./host-config.ts";
@@ -237,7 +237,7 @@ test("a log with no escape bytes is read as before: the same lines, nothing stri
 const INSTALL_ERROR = "2026-10-11T09:42:11.123Z ##[error]npm ERR! 404 Not Found - GET https://registry/agent-org-0.155.4.tgz";
 type Job = { steps: { name: string; conclusion: string }[]; log: string };
 const jobUrl = (job: number) => `https://github.com/a11ign/a11ign/actions/runs/${job + 1000}/job/${job}`;
-const redPr = (number: number, job: number, check = "gate"): RedPr =>
+const redPr = (number: number, job: number, check = "checks"): RedPr =>
   ({ ref: `pr-${number}`, repo: "a11ign/a11ign", number, checks: [{ name: check, detailsUrl: jobUrl(job), completedAt: "2026-10-11T09:50:00Z" }] });
 const redOrder = (number: number) => ({ cause: "pr-checks-failing", subject: `pr-${number}`, session: `worker-${number}`, discriminator: "red" });
 
@@ -260,7 +260,7 @@ function ghFake(over: { jobs?: Record<number, Job>; issues?: any[]; pulls?: Reco
     if (cmd === "api" && /\/compare\//.test(path)) return JSON.stringify({ behind_by: over.behind ?? 3 });
     if (cmd === "api" && /\/pulls\/\d+$/.test(path)) return JSON.stringify((over.pulls ?? {})[Number(/pulls\/(\d+)/.exec(path)![1])] ?? { state: "open", head: { sha: "abc" }, base: { ref: "main" } });
     writes.push(args);
-    if (cmd === "issue" && sub === "create") { issues.push({ number: 900 + issues.length, state: "open", body: args[args.indexOf("--body") + 1] }); return "https://github.com/a11ign/a11ign/issues/900"; }
+    if (cmd === "issue" && sub === "create") { issues.push({ number: 900 + issues.length, state: "open", createdAt: new Date().toISOString(), body: args[args.indexOf("--body") + 1] }); return "https://github.com/a11ign/a11ign/issues/900"; }
     if (cmd === "issue" && sub === "edit") { const row = issues.find((i) => i.number === Number(args[2])); row.body = args[args.indexOf("--body") + 1]; }
     return "";
   };
@@ -319,7 +319,7 @@ test("shared failure: a log that cannot be read, a hung check and a PR with a se
 });
 
 test("the fix refreshes its victims: merging the incident's PR updates both branches, once, with no worker turn", () => {
-  const body = ["Check: gate", "First error line: npm ERR! # Not Found - GET https://registry/agent-org-#.#.#.tgz", "Shared-failure-prs: a11ign/a11ign#4969, a11ign/a11ign#4977"].join("\n");
+  const body = ["Check: checks", "First error line: npm ERR! # Not Found - GET https://registry/agent-org-#.#.#.tgz", "Shared-failure-prs: a11ign/a11ign#4969, a11ign/a11ign#4977"].join("\n");
   const closedBy = [{ number: 5004, repository: { nameWithOwner: "a11ign/agent-org" } }];
   const gh = ghFake({ issues: [{ number: 4988, state: "closed", body, closedByPullRequestsReferences: closedBy }],
     pulls: { 5004: { merged_at: "2026-10-11T10:32:00Z" } } });
@@ -333,7 +333,7 @@ test("the fix refreshes its victims: merging the incident's PR updates both bran
 });
 
 test("the fix is not merged, or a PR is not behind, or the refresh is refused: nothing is updated, and a conflict is the worker's again", () => {
-  const body = "Check: gate\nFirst error line: x\nShared-failure-prs: a11ign/a11ign#1, a11ign/a11ign#2";
+  const body = "Check: checks\nFirst error line: x\nShared-failure-prs: a11ign/a11ign#1, a11ign/a11ign#2";
   const closedBy = [{ number: 5004, repository: { nameWithOwner: "a11ign/agent-org" } }];
   const unmerged = ghFake({ issues: [{ number: 7, state: "closed", body, closedByPullRequestsReferences: closedBy }], pulls: { 5004: { merged_at: null } } });
   assert.deepEqual(refreshFixed({ run: unmerged.run, log }).refreshed, []);
@@ -350,7 +350,7 @@ test("the fix is not merged, or a PR is not behind, or the refresh is refused: n
 });
 
 test("the detector: a PR red before the fix merged, unnoted, is refreshed only 10 minutes after the merge", () => {
-  const body = "Check: gate\nFirst error line: npm ERR! # Not Found - GET https://registry/agent-org-#.#.#.tgz\nShared-failure-prs: a11ign/a11ign#4969";
+  const body = "Check: checks\nFirst error line: npm ERR! # Not Found - GET https://registry/agent-org-#.#.#.tgz\nShared-failure-prs: a11ign/a11ign#4969";
   const closedBy = [{ number: 5004, repository: { nameWithOwner: "a11ign/agent-org" } }];
   const mk = () => ghFake({ jobs: { 12: installJob() }, issues: [{ number: 4988, state: "closed", body, closedByPullRequestsReferences: closedBy }],
     pulls: { 5004: { merged_at: "2026-10-11T10:32:00Z" } } });
@@ -358,4 +358,36 @@ test("the detector: a PR red before the fix merged, unnoted, is refreshed only 1
   assert.deepEqual(early.refreshed, ["a11ign/a11ign#4969"]);
   const late = refreshFixed({ run: mk().run, log, nowMs: Date.parse("2026-10-11T10:43:00Z"), open: [redPr(4977, 12)] });
   assert.deepEqual(late.refreshed, ["a11ign/a11ign#4969", notedAs(redPr(4977, 12))]);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// #5098: WHICH LINE IS THE FAILURE, and what is never a cause. The packaging test reaches these from the gate with the real control logs; these pin each rule ALONE, because
+// the diff rule would also keep the same pair from being grouped and so hides a broken one beside it.
+
+const jobRun = (failedStep: string, ...log: string[]): Run => (args) =>
+  /\/logs$/.test(args.find((a) => a.startsWith("repos/")) ?? "") ? log.join("\n") : JSON.stringify({ steps: [{ name: failedStep, conclusion: "failure" }] });
+const checkOf = (name: string): RedCheck => ({ name, detailsUrl: jobUrl(77) });
+
+test("#5098 a package manager's WARN line, a command echoed by the runner and the exit code are not the failure; a test runner's FAIL line is", () => {
+  const warn = "2026-10-11T13:10:30Z  WARN  Failed to create bin at /home/runner/work/control/control/core/node_modules/.bin/a11ign. ENOENT";
+  const echo = "2026-10-11T13:10:31Z ##[group]Run pnpm run fail-fast";
+  const exit = "2026-10-11T13:13:31Z ##[error]Process completed with exit code 1.";
+  const assertion = "2026-10-11T13:13:30Z AssertionError: the racing tick found the day reserved";
+  assert.match(readSignature(checkOf("checks"), jobRun("Run tests", warn, echo, assertion, exit))!.line, /^AssertionError: the racing tick found the day reserved/);
+  const fail = "2026-10-11T13:13:30Z  FAIL  packages/control/src/fleet-watch.test.ts > postUseOnce: a tick that lands";
+  const out = readSignature(checkOf("checks"), jobRun("Run tests", warn, assertion, fail, exit))!;
+  assert.match(out.line, /^FAIL\s+packages\/control\/src\/fleet-watch\.test\.ts > postUseOnce/);
+  assert.equal(out.file, "packages/control/src/fleet-watch.test.ts");
+});
+
+test("#5098 the roll-up is no cause: by its name, by the step it fails, and by the line its script prints", () => {
+  const install: FailureSignature = { check: "gate", step: "Install agent-org", line: "npm ERR!", file: null };
+  const pr = (n: number, name: string): RedPr => ({ ref: `pr-${n}`, repo: "a11ign/a11ign", number: n, checks: [{ name, detailsUrl: jobUrl(n) }] });
+  // by NAME: were `gate` a cause, two PRs failing it on a setup-looking step would be one incident
+  assert.deepEqual(sharedFailureGroups([pr(1, "gate"), pr(2, "gate")], () => install), []);
+  assert.equal(sharedFailureGroups([pr(1, "checks"), pr(2, "checks")], () => ({ ...install, check: "checks" })).length, 1, "positive control: the same pair on a real job IS grouped");
+  // by STEP and by LINE, for a roll-up that is named something else
+  assert.equal(readSignature(checkOf("ci-ok"), jobRun("Every job ran, and ran clean", "##[error]boom")), null);
+  assert.equal(readSignature(checkOf("ci-ok"), jobRun("Check results", "##[error]a job reported 'failure', not success")), null);
+  assert.deepEqual(readSignature(checkOf("ci-ok"), jobRun("Check results", "##[error]boom"))?.line, "boom", "positive control: the same step and a real error is read");
 });

@@ -9,6 +9,7 @@
 //
 // THE CALLER IS `wake.ts` (#4888), NOT THE GATE: `work-gate.ts` is synchronous end to end and a provider call is not, so the gate's order is classified at the one async seam the tick has,
 // beside `routesForStarts`, just before delivery. {@link readCiFailure} reads the facts there; they are CODE's reading of GitHub (REST, the core pool) and never the provider's.
+import { CLAIM_LABEL } from "./claim-labels.ts";
 import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5039
 import { decide, MAX_STATE_BYTES, type DecisionDeps, type Question } from "./decision-provider.ts";
 
@@ -214,9 +215,13 @@ export function classNote(decision: CiFailureDecision): string {
 // A FAILURE SHARED BY MANY PULL REQUESTS IS ONE INCIDENT (a11ign#5008). The four classes above are PER pull request, so the same broken setup step (#4988: the agent-org tool install) woke
 // every red PR's worker and two of them diagnosed it separately; and when its fix merged nothing re-ran the red PRs, because a re-run tests the OLD merge commit.
 //
-//   1. {@link holdSharedFailures}: red orders whose failing check, failing step and first error line MATCH across two or more open PRs (or whose failing step is the runner's own setup,
-//      which is never the PR's diff) are HELD -- nothing is written, as `holdForGithubIncident` does it -- and ONE incident row is filed or joined ({@link recordIncident}), its body
-//      listing the PRs. A PR with any red check that is NOT shared still goes out as today, and so does one whose log could not be read (ABSENCE IS NOT PROOF).
+//   1. {@link holdSharedFailures}: red orders whose failing check, failing step and first error line MATCH across two or more open PRs are HELD -- nothing is written, as
+//      `holdForGithubIncident` does it -- and ONE incident row is filed or joined ({@link recordIncident}), its body listing the PRs. A PR with any red check that is NOT shared still goes
+//      out as today, and so does one whose log could not be read (ABSENCE IS NOT PROOF).
+//      WHAT "SHARED" MEANS (#5098): the failure is OUTSIDE every PR's diff. A setup or install step is (the runner and the registry are not the PR's); anything else is shared only when
+//      both PRs fail in ONE file that NEITHER changes (nor changes the source its test covers). The roll-up job (`gate`) is never read: it is red whenever any job is, and says nothing.
+//   1b. {@link standingOf}: a hold is not a state, it is a reading of the incident row. A CLOSED row releases its holds at once and its signature stays quiet for {@link QUIET_AFTER_CLOSE_MS}
+//      unless a PR the row never named joins; an OPEN row holds for {@link HOLD_MAX_MS} and past that only while it is CLAIMED, and the released order carries the failing job's own line.
 //   2. {@link refreshFixed}: when the pull request closing an incident row has MERGED, every PR it notes is updated from main (`PUT /pulls/{n}/update-branch`), so CI runs against the fix
 //      with no worker turn. A refusal (a conflict) is written on the row as `Refresh-failed:`, which stops that PR being held: its worker gets the order again.
 //   3. The detector: an open PR whose red check failed BEFORE the fix merged, named like the incident's check, and still behind 10 minutes after the merge, is read, and refreshed
@@ -228,7 +233,26 @@ export const SHARED_FAILURE_LABEL = "ci-shared-failure";
 export const REFRESH_GRACE_MS = 10 * 60 * 1000;
 const MAX_SIGNATURE_READS = 12;
 const MAX_INCIDENT_ROWS = 20;
-const SETUP_STEP = /^(set up job|initialize containers|complete job|checkout|run actions\/checkout)/i;
+/** The runner's own steps: a failure here is never the PR's diff, so ONE PR in one is enough. */
+const RUNNER_SETUP_STEP = /^(set up job|initialize containers|complete job|checkout|run actions\/checkout)/i;
+/** Plus the steps that fetch what the PR did not write (the agent-org tool install, #4988): two PRs failing one of these the same way share it. */
+const SETUP_STEP = /^(set up|setup|install|initialize containers|complete job|post |checkout|run actions\/|download|restore|cache)/i;
+/** The roll-up job reports OTHER jobs' results, so its failure is every failure's echo: it names no cause (#5098). By name, by step, and by the line its script prints. */
+const AGGREGATOR_CHECK = /(^|[\s/])gate$/i;
+const AGGREGATOR_STEP = /^every job ran\b/i;
+const AGGREGATOR_LINE = /##\[group\]Run for result in|\ba job reported\b|\breported '[^']*', not success/;
+/** Lines that match {@link ERROR_LINE} and are not the failure: a package manager's warning, a command echoed by the runner, and the exit code every failed step ends on. */
+const NOT_THE_FAILURE = /^(?:WARN\b|warn(?:ing)?\b|##\[(?:group|endgroup|command|warning)\]|##\[error\]Process completed with exit code)/i;
+/** What a test runner prints for the test that failed, which names the file: rstest/vitest `FAIL file > name`, TAP `not ok`. */
+const TEST_FAILURE = /^(?:##\[error\]|FAIL\b|not ok\b)/;
+const LOG_TIMESTAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z\s*/;
+const FILE_WINDOW_LINES = 30;
+const SOURCE_FILE = /((?:[\w@.-]+\/)*[\w@.-]+\.(?:tsx?|mts|cts|jsx?|mjs|cjs|py|rb|go|rs|sh|ya?ml|json))\b/;
+/** A hold older than this with no CLAIMED incident row wakes its holder (#5098): 15 minutes is the time an engineer has to take the row. */
+export const HOLD_MAX_MS = 15 * 60 * 1000;
+/** A closed incident's signature is not filed again for this long, unless a PR the row never named joins it. */
+export const QUIET_AFTER_CLOSE_MS = 24 * 60 * 60 * 1000;
+const CHANGED_FILES_PAGE = 100;
 const SIGNATURE_NOISE: readonly [RegExp, string][] = [
   [/\d{4}-\d\d-\d\dT[\d:.]+Z\s*/g, ""], [/##\[error\]/g, ""], [/\b[0-9a-f]{7,40}\b/g, "<sha>"], [/\/home\/runner\/work\/\S*/g, "<path>"], [/\d+/g, "#"],
 ];
@@ -238,25 +262,52 @@ export type Run = (args: string[]) => string;
 export type RedCheck = { name: string; detailsUrl: string; completedAt?: string };
 /** An open pull request with red checks: `ref` is the order's own subject (`pr-7`, `pr-agent-org#7`), `repo` is `owner/name`. */
 export type RedPr = { ref: string; repo: string; number: number; checks: RedCheck[]; headBehind?: boolean };
-export type FailureSignature = { check: string; step: string; line: string };
+/** `file` is the source file the failure names (`null` when the log names none): it decides whether a match is outside the PR's diff, so it is part of the key unless the step is setup. */
+export type FailureSignature = { check: string; step: string; line: string; file: string | null };
 
 const normalise = (line: string): string => SIGNATURE_NOISE.reduce((text, [pattern, to]) => text.replace(pattern, to), line.replace(ANSI, "")).trim().slice(0, MAX_LINE_CHARS);
-/** The key two failures share when they are the same failure. */
-export const signatureKey = ({ check, step, line }: FailureSignature): string => `${check} | ${step} | ${line}`;
 const isSetup = (signature: FailureSignature): boolean => SETUP_STEP.test(signature.step);
+/** The key two failures share when they are the same failure. A setup step's file is incidental (a path in an npm error), so only another step's file is part of it. */
+export const signatureKey = (signature: FailureSignature): string =>
+  `${signature.check} | ${signature.step} | ${signature.line}${isSetup(signature) || signature.file === null ? "" : ` | ${signature.file}`}`;
+const isAggregator = (check: Pick<RedCheck, "name">): boolean => AGGREGATOR_CHECK.test(check.name);
+/** The checks that can name a cause: the roll-up is left out. */
+const causes = (pr: RedPr): RedCheck[] => pr.checks.filter((check) => !isAggregator(check));
 
-/** The failing step and the first error line of one job, or `null` when either read was refused or the job has no failed step. Normalised, so two runs compare equal. */
+/** The log line that IS the failure: a test runner's or an `##[error]` line first, else the first error-looking line that is not a warning or an echoed command (#5098). */
+function failureLine(lines: readonly string[]): number {
+  const text = (line: string) => line.replace(LOG_TIMESTAMP, "").trim();
+  const plausible = lines.map((line, at) => [at, text(line)] as const).filter(([, line]) => ERROR_LINE.test(line) && !NOT_THE_FAILURE.test(line));
+  const named = plausible.find(([, line]) => TEST_FAILURE.test(line)) ?? plausible[0];
+  return named?.[0] ?? lines.findIndex((line) => ERROR_LINE.test(line));
+}
+
+/** The first source file named from the failing line on, as the repository writes it (the runner's checkout prefix and any `:line:col` removed); `null` when none is named. */
+function failingFile(lines: readonly string[], from: number): string | null {
+  for (const line of lines.slice(from, from + FILE_WINDOW_LINES)) {
+    const found = SOURCE_FILE.exec(line.replace(LOG_TIMESTAMP, ""))?.[1];
+    if (found === undefined || found.includes("node_modules/")) continue;
+    return found.replace(/^.*?\/work\/[^/]+\/[^/]+\//, "").replace(/^\.\//, "");
+  }
+  return null;
+}
+
+/**
+ * The failing step and the failing line of one job, or `null` when either read was refused, the job has no failed step, or it is a ROLL-UP (it reports other jobs, so it has no
+ * failure of its own). Normalised, so two runs compare equal.
+ */
 export function readSignature(check: RedCheck, run: Run): FailureSignature | null {
   const ids = RUN_AND_JOB.exec(check.detailsUrl);
   const repo = /^https:\/\/github\.com\/([^/]+\/[^/]+)\//.exec(check.detailsUrl)?.[1];
-  if (ids === null || repo === undefined) return null;
+  if (ids === null || repo === undefined || isAggregator(check)) return null;
   try {
     const job = JSON.parse(run(["api", `repos/${repo}/actions/jobs/${ids[2]}`]));
     const step = (job?.steps ?? []).find((s: { conclusion?: string }) => s.conclusion === "failure");
-    if (step === undefined) return null;
-    const log = run(["api", `repos/${repo}/actions/jobs/${ids[2]}/logs`, "--allow-escape-sequences"]).replace(ANSI, "");
-    const first = log.split("\n").find((line) => ERROR_LINE.test(line));
-    return first === undefined ? null : { check: check.name, step: String(step.name), line: normalise(first) };
+    if (step === undefined || AGGREGATOR_STEP.test(String(step.name))) return null;
+    const lines = run(["api", `repos/${repo}/actions/jobs/${ids[2]}/logs`, "--allow-escape-sequences"]).replace(ANSI, "").split("\n");
+    const at = failureLine(lines);
+    if (at < 0 || AGGREGATOR_LINE.test(lines[at])) return null;
+    return { check: check.name, step: String(step.name), line: normalise(lines[at]), file: failingFile(lines, at) };
   } catch {
     return null; // a refused read: UNCLASSIFIED, never "shared"
   }
@@ -266,16 +317,28 @@ export function readSignature(check: RedCheck, run: Run): FailureSignature | nul
 export type SharedGroup = { key: string; signature: FailureSignature; prs: string[]; noted: string[] };
 export const notedAs = (pr: Pick<RedPr, "repo" | "number">): string => `${pr.repo}#${pr.number}`;
 
+/** Does this failing file belong to what the PR changed: the file itself, or the source/test beside it (`foo.ts` and `foo.test.ts` cover each other)? */
+export function touchesDiff(file: string, changed: readonly string[]): boolean {
+  const bare = (path: string) => path.replace(/\.(?:test|spec)(?=\.[^./]+$)/, "");
+  const same = (a: string, b: string) => a === b || a.endsWith(`/${b}`) || b.endsWith(`/${a}`);
+  return changed.some((path) => same(bare(path), bare(file)));
+}
+
 /**
  * THE GROUPS OF THE TICK. A check name red on two or more of `prs` is read (one job each, at most {@link MAX_SIGNATURE_READS}); a group is the PRs whose signature key is equal and which
  * number two or more, or one PR whose failing step is the runner's own setup. A PR is in a group only when EVERY one of its red checks is (a second, own failure sends its order).
+ *
+ * #5098: THE FAILURE MUST BE OUTSIDE THE DIFF. A setup step is. Any other step is shared only when its signature names a file, `changedOf` could read every PR's changed files, and
+ * none of them touches that file; a PR that does is left out, so a group of one is no group. The roll-up check is not one of a PR's red checks at all.
  */
-export function sharedFailureGroups(prs: readonly RedPr[], read: (check: RedCheck) => FailureSignature | null): SharedGroup[] {
+export function sharedFailureGroups(
+  prs: readonly RedPr[], read: (check: RedCheck) => FailureSignature | null, changedOf: (pr: RedPr) => readonly string[] | null = () => null,
+): SharedGroup[] {
   let reads = 0;
   const keyed = new Map<string, { signature: FailureSignature; prs: Set<string> }>();
   const unshared = new Set<string>();
   for (const pr of prs) {
-    for (const check of pr.checks) {
+    for (const check of causes(pr)) {
       const signature = reads < MAX_SIGNATURE_READS ? (reads++, read(check)) : null;
       if (signature === null) { unshared.add(pr.ref); continue; }
       const group = keyed.get(signatureKey(signature)) ?? { signature, prs: new Set<string>() };
@@ -283,43 +346,86 @@ export function sharedFailureGroups(prs: readonly RedPr[], read: (check: RedChec
       keyed.set(signatureKey(signature), group);
     }
   }
-  const shared = [...keyed.entries()].filter(([, g]) => g.prs.size >= 2 || isSetup(g.signature));
+  const byRef = new Map(prs.map((pr) => [pr.ref, pr]));
+  const outsideDiff = (signature: FailureSignature, refs: Set<string>): string[] => [...refs].filter((ref) => {
+    if (isSetup(signature)) return true;
+    const changed = signature.file === null ? null : changedOf(byRef.get(ref)!);
+    return signature.file !== null && changed !== null && !touchesDiff(signature.file, changed);
+  });
+  const shared = [...keyed.entries()].map(([key, g]) => ({ key, signature: g.signature, refs: outsideDiff(g.signature, g.prs) }))
+    .filter((g) => g.refs.length >= 2 || (g.refs.length === 1 && RUNNER_SETUP_STEP.test(g.signature.step)));
   const sharedRefs = new Map<string, number>();
-  for (const [, g] of shared) for (const ref of g.prs) sharedRefs.set(ref, (sharedRefs.get(ref) ?? 0) + 1);
-  const redCount = new Map(prs.map((pr) => [pr.ref, pr.checks.length]));
+  for (const g of shared) for (const ref of g.refs) sharedRefs.set(ref, (sharedRefs.get(ref) ?? 0) + 1);
+  const redCount = new Map(prs.map((pr) => [pr.ref, causes(pr).length]));
   const whole = (ref: string) => !unshared.has(ref) && (sharedRefs.get(ref) ?? 0) === redCount.get(ref);
   const noted = new Map(prs.map((pr) => [pr.ref, notedAs(pr)]));
-  return shared.map(([key, g]) => ({ key, signature: g.signature, prs: [...g.prs].filter(whole) }))
+  return shared.map((g) => ({ key: g.key, signature: g.signature, prs: g.refs.filter(whole) }))
     .filter((g) => g.prs.length > 0).map((g) => ({ ...g, noted: g.prs.map((ref) => noted.get(ref)!) }));
 }
 
-/** Filter-cheap: only a PR with a red check name that is red on two PRs is worth a log read (whether ALL its red checks are shared is decided after). A lone red PR costs no read, so a lone setup failure is today's order. */
+/** Filter-cheap: only a PR with a red check name that is red on two PRs is worth a log read (whether ALL its red checks are shared is decided after). A lone red PR costs no read, so a lone setup failure is today's order. The roll-up is no check. */
 export const candidates = (prs: readonly RedPr[]): RedPr[] => {
   const seen = new Map<string, number>();
-  for (const pr of prs) for (const name of new Set(pr.checks.map((c) => c.name))) seen.set(name, (seen.get(name) ?? 0) + 1);
-  return prs.filter((pr) => pr.checks.some((c) => (seen.get(c.name) ?? 0) >= 2));
+  for (const pr of prs) for (const name of new Set(causes(pr).map((c) => c.name))) seen.set(name, (seen.get(name) ?? 0) + 1);
+  return prs.filter((pr) => causes(pr).some((c) => (seen.get(c.name) ?? 0) >= 2));
 };
 
+/** The files a pull request changes, or `null` when the read was refused or the page is full (a truncated list proves nothing about a file it does not show). */
+function changedFiles(pr: RedPr, run: Run): string[] | null {
+  try {
+    const files = JSON.parse(run(["api", `repos/${pr.repo}/pulls/${pr.number}/files?per_page=${CHANGED_FILES_PAGE}`]));
+    return Array.isArray(files) && files.length < CHANGED_FILES_PAGE ? files.map((f: { filename?: unknown }) => String(f.filename)) : null;
+  } catch {
+    return null; // a refused read: the diff is UNKNOWN, so the failure is not shown to be outside it
+  }
+}
+
 export type HeldOrder = { subject: string; session: string; key: string };
+export type ReleasedOrder = { subject: string; session: string; key: string; why: "closed" | "expired" | "unrecorded"; line: string };
+/**
+ * What the rows say about a group: hold it (no row yet, a young row, a claimed row), or release it because its row was closed, outlived {@link HOLD_MAX_MS} unclaimed, or could not
+ * be filed (a hold with no row behind it is exactly the hold #5098 forbids).
+ */
+export type Standing = { hold: true } | { hold: false; why: ReleasedOrder["why"]; row?: number };
+type OrderLike = { cause?: string; subject?: string; session?: string; discriminator?: string; prompt?: string };
+
+const RELEASE_REASON: Readonly<Record<ReleasedOrder["why"], string>> = {
+  closed: "its incident row was closed",
+  expired: `its incident row was not claimed within ${HOLD_MAX_MS / 60_000} minutes`,
+  unrecorded: "its incident row could not be filed",
+};
+const releasedWords = (group: SharedGroup, standing: Extract<Standing, { hold: false }>): string =>
+  `SHARED-FAILURE HOLD RELEASED (${standing.row === undefined ? "" : `#${standing.row}: `}${RELEASE_REASON[standing.why]}): this red is NOT being held for an incident, so it is yours to read. `
+  + `The failing job \`${group.signature.check}\`, step \`${group.signature.step}\`, says: ${group.signature.line}`;
+
 /**
  * HOLD, DO NOT WAKE: the settled-red `pr-checks-failing` orders of a shared failure are withheld and everything else goes out unchanged. `refused` are the PRs whose refresh was refused,
- * which are never held again. Pure given `run`.
+ * which are never held again. `standing` is what the incident rows say about a group (absent: hold it); a RELEASED group's orders go out carrying the failing job's own line (#5098).
+ * Pure given `run`.
  */
-export function holdSharedFailures<O extends { cause?: string; subject?: string; session?: string; discriminator?: string }>(
-  orders: readonly O[], { prs, run, refused = [] }: { prs: readonly RedPr[]; run: Run; refused?: readonly string[] },
-): { orders: O[]; held: HeldOrder[]; groups: SharedGroup[] } {
+export function holdSharedFailures<O extends OrderLike>(
+  orders: readonly O[], { prs, run, refused = [], standing = () => ({ hold: true }) }: { prs: readonly RedPr[]; run: Run; refused?: readonly string[]; standing?: (group: SharedGroup) => Standing },
+): { orders: O[]; held: HeldOrder[]; released: ReleasedOrder[]; groups: SharedGroup[] } {
   const ordered = new Set(orders.filter((o) => o.cause === "pr-checks-failing" && o.discriminator !== "hung-check" && o.discriminator !== "ejected").map((o) => o.subject));
   const open = candidates(prs.filter((pr) => ordered.has(pr.ref)));
   const released = new Set(prs.filter((pr) => refused.includes(notedAs(pr))).map((pr) => pr.ref));
-  const groups = sharedFailureGroups(open, (check) => readSignature(check, run));
-  const keyOf = new Map(groups.flatMap((g) => g.prs.filter((ref) => !released.has(ref)).map((ref) => [ref, g.key] as const)));
+  const changed = new Map<string, string[] | null>();
+  const changedOf = (pr: RedPr) => (changed.has(pr.ref) ? changed : changed.set(pr.ref, changedFiles(pr, run))).get(pr.ref)!;
+  const groups = sharedFailureGroups(open, (check) => readSignature(check, run), changedOf);
+  const standings = new Map<string, Standing>();
+  const standingFor = (group: SharedGroup): Standing => standings.get(group.key) ?? standings.set(group.key, standing(group)).get(group.key)!; // asked once, and only of a group with an order to decide
+  const groupOf = new Map(groups.flatMap((g) => g.prs.filter((ref) => !released.has(ref)).map((ref) => [ref, g] as const)));
   const held: HeldOrder[] = [];
-  const kept = orders.filter((o) => {
-    const key = o.cause === "pr-checks-failing" ? keyOf.get(String(o.subject)) : undefined;
-    if (key !== undefined) held.push({ subject: String(o.subject), session: String(o.session), key });
-    return key === undefined;
+  const freed: ReleasedOrder[] = [];
+  const kept = orders.flatMap((o): O[] => {
+    const group = o.cause === "pr-checks-failing" ? groupOf.get(String(o.subject)) : undefined;
+    if (group === undefined) return [o];
+    const verdict = standingFor(group);
+    if (verdict.hold) { held.push({ subject: String(o.subject), session: String(o.session), key: group.key }); return []; }
+    freed.push({ subject: String(o.subject), session: String(o.session), key: group.key, why: verdict.why, line: group.signature.line });
+    return [{ ...o, prompt: `${o.prompt === undefined ? "" : `${o.prompt}\n\n`}${releasedWords(group, verdict)}` }];
   });
-  return { orders: kept, held, groups };
+  return { orders: kept, held, released: freed, groups };
 }
 
 // ---- the incident row
@@ -335,16 +441,36 @@ const REFRESHED_LINE = /^Refreshed-at: /m;
 const CHECK_LINE = /^Check: (.*)$/m;
 const listOf = (body: string, line: RegExp): string[] => (line.exec(body)?.[1] ?? "").split(",").map((s) => s.trim()).filter((s) => s !== "");
 
-type IncidentRow = { number: number; body: string; state?: string; closedByPullRequestsReferences?: { number: number; repository?: { nameWithOwner?: string } }[] };
+type IncidentRow = {
+  number: number; body: string; state?: string; createdAt?: string; closedAt?: string; labels?: string[];
+  closedByPullRequestsReferences?: { number: number; repository?: { nameWithOwner?: string } }[];
+};
 /**
  * #5039: THE INCIDENT ROWS, READ WITHOUT SEARCH (see rows-by-label.ts), and a FAILED READ THROWS: it used to answer `[]`, which read as "no
  * incident row", so a tick that could not list them filed a second row for the same failure. The two callers that file or join catch it.
  */
 const readRows = (run: Run, state: "open" | "closed"): IncidentRow[] =>
   readRowsByLabel({ label: SHARED_FAILURE_LABEL, state: state === "open" ? "OPEN" : "CLOSED", newest: MAX_INCIDENT_ROWS, run,
-    select: "number body closedByPullRequestsReferences(first:10){nodes{number repository{nameWithOwner}}}" })
-    .map((row) => ({ number: Number(row.number), body: String(row.body ?? ""),
-      closedByPullRequestsReferences: row.closedByPullRequestsReferences?.nodes ?? [] }));
+    select: "number body createdAt closedAt labels(first:20){nodes{name}} closedByPullRequestsReferences(first:10){nodes{number repository{nameWithOwner}}}" })
+    .map((row) => ({ number: Number(row.number), body: String(row.body ?? ""), createdAt: row.createdAt, closedAt: row.closedAt,
+      labels: (row.labels?.nodes ?? []).map((l: { name: string }) => String(l.name)), closedByPullRequestsReferences: row.closedByPullRequestsReferences?.nodes ?? [] }));
+
+/**
+ * WHAT THE ROWS SAY ABOUT `group` (#5098). The hold used to be recomputed from the live reds every tick, so closing the row released nothing: the same signature matched again, no OPEN
+ * row carried its marker, and a fresh row was filed. A hold is now a reading of the row: an OPEN row holds while it is young or CLAIMED (`in-progress`); a row CLOSED within
+ * {@link QUIET_AFTER_CLOSE_MS} releases at once, unless a PR it never named has joined. An unreadable time is never young (the order goes out, as it always did).
+ */
+export function standingOf(group: SharedGroup, { open, closed, nowMs }: { open: readonly IncidentRow[]; closed: readonly IncidentRow[]; nowMs: number }): Standing {
+  const marker = markerOf(group.key);
+  const row = open.find((r) => r.body.includes(marker));
+  if (row !== undefined) {
+    const young = nowMs - Date.parse(String(row.createdAt)) < HOLD_MAX_MS;
+    return young || (row.labels ?? []).includes(CLAIM_LABEL) ? { hold: true } : { hold: false, why: "expired", row: row.number };
+  }
+  const quiet = closed.find((r) => r.body.includes(marker) && nowMs - Date.parse(String(r.closedAt)) < QUIET_AFTER_CLOSE_MS
+    && group.noted.every((ref) => listOf(r.body, PRS_LINE).includes(ref)));
+  return quiet === undefined ? { hold: true } : { hold: false, why: "closed", row: quiet.number };
+}
 
 const bodyOf = (group: SharedGroup, prs: readonly string[]): string => [
   `A failure shared by ${prs.length} open pull request(s), found by the gate: one incident, and the workers of these PRs are not woken for it.`, "",
@@ -461,28 +587,37 @@ function stamp(row: IncidentRow, { late, failed, run, log, nowMs }: { late: stri
   }
 }
 
+const refusedOf = (rows: readonly IncidentRow[]): string[] => rows.flatMap((row) => listOf(String(row.body), FAILED_LINE));
 /** PRs whose refresh a refusal stopped: they are never held again, so the worker's order goes out as today. */
 export function refusedRefreshes(run: Run): string[] {
-  return [...readRows(run, "open"), ...readRows(run, "closed")].flatMap((row) => listOf(String(row.body), FAILED_LINE));
+  return refusedOf([...readRows(run, "open"), ...readRows(run, "closed")]);
 }
 
 /**
  * THE TICK'S ONE CALL. Refresh what a merged fix owes, hold what a shared failure owes nobody, file or join the incident, and return what remains. Never throws: a tick that cannot
- * do this sends the orders as it always did.
+ * do this sends the orders as it always did. A group is held only while {@link standingOf} says so AND its incident row is on record: a row that cannot be filed releases it.
  */
-export function sharedFailureTick<O extends { cause?: string; subject?: string; session?: string; discriminator?: string }>(
+export function sharedFailureTick<O extends OrderLike>(
   orders: readonly O[], deps: { prs: readonly RedPr[]; run: Run; log?: (line: string) => void; nowMs?: number },
-): { orders: O[]; held: HeldOrder[]; refreshed: string[] } {
+): { orders: O[]; held: HeldOrder[]; released: ReleasedOrder[]; refreshed: string[] } {
   const log = deps.log ?? ((line: string) => void process.stderr.write(line));
+  const nowMs = deps.nowMs ?? Date.now();
   try {
-    const { refreshed, refused } = refreshFixed({ run: deps.run, log, nowMs: deps.nowMs, open: deps.prs });
+    const { refreshed, refused } = refreshFixed({ run: deps.run, log, nowMs, open: deps.prs });
     for (const ref of refreshed) log(`ci-shared-failure: updated ${ref} from main (its incident's fix merged) -- no worker woken\n`);
-    const held = holdSharedFailures(orders, { prs: deps.prs, run: deps.run, refused: [...refused, ...refusedRefreshes(deps.run)] });
-    for (const group of held.groups.filter((g) => held.held.some((h) => h.key === g.key))) recordIncident(group, { run: deps.run, log });
-    if (held.held.length > 0) log(`ci-shared-failure: holding ${held.held.length} red order(s) of a shared failure:${held.held.map((h) => ` ${h.subject}`).join("")}\n`);
-    return { orders: held.orders, held: held.held, refreshed };
+    const rows = { open: readRows(deps.run, "open"), closed: readRows(deps.run, "closed"), nowMs };
+    const standing = (group: SharedGroup): Standing => {
+      const said = standingOf(group, rows);
+      return said.hold && recordIncident(group, { run: deps.run, log }) === null ? { hold: false, why: "unrecorded" } : said;
+    };
+    const waiting = new Set(deps.prs.filter((pr) => refreshed.includes(notedAs(pr))).map((pr) => pr.ref)); // its CI is running again: nobody is woken for the old red
+    const pending = orders.filter((o) => !(o.cause === "pr-checks-failing" && waiting.has(String(o.subject))));
+    const out = holdSharedFailures(pending, { prs: deps.prs, run: deps.run, refused: [...refused, ...refusedOf([...rows.open, ...rows.closed])], standing });
+    if (out.held.length > 0) log(`ci-shared-failure: holding ${out.held.length} red order(s) of a shared failure:${out.held.map((h) => ` ${h.subject}`).join("")}\n`);
+    if (out.released.length > 0) log(`ci-shared-failure: released ${out.released.length} red order(s), their hold is over:${out.released.map((r) => ` ${r.subject} (${r.why})`).join("")}\n`);
+    return { orders: out.orders, held: out.held, released: out.released, refreshed };
   } catch (error) {
     log(`ci-shared-failure: could not run (${String((error as Error).message).split("\n")[0]}); the orders go out as they were\n`);
-    return { orders: [...orders], held: [], refreshed: [] };
+    return { orders: [...orders], held: [], released: [], refreshed: [] };
   }
 }
