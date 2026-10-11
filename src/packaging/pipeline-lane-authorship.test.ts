@@ -34,7 +34,7 @@ import { SWEEP_WAIT_ENV } from "../auto-arm-sweep.ts";
 import { laneLabelsFor } from "../row-file.ts";
 import { laneAuthorshipRefusal, ownsReviewOnlyLane, reviewOnlyPathsIn, authorshipVerdict, ROLE_LOGIN } from "../lane-ownership.ts";
 import { runArmPr, EXIT } from "../arm-pr.ts";
-import { main, EXIT_NOTHING_SENT } from "../pr-open.ts";
+import { main, EXIT_NOTHING_SENT, loginThrough } from "../pr-open.ts";
 
 const LEADS = "a11ign-ai-leads";
 const WORKERS = "a11ign-ai-workers";
@@ -234,6 +234,63 @@ test("#3254: a login pr-open cannot read REFUSES a pipeline diff -- unreadable i
   assert.equal(out.code, EXIT_NOTHING_SENT);
   assert.deepEqual(out.sent, []);
   assert.match(out.said, /could not say who is opening it/);
+});
+
+// --- #811: an installation token cannot answer `gh api user`; the identity comes from the GraphQL viewer ---
+
+const BOT = "a11ign-workers[bot]";
+const ACCESS_403 = Object.assign(new Error("Command failed: gh api user --jq .login"),
+  { stderr: "gh: Resource not accessible by integration (HTTP 403)\n" });
+
+/** A `gh` that answers as `token` would: `api user` and the GraphQL viewer each from its own entry, a function throwing. */
+function fakeGh(answers: { user: string | (() => string); viewer: string | (() => string) }) {
+  const asked: string[] = [];
+  const gh = (args: string[]) => {
+    const which = args[0] === "api" && args[1] === "user" ? "user"
+      : args[0] === "api" && args[1] === "graphql" && args.join(" ").includes("viewer") ? "viewer" : null;
+    assert.ok(which, `an unexpected gh call: ${args.join(" ")}`);
+    asked.push(which);
+    const answer = answers[which];
+    return typeof answer === "function" ? answer() : answer;
+  };
+  return { gh, asked };
+}
+const refuses403 = () => { throw ACCESS_403; };
+
+test("#811 (1): an installation token's identity opening a diff into .github/workflows/ is NOT refused", () => {
+  const { gh, asked } = fakeGh({ user: refuses403, viewer: BOT });
+  const out = drivePrOpen([WORKFLOW], () => loginThrough(gh));
+  assert.deepEqual(asked, ["user", "viewer"], "the viewer is asked after `api user` is refused, and only then");
+  // authorship is checked BEFORE the body (`main`), and this fixture's bare body fails the later acceptance check, so "not
+  // refused" is the absence of the authorship refusals, as at #3254 (3) -- and `asked` above proves the identity was read.
+  assert.doesNotMatch(out.said, /Ruling item 7|could not say who|review-only lane/);
+});
+
+test("#811 (2) POSITIVE CONTROL: the leads login, read through the SAME fallback, is still refused", () => {
+  const { gh } = fakeGh({ user: refuses403, viewer: LEADS });
+  const out = drivePrOpen([WORKFLOW], () => loginThrough(gh));
+  assert.equal(out.code, EXIT_NOTHING_SENT);
+  assert.deepEqual(out.sent, []);
+  assert.match(out.said, /#1756 Ruling item 7/);
+});
+
+test("#811 (3): an identity NEITHER read answers is refused -- the 403 is named, and the refusal is #3254's", () => {
+  for (const viewer of [() => { throw new Error("HTTP 502"); }, () => "\n"]) {
+    const { gh } = fakeGh({ user: refuses403, viewer });
+    const out = drivePrOpen([WORKFLOW], () => loginThrough(gh));
+    assert.equal(out.code, EXIT_NOTHING_SENT);
+    assert.deepEqual(out.sent, []);
+    assert.match(out.said, /could not say who is opening it/);
+    assert.match(out.said, /Resource not accessible by integration \(HTTP 403\)/, "the first failure's own words, not just `Command failed`");
+  }
+});
+
+test("#811 (4): a user token pays ONE call -- `api user` answering means the viewer is never asked, and an empty answer is no login", () => {
+  const user = fakeGh({ user: ` ${WORKERS}\n`, viewer: () => { throw new Error("must not be asked"); } });
+  assert.equal(loginThrough(user.gh), WORKERS);
+  assert.deepEqual(user.asked, ["user"]);
+  const empty = fakeGh({ user: "", viewer: BOT });
+  assert.equal(loginThrough(empty.gh), BOT, "an empty `api user` answer is a failure, so the viewer is asked");
 });
 
 // --- the sweep: the same predicate, or arm-pr's refusal is undone one job later ---

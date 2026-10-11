@@ -3,11 +3,11 @@
   "summary": {
     "files": 96,
     "spawns": 136,
-    "calls": 393,
+    "calls": 394,
     "shapes": {
       "api rest": 138,
       "issue list": 42,
-      "api graphql": 37,
+      "api graphql": 38,
       "issue view": 34,
       "pr list": 29,
       "issue comment": 27,
@@ -558,6 +558,7 @@
     "src/pr-open.ts": {
       "spawns": 7,
       "calls": {
+        "api graphql": 1,
         "api rest": 6,
         "label create": 2,
         "pr edit": 1,
