@@ -9,10 +9,11 @@ Row-claim records each refused claim in the failure ledger, so the claim-refusal
 **Mutation.** Copies made in the scratchpad, each restored byte-identical (sha256 checked against the original):
 - recorder writes nothing: 4 of 4 red;
 - reason is the whole refusal rather than its first line: 1 red (the multi-line reason test);
-- recorder throws into the claim: 4 of 4 red.
+- recorder throws into the claim: 4 of 4 red;
+- `runDecline`'s catch drops its `recordClaimRefusal` (the review's blocker): 1 red (the decline test).
 
 **Evidence.**
-- `npx rstest run --config scripts/rstest/rstest.config.ts src/row-claim-refusal-record.test.ts src/claim-refusal-storm.test.ts`: 17 of 17 pass (4 new, 13 existing storm tests), run in this worktree.
+- `npx rstest run --config scripts/rstest/rstest.config.ts src/row-claim-refusal-record.test.ts src/claim-refusal-storm.test.ts`: 18 of 18 pass (5 new, 13 existing storm tests), run in this worktree.
 - `pnpm run typecheck`: passes.
 - `pnpm test` (the full suite): 11 tests fail in 6 files; a clean `HEAD` export fails the same number in each of the same files: `live-tree-independence` 2, `org-health-queued-lab-jobs` 4, `release-tag-on-merge` 1, `wait-condition` 2, `work-gate-other-scopes-concurrent` 1, `worker-stop-hook` 1. None is in the files this change touches or adds.
 - Not run: `pnpm run lint`, `pnpm run test:org`, `pnpm run verify`. This repository's `package.json` has no such scripts (`pnpm` reports `Missing script`), and no linter is configured.

@@ -15,7 +15,7 @@
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { chmodSync, cpSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -89,4 +89,25 @@ test("an unwritable ledger is said on stderr, and the verdict and exit code are 
   assert.equal(run.status, 1, "the claim's exit code is the refusal's, not the ledger's");
   assert.equal(run.stdout.split("\n")[0], `${PRINTED_PREFIX}${REFUSAL}`, "the verdict is the refusal, unchanged");
   assert.match(run.stderr, /failure-ledger: NOT RECORDED claim-refused/, "the refused append is said on stderr");
+});
+
+test("a decline that cannot read its row says COULD NOT DETERMINE, exits 2, and leaves one claim-refused line", () => {
+  // THE DECLINE'S OWN CATCH (agent-org#972 review): `gh` is a shim that always fails, so `declineRow` throws before any write. Nothing reaches GitHub.
+  const home = join(SCRATCH, "home-decline");
+  mkdirSync(home, { recursive: true });
+  const shimBin = join(SCRATCH, "gh-down");
+  mkdirSync(shimBin, { recursive: true });
+  writeFileSync(join(shimBin, "gh"), "#!/bin/sh\necho \"gh: simulated outage\" >&2\nexit 1\n");
+  chmodSync(join(shimBin, "gh"), 0o755);
+  const run = spawnSync(process.execPath, [ROW_CLAIM, "decline", "972", "--session=worker-agent-org-972"],
+    { env: { ...process.env, PATH: `${shimBin}:${process.env.PATH}`, HOME: home, A11Y_POLICY_LAUNCH_REASON: "row-claim-refusal-record test fixture" }, encoding: "utf8" });
+  assert.equal(run.status, 2, `a decline that cannot read its row exits 2: ${run.stderr}`);
+  // gh's own stderr comes first; the tool's verdict is the line that names the outcome.
+  const printed = run.stderr.split("\n").find((line) => line.startsWith("COULD NOT DETERMINE: ")) ?? "";
+  assert.notEqual(printed, "", "the verdict the tool printed is the could-not-determine one");
+  const lines = readFileSync(ledgerUnder(home), "utf8").split("\n").filter((line) => line !== "");
+  assert.equal(lines.length, 1, "one refusal, one line");
+  const [entry] = parseFailureLedger(lines.join("\n"));
+  assert.equal(entry.classKey, CLAIM_REFUSED_KIND);
+  assert.equal(entry.ref, printed.slice("COULD NOT DETERMINE: ".length), "the reason is the printed message's first line");
 });

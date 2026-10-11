@@ -3273,6 +3273,8 @@ function runDecline(issueNumber: number, rest: string[]) {
     // #1399: a failure after a landed write exits LANDED_WRITE_EXIT and names the writes; otherwise exit 2.
     const report = failureReport(error);
     process.stderr.write(`${report.text}\n`);
+    // #972: only the "could not determine" outcome is a refusal; a partial write is not one, and says so on its own line.
+    if (report.exitCode !== LANDED_WRITE_EXIT) recordClaimRefusal((error as Error).message);
     process.exitCode = report.exitCode;
   }
 }
