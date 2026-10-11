@@ -19,6 +19,7 @@ Closes a11ign/agent-org#742
 
 Outside-Region: src/packaging/gh-read-cache.test.ts -- the wrapper's cache tests, where the verdict is pinned.
 Outside-Region: src/packaging/gh-call-ledger.test.ts -- pins the ledger's field count; ten, with the session id the 9th.
+Outside-Region: src/packaging/host-project-paths.test.ts -- pins the wrapper's sha256; the new ledger field moves it, with a dated comment.
 Outside-Region: .changeset/the-ledger-names-why-a-read-missed.md -- the entry a project that pins a tag reads.
 
 platform: n/a (no GitHub, pnpm, systemd or git feature records a read cache's verdict; the ledger is this wrapper's own)
