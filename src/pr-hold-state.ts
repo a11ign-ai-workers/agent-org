@@ -29,6 +29,9 @@
 import { conditionHolds, declaredWaitsOf, hoursSince, waitItemOf, MANUAL_WAIT_HOURS } from "./wait-condition.ts";
 import { CLAIM_LABEL } from "./claim-labels.ts";
 import { SESSION_PREFIX } from "./project-vocabulary.ts";
+import { IDLE_STATUSES } from "./idle-claimant.ts";
+import { listingIsComplete } from "./herdr-agents.ts";
+import { subjectMention, subjectRef } from "./review-attribution.ts";
 
 export type Wait = import("./wait-condition.ts").Wait;
 export type WaitFacts = import("./wait-condition.ts").WaitFacts;
@@ -173,6 +176,192 @@ export function idleHoldIncident(hold: { pr: PullRequestRef; labels: string[]; s
     key: `${IDLE_HOLD_CLASS}:${hold.pr.repo}#${hold.pr.number}:${targetKey}:${hold.since}`,
     pr: hold.pr, target: targetKey, minutes: Math.floor(minutes), reason,
   };
+}
+
+// --- A HOLD OUTLIVES ITS HOLDER (#4970, chairman, 2026-10-11) -------------------------------------------------------------------------------------------------------------
+
+/** The cause of both orders below: the wake to the holder and the decision asked of the escalation seat. Declared in `cause-declaration.ts`. */
+export const HOLD_HOLDER_CAUSE = "hold-holder-idle";
+
+/**
+ * How long a holder may sit idle, or be gone, with no declared state before it is woken, and how long after the wake before the seat that decides is asked. The
+ * chairman's two numbers (#4970), so they are named here and not quoted in a comment. The idle clock is the gate's own (`herdr` reports a status and never since
+ * when), so the first tick that reads the holder idle starts it.
+ */
+export const HOLDER_IDLE_MINUTES = 30;
+export const HOLDER_ESCALATE_MINUTES = 30;
+
+/** Who decides when the holder does not answer. The holder's own seat cannot decide its own hold, so `orchestrator` holding a hold asks `ceo`. */
+export const HOLD_ESCALATION_SEAT = "orchestrator";
+const HOLD_ESCALATION_FALLBACK_SEAT = "ceo";
+
+/** Who is asked to decide about a hold of `holder`'s: never the holder itself. */
+export const escalationSeatFor = (holder: string): string => (holder === HOLD_ESCALATION_SEAT ? HOLD_ESCALATION_FALLBACK_SEAT : HOLD_ESCALATION_SEAT);
+
+/** What one hold remembers between ticks, keyed by {@link holdHolderKey}: when its holder was first read idle, when it was woken, when the decision was asked. */
+export type HolderMemory = { idleSince: number; wokenAt?: number; escalatedAt?: number };
+
+/** `worker-state.ts`'s declaration, narrowed to what a hold reads (a leaf cannot import it: it reads the file system). */
+export type HolderDeclaration = { state: string; at: number; pr?: { number: number; repoKey?: string } };
+
+/** A held pull request as the reading needs it: `since` is the hold marker's date (`holdReasonOf`'s), `approved` is GitHub's own `reviewDecision`. */
+export type HeldPr = { number: number; repoKey?: string; since: number | null; approved: boolean };
+
+/**
+ * THE KEY OF ONE HOLD, STABLE FOR ITS LIFE: the pull request, who holds it and the date it was taken. A hold re-taken is a new hold and starts its clocks again;
+ * a hold seen on every tick is one key, which is what makes the wake once and the decision once. A hold with no date is `undated`, one key per (pull request, holder).
+ */
+export function holdHolderKey({ pr, holder }: { pr: HeldPr; holder: string }): string {
+  return `${subjectRef(pr.repoKey, pr.number)}:${holder}:${pr.since ?? "undated"}`;
+}
+
+/**
+ * DOES THIS DECLARATION EXCUSE AN IDLE HOLDER OF THIS HOLD? (#4970) A declaration is the one place a worker says what its turn ended on, and the gate reads it instead of the pane
+ * (`worker-state.ts`). What it excuses is narrower than "something was declared", because a worker that declared `done` and still holds a pull request is the case this exists for:
+ *   - made BEFORE the hold was taken, it describes an earlier thing and does not speak to this hold; a hold with no date cannot be compared, and is excused (an unknown is not "stale");
+ *   - `blocked <row>` is the worker asking for an answer, which the org reads as a label and routes: excused;
+ *   - `done` is not: the work it names is finished and the hold stands;
+ *   - `waiting-ci <pr>` and `waiting-review <pr>` excuse only when they name THIS pull request, and `waiting-review` not when it is already approved (what it waits for has happened,
+ *     and a held approved pull request is waiting on the hold, which is the holder's to lift).
+ */
+export function declarationExcusesHold(declaration: HolderDeclaration | undefined, pr: HeldPr): boolean {
+  if (declaration === undefined) return false;
+  if (pr.since !== null && declaration.at < pr.since) return false;
+  if (declaration.state === "blocked") return true;
+  if (declaration.state === "done" || declaration.pr === undefined) return false;
+  const names = declaration.pr.number === pr.number && (declaration.pr.repoKey === undefined || declaration.pr.repoKey === pr.repoKey);
+  return names && !(declaration.state === "waiting-review" && pr.approved);
+}
+
+export type HolderStep = { step: "none" | "wake" | "escalate"; gone: boolean; idleMinutes: number; memory: HolderMemory | null };
+
+const MS_PER_HOLDER_MINUTE = 60_000;
+
+/**
+ * WHAT THE GATE DOES THIS TICK FOR ONE HELD PULL REQUEST'S ONE HOLDER (#4970): nothing, wake it, or ask for the decision. PURE; the listing, the declaration and the memory are
+ * inputs, and `memory: null` is the instruction to forget.
+ *
+ * THE ORDER IS THE DESIGN. A listing that is not the whole org PROVES NOTHING (`listingIsComplete`): it is silence, and the memory is kept as it was. Then a declaration that
+ * excuses the hold, which forgets everything (the holder answered). Then the holder's status: `working` and `blocked` are not idle, so a holder never woken has its idle run
+ * broken, and a holder ALREADY WOKEN keeps its memory, because its wake is what made it `working` and forgetting it would wake it again, which is "once" turned into "every other
+ * turn". Only then the clocks: first idle tick, then {@link HOLDER_IDLE_MINUTES} to the wake, then {@link HOLDER_ESCALATE_MINUTES} to the decision, each at most once per hold.
+ *
+ * A GONE HOLDER (a complete listing that does not carry its label) cannot hear a wake, so the order that would have gone to it is also the one that asks for the decision: it is
+ * recorded as both, and the later step does not repeat it. NOTHING HERE LIFTS A HOLD: no code removes a label by itself (#4970), only the order's text says how.
+ */
+export function holderStep({ holder, pr, agents, declaration }: { holder: string; pr: HeldPr; agents: { label: string; status: string }[] | null; declaration: HolderDeclaration | undefined },
+  { memory, now }: { memory: HolderMemory | undefined; now: number }): HolderStep {
+  const unchanged = { step: "none" as const, gone: false, idleMinutes: 0, memory: memory ?? null };
+  if (agents === null || !listingIsComplete(agents)) return unchanged;
+  if (declarationExcusesHold(declaration, pr)) return { ...unchanged, memory: null };
+  const status = agents.find((agent) => agent.label === holder)?.status ?? null;
+  const gone = status === null;
+  if (!gone && !IDLE_STATUSES.includes(status)) return { ...unchanged, memory: memory?.wokenAt === undefined ? null : memory };
+  const idleSince = memory?.idleSince ?? now;
+  const idleMinutes = Math.floor((now - idleSince) / MS_PER_HOLDER_MINUTE);
+  const kept = { ...memory, idleSince };
+  const result = { gone, idleMinutes };
+  if (memory?.escalatedAt !== undefined) return { ...unchanged, ...result, memory: kept };
+  if (memory?.wokenAt === undefined) {
+    if (idleMinutes < HOLDER_IDLE_MINUTES) return { ...unchanged, ...result, memory: kept };
+    return { step: "wake", ...result, memory: { ...kept, wokenAt: now, ...(gone ? { escalatedAt: now } : {}) } };
+  }
+  if ((now - memory.wokenAt) / MS_PER_HOLDER_MINUTE < HOLDER_ESCALATE_MINUTES) return { ...unchanged, ...result, memory: kept };
+  return { step: "escalate", ...result, memory: { ...kept, escalatedAt: now } };
+}
+
+/** One order of the gate: the shape `wake` reads. `fallback*` is `routeWithFallback`'s, for a recipient that no workspace carries. */
+export type HolderOrder = { session: string; cause: string; subject: string; discriminator: string; prompt: string; causeKey: string;
+  fallback?: string; fallbackOnlyIfAbsent?: boolean; fallbackPrompt?: string };
+
+/** What is said about the hold itself: who, since when and why, in the words the hold recorded. */
+export type HoldFacts = { pr: HeldPr; holder: string; reason: string };
+
+const releaseCommand = ({ pr, holder }: { pr: HeldPr; holder: string }): string =>
+  `agent-org pr:release ${pr.repoKey === undefined || pr.repoKey === "" ? "" : `--repo-key=${pr.repoKey} `}${pr.number} --session=${holder}`;
+
+/**
+ * THE WAKE (#4970): the holder is told what it holds, why the org thinks it has stopped, and the three things it can do, each a command or a field the gate reads. For a GONE holder
+ * the same order carries `fallback`, so no workspace carrying the label sends it to the seat that decides, with the text of {@link decisionPrompt} and not this one.
+ */
+export function holderWakeOrder(hold: HoldFacts, { idleMinutes, gone }: { idleMinutes: number; gone: boolean }): HolderOrder {
+  const { pr, holder } = hold;
+  const escalateTo = escalationSeatFor(holder);
+  const ref = subjectRef(pr.repoKey, pr.number);
+  const mention = subjectMention(pr);
+  const stage = `wake-${pr.since ?? "undated"}`;
+  return {
+    session: holder, cause: "hold-holder-idle", // A LITERAL, which `worker-profile.test.ts` reads out of this file; `pr-hold.test.ts` pins it equal to HOLD_HOLDER_CAUSE
+    subject: `pr-${ref}`, discriminator: stage,
+    prompt: `YOU HOLD ${mention} (\`${HOLD_PREFIX}${holder}\`)${pr.approved ? ", WHICH IS APPROVED," : ""} AND YOU HAVE BEEN IDLE FOR ${idleMinutes} MINUTES with no declared state: ${hold.reason}. `
+      + "A hold stops the pull request being armed; the gate lifts one only when the condition it names is true, and nothing else lifts it but you.\n"
+      + `IF ITS REASON IS OVER, RELEASE IT NOW: \`${releaseCommand(hold)}\`.\n`
+      + "IF IT STILL STANDS, SAY SO AS A FIELD, because the terminal is not one: `agent-org worker:state blocked <row> <reason>` (the answer you wait for) or "
+      + `\`agent-org worker:state waiting-review ${pr.number}\` / \`waiting-ci ${pr.number}\` (it is open and waits on that), or re-take the hold with \`pr:hold ${pr.number} --until "merged #<m>"\`, which the gate lifts itself.\n`
+      + `${HOLDER_ESCALATE_MINUTES} MINUTES AFTER THIS REACHES YOU, with the hold still on and you idle, \`${escalateTo}\` is asked to decide: release it with a reason written on the pull request, or take the work over. `
+      + "THE GATE NEVER REMOVES A HOLD ITSELF.",
+    causeKey: `${holder}/${HOLD_HOLDER_CAUSE}/pr-${ref}/${stage}`,
+    ...(gone ? { fallback: escalateTo, fallbackOnlyIfAbsent: true, fallbackPrompt: decisionPrompt(hold, { idleMinutes, gone: true }) } : {}),
+  };
+}
+
+/** THE DECISION ASKED OF THE ESCALATION SEAT: the pull request, the hold, what was done so far and the two ways out. */
+function decisionPrompt(hold: HoldFacts, { idleMinutes, gone }: { idleMinutes: number; gone: boolean }): string {
+  const { pr, holder } = hold;
+  const mention = subjectMention(pr);
+  const state = gone
+    ? `\`${holder}\` NO LONGER EXISTS (no workspace carries that label), so it could not be woken`
+    : `\`${holder}\` was woken ${HOLDER_ESCALATE_MINUTES} minutes ago and is still idle (${idleMinutes} minutes idle in all) with no declared state`;
+  return `${mention} IS HELD BY A SESSION THAT HAS STOPPED${pr.approved ? ", AND IT IS APPROVED" : ""}: ${state}. The hold: ${hold.reason}.\n`
+    + `DECIDE, AND WRITE THE REASON ON THE PULL REQUEST: release it (\`${releaseCommand(hold)}\`, which only the reason on the pull request makes safe to do for another session), or take the work over `
+    + "and say who now holds it. If the reason is still true, record where it ends as a field (`Waiting-for:`, `Not-before:`, `answer:<session>`).\n"
+    + "THE GATE DID NOT AND WILL NOT REMOVE THE LABEL: the decision is yours, and this order is asked once for this hold.";
+}
+
+/** THE DECISION ORDER (#4970), to {@link HOLD_ESCALATION_SEAT}, or to `ceo` when that seat is the holder. Once per hold: the key is the hold's own. */
+export function holderDecisionOrder(hold: HoldFacts, { idleMinutes }: { idleMinutes: number }): HolderOrder {
+  const { pr, holder } = hold;
+  const ref = subjectRef(pr.repoKey, pr.number);
+  const seat = escalationSeatFor(holder);
+  const stage = `decide-${pr.since ?? "undated"}`;
+  return { session: seat, cause: "hold-holder-idle", subject: `pr-${ref}`, discriminator: stage, prompt: decisionPrompt(hold, { idleMinutes, gone: false }),
+    causeKey: `${seat}/${HOLD_HOLDER_CAUSE}/pr-${ref}/${stage}` };
+}
+
+/** The hold's own reason, in the words it recorded: the condition it waits for, `manual`, or nothing said. */
+function holdReasonText(hold: ReturnType<typeof holdReasonOf>): string {
+  if (hold.reason === "until") return `it waits for ${hold.waits.map((wait) => wait.text).join(" and ")}`;
+  return hold.reason === "manual" ? "it was taken `--until=manual`, a wait nobody can read" : "it recorded no reason";
+}
+
+type OpenPr = { number: number; repoKey?: string; labels?: unknown[]; body?: string; comments?: unknown[]; reviewDecision?: string | null };
+
+/**
+ * EVERY HOLD'S STEP FOR ONE TICK, AS ORDERS AND AS THE MEMORY THE NEXT TICK STARTS FROM (#4970). `prs` is every open pull request the tick read (a refused list is the
+ * CALLER's silence and never reaches here); `memory` is keyed by {@link holdHolderKey} and comes back holding only the holds that exist now, so a released hold forgets itself.
+ * Two holders of one pull request are two holds. A hold whose holder is idle and declared nothing is woken at {@link HOLDER_IDLE_MINUTES}; the decision is asked
+ * {@link HOLDER_ESCALATE_MINUTES} later; and a gone holder's wake IS the decision, so it asks once (`holderStep`).
+ */
+export function holderOrdersOf({ prs, agents, declarations, memory, now }: { prs: OpenPr[]; agents: { label: string; status: string }[] | null;
+  declarations: Map<string, HolderDeclaration>; memory: Record<string, HolderMemory>; now: number }): { orders: HolderOrder[]; memory: Record<string, HolderMemory> } {
+  const orders: HolderOrder[] = [];
+  const next: Record<string, HolderMemory> = {};
+  for (const open of prs) {
+    const labels = (open.labels ?? []).map((l) => String((l as { name?: unknown } | null)?.name ?? l));
+    const holders = holdersOf(labels).map((label) => label.slice(HOLD_PREFIX.length));
+    if (holders.length === 0) continue;
+    const marker = holdReasonOf(open);
+    const pr: HeldPr = { number: Number(open.number), repoKey: open.repoKey, since: marker.since, approved: open.reviewDecision === "APPROVED" };
+    for (const holder of holders) {
+      const key = holdHolderKey({ pr, holder });
+      const step = holderStep({ holder, pr, agents, declaration: declarations.get(holder) }, { memory: memory[key], now });
+      if (step.memory !== null) next[key] = step.memory;
+      const hold = { pr, holder, reason: holdReasonText(marker) };
+      if (step.step === "wake") orders.push(holderWakeOrder(hold, step));
+      if (step.step === "escalate") orders.push(holderDecisionOrder(hold, step));
+    }
+  }
+  return { orders, memory: next };
 }
 
 /**

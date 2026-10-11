@@ -1134,8 +1134,10 @@ test("every cause is classified as START or FINISH -- a new one cannot default i
   // when a stock of undecided rows should still be swept, since nothing is claiming them anyway.
   // #3632: `answer-given` is FINISH, and a JUDGMENT cause. Its subject is a row the asking session already holds, and it starts no work: it tells the claimant
   // its question was answered, once, which a drain exists to land -- and a drain is when the answerer's reply most needs to reach the asker.
+  // #4970: `hold-holder-idle` is FINISH, and an ACTION cause. It starts no work -- it wakes the session that holds an approved pull request, then asks the seat that
+  // decides about it -- and a drain is when a held pull request most needs releasing, since nothing else is landing.
   assert.deepEqual(finish, ["answer-given", "answer-label-unexplained", "answer-owed", "awaiting-evidence-stale", "backlog-aged-unpromoted", "blocker-cleared", "chairman-answered", "chairman-blocked",
-    "claim-stalled", "claimed-row-amended", "closes-unresolved-repo-wide", "disk-headroom-low", "draft-awaiting-verdict", "draft-convinced-not-ready", "host-units-stale",
+    "claim-stalled", "claimed-row-amended", "closes-unresolved-repo-wide", "disk-headroom-low", "draft-awaiting-verdict", "draft-convinced-not-ready", "hold-holder-idle", "host-units-stale",
     "lab-job-finished", "org-health", "org-retrospective", "pr-checks-failing", "pr-codeowner-review-missing", "pr-green-unarmed", "pr-merge-conflict", "pr-review-blocked", "primary-stale", "ready-row-incomplete", "ready-row-unclaimable", "ready-rows-untiered", "repeating-log-line", "reviewer-auth-failed",
     "row-branch-unshipped", "row-call-count-signal", "row-off-board", "tick-overran", "trunk-red", "verdict-comment-unreviewed", "verdict-not-convinced"]);
   for (const cause of START_CAUSES) {
@@ -1564,8 +1566,10 @@ test("the expensive question is asked only when something is red", () => {
   assert.equal(anyChecksRed([]), false);
 });
 
+/** `branches/main` as GitHub answers it (the part the gate reads); `contexts: null` is protection with no list. */
 const BRANCH_ANSWER = (contexts: string[] | null, isProtected = true) =>
-  JSON.stringify({ protected: isProtected, contexts });
+  JSON.stringify({ name: "main", protected: isProtected,
+    protection: { enabled: isProtected, required_status_checks: contexts === null ? {} : { contexts } } });
 
 /**
  * #2117: THE `pr-checks-failing` PROMPT CARRIES WHEN THE FAILING RUN STARTED AND WHETHER `main` MOVED
@@ -1728,6 +1732,73 @@ test("requiredCheckNames fails OPEN on every unusable answer", () => {
 });
 
 /**
+ * #5020: CLASSIC PROTECTION IS GONE ON EVERY REPO AND THE LIST LIVES IN THE RULESETS. `gh` answers `branches/main`
+ * with `protection: {enabled: false, required_status_checks: {contexts: []}}`, which read as "nothing is required"
+ * for every tick since the chairman's consolidation and failed the gate open on every red PR.
+ *
+ * The fake routes by ENDPOINT, as GitHub does, so a reader that asks only one of the two is told the other's
+ * answer is absent -- a mock returning one body for every call would pass a reader that never looked at the rules.
+ */
+const rulesAnswer = (...checkRulesets: string[][]) => JSON.stringify([
+  { type: "deletion", ruleset_id: 1 },
+  { type: "pull_request", parameters: { required_approving_review_count: 1 }, ruleset_id: 1 },
+  ...checkRulesets.map((contexts, i) => ({ type: "required_status_checks", ruleset_id: 2 + i,
+    parameters: { strict_required_status_checks_policy: false,
+      required_status_checks: contexts.map((context) => ({ context, integration_id: 15368 })) } })),
+  { type: "merge_queue", ruleset_id: 1 },
+]);
+const CLASSIC_GONE = BRANCH_ANSWER([]);
+const routedGh = (answers: { rules?: string | Error; branch?: string | Error }) => (args: string[]) => {
+  const answer = args.some((arg) => arg.endsWith("/rules/branches/main")) ? answers.rules
+    : args.some((arg) => arg.endsWith("/branches/main")) ? answers.branch : undefined;
+  if (answer === undefined || answer instanceof Error) throw answer ?? new Error(`unexpected gh call: ${args.join(" ")}`);
+  return answer;
+};
+
+test("#5020: a ruleset-only answer yields the gate -- the classic list is empty and is never needed", () => {
+  const read = requiredWithLog(routedGh({ rules: rulesAnswer(["gate"]), branch: CLASSIC_GONE }));
+  assert.deepEqual(read.required, ["gate"]);
+  assert.deepEqual(read.lines, [], "a read that works says nothing");
+  assert.equal(read.calls.length, 1, "the ruleset answered, so the classic read is not paid for");
+  assert.ok(read.calls[0].some((arg: string) => arg.endsWith("/rules/branches/main")));
+});
+
+test("#5020: a classic-only answer still yields its list -- a repo the rulesets do not cover", () => {
+  const read = requiredWithLog(routedGh({ rules: "[]", branch: BRANCH_ANSWER(["gate", "verify"]) }));
+  assert.deepEqual(read.required, ["gate", "verify"]);
+  assert.deepEqual(read.lines, []);
+  assert.equal(read.calls.length, 2, "rulesets first, then the classic fallback");
+  // A refused ruleset read is a fallback too, not a verdict: the rulesets may be unreadable to this credential.
+  const refused = requiredWithLog(routedGh({ rules: new Error("HTTP 403"), branch: BRANCH_ANSWER(["gate"]) }));
+  assert.deepEqual(refused.required, ["gate"]);
+});
+
+test("#5020: neither source gives a list -> null, and the report names BOTH reads", () => {
+  for (const [name, answers] of Object.entries({
+    "no rule and no classic list": { rules: "[]", branch: CLASSIC_GONE },
+    "a rule that lists no check": { rules: rulesAnswer([]), branch: CLASSIC_GONE },
+    "both refused": { rules: new Error("HTTP 404"), branch: new Error("HTTP 404") },
+    "ruleset not JSON": { rules: "<html>", branch: "not json" },
+  })) {
+    const read = requiredWithLog(routedGh(answers));
+    assert.equal(read.required, null, `${name}: unknown, never [] (which would read as "nothing blocks")`);
+    assert.equal(read.lines.length, 1, name);
+    assert.match(read.lines[0], /CANNOT READ the required checks/, name);
+    assert.match(read.lines[0], /rules\/branches\/main/, `${name}: the ruleset read is named`);
+    assert.match(read.lines[0], /\/branches\/main`/, `${name}: the classic read is named`);
+    assert.equal(read.calls.length, 2, name);
+  }
+});
+
+test("#5020: several required_status_checks rules are UNIONED, deduplicated, and other rule types are ignored", () => {
+  // A rule of ANOTHER type that happens to carry a `required_status_checks` list is not a required check.
+  const other = { type: "workflows", ruleset_id: 9, parameters: { required_status_checks: [{ context: "not-required" }] } };
+  const rules = JSON.stringify([...JSON.parse(rulesAnswer(["gate", "verify"], ["gate", "lint"])), other]);
+  const read = requiredWithLog(routedGh({ rules, branch: CLASSIC_GONE }));
+  assert.deepEqual([...(read.required ?? [])].sort(), ["gate", "lint", "verify"]);
+});
+
+/**
  * FAILING OPEN IN SILENCE IS INDISTINGUISHABLE FROM NEVER HAVING WORKED -- #2106.
  *
  * `requiredCheckNames` returned `null` on EVERY tick from the day #1750 shipped until 2026-09-23, and
@@ -1764,10 +1835,11 @@ test("the required checks are read through `branches/main` with the ADMIN endpoi
   const read = requiredWithLog(nonAdminGh(BRANCH_ANSWER(["gate"])));
   assert.deepEqual(read.required, ["gate"]);
   assert.deepEqual(read.lines, [], "and a read that works says nothing");
-  assert.equal(read.calls.length, 1, "ONE call -- there is no discriminator left to pay for");
+  assert.equal(read.calls.length, 2, "the rulesets, then the classic fallback -- and no discriminator beyond those (#5020)");
   assert.ok(read.calls.every((args) => args.every((arg) => !arg.includes("branches/main/protection"))),
     `no call may name the admin-only endpoint; saw ${JSON.stringify(read.calls)}`);
-  assert.ok(read.calls[0].some((arg) => arg.endsWith("/branches/main")));
+  assert.ok(read.calls[0].some((arg) => arg.endsWith("/rules/branches/main")));
+  assert.ok(read.calls[1].some((arg) => arg.endsWith("/branches/main")));
 });
 
 test("POSITIVE CONTROL: a protected branch with no list is the existing 'cannot read' outcome -- #2331", () => {
@@ -1785,13 +1857,13 @@ test("POSITIVE CONTROL: a protected branch with no list is the existing 'cannot 
   assert.match(refused.lines[0], /REFUSED/);
   assert.doesNotMatch(refused.lines[0], /ABSENT|unprotected/,
     "a refused read says nothing about whether the trunk is protected");
-  assert.equal(refused.calls.length, 1, "and a refusal is not followed by a second, diagnosing read");
+  assert.equal(refused.calls.length, 2, "both sources asked once, and a refusal is not followed by a diagnosing read");
 });
 
 test("the report cannot become tick noise on a healthy gate -- #2106", () => {
   // THE POSITIVE CONTROL, NAMED. Every assertion above is satisfied by a version that reports on every
   // tick, including the successful ones -- which would bury the failure it exists to surface.
-  const healthy = requiredWithLog(() => BRANCH_ANSWER(["gate"]));
+  const healthy = requiredWithLog(routedGh({ rules: rulesAnswer(["gate"]), branch: CLASSIC_GONE }));
   assert.deepEqual(healthy.required, ["gate"], "the successful read is unchanged");
   assert.deepEqual(healthy.lines, [], "a gate that CAN read the contexts says NOTHING");
   assert.equal(healthy.calls.length, 1);

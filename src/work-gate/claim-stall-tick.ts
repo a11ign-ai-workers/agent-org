@@ -16,6 +16,7 @@ import { CLAIM_LABEL } from "../claim-labels.ts";
 import { gitRun, pathExists, statMtime, readStallState, writeStallState, STALL_STATE_FILE, nextStallState,
   claimStalledOrders, readHerdrRestart, claimFactsFrom, readClaim, readLabelEvents, nudgeDeliveredAt, nudgeKey, closedClaimOrders,
   restartNotices, recordStalledNudges, AGENT_SESSIONS_FILE } from "../claim-stall.ts";
+import { subjectMention, subjectRef } from "../review-attribution.ts";
 import { FAILURE_LEDGER_FILE } from "../failure-ledger.ts";
 import { readAgents, readAgentSessions } from "../herdr-agents.ts";
 import { NEEDS_CHAIRMAN_LABEL as CHAIRMAN_LABEL, SESSION_PREFIX } from "../project-vocabulary.ts";
@@ -78,6 +79,17 @@ export type ClaimFactsOfTick = { moves: Map<number, ClaimMoves>, skipped: Map<nu
 /** `null` is a tick that evaluated NO claim (a refused read), never "no claims" */
 export type OnClaimFacts = (facts: ClaimFactsOfTick | null) => void;
 
+/**
+ * (agent-org#747) ONE OTHER DECLARED TRACKER'S CLAIMED ROWS, as the stall pass reads them. `key` is the tracker's declared key (`agent-org`), which every memory
+ * entry and order subject of its rows is namespaced by, and `repo` is its `owner/repo`, which a pull request title's reference and the row's label history name.
+ * `rows: null` is a tracker whose open rows could not be read, and `claimedComments: null` one whose claimed rows' comments could not: each is SAID as unread
+ * and never read as "no claim" (a tracker read as empty would forget every nudge it had sent).
+ */
+export type TrackerClaims = { key: string; repo: string; rows: any[] | null; claimedComments: any[] | null };
+
+/** A row's label history in ONE NAMED tracker: `io.labelEvents` is the home tracker's alone, and for another tracker's row number it would read the home row's. */
+export type LabelEventsOf = (row: number, repo: string) => ReturnType<NonNullable<import("../claim-stall.ts").HostReads["labelEvents"]>>;
+
 function movesOf(facts: import("../claim-stall.ts").ClaimFacts): ClaimMoves {
   return { claimedAt: facts.claimedAt, comment: facts.comment, commit: facts.commit, push: facts.push,
     // #3569: the fields `idleClaimantReading` reads a holder's wait from (a review, a check, an approval, a hold), already on `ownPrs` -- no new read.
@@ -116,9 +128,10 @@ export function claimStallTick({ io = LIVE_HOST_READS, repo = REPO_CHECKOUT, now
         agents?: { label: string; status: string; }[] | null; agentSessions?: Map<string, string> | null;
         stateDir?: string; log?: (line: string) => void; ledger?: () => string;
         read?: typeof readStallState; write?: typeof writeStallState; onFacts?: OnClaimFacts; record?: typeof recordStalledNudges;
+        trackers?: TrackerClaims[]; labelEventsOf?: LabelEventsOf;
     }): import("../claim-stall.ts").StallOrder[] {
   try {
-    return evaluateClaims({ ...inputs, io, repo, now, stateDir, log, read, write });
+    return evaluateClaims({ labelEventsOf: io === LIVE_HOST_READS ? readLabelEvents : undefined, ...inputs, io, repo, now, stateDir, log, read, write });
   } catch (err: any) {
     log(`claim-stall: could not run (${String(err?.message ?? err).split("\n")[0]}) -- no claim-stalled order this tick.\n`);
     inputs.onFacts?.(null);
@@ -128,42 +141,143 @@ export function claimStallTick({ io = LIVE_HOST_READS, repo = REPO_CHECKOUT, now
 
 /**
  * `claimStallTick`'s body, with every default resolved by its caller. NEVER CALLED WITHOUT THE CATCH ABOVE: a throw here is the tick's to report.
+ *
+ * EVERY DECLARED TRACKER'S CLAIMED ROWS (agent-org#747). The home tracker's rows are read exactly as they were; each of `trackers` is read with the same
+ * readings, the same memory file and the same orders, its rows' memory entries and order subjects namespaced by the tracker's key (`agent-org#476`, so
+ * `476` of the home tracker is another entry), and two things differ and are SAID where they happen: a tracker that cannot be read is skipped as UNREAD with
+ * its memory kept (an empty claim list would forget its nudges), and a release of its rows carries the tracker's key (`ReleaseRequest.tracker`, agent-org#834),
+ * which is how `wake.ts` reads the holder's `session:` label, comments and declines in THAT tracker's repository and not the home one's.
+ * `onFacts` stays the home tracker's: `blockerClearedOrders` keys those facts by bare row number.
  */
-function evaluateClaims({ rows, claimedComments, openPrs, mergedPrs, elsewhere, restartAt, agents, agentSessions, ledger, io, repo, now, stateDir, log, read, write, onFacts, record = recordStalledNudges }: {
+function evaluateClaims({ rows, claimedComments, openPrs, mergedPrs, elsewhere, restartAt, agents, agentSessions, ledger, io, repo, now, stateDir, log, read, write, onFacts, record = recordStalledNudges, trackers = [], labelEventsOf }: {
         rows: any[]; claimedComments: any[] | null; openPrs: any[]; mergedPrs: any[] | null; restartAt?: number | null;
         elsewhere?: import("../claim-stall.ts").ElsewherePrs; agents?: { label: string; status: string; }[] | null; agentSessions?: Map<string, string> | null;
         ledger?: () => string; io: import("../claim-stall.ts").HostReads; repo: string; now: number; stateDir: string;
         log: (line: string) => void; read: typeof readStallState; write: typeof writeStallState; onFacts?: OnClaimFacts; record?: typeof recordStalledNudges;
+        trackers?: TrackerClaims[]; labelEventsOf?: LabelEventsOf;
     }) {
   const held = rows.filter((r) => labelsOf(r).includes(CLAIM_LABEL));
-  if (held.length > 0 && claimedComments === null) {
+  const homeUnread = held.length > 0 && claimedComments === null;
+  if (homeUnread) {
     log("claim-stall: the comments on the claimed rows could not be read -- NO claim was evaluated this tick.\n");
     onFacts?.(null);
-    return [];
   }
+  // each other tracker: its claimed rows, or why it was not read (said, once per tick, and its memory is kept below)
+  const units = trackers.map((tracker) => {
+    const heldRows = tracker.rows === null ? [] : tracker.rows.filter((r) => labelsOf(r).includes(CLAIM_LABEL));
+    const unread = tracker.rows === null ? "its open rows could not be read"
+      : heldRows.length > 0 && tracker.claimedComments === null ? "the comments on its claimed rows could not be read" : null;
+    if (unread !== null) log(`claim-stall: tracker \`${tracker.key}\` (${tracker.repo}): ${unread} -- its claimed rows were NOT evaluated this tick (UNREAD, which is not "no claim"; its nudge memory is kept).\n`);
+    return { tracker, held: heldRows, unread };
+  });
+  const readable = units.filter((unit) => unit.unread === null);
+  if (homeUnread && readable.length === 0) return [];
+  const everyHeld = [...(homeUnread ? [] : held), ...readable.flatMap((unit) => unit.held)];
   const statePath = `${stateDir}/${STALL_STATE_FILE}`;
   const before = read(statePath);
-  const byRow = new Map((claimedComments ?? []).map((r) => [Number(r?.number), r?.comments ?? []]));
   const wakeLedger = ledger ?? (() => ledgerText(`${stateDir}/wake-ledger`));
   // #460: WHAT EACH WORKER'S LAST TURN DECLARED, read once, with no model. `null` is a directory that exists and cannot be read: the declaration regime is
   // then OFF for the tick (absence is not proof), and every claim is read as it was before the declaration existed.
-  const declarations = held.length === 0 ? null : readDeclarations(`${stateDir}/${WORKER_STATE_DIR}`);
+  const declarations = everyHeld.length === 0 ? null : readDeclarations(`${stateDir}/${WORKER_STATE_DIR}`);
   if (declarations !== null && declarations.unreadable.length > 0) log(`claim-stall: worker-state files that could not be read (those workers read as undeclared): ${declarations.unreadable.join(", ")}.\n`);
-  const { readings, skipped } = readClaims({ held, byRow, openPrs, mergedPrs, elsewhere, io, repo, now, before, log, declarations,
-    ledger: wakeLedger, restart: restartFor(held, restartAt),
-    agents: agentsFor(held, agents) });
-  onFacts?.({ moves: new Map(readings.map(({ facts }) => [facts.row, movesOf(facts)])), skipped });
-  const after = nextStallState(before, readings, now);
-  if (after !== before) write(statePath, after);
+  const shared = { openPrs, mergedPrs, elsewhere, repo, now, log, declarations, ledger: wakeLedger, restart: restartFor(everyHeld, restartAt),
+    agents: agentsFor(everyHeld, agents), heldBy: rowsPerSession(everyHeld) };
+  const homeBefore = unscoped(before);
+  const home = homeUnread ? { readings: [], skipped: new Map<number, string>() }
+    : readClaims({ ...shared, held, byRow: commentsByRow(claimedComments), key: "", trackerRepo: homeProjectDeclaration().tracker[0].repo, io, before: homeBefore });
+  if (!homeUnread) onFacts?.({ moves: new Map(home.readings.map(({ facts }) => [facts.row, movesOf(facts)])), skipped: home.skipped });
+  const others = readable.map((unit) => {
+    const { key, repo: trackerRepo } = unit.tracker;
+    const read = readClaims({ ...shared, held: unit.held, byRow: commentsByRow(unit.tracker.claimedComments), key, trackerRepo,
+      io: { ...io, labelEvents: labelEventsOf === undefined ? undefined : (row: number) => labelEventsOf(row, trackerRepo) } as typeof io,
+      before: scopedView(before, `${key}#`) });
+    if (unit.held.length > 0) log(`claim-stall: tracker \`${key}\` (${trackerRepo}): ${unit.held.length} claimed rows, ${read.readings.length} evaluated.\n`);
+    return { unit, ...read };
+  });
+  const after: import("../claim-stall.ts").StallState = { ...(homeUnread ? homeBefore : nextStallState(homeBefore, home.readings, now)) };
+  for (const unit of units) {
+    const prefix = `${unit.tracker.key}#`;
+    const mine = others.find((o) => o.unit === unit);
+    scopedInto(after, prefix, mine === undefined ? scopedView(before, prefix) : nextStallState(scopedView(before, prefix), mine.readings, now));
+  }
+  // a memory entry of a key this tick was not asked about (a tracker no longer declared, or no tracker list at all) is nobody's to forget here
+  for (const [slot, entry] of Object.entries(before)) {
+    if (slot.includes(SCOPE_MARK) && !(slot in after) && !units.some((unit) => slot.startsWith(`${unit.tracker.key}${SCOPE_MARK}`))) after[slot] = entry;
+  }
+  if (JSON.stringify(after) !== JSON.stringify(before)) write(statePath, after);
   // #458: THE TWO THINGS THAT NEED THE STATE DIRECTORY ITSELF (the restart memory and the failure ledger) are done only where one exists, so a tick
   // run on a fixture with the `read`/`write` seams writes nowhere. A failure of either is said and never stops the orders.
   const kept = existsSync(stateDir);
   const sessionsPath = `${stateDir}/${AGENT_SESSIONS_FILE}`;
-  const told = restartNotices({ readings, sessions: agentSessionsFor(held, agentSessions, agents),
-    acked: kept ? readAckedSessions(sessionsPath) : {}, delivered: (key) => nudgeDeliveredAt(wakeLedger(), key) !== null });
-  if (kept) writeAckedSessions(sessionsPath, told.after, log);
-  if (kept) record({ readings, now, logPath: `${stateDir}/${FAILURE_LEDGER_FILE}` });
-  return [...claimStalledOrders(readings, now), ...told.orders];
+  const sessions = agentSessionsFor(everyHeld, agentSessions, agents);
+  const acked = kept ? readAckedSessions(sessionsPath) : {};
+  const homeTold = homeUnread ? { orders: [], after: unscoped(acked) }
+    : restartNotices({ readings: home.readings, sessions, acked: unscoped(acked), delivered: (key) => nudgeDeliveredAt(wakeLedger(), key) !== null });
+  const ackedAfter: Record<string, string> = { ...homeTold.after };
+  const orders = [...(homeUnread ? [] : claimStalledOrders(home.readings, now)), ...homeTold.orders];
+  for (const unit of units) {
+    const { key, repo: trackerRepo } = unit.tracker;
+    const prefix = `${key}#`;
+    const mine = others.find((o) => o.unit === unit);
+    if (mine === undefined) { scopedInto(ackedAfter, prefix, scopedView(acked, prefix)); continue; }
+    const told = restartNotices({ readings: mine.readings, sessions, acked: scopedView(acked, prefix),
+      delivered: (causeKey) => nudgeDeliveredAt(wakeLedger(), scopedCauseKey(key, causeKey)) !== null });
+    scopedInto(ackedAfter, prefix, told.after);
+    for (const order of [...claimStalledOrders(mine.readings, now), ...told.orders]) orders.push(namespacedOrder(order, key, trackerRepo));
+  }
+  for (const [slot, value] of Object.entries(acked)) {
+    if (slot.includes(SCOPE_MARK) && !(slot in ackedAfter) && !units.some((unit) => slot.startsWith(`${unit.tracker.key}${SCOPE_MARK}`))) ackedAfter[slot] = value;
+  }
+  if (kept) writeAckedSessions(sessionsPath, ackedAfter, log);
+  if (kept) record({ readings: [...home.readings, ...others.flatMap((o) => o.readings)], now, logPath: `${stateDir}/${FAILURE_LEDGER_FILE}` });
+  return orders;
+}
+
+// --- AGENT-ORG#747: THE OTHER TRACKERS' ROWS ARE KEPT IN THE SAME FILES, UNDER `<key>#<row>` -----------------------------------------------
+
+/** What joins a tracker's key to a row number in a memory slot and an order subject: `agent-org#476`, the spelling `subjectRef` gives a pull request. */
+const SCOPE_MARK = "#";
+
+/** The home tracker's entries of a memory: a bare row number, with no tracker key before it. */
+function unscoped<T>(memory: Record<string, T>): Record<string, T> {
+  return Object.fromEntries(Object.entries(memory).filter(([slot]) => !slot.includes(SCOPE_MARK)));
+}
+
+/** One tracker's entries of a memory (those under `prefix`, `agent-org#`), with the prefix taken off, so the readers that key by row see their own rows. */
+function scopedView<T>(memory: Record<string, T>, prefix: string): Record<string, T> {
+  return Object.fromEntries(Object.entries(memory).filter(([slot]) => slot.startsWith(prefix)).map(([slot, entry]) => [slot.slice(prefix.length), entry]));
+}
+
+/** `scopedView`'s inverse: `view`'s entries written into `into` under `prefix`. */
+function scopedInto<T>(into: Record<string, T>, prefix: string, view: Record<string, T>) {
+  for (const [slot, entry] of Object.entries(view)) into[`${prefix}${slot}`] = entry;
+}
+
+/**
+ * A claim's delivery key as the ledger records it for another tracker's row: `<session>/claim-stalled/row-<n>/nudge-<at>` becomes `.../row-agent-org#<n>/...`,
+ * so a nudge of `agent-org#476` and one of the home tracker's `476` are two entries in the ledger. The home tracker's keys are unchanged.
+ */
+function scopedCauseKey(key: string, causeKey: string): string {
+  return key === "" ? causeKey : causeKey.replace(/\/row-(\d+)\//, (_whole, row) => `/row-${subjectRef(key, Number(row))}/`);
+}
+
+/**
+ * An order of another tracker's row, with its subject and delivery key namespaced and its prompt saying which repository the number belongs to (a prompt
+ * names a row as `#747`, which the holder's `gh` reads in the repository of its own checkout). A RELEASE carries the tracker's key (agent-org#834), so the
+ * performer reads, comments on and declines the row in that tracker and not the home one's of the same number.
+ */
+function namespacedOrder(order: import("../claim-stall.ts").StallOrder, key: string, repo: string): import("../claim-stall.ts").StallOrder {
+  const row = /^row-(\d+)$/.exec(order.subject)?.[1];
+  if (row === undefined) return order;
+  const ref = subjectRef(key, Number(row));
+  return { ...order, subject: `row-${ref}`, causeKey: scopedCauseKey(key, order.causeKey),
+    ...(order.release === undefined ? {} : { release: { ...order.release, tracker: key } }),
+    prompt: `${order.prompt}\n\nTHIS ROW IS \`${ref}\` OF \`${repo}\`, NOT THE PRIMARY'S #${row}: put \`--repo ${repo}\` on every \`gh\` command that names it, and read its number as \`${ref}\`.` };
+}
+
+/** The claimed rows' comments by row number; `null` (unread) is an empty map here, and the caller has already said it was not read. */
+function commentsByRow(claimedComments: any[] | null): Map<number, any[]> {
+  return new Map((claimedComments ?? []).map((r) => [Number(r?.number), r?.comments ?? []]));
 }
 
 /**
@@ -228,45 +342,49 @@ function rowsPerSession(held: any[]): Map<string, number> {
   return counts;
 }
 
-function readClaims({ held, byRow, openPrs, mergedPrs, elsewhere, io, repo, now, restart, agents, before, log, ledger, declarations }: {
+function readClaims({ held, byRow, openPrs, mergedPrs, elsewhere, io, repo, now, restart, agents, before, log, ledger, declarations, key, trackerRepo, heldBy }: {
         held: any[]; byRow: Map<number, any[]>; openPrs: any[]; mergedPrs: any[] | null;
         elsewhere?: import("../claim-stall.ts").ElsewherePrs; io: import("../claim-stall.ts").HostReads; repo: string; now: number; restart: number | null;
         agents: { label: string; status: string; }[] | null;
         before: import("../claim-stall.ts").StallState; log: (line: string) => void; ledger: () => string; declarations: ReturnType<typeof readDeclarations>;
+        /** the tracker's declared key (`""` is the home tracker's), its `owner/repo`, and how many claimed rows each session holds across every tracker read */
+        key: string; trackerRepo: string; heldBy: Map<string, number>;
     }): { readings: { facts: import("../claim-stall.ts").ClaimFacts; reading: import("../claim-stall.ts").Reading; }[]; skipped: Map<number, string>; } {
   const readings: { facts: import("../claim-stall.ts").ClaimFacts; reading: import("../claim-stall.ts").Reading; }[] = [];
   // the rows whose facts could not be built, with the reason `claimFactsFrom` gave (#3451)
   const skipped: Map<number, string> = new Map();
-  const heldBy = rowsPerSession(held);
+  // another tracker's lines name its rows as `agent-org#476` and say which tracker they are of; the home tracker's are as they were
+  const where = key === "" ? "" : `[${key}] `;
+  const mention = (row: number) => subjectMention({ repoKey: key, number: row });
   for (const row of held) {
     const sessions = labelsOf(row).filter((n: string) => n.startsWith(SESSION_PREFIX));
     if (sessions.length !== 1) {
-      log(`claim-stall: #${row.number} carries ${sessions.length} session labels -- not evaluated.\n`);
+      log(`claim-stall: ${where}${mention(row.number)} carries ${sessions.length} session labels -- not evaluated.\n`);
       continue;
     }
     const session = sessions[0].slice(SESSION_PREFIX.length);
     const built = claimFactsFrom({ row: row.number, title: row.title, session, waiting: declaredWait(row, session),
       waitKind: declaredWaitOf(row, session)?.kind ?? null, blockedBy: openBlockers(row), comments: byRow.get(Number(row.number)) ?? [], openPrs: withChecksPending(openPrs), mergedPrs,
-      trackerRepo: homeProjectDeclaration().tracker[0].repo, sessionRows: heldBy.get(session), now,
+      trackerRepo, sessionRows: heldBy.get(session), now,
       ...(elsewhere === undefined ? {} : { elsewhere: { ...elsewhere, open: elsewhere.open === null ? null : withChecksPending(elsewhere.open) } }), repo }, io);
     if ("skip" in built) {
-      log(`claim-stall: ${built.skip} -- not evaluated.\n`);
+      log(`claim-stall: ${where}${built.skip} -- not evaluated.\n`);
       skipped.set(Number(row.number), built.skip);
       continue;
     }
     // #612: a clock that could not be dated from the label keeps the record's time, and the tick says so (a log line, not a reading: the reading is today's)
-    if (built.clockHeld !== undefined) log(`claim-stall: #${built.row} (${session}) clock kept at the claim record: ${built.clockHeld}.\n`);
+    if (built.clockHeld !== undefined) log(`claim-stall: ${where}${mention(built.row)} (${session}) clock kept at the claim record: ${built.clockHeld}.\n`);
     // #460: the declaration, read against THIS claim. A claim that names no branch (`nothing`) is idle at its prompt by design and has none to make.
     const facts = declarations === null || built.nothing === true ? built : { ...built, declared: declarationReading(declarations.byClaimant.get(session), {
       row: built.row, claimedAt: built.claimedAt, turnStartedAt: lastDeliveredTo(ledger(), session), ownPrs: built.ownPrs ?? [], mergedPr: built.mergedPr,
-      answersOwed: answersOwedBy(row).filter((owed) => owed !== session), repo: homeProjectDeclaration().tracker[0].repo }) };
-    const reading = readClaim(facts, { now, restartAt: restart, agents, ...rememberedFor({ entry: before[facts.row], session, row: facts.row, ledger }) });
+      answersOwed: answersOwedBy(row).filter((owed) => owed !== session), repo: trackerRepo }) };
+    const reading = readClaim(facts, { now, restartAt: restart, agents, ...rememberedFor({ entry: before[facts.row], session, row: facts.row, ledger, key }) });
     // A HOLDER THAT HAS WORK AND A BLOCKER is the EXPECTED hold and is not said every tick; only a read that could not be made is.
     if (reading.kind === "holding" && reading.expected !== true) {
-      log(`claim-stall: #${facts.row} (${session}) is HELD, not released: ${reading.why}.\n`);
+      log(`claim-stall: ${where}${mention(facts.row)} (${session}) is HELD, not released: ${reading.why}.\n`);
     }
     if (reading.kind === "release" && reading.why === "gone") {
-      log(`claim-stall: #${facts.row} (${session}) is GONE from herdr's own listing -- releasing.\n`);
+      log(`claim-stall: ${where}${mention(facts.row)} (${session}) is GONE from herdr's own listing -- releasing.\n`);
     }
     readings.push({ facts, reading });
   }
@@ -276,11 +394,12 @@ function readClaims({ held, byRow, openPrs, mergedPrs, elsewhere, io, repo, now,
 /**
  * What the memory says about ONE claim's holder, as the reading's context: the nudge it was sent (with its delivery, read from the wake ledger),
  * the tick its session was first found gone, and the tick it was first found idle (#2999). A memory written for ANOTHER session is nobody's.
+ * `key` is the row's tracker: the delivery is looked up under the key the order carried (`scopedCauseKey`), not under the home tracker's spelling of it.
  */
-function rememberedFor({ entry, session, row, ledger }: { entry: import("../claim-stall.ts").StallState[string] | undefined; session: string; row: number; ledger: () => string; }) {
+function rememberedFor({ entry, session, row, ledger, key }: { entry: import("../claim-stall.ts").StallState[string] | undefined; session: string; row: number; ledger: () => string; key: string; }) {
   const remembered = entry?.session === session ? entry : undefined;
   const nudge = remembered?.nudgedAt !== undefined ? { nudgedAt: remembered.nudgedAt, idle: remembered.idle === true,
-    deliveredAt: nudgeDeliveredAt(ledger(), nudgeKey(session, row, remembered.nudgedAt)) } : null;
+    deliveredAt: nudgeDeliveredAt(ledger(), scopedCauseKey(key, nudgeKey(session, row, remembered.nudgedAt))) } : null;
   return { nudge, goneSince: remembered?.goneSince ?? null, idleSince: remembered?.idleSince ?? null };
 }
 
@@ -302,18 +421,21 @@ function ledgerText(path: string) {
  * review as one with no PR at all (nudged, or, with a `blockedBy` edge, released), and a refused row read would empty the nudge memory.
  */
 export function claimStallsNow(rows: any[] | null, claimedComments: any[] | null, prs: any[] | null, { tick = claimStallTick, merged = readMergedPrs, elsewhere = readElsewherePrs,
-  log = (line) => process.stderr.write(line), onFacts }: {
+  log = (line) => process.stderr.write(line), onFacts, trackers }: {
         tick?: typeof claimStallTick; merged?: typeof readMergedPrs; elsewhere?: typeof readElsewherePrs; log?: (line: string) => void;
-        onFacts?: OnClaimFacts;
+        onFacts?: OnClaimFacts; trackers?: () => TrackerClaims[];
     } = {}) {
   if (rows === null || prs === null) {
     log(`claim-stall: the ${rows === null ? "open rows" : "open pull requests"} could not be read -- NO claim was evaluated this tick.\n`);
     onFacts?.(null);
     return [];
   }
-  const anyClaimed = rows.some((r) => labelsOf(r).includes(CLAIM_LABEL));
+  // agent-org#747: every OTHER declared tracker's claimed rows, asked for here and not in `work-gate.ts`, so that what a tick reads is what it evaluates. A
+  // thrown read is a tracker said as unread (`rows: null`) by `claimStallTick`, and never an empty list.
+  const others = trackers === undefined ? [] : trackers();
+  const anyClaimed = rows.some((r) => labelsOf(r).includes(CLAIM_LABEL)) || others.some((t) => (t.rows ?? []).some((r) => labelsOf(r).includes(CLAIM_LABEL)));
   return tick({ rows, claimedComments, openPrs: prs, mergedPrs: anyClaimed ? merged() : null, ...(anyClaimed ? { elsewhere: elsewhere() } : {}),
-    ...(onFacts === undefined ? {} : { onFacts }) });
+    ...(onFacts === undefined ? {} : { onFacts }), ...(others.length === 0 ? {} : { trackers: others }) });
 }
 
 /**

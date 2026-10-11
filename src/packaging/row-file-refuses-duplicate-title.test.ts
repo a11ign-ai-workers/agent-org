@@ -20,7 +20,9 @@ import { appendFiledBy, createIssue, duplicateTitleRefusal, promoteRow, titleFro
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SESSION = "product-manager";
 const TITLE = "layout: the long-form rows land in one place";
-const BODY = "## Region\n\npackages/lab/src/packaging/foo.ts\n\n"
+// The second entry is a PRODUCT path (`packages/cli/` is a `releasablePaths` of the project's own `dora` repository): since a11ign#4082 a Region with
+// none is an ORG row and is filed in `a11ign/agent-org`, and this file pins the filing in the project's own tracker.
+const BODY = "## Region\n\npackages/lab/src/packaging/foo.ts\npackages/cli/src/foo.ts\n\n"
   + "## Acceptance\n\n```\nnpx tsx --test x\n```\n\n"
   + "## Open-check\n\n```\ngh issue view 735 --json state\n```\n";
 const RELEASE = ["--milestone", "CI reset"];

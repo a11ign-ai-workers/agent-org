@@ -42,7 +42,7 @@ function drive(body: string, { trackers, branch = BRANCH, wired = true }: { trac
     asked.push(prRepo);
     return lookupClaimedRowsOfTrackers(Object.keys(trackers), (repo) => trackers[repo]);
   };
-  const code = main(["create", "--draft", "--body", body], {
+  const code = main(["create", "--draft", "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`], {
     run: (args: string[]) => { if (!args.includes("--add-label")) sent.push(args); },
     git: (args: string[]) => {
       if (args[0] === "diff") return (args.includes("--diff-filter=A") ? [ACCEPTANCE_FILE] : ["src/pr-open.ts"]).join("\0");

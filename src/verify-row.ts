@@ -18,6 +18,11 @@
 // repository, so only the sub-issue link (what the epic counts) is copied; and Project boarding is `row-file --board=`'s, which refuses a row with no Region, so
 // a verify row is filed `backlog` and a refusal is reported beside it rather than hidden.
 //
+// A `Closes: none` THAT NAMES ITS OWN ROW closes that row as built, and what the reason says is still to do is filed here too (agent-org#750): `planLeftoverVerifyRow`. The items
+// are the build's own Done-when items the reason cites by number (`Done-when 2`), else the reason itself, because the classifier above reads a reading of the live system and
+// "tell a11ign#4623 the fix is in force" is neither of its two kinds (measured on #560 and #475: `planVerifyRow` is `null` for both). That row is blocked by nothing, since
+// the build it follows is closed by the same act, and carries `Not-before:` only when an item names a time it can place.
+//
 // A LEAF over its effects: every read and write arrives as an argument, so the tests reach no network.
 import { BACKLOG_LABEL, LANE_PREFIX, OUT_OF_RELEASE_LABEL } from "./project-vocabulary.ts";
 import { doneWhenItems, liveCheckItems, unfinishableItems, type LiveCheckItem, type UnfinishableItem } from "./unsplit-done-when.ts";
@@ -27,11 +32,18 @@ export type ReadingItem = LiveCheckItem | (UnfinishableItem & { kind: "future-ti
 /** An item that reads like a reading but is not one a verify row can take: a seat's act or another row's outcome. */
 export type DeclinedItem = { text: string; kind: "seat-act" | "row-outcome"; evidence: string; };
 
+/** An item the build's `Closes: none` reason left: a cited Done-when item, or the reason itself. `evidence` is empty: nothing classified it. */
+export type LeftoverItem = { text: string; kind: "leftover"; evidence: string; rows: number[]; };
+
 export type BuildRow = { number: number; title: string; body: string; labels: string[]; milestone: string | null; parent: number | null; };
 export type VerifyPlan = {
-  title: string; body: string; labels: string[]; milestone: string | null; blockedBy: number; parent: number | null; notBefore: string;
-  /** The first reading; `items` is every one the row carries. */
-  item: ReadingItem; items: ReadingItem[];
+  title: string; body: string; labels: string[]; milestone: string | null; parent: number | null;
+  /** The build the row waits on; `null` for a leftover row, whose build closed with the act that filed it. */
+  blockedBy: number | null;
+  /** `null` when no item names a time this could place: a leftover row is then readable at once. A reading row always has one. */
+  notBefore: string | null;
+  /** The first item; `items` is every one the row carries. */
+  item: ReadingItem | LeftoverItem; items: (ReadingItem | LeftoverItem)[];
 };
 export type VerifyEffects = {
   /** The verify row already filed for this build, `null` when the search ANSWERED none; throws when it could not be read. */
@@ -139,12 +151,8 @@ function attempt(problems: string[], what: string, step: () => string | null | v
   }
 }
 
-/** THE WHOLE ACT for one closed build row: plan, look for the first filing, file, then link. A link that fails is REPORTED beside the row (it exists and is findable). */
-export function fileVerifyRow(build: BuildRow, ctx: { pr: string; mergedAt: string; }, effects: VerifyEffects): VerifyOutcome {
-  const plan = planVerifyRow(build, ctx);
-  const declined = declinedItems(build.body, new Date(ctx.mergedAt));
-  const said = declined.length ? { declined } : {};
-  if (!plan) return { kind: "none", ...said };
+/** The plan filed and linked, for either kind of verify row: look for the first filing, file, then link. A link that fails is REPORTED beside the row (it exists and is findable). */
+function filePlan(build: BuildRow, plan: VerifyPlan, effects: VerifyEffects, said: { declined?: DeclinedItem[] }): VerifyOutcome {
   let existing: number | null;
   try {
     existing = effects.findExisting(build);
@@ -159,8 +167,63 @@ export function fileVerifyRow(build: BuildRow, ctx: { pr: string; mergedAt: stri
     return { kind: "failed", reason: `creating the verify row failed (${cause instanceof Error ? cause.message : cause})` };
   }
   const problems: string[] = [];
-  attempt(problems, "blocked-by edge", () => effects.blockBy(child, plan.blockedBy));
+  if (plan.blockedBy !== null) attempt(problems, "blocked-by edge", () => effects.blockBy(child, plan.blockedBy as number));
   if (plan.parent !== null) attempt(problems, `sub-issue of #${plan.parent}`, () => effects.addSubIssue(child, plan.parent as number));
   attempt(problems, "board", () => effects.board(child));
   return { kind: "filed", number: child, plan, problems, ...said };
+}
+
+/** THE WHOLE ACT for one closed build row: plan, then file and link. */
+export function fileVerifyRow(build: BuildRow, ctx: { pr: string; mergedAt: string; }, effects: VerifyEffects): VerifyOutcome {
+  const plan = planVerifyRow(build, ctx);
+  const declined = declinedItems(build.body, new Date(ctx.mergedAt));
+  const said = declined.length ? { declined } : {};
+  if (!plan) return { kind: "none", ...said };
+  return filePlan(build, plan, effects, said);
+}
+
+// --- THE ROW A `Closes: none` THAT NAMES ITS OWN ROW LEAVES (agent-org#750) -------------------------------------------------------------------------------------
+
+const CITED_DONE_WHEN = /done-when(?:\s+items?)?\s+(\d+(?:\s*(?:,|and|&)\s*\d+)*)/gi;
+
+/**
+ * The items a `Closes: none -- <reason>` left. The build's own Done-when items the reason cites by number (`Done-when 2`, `Done-when items 2 and 3`), in the row's order, when
+ * EVERY cited number is one of its items; otherwise the reason itself, verbatim: a number the row has no item for is "could not place", and a verify row built on a guess about
+ * which item was meant would be a worse record than the author's own sentence.
+ */
+export function leftoverItems(build: BuildRow, reason: string): string[] {
+  const own = doneWhenItems(build.body);
+  const cited = [...new Set([...reason.matchAll(CITED_DONE_WHEN)].flatMap((match) => [...match[1].matchAll(/\d+/g)].map((n) => Number(n[0]))))].sort((a, b) => a - b);
+  const texts = cited.map((n) => own[n - 1]);
+  return cited.length > 0 && texts.every((text) => typeof text === "string") ? texts : [reason];
+}
+
+function leftoverBody(build: BuildRow, { items, notBefore, reason, pr }: { items: string[]; notBefore: string | null; reason: string; pr: string; }): string {
+  const wait = notBefore === null ? "" : `Not-before: ${notBefore}\n`;
+  return `## What it is\n\nWhat #${build.number} (\`${build.title}\`) left after its merge (${pr}). The pull request declared \`Closes: none\` naming the row as its own, so the build `
+    + `closed with the merge and the pipeline filed what remained here (agent-org#750). Its reason, as written:\n\n> ${reason.replace(/\n/g, "\n> ")}\n\n`
+    + `## Done-when\n\n${items.map((item, i) => `${i + 1}. ${item}`).join("\n")}\n\n${wait}Verifies: #${build.number}\n\n${verifyMarker(build.number)}\n`;
+}
+
+/**
+ * The verify row a build's own `Closes: none` files for what it left. PURE. Blocked by nothing (the build is closed by the act that files this), `Not-before:` only when an
+ * item names a time `notBeforeFor` could place from the merge (a fallback "a day on" is a guess, and a leftover row has no reading to wait for), the same marker as a reading row
+ * so a second merge of the same build finds it.
+ */
+export function planLeftoverVerifyRow(build: BuildRow, { pr, mergedAt, reason }: { pr: string; mergedAt: string; reason: string; }): VerifyPlan {
+  const texts = leftoverItems(build, reason);
+  const items: LeftoverItem[] = texts.map((text) => ({ text, kind: "leftover", evidence: "", rows: [] }));
+  const now = new Date(mergedAt);
+  const stamps = texts.flatMap((text) => unfinishableItems(`## Done-when\n\n- ${text.replace(/\s*\n\s*/g, " ")}\n`, { now })
+    .flatMap((item) => (item.kind === "future-time" ? [notBeforeFor(item, mergedAt)] : []))
+    .flatMap((wait) => (wait.placed ? [wait.stamp] : [])));
+  const notBefore = stamps.length === 0 ? null : stamps.reduce((last, stamp) => (Date.parse(stamp) > Date.parse(last) ? stamp : last));
+  const carried = build.labels.filter((label) => label.startsWith(LANE_PREFIX) || label === OUT_OF_RELEASE_LABEL);
+  return { title: verifyTitle(build), body: leftoverBody(build, { items: texts, notBefore, reason, pr }), labels: [BACKLOG_LABEL, ...carried],
+    milestone: build.milestone, blockedBy: null, parent: build.parent, notBefore, item: items[0], items };
+}
+
+/** THE WHOLE ACT for a build closed from its own `Closes: none`: plan what it left, then file and link. */
+export function fileLeftoverVerifyRow(build: BuildRow, ctx: { pr: string; mergedAt: string; reason: string; }, effects: VerifyEffects): VerifyOutcome {
+  return filePlan(build, planLeftoverVerifyRow(build, ctx), effects, {});
 }

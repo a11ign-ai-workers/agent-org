@@ -23,7 +23,11 @@ import { completionPath, readCompletion } from "../lib/tick-completion.ts";
 
 const SRC = fileURLToPath(new URL("..", import.meta.url));
 const PRELOAD = join(SRC, "lib", "crash-exit.ts");
-const TRACKER = homeProjectDeclaration().tracker[0].repo;
+// #4080: the variable is written to EVERY declared tracker and the standing comment to the FIRST alone, so what a tick writes follows the project's declaration:
+// one tracker was two writes, a second tracker (a11ign/agent-org, declared at the pin) makes it three. The expectations below are derived from the declaration.
+const TRACKERS = homeProjectDeclaration().tracker.map((tracker) => tracker.repo);
+const TRACKER = TRACKERS[0];
+const WRITES = TRACKERS.length + 1;
 const GATE_THROWS = 'throw new Error("gate blew up");\n';
 
 type Call = { argv: string[]; completionExisted: boolean };
@@ -72,24 +76,29 @@ function runTick({ gate, wakeExit = 0, ghFails = false as Fails, recordIsADirect
 }
 
 const commentPath = `repos/${TRACKER}/issues/comments/${HEARTBEAT_COMMENT_ID}`;
+const variablePath = (repo: string) => `repos/${repo}/actions/variables/${HEARTBEAT_VARIABLE}`;
 
-test("#3880/#3896: a tick that reaches its end makes EXACTLY TWO writes, of the completion's own `at` -- the variable, then the standing comment -- each AFTER the completion file exists", () => {
+test("#3880/#3896/#4080: a tick that reaches its end makes EXACTLY the declared writes, of the completion's own `at` -- each tracker's variable, the standing comment after the first's -- each AFTER the completion file exists", () => {
   const { ran, calls, record } = runTick({ gate: "process.exit(0);" });
   assert.equal(ran.status, EXIT.QUIET, ran.stderr);
   assert.ok(record !== null);
-  assert.equal(calls.length, 2, JSON.stringify(calls));
-  assert.deepEqual(calls[0].argv, ["api", "-X", "PATCH", `repos/${TRACKER}/actions/variables/${HEARTBEAT_VARIABLE}`, "-f", `value=${record.at}`]);
-  assert.deepEqual(calls[1].argv, ["api", "-X", "PATCH", commentPath, "-f", `body=${heartbeatCommentBody(record.at)}`]);
+  assert.ok(TRACKERS.length >= 1, "the project declares a tracker, or the expectation below is vacuous");
+  const expected = TRACKERS.flatMap((repo, index) => [
+    ["api", "-X", "PATCH", variablePath(repo), "-f", `value=${record.at}`],
+    ...(index === 0 ? [["api", "-X", "PATCH", commentPath, "-f", `body=${heartbeatCommentBody(record.at)}`]] : []),
+  ]);
+  assert.equal(calls.length, WRITES, JSON.stringify(calls));
+  assert.deepEqual(calls.map((call) => call.argv), expected);
   assert.ok(calls.every((call) => call.completionExisted), "the heartbeat is written AFTER the completion file, never before");
 });
 
 test("#3880: every exit a COMPLETED tick can have writes it -- the organisation waiting (ATTENTION) is not the gate crashing", () => {
   const attention = runTick({ gate: "process.exit(1);", wakeExit: 1 });
   assert.equal(attention.ran.status, EXIT.ATTENTION, attention.ran.stderr);
-  assert.equal(attention.calls.length, 2);
+  assert.equal(attention.calls.length, WRITES);
   const cannotAsk = runTick({ gate: "process.exit(2);" });
   assert.equal(cannotAsk.ran.status, EXIT.CANNOT_ASK, cannotAsk.ran.stderr);
-  assert.equal(cannotAsk.calls.length, 2);
+  assert.equal(cannotAsk.calls.length, WRITES);
 });
 
 test("#3880: a tick that ends with CRASH makes NO write -- the gate throwing, and the tick throwing at import", () => {
@@ -104,20 +113,24 @@ test("#3880: a tick that ends with CRASH makes NO write -- the gate throwing, an
 test("#3880: a write that FAILS leaves the exit code unchanged and says one line on stderr naming the object", () => {
   const { ran, calls, record } = runTick({ gate: "process.exit(0);", ghFails: "all" });
   assert.equal(ran.status, EXIT.QUIET, "the tick did its work");
-  assert.equal(calls.length, 2, "one attempt at each object, no retry");
+  assert.equal(calls.length, WRITES, "one attempt at each object, no retry");
   assert.ok(record !== null, "the file is written regardless");
   const lines = ran.stderr.split("\n").filter((line) => line.includes("HEARTBEAT NOT WRITTEN"));
-  assert.equal(lines.length, 1, ran.stderr);
-  assert.ok(lines[0].includes(HEARTBEAT_VARIABLE) && lines[0].includes(TRACKER), lines[0]);
-  assert.ok(lines[0].includes("HTTP 403"), "it carries gh's own reason");
+  assert.equal(lines.length, TRACKERS.length, ran.stderr);
+  TRACKERS.forEach((repo, index) => {
+    assert.ok(lines[index].includes(HEARTBEAT_VARIABLE) && lines[index].includes(repo), lines[index]);
+    assert.ok(lines[index].includes("HTTP 403"), "it carries gh's own reason");
+  });
 });
 
 test("#3896: a comment write that FAILS says HEARTBEAT COMMENT NOT WRITTEN once, leaves the exit unchanged, and the variable write still happened (positive control: a stub failing ONLY the comment call)", () => {
   const { ran, calls, record } = runTick({ gate: "process.exit(0);", ghFails: "comment" });
   assert.equal(ran.status, EXIT.QUIET, "the tick did its work");
   assert.ok(record !== null, "the file is written regardless");
-  assert.equal(calls.length, 2, "one attempt at each object, no retry and no creating a comment");
-  assert.ok(calls[0].argv.includes(`repos/${TRACKER}/actions/variables/${HEARTBEAT_VARIABLE}`), "the variable write happened");
+  assert.equal(calls.length, WRITES, "one attempt at each object, no retry and no creating a comment");
+  assert.ok(calls[0].argv.includes(variablePath(TRACKER)), "the variable write happened");
+  assert.deepEqual(calls.filter((call) => call.argv.some((arg) => arg.startsWith("repos/") && arg.includes("/actions/variables/"))).length, TRACKERS.length,
+    "every tracker's variable was still written");
   assert.ok(calls.every((call) => !call.argv.includes("POST")), "a missing comment is never created by the tick");
   const lines = ran.stderr.split("\n").filter((line) => line.includes("HEARTBEAT COMMENT NOT WRITTEN"));
   assert.equal(lines.length, 1, ran.stderr);
@@ -153,7 +166,10 @@ test("#3880: the unit-level `writeHeartbeat` never throws, whatever `gh` does", 
   } finally {
     process.stderr.write = realWrite;
   }
-  assert.equal(written.length, 2, "one line per object, and the comment is attempted though the variable failed");
+  assert.equal(written.length, WRITES, "one line per object, the comment is attempted though the variable failed, and a refusal on one tracker stops no other write");
   assert.match(written[0], new RegExp(`HEARTBEAT NOT WRITTEN to ${TRACKER} variable ${HEARTBEAT_VARIABLE}: gh: nope`));
   assert.match(written[1], new RegExp(`HEARTBEAT COMMENT NOT WRITTEN to ${TRACKER} comment ${HEARTBEAT_COMMENT_ID}: gh: nope`));
+  TRACKERS.slice(1).forEach((repo, index) => {
+    assert.match(written[2 + index], new RegExp(`HEARTBEAT NOT WRITTEN to ${repo} variable ${HEARTBEAT_VARIABLE}: gh: nope`));
+  });
 });

@@ -27,10 +27,16 @@ const PRIMARY = { number: 10, title: "v3 — Ready for a first outside adopter",
   description: "THE PRIMARY GOAL (chairman, 2026-10-08). Make a11ign adoptable.\n\nPrimary: yes" };
 const ORDINARY = { number: 7, title: "Out of release", dueOn: null, description: "Rows deliberately outside every release." };
 
+// #4378: the project declares which repositories are `adopterFacing: false` (a11ign/a11ign at the pin), and from then on the primary milestone's clock counts a row only
+// when its Region names an adopter-facing path -- a row with no readable Region is "unknown", never counted, so the milestone reads as no open row. Every row here carries
+// one under `packages/cli/`, a releasable path of the project's own repository, so each is the adopter-facing row the clock was written to count.
+const ADOPTER_REGION = "## Region\n\n```\npackages/cli/src/example.ts\n```\n";
+const withRegion = (body: string) => (body === "" ? ADOPTER_REGION : `${body}\n\n${ADOPTER_REGION}`);
+
 type Row = Record<string, unknown> & { number: number };
 const row = (number: number, { labels = [], createdMinutesAgo, body = "", milestone = PRIMARY, blockedBy }:
   { labels?: string[]; createdMinutesAgo: number; body?: string; milestone?: unknown; blockedBy?: number[] }): Row => ({
-  number, title: `row ${number}`, labels: labels.map((name) => ({ name })), body, milestone, createdAt: iso(ago(createdMinutesAgo)), updatedAt: iso(ago(1)),
+  number, title: `row ${number}`, labels: labels.map((name) => ({ name })), body: withRegion(body), milestone, createdAt: iso(ago(createdMinutesAgo)), updatedAt: iso(ago(1)),
   blockedBy: { nodes: (blockedBy ?? []).map((n) => ({ number: n, state: "OPEN" })) },
 });
 

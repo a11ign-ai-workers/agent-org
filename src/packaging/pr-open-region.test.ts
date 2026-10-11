@@ -73,7 +73,7 @@ function drive(argv: string[], { rows, changed, rowBody, origin }: { rows?: Reco
   return { code, sent, acceptance, out: out.join(""), err: err.join("") };
 }
 
-const create = (body: string) => ["create", "--draft", "--body", body];
+const create = (body: string) => ["create", "--draft", "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`];
 const CREATE_ONLY = (sent: string[][]) => sent.map((args) => args.slice(0, 2));
 
 const IN_REGION = ["packages/agent-org/src/pr-open.ts", "packages/lab/src/packaging/pr-open-region.test.ts"];
@@ -287,7 +287,7 @@ test("#2417 WIRING: the shipped entry hands `main` the real row reader, and `mai
 const AGENT_ORG_ROW_PATHS = ["src/pr-open.ts", "src/packaging/pr-open-region.test.ts"];
 const agentOrgRow = (stated: string) => `The repository is **\`${stated}\`**; paths are relative to its root.\n\n${regionBody(AGENT_ORG_ROW_PATHS)}`;
 const CLOSES_3083 = prBody("Closes a11ign/a11ign#3083");
-const inAgentOrg = (body: string) => ["create", "--draft", "--repo", "a11ign/agent-org", "--body", body];
+const inAgentOrg = (body: string) => ["create", "--draft", "--repo", "a11ign/agent-org", "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`];
 
 test("#3083 done-when 1: a PR opened in agent-org whose diff is exactly the paths the row names reads them all INSIDE, with no Outside-Region line", () => {
   const r = drive(inAgentOrg(CLOSES_3083), { rows: { 3083: agentOrgRow("a11ign/agent-org") }, changed: AGENT_ORG_ROW_PATHS });

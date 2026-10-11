@@ -1653,10 +1653,12 @@ export function declaredNewFiles(body: string): string[] {
  */
 export function acceptancePathsReason(body: string, tool: string, deps: {
     exists?: (path: string) => boolean; trackedDirs?: string[]; regionEntries?: string[]; trackedFiles?: string[];
-    primaryCheckout?: string | null;
+    primaryCheckout?: string | null; builtInCheckout?: string | null;
 } = {}): string | null {
   const primary = primaryCheckoutCdReason(body, tool, deps);
   if (primary) return primary;
+  const tsx = tsxAcceptanceReason(body, tool); // agent-org#870
+  if (tsx) return tsx;
   const unresolved = unresolvedAcceptancePaths(body, deps);
   if (unresolved.length === 0) return null;
   const halves = [
@@ -1710,19 +1712,145 @@ function primaryCheckoutOfHost(): string | null {
  * DECLARES `Hand-run:` keeps that declaration's meaning: a human runs it and chose the directory. The refusal is for the undeclared line.
  *
  *  @param tool the CLI to name in the refusal
- * @param [deps] a test names the checkout; `null` is "cannot tell" and skips the check
+ * @param [deps] a test names the checkouts; `null` is "cannot tell" and skips that check. `builtInCheckout` is #852's: the caller passes
+ *   `builtInCheckoutOf` (`built-in-checkout.ts`), since this file cannot read the row's tracker without a cycle; `null` is "cannot tell"
  */
-export function primaryCheckoutCdReason(body: string, tool: string, { primaryCheckout = primaryCheckoutOfHost() }: { primaryCheckout?: string | null; } = {}): string | null {
+export function primaryCheckoutCdReason(body: string, tool: string, { primaryCheckout = primaryCheckoutOfHost(), builtInCheckout = null }: { primaryCheckout?: string | null; builtInCheckout?: string | null; } = {}): string | null {
   const section = extractAcceptanceSection(body);
-  if (primaryCheckout === null || section.kind !== "commands" || handRunDeclaration(body) !== null) return null;
-  const hits = section.commands.filter((command) => cdIntoCheckout(command, primaryCheckout) !== null);
+  if (section.kind !== "commands" || handRunDeclaration(body) !== null) return null;
+  const hitsIn = (checkout: string | null) => (checkout === null ? [] : section.commands.filter((command) => cdIntoCheckout(command, checkout) !== null));
+  const hits = hitsIn(primaryCheckout);
+  if (hits.length > 0) {
+    return `${tool}: REFUSING -- the Acceptance \`cd\`s into this project's own primary checkout (${primaryCheckout}): `
+      + `${hits.map((command) => `\`${command}\``).join(", ")}. CI has no such path, so the \`acceptance\` job dies on `
+      + "`No such file or directory` (#4318 did, three times), and on the host the line reads the PRIMARY checkout, which "
+      + "carries the change only after the merge -- it would pass or fail for the wrong tree. Drop the `cd` and run the "
+      + "command from the repository root, the way every row that works does. A `cd` into ANOTHER repository's checkout is not "
+      + "refused here, and a command a human is meant to run takes a `Hand-run: <who runs it and why>` line.";
+  }
+  const builtHits = hitsIn(builtInCheckout);
+  if (builtInCheckout === null || builtHits.length === 0) return null;
+  return `${tool}: REFUSING -- the Acceptance \`cd\`s into the clone of the repository this row is built in (${builtInCheckout}): `
+    + `${builtHits.map((command) => `\`${command}\``).join(", ")}. The row's tracker is a second tracker, so its pull request lands in `
+    + "that repository, and the line would run in that clone's PRIMARY checkout, which carries the change only after the merge -- it "
+    + "would pass or fail for the wrong tree, and CI has no such path. Run the command from the worktree root, the way every row that "
+    + "works does. A `cd` into a repository this row is not built in is not refused here, and a command a human is meant to run takes "
+    + "a `Hand-run: <who runs it and why>` line.";
+}
+
+// agent-org#870: A COMMAND THAT LOADS TYPESCRIPT THROUGH `tsx`. The spellings are `no-loader.test.ts`'s `NAMES_TSX` -- a flag (`--import tsx`,
+// `--import=tsx`, `--loader tsx`) or a runner (`pnpm exec tsx`, `tsx file.ts`) -- with TWO narrowings, both deliberate:
+//  - that pattern's bare arm is `(^|\s)tsx`, and so also names `git grep -qE tsx -- .github/workflows`, a good line (#524's own Acceptance). Here the
+//    bare runner must stand at a command's own position (the start, after `&&` `||` `;` `|` `(`, opening a `bash -c '...'` string, behind env
+//    assignments), the same position `CD_AT_COMMAND_POSITION` reads. `(?![\w.-])` keeps `tsx-codemod` and `tsx.test.ts` out and lets `tsx/esm` through.
+//  - its one-shot-runner arm (the registry's `x` runner) is NOT claimed. That runner fetches `tsx` itself, so it is not the `ERR_MODULE_NOT_FOUND` of
+//    #844, and it is the spelling of the placeholder Acceptance in the fixtures of many test files (`<runner> tsx --test x`), outside this row's Region.
+const TSX_FLAG_OR_EXEC = /(?:(?:--import|--loader)[= ]|\bexec\s+)['"]?tsx(?![\w.-])/;
+const TSX_AT_COMMAND_POSITION = /(?:^|&&|\|\||[;|(]|\b(?:ba|z)?sh\s+-\w*c\s+['"])\s*(?:\w+=\S*\s+)*tsx(?![\w.-])/;
+
+/** Whether `command` loads TypeScript through `tsx`, which is no dependency of this tool (#4389) and so cannot run on any host or in CI. */
+export function loadsTypeScriptThroughTsx(command: string): boolean {
+  return TSX_FLAG_OR_EXEC.test(command) || TSX_AT_COMMAND_POSITION.test(command);
+}
+
+/**
+ * agent-org#870: AN ACCEPTANCE THAT LOADS TYPESCRIPT THROUGH `tsx` IS REFUSED. 37 shipped `.acceptance/` files carry the spelling and each new one
+ * fails the first time a reviewer runs it (`ERR_MODULE_NOT_FOUND: Cannot find package 'tsx'`, #844 and no verdict posted), because `no-loader.test.ts`
+ * reads units and package scripts and never an Acceptance. Node strips the types itself, so the way out is the same line without the loader.
+ *
+ * A body that DECLARES `Hand-run:` keeps that declaration's meaning, as it does for `primaryCheckoutCdReason`: a human runs it, on a host they chose.
+ *
+ *  @param tool the CLI to name in the refusal
+ */
+export function tsxAcceptanceReason(body: string, tool: string): string | null {
+  const section = extractAcceptanceSection(body);
+  if (section.kind !== "commands" || handRunDeclaration(body) !== null) return null;
+  const hits = section.commands.filter(loadsTypeScriptThroughTsx);
   if (hits.length === 0) return null;
-  return `${tool}: REFUSING -- the Acceptance \`cd\`s into this project's own primary checkout (${primaryCheckout}): `
-    + `${hits.map((command) => `\`${command}\``).join(", ")}. CI has no such path, so the \`acceptance\` job dies on `
-    + "`No such file or directory` (#4318 did, three times), and on the host the line reads the PRIMARY checkout, which "
-    + "carries the change only after the merge -- it would pass or fail for the wrong tree. Drop the `cd` and run the "
-    + "command from the repository root, the way every row that works does. A `cd` into ANOTHER repository's checkout is not "
-    + "refused here, and a command a human is meant to run takes a `Hand-run: <who runs it and why>` line.";
+  return `${tool}: REFUSING -- the Acceptance loads TypeScript through \`tsx\`: ${hits.map((command) => `\`${command}\``).join(", ")}. `
+    + "`tsx` is not a dependency of this tool (#4389), so the line dies on `ERR_MODULE_NOT_FOUND: Cannot find package 'tsx'` "
+    + "on every host and in CI, and no verdict is posted. Node strips the types itself: drop the loader (`--import tsx`, `--import=tsx`, "
+    + "`--loader tsx`) and run `node --test <file>`, or run the script as `node <file>` in place of `tsx <file>` or `pnpm exec tsx <file>`. "
+    + "A command a human is meant to run takes a `Hand-run: <who runs it and why>` line.";
+}
+
+// #859 (a11ign#4957, cause 2): AN ACCEPTANCE RUNS IN THE CLAIMED WORKTREE. `execSync` was given no `cwd`, so a command ran wherever `pr:open`
+// happened to be started, and the rows' own `cd <primary checkout> && ...` ran the PRIMARY checkout, which carries the change only after the
+// merge: the Acceptance tested the wrong tree. Refusing that `cd` at filing is #852's; this is the run, and the rewrite that keeps the rows
+// filed before it correct without amending their claimed bodies.
+
+/**
+ * The top level of the git working tree `cwd` is in, and the PRIMARY checkout of the repository that tree belongs to (the parent of its
+ * common `.git`, which is the primary checkout for a linked worktree too). `null` is "cannot tell" -- `cwd` is no working tree -- and the
+ * callers then run as they always did; `primary` is `null` for a bare or separate-git-dir repository, which has no such checkout to name.
+ */
+export function acceptanceTree(cwd: string = process.cwd()): { worktree: string; primary: string | null; } | null {
+  try {
+    const [worktree, common] = execFileSync("git", ["rev-parse", "--path-format=absolute", "--show-toplevel", "--git-common-dir"],
+      { cwd, encoding: "utf8", env: sandboxGitEnv(), stdio: ["ignore", "pipe", "ignore"] }).split("\n");
+    if (!worktree) return null;
+    return { worktree, primary: basename(common ?? "") === ".git" ? dirname(common) : null };
+  } catch {
+    return null;
+  }
+}
+
+/** What follows `primary` in `target` (`""`, or `"/sub/dir"`), or null when `target` is not in that checkout. */
+function insidePrimary(target: string, primary: string): string | null {
+  const root = primary.replace(/\/+$/, "");
+  const path = target.replace(/\/+$/, "");
+  return path === root || path.startsWith(`${root}/`) ? path.slice(root.length) : null;
+}
+
+// The `cd` that OPENS a command: the start of the line, or the start of the `bash -c '...'` string that is the command (the second spelling
+// #4220 carries, and four of the fourteen rows' own). A `cd` after `&&` or `;` is not leading and is left where it is.
+const RUN_LEADING_CD = /^(\s*(?:(?:ba|z)?sh\s+-\w*c\s+['"]\s*)?cd\s+)("[^"]*"|'[^']*'|[^\s&;|'")]+)/;
+
+/**
+ * `command` with a LEADING `cd` into `primary` (or a directory in it) pointed at `worktree` instead, or null when it has none. The target is
+ * rewritten to `.` or `./sub` -- relative, because the command runs with `cwd` at the worktree's top level and so the path needs no quoting
+ * the original did not -- and `line` says so, for the run to print first. A `cd` into another repository's checkout is not this check's.
+ */
+export function rewriteLeadingCd(command: string, primary: string, worktree: string): { command: string; line: string; } | null {
+  const match = RUN_LEADING_CD.exec(command);
+  if (match === null) return null;
+  const token = match[2];
+  const quote = /^["']/.test(token) ? token[0] : "";
+  const target = quote ? token.slice(1, -1) : token;
+  const rest = insidePrimary(target, primary);
+  if (rest === null || primary === worktree) return null;
+  const relative = `.${rest}`;
+  return {
+    command: `${match[1]}${quote}${relative}${quote}${command.slice(match[0].length)}`,
+    line: `RUN-IN-WORKTREE: a leading \`cd ${target}\` is into the primary checkout (${primary}); run in this worktree (${worktree}) as \`cd ${relative}\``,
+  };
+}
+
+/**
+ * Runs one Acceptance command FOR REAL, in the top level of the worktree the process was started in, and prints the rewrite line first when a
+ * leading `cd` into the primary checkout was pointed at that worktree. The ONE runner: `pr-open.ts`'s check and CI's `main` both call it.
+ *
+ * @param [options] `env` is the child's environment (the process's, when absent); `cwd` is where the process was started, and is the
+ *   directory the command runs in when it is no working tree at all
+ * @returns the command's exit code
+ */
+export function runAcceptanceCommand(command: string, { env, cwd = process.cwd() }: { env?: NodeJS.ProcessEnv; cwd?: string; } = {}): number {
+  const tree = acceptanceTree(cwd);
+  let toRun = command;
+  if (tree?.primary) {
+    const rewrite = rewriteLeadingCd(command, tree.primary, tree.worktree);
+    if (rewrite) {
+      toRun = rewrite.command;
+      console.log(rewrite.line);
+    }
+  }
+  try {
+    execSync(toRun, { stdio: "inherit", shell: "/bin/bash", cwd: tree?.worktree ?? cwd, ...(env ? { env } : {}) });
+    return 0;
+  } catch (error) {
+    const status = (error as { status?: number }).status;
+    return typeof status === "number" ? status : 1;
+  }
 }
 
 function absentPathsRefusal(absent: { path: string; command: string; }[], tool: string) {
@@ -2176,7 +2304,12 @@ const LEADING_CD = /^\s*cd\s+(?:"([^"]*)"|'([^']*)'|([^\s&;|]+))\s*&&\s*/;
  */
 function leadingCdTarget(command: string): string | null {
   const match = LEADING_CD.exec(command);
-  return match === null ? null : (match[1] ?? match[2] ?? match[3]);
+  if (match === null) return null;
+  const target = match[1] ?? match[2] ?? match[3];
+  // #859: the command RUNS in the worktree (`runAcceptanceCommand`), so a file it names is looked up there, not in the primary checkout.
+  const tree = acceptanceTree();
+  const rest = tree?.primary ? insidePrimary(target, tree.primary) : null;
+  return tree && rest !== null ? resolve(tree.worktree, `.${rest}`) : target;
 }
 
 /**
@@ -3174,16 +3307,10 @@ export function acceptanceReport(body: string | null | undefined, run: (command:
  * Runs a command for real, via a shell (these are arbitrary shell strings out of a PR body, potentially
  * carrying flags/pipes/quoting -- the same trust boundary `merge-guard.ts`'s `--ci-gate` and this
  * project's other CI-invoked scripts already accept, contained by `pull_request`'s read-only token and
- * fork checkout rather than by refusing shell syntax).
+ * fork checkout rather than by refusing shell syntax). #859: in the worktree, by `runAcceptanceCommand`.
  */
 function runForReal(command: string): number {
-  try {
-    execSync(command, { stdio: "inherit", shell: "/bin/bash" });
-    return 0;
-  } catch (error) {
-    const status = (error as { status?: number }).status;
-    return typeof status === "number" ? status : 1;
-  }
+  return runAcceptanceCommand(command);
 }
 
 // #471: A PR MUST DECLARE WHAT IT CLOSES, and an unrecognised body must not read as an honest opt-out.
@@ -3540,6 +3667,9 @@ export const CI_BODY_REPORTS: BodyReport[] = [
     // #4322: BEFORE the command runs, because running it is the harm on the host -- it would read the primary checkout.
     const primary = primaryCheckoutCdReason(text, "ACCEPTANCE");
     if (primary) return { ok: false, lines: [named, primary] };
+    // agent-org#870: for the same reason -- `pr:open` and CI run the line, and it cannot load `tsx`.
+    const tsx = tsxAcceptanceReason(text, "ACCEPTANCE");
+    if (tsx) return { ok: false, lines: [named, tsx] };
     const report = acceptanceReport(text, input.run);
     const declared = extractAcceptanceSection(text);
     const notes = declared.kind === "commands" ? wholeSuiteNote(declared.commands) : [];

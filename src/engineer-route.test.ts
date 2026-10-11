@@ -13,6 +13,7 @@ import {
 } from "./engineer-route.ts";
 import { parseHostConfig } from "./host-config.ts";
 import { ABSENT_ROUTING, type RoutingDeclaration } from "./project-config.ts";
+import { confidenceReading } from "./provider-confidence.ts";
 import { tmpDir } from "./lib/tmp-fixture.ts";
 import { freshState } from "./triage-provider.ts";
 import { ROUTE_AHEAD, routesForStarts, spawnClaimer } from "./wake.ts";
@@ -133,9 +134,12 @@ function rig(opts: { triage?: unknown; switches?: string; body?: unknown; haikuS
   }) as unknown as typeof fetch;
   const logPath = decisionLogPathFrom(join(dir, "state", "wake-ledger"));
   const reads: string[] = [];
-  const deps: DecisionDeps & { haikuSwitchPath: string } = {
+  // `routing` is PINNED to the absent declaration (the four traits, composed): left out, `routeEngineer` reads the HOME project's `routing` block, and a11ign/a11ign set
+  // `routing: { question: "choice" }` in the #4953 ruling, so every test here that drives the four traits was reading a project fact and not the thing it names. A test
+  // that means the one-question form spreads `CHOICE` over these deps, as the `choose` helper below does.
+  const deps: DecisionDeps & { haikuSwitchPath: string; routing: RoutingDeclaration } = {
     host: withTriage(opts.triage), fetch: fn, state: freshState(), timeoutMs: 50, diagnostic: () => {}, switchesPath: decisionSwitchesPath(dir), logPath, now: () => 1_000,
-    readKey: (path) => { reads.push(path); return "tsk-FAKE"; }, haikuSwitchPath: haikuSwitch,
+    readKey: (path) => { reads.push(path); return "tsk-FAKE"; }, haikuSwitchPath: haikuSwitch, routing: ABSENT_ROUTING,
   };
   const log = () => (existsSync(logPath) ? readFileSync(logPath, "utf8").split("\n").filter(Boolean).map((l) => JSON.parse(l)) : []);
   return { deps, calls: () => calls, sent, reads, log, logPath };
@@ -1158,4 +1162,33 @@ test("#4904 with #756: another tracker's row is asked and logged under its OWN i
   // The control: the first tracker's own row keeps row-<n>.
   const own = await choose(rowOf(), routeReply(at("haiku/high", 0.8)));
   assert.deepEqual([...new Set(own.r.log().filter((line: { use?: string }) => line.use === "model-routing").map((line: { id: string }) => line.id))], ["row-4999"]);
+});
+
+// --- #4990: the provider is asked ONCE per row body, and a reused start is one short line ---
+const DAY_MS = 86_400_000;
+
+test("#4990: a second start of the same unchanged row asks the provider zero times, runs the first start's route, and logs `route reused` that the confidence reading does not count", async () => {
+  for (const routing of [ABSENT_ROUTING, CHOICE]) {
+    const r = rig({ triage: JEV, switches: ON, body: routeReply(at("sonnet/high", 0.9)) });
+    const first = await routeEngineer(rowOf(), { ...r.deps, routing });
+    const before = confidenceReading(r.log(), { now: 1_000, windowMs: DAY_MS });
+    const second = await routeEngineer(rowOf(), { ...r.deps, routing });
+    assert.equal(r.calls(), 1, `${routing.question}: the first start asked, the second did not`);
+    assert.deepEqual(second, first, `${routing.question}: the reused route is the logged one`);
+    assert.equal(outcomeOf(r), "route reused", routing.question);
+    assert.deepEqual(confidenceReading(r.log(), { now: 1_000, windowMs: DAY_MS }), before, `${routing.question}: the reused line counts for nothing`);
+  }
+});
+
+test("#4990: a changed label or a changed Region asks again, and a start the provider did not answer is never remembered", async () => {
+  const r = rig({ triage: JEV, switches: ON });
+  await routeEngineer(rowOf(), r.deps);
+  await routeEngineer(rowOf({ labels: ["ready", "area:docs"] }), r.deps);
+  assert.equal(r.calls(), 2, "a changed label asks again");
+  await routeEngineer(rowOf({ labels: ["ready", "area:docs"], body: bodyOf({ region: ["src/a.ts", "src/b.ts", "src/c.ts"] }) }), r.deps);
+  assert.equal(r.calls(), 3, "a changed Region asks again");
+  const failing = rig({ triage: JEV, switches: ON, throws: true });
+  await routeEngineer(rowOf(), failing.deps);
+  await routeEngineer(rowOf(), failing.deps);
+  assert.equal(failing.calls(), 2, "the control: a call that failed is the fallback, and the next start asks again");
 });

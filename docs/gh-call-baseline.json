@@ -51,7 +51,7 @@
     },
     "src/board-truth-audit.ts": {
       "spawns": 1,
-      "calls": 10
+      "calls": 11
     },
     "src/branch-inventory-report.ts": {
       "spawns": 3,
@@ -63,7 +63,7 @@
     },
     "src/ci-failure-class.ts": {
       "spawns": 0,
-      "calls": 2
+      "calls": 13
     },
     "src/ci-health-liveness.ts": {
       "spawns": 1,
@@ -95,7 +95,7 @@
     },
     "src/closes-mismatch-check.ts": {
       "spawns": 0,
-      "calls": 2
+      "calls": 3
     },
     "src/decision-confidence-post.ts": {
       "spawns": 1,
@@ -372,6 +372,10 @@
     "src/worker-state.ts": {
       "spawns": 1,
       "calls": 4
+    },
+    "src/worker-stop-hook.ts": {
+      "spawns": 1,
+      "calls": 1
     },
     "src/workflow-run-liveness.ts": {
       "spawns": 0,

@@ -116,11 +116,40 @@ function figuresIn(text: string): string[] {
     .filter((n) => !/^(19|20)\d\d$/.test(n.replace(/,/g, ""))))];
 }
 
+/** A MEASUREMENT RECORD a claim may cite instead of a gate entry (a11ign#4531, seen at the a11ign#4960 pin).
+ *
+ * The project replaced "under re-measurement" with the per-page capture time, dated and linked to
+ * `docs/capture-cost.md`, a document that names each run and is itself headed "Measured <date>". A figure there
+ * is sourced from a recorded measurement, which is what this file asks of every figure; what it does NOT accept
+ * is a link to any page, so a record counts only when (1) the link resolves to a file that exists in the
+ * project, and (2) that file's own opening lines say "Measured <ISO date>". The figure must then appear in the
+ * record's text, so a figure the record does not hold is still refused (the controls below). */
+const MEASURED_HEADING = /^Measured\s+\d{4}-\d{2}-\d{2}/m;
+
+function citedMeasurementRecords(fromFile: string, text: string, read: (rel: string) => string | undefined): string[] {
+  const dir = path.posix.dirname(fromFile);
+  const records: string[] = [];
+  for (const m of text.matchAll(/\]\(([^)#\s]+\.md)(?:#[^)]*)?\)/g)) {
+    const rel = path.posix.normalize(path.posix.join(dir, m[1]));
+    const body = read(rel);
+    if (body !== undefined && MEASURED_HEADING.test(body.split("\n").slice(0, 8).join("\n"))) records.push(body);
+  }
+  return records;
+}
+
+const readProjectFile = (rel: string): string | undefined =>
+  existsSync(path.join(REPO, rel)) ? readFileSync(path.join(REPO, rel), "utf8") : undefined;
+
+/** The figures of `block` that no gate output and no record the block cites holds. */
+function unsourcedFigures(file: string, block: string, gates: string, read = readProjectFile): string[] {
+  const records = citedMeasurementRecords(file, block, read).join("\n");
+  const sourced = (n: string) => [gates, records].some((src) => src.includes(n) || src.includes(n.replace(/,/g, "")));
+  return figuresIn(block).filter((n) => !sourced(n));
+}
+
 test("every figure in the public claim is sourceable from a recorded gate result", () => {
-  const claim = claimText();
   const gates = recordedGateOutput();
-  const unsourced = figuresIn(claim).filter((n) =>
-    !gates.includes(n) && !gates.includes(n.replace(/,/g, "")));
+  const unsourced = [...new Set(CLAIM_FILES.flatMap((file) => unsourcedFigures(file, claimBlockIn(file), gates)))];
 
   // THERE IS NO EXEMPTION, and the one there used to be is why this comment is long.
   //
@@ -140,6 +169,31 @@ test("every figure in the public claim is sourceable from a recorded gate result
     "these figures are in the public claim and in no recorded gate output, so nothing keeps them true: "
     + `${offending.join(", ")}. Record the gate's verbatim output in docs/board/reported/, or take `
     + "the figure out of the claim and say it is being re-measured.");
+});
+
+test("a cited measurement record sources a figure only when it exists, is headed 'Measured <date>' and holds the figure", () => {
+  const files: Record<string, string> = {
+    "docs/cost.md": "# Cost\n\nMeasured 2026-09-24 for #2271.\n\none capture took 105 s to 460 s\n",
+    "docs/essay.md": "# An essay\n\nabout 105 s to 460 s, trust me\n",
+  };
+  const read = (rel: string) => files[rel];
+  const sentence = (target: string, figure: string) => `took ${figure} s ([cost](${target}))`;
+  // POSITIVE CONTROL: the record the project cites does source its figures, from a block in a sibling directory.
+  assert.deepEqual(unsourcedFigures("README.md", sentence("./docs/cost.md", "105"), "", read), []);
+  assert.deepEqual(unsourcedFigures("docs/try-it.md", sentence("./cost.md", "460"), "", read), []);
+  // A figure the record does not hold is refused, a record with no 'Measured <date>' heading is no record, and
+  // a link that resolves to nothing is no record: each is the way the new source would turn vacuous.
+  assert.deepEqual(unsourcedFigures("README.md", sentence("./docs/cost.md", "999"), "", read), ["999"]);
+  assert.deepEqual(unsourcedFigures("README.md", sentence("./docs/essay.md", "105"), "", read), ["105"]);
+  assert.deepEqual(unsourcedFigures("README.md", sentence("./docs/gone.md", "105"), "", read), ["105"]);
+});
+
+test("the live claim cites a measurement record where the project says it did (the control that the source above is read)", () => {
+  // `docs/try-it.md` carries 105 and 460 sourced only by `docs/capture-cost.md`; if that link or the record's
+  // heading goes, the figures fall back to the gate entries and the sourcing test above is the one that fails.
+  const block = claimBlockIn("docs/try-it.md");
+  assert.ok(citedMeasurementRecords("docs/try-it.md", block, readProjectFile).length > 0,
+    "docs/try-it.md's claim block no longer cites a 'Measured <date>' record, so this control has nothing to read");
 });
 
 test("the claim never says 'no false positives'", () => {
@@ -931,11 +985,18 @@ const NOT_A_DURATION_CLAIM: Record<string, string> = {
     + "reason: no capture gate has ever measured, or should measure, a one-time Windows setup step.",
 };
 
+/** A duration promise that dates its measurement ("Measured 2026-09-24 ...") and links the record it came from
+ * (a11ign#4531): sourced by the same rule as a figure above, so the record must exist and be headed 'Measured <date>'. */
+function citesMeasurementRecord(file: string, text: string, read = readProjectFile): boolean {
+  return /\bMeasured\s+\d{4}-\d{2}-\d{2}\b/.test(text) && citedMeasurementRecords(file, text, read).length > 0;
+}
+
 function assertDurationClaimSourced(file: string): void {
   const discovered = durationClaimParagraphsOutsideBlocks(file);
   const offenders = discovered
     .filter(({ text }) => !Object.keys(NOT_A_DURATION_CLAIM).some((key) => text.includes(key)))
     .filter(({ text }) => !UNDER_REMEASUREMENT.test(text))
+    .filter(({ text }) => !citesMeasurementRecord(file, text))
     .map(({ line, text }) => `  ${file}:${line}  ${text.slice(0, 120)}`);
 
   assert.deepEqual(offenders, [],
@@ -948,6 +1009,16 @@ function assertDurationClaimSourced(file: string): void {
 
 test("every time/duration promise outside the claim block is sourced, disclosed, or classified", () => {
   for (const file of CLAIM_FILES) assertDurationClaimSourced(file);
+});
+
+test("PROOF: a dated duration promise is sourced only by a record that exists, and an undated one is not", () => {
+  const read = (rel: string) => (rel === "docs/cost.md" ? "Measured 2026-09-24 at protocol 21.\n" : undefined);
+  const dated = "A capture takes 105 s. Measured 2026-09-24 and not refreshed since ([cost](./docs/cost.md)).";
+  assert.equal(citesMeasurementRecord("README.md", dated, read), true);
+  assert.equal(citesMeasurementRecord("README.md", dated.replace("2026-09-24", "recently"), read), false,
+    "no date, no measurement: 'Measured recently' is not a reading");
+  assert.equal(citesMeasurementRecord("README.md", dated.replace("docs/cost.md", "docs/gone.md"), read), false,
+    "a link to a record that does not exist sources nothing");
 });
 
 test("every duration classification still matches a real sentence", () => {

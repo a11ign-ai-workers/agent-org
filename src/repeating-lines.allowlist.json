@@ -11,6 +11,10 @@
       "reason": "work the gate can see and is deliberately not offering (a declared blockedBy, Not-before, answer: or a file overlap with an open pull request); a row in a keyed repository is printed with its key (`agent-org#460`), the same state. The line itself says it clears itself; 972 per day measured on 2026-10-01 and each is a row waiting on a field."
     },
     {
+      "pattern": "^blocking-impact: \\S+ shelves N rows( behind \\S*#N( \\S*#N)*( \\+N more)?)?: \\S*#N( \\S*#N)*$",
+      "reason": "blocking-impact.ts's readout of a holder that shelves 1 to 4 rows, printed for every holder every tick (`holdingLines`): the count, the rows it shelves, and, after `behind`, the rows it is held behind. Below BLOCKING_MIN_ROWS (5) it is a count that has its own threshold and owner and is not a fault: a ready row held behind an open pull request in review for an hour repeats this line for as long as the review takes (agent-org#818, measured 2026-10-11: one holder, 59 consecutive ticks). A keyed row (`agent-org#N`) is the same state, as the SHELVED entry's. The FAULT form of the same count is an incident at 5 rows for 30 minutes: it carries `(episode open)` and is recorded in the failure ledger, and that form is NOT allowlisted, nor is a line with no row list, nor the `N B4 shelvings` line."
+    },
+    {
       "pattern": "^tool checkout detached at origin/main \\(H\\)$",
       "reason": "update-tool.ts states where the tool's own checkout is on every tick it runs (the work-tick unit's first ExecStartPre); it is a position reading, the twin of the primary's line below, and was offered to orchestrator after 30 ticks on 2026-10-02. A failed update throws and prints a different line (`has uncommitted changes to tracked files`, `is not a primary checkout`), which is not allowlisted."
     },

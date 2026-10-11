@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { test } from "node:test";
 import {
   CI_FAILURE_CLASSES, MAX_ERROR_LINES, classLine, classifyCiFailure, fallbackClass, readCiFailure, routeFor, trimErrorLines,
-  type CiFailure, type CiFailureClass,
+  holdSharedFailures, notedAs, refreshFixed, sharedFailureTick, type CiFailure, type CiFailureClass, type RedPr, type Run,
 } from "./ci-failure-class.ts";
 import { MAX_STATE_BYTES, type DecisionDeps } from "./decision-provider.ts";
 import { parseHostConfig } from "./host-config.ts";
@@ -228,4 +228,135 @@ test("a log with no escape bytes is read as before: the same lines, nothing stri
   assert.ok(out !== null);
   assert.deepEqual(out.errorLines, ["AssertionError: expected 1 to equal 2", "not ok 1 - the thing"]);
   assert.equal(out.rateLimitOrRunnerLost, false);
+});
+
+// ---------------------------------------------------------------------------------------------------
+// a11ign#5008: a failure SHARED by open pull requests is one incident, and its merged fix refreshes them.
+
+const INSTALL_ERROR = "2026-10-11T09:42:11.123Z ##[error]npm ERR! 404 Not Found - GET https://registry/agent-org-0.155.4.tgz";
+type Job = { steps: { name: string; conclusion: string }[]; log: string };
+const jobUrl = (job: number) => `https://github.com/a11ign/a11ign/actions/runs/${job + 1000}/job/${job}`;
+const redPr = (number: number, job: number, check = "gate"): RedPr =>
+  ({ ref: `pr-${number}`, repo: "a11ign/a11ign", number, checks: [{ name: check, detailsUrl: jobUrl(job), completedAt: "2026-10-11T09:50:00Z" }] });
+const redOrder = (number: number) => ({ cause: "pr-checks-failing", subject: `pr-${number}`, session: `worker-${number}`, discriminator: "red" });
+
+/** A `gh` fake: jobs by number, issues by number, pulls by number; every write is recorded. */
+function ghFake(over: { jobs?: Record<number, Job>; issues?: any[]; pulls?: Record<number, any>; behind?: number; refuse?: number[] } = {}) {
+  const writes: string[][] = [];
+  const issues = over.issues ?? [];
+  const run: Run = (args) => {
+    const [cmd, sub] = args;
+    const path = args.find((a) => a.startsWith("repos/")) ?? "";
+    if (cmd === "api" && /actions\/jobs\/\d+\/logs/.test(path)) return (over.jobs ?? {})[Number(/jobs\/(\d+)/.exec(path)![1])]?.log ?? (() => { throw new Error("refused"); })();
+    if (cmd === "api" && /actions\/jobs\/\d+$/.test(path)) return JSON.stringify((over.jobs ?? {})[Number(/jobs\/(\d+)/.exec(path)![1])] ?? (() => { throw new Error("refused"); })());
+    if (cmd === "api" && args.includes("PUT")) {
+      writes.push(args);
+      if ((over.refuse ?? []).includes(Number(/pulls\/(\d+)/.exec(path)![1]))) throw new Error("422 merge conflict");
+      return "{}";
+    }
+    if (cmd === "api" && /\/compare\//.test(path)) return JSON.stringify({ behind_by: over.behind ?? 3 });
+    if (cmd === "api" && /\/pulls\/\d+$/.test(path)) return JSON.stringify((over.pulls ?? {})[Number(/pulls\/(\d+)/.exec(path)![1])] ?? { state: "open", head: { sha: "abc" }, base: { ref: "main" } });
+    if (cmd === "issue" && sub === "list") {
+      const state = args[args.indexOf("--state") + 1];
+      return JSON.stringify(issues.filter((i) => i.state === state));
+    }
+    writes.push(args);
+    if (cmd === "issue" && sub === "create") { issues.push({ number: 900 + issues.length, state: "open", body: args[args.indexOf("--body") + 1] }); return "https://github.com/a11ign/a11ign/issues/900"; }
+    if (cmd === "issue" && sub === "edit") { const row = issues.find((i) => i.number === Number(args[2])); row.body = args[args.indexOf("--body") + 1]; }
+    return "";
+  };
+  return { run, writes, issues };
+}
+const installJob = (): Job => ({ steps: [{ name: "Set up job", conclusion: "success" }, { name: "Install agent-org", conclusion: "failure" }], log: `${INSTALL_ERROR}\n` });
+const log = () => {};
+
+test("shared failure -- POSITIVE CONTROL: two open PRs fail the same setup step, so the gate files ONE incident and wakes ZERO workers", () => {
+  const gh = ghFake({ jobs: { 11: installJob(), 12: { ...installJob(), log: INSTALL_ERROR.replace("09:42:11", "09:43:50") + "\n" } } });
+  const out = sharedFailureTick([redOrder(4969), redOrder(4977)], { prs: [redPr(4969, 11), redPr(4977, 12)], run: gh.run, log });
+  assert.deepEqual(out.orders, [], "no worker is woken");
+  assert.equal(out.held.length, 2);
+  assert.deepEqual(gh.writes.filter((w) => w[0] === "issue" && w[1] === "create").length, 1, "one incident row");
+  const body = String(gh.issues[0].body);
+  assert.match(body, /Shared-failure-prs: a11ign\/a11ign#4969, a11ign\/a11ign#4977/);
+  // the next tick JOINS it: the same failure on a third PR edits the one row and files no second
+  const again = sharedFailureTick([redOrder(4969), redOrder(4977), redOrder(5001)], { prs: [redPr(4969, 11), redPr(4977, 12), redPr(5001, 13)], run: ghFakeWith(gh, { 13: installJob() }), log });
+  assert.deepEqual(again.orders, []);
+  assert.equal(gh.issues.length, 1);
+  assert.match(String(gh.issues[0].body), /#5001/);
+});
+const ghFakeWith = (gh: ReturnType<typeof ghFake>, jobs: Record<number, Job>): Run => (args) => {
+  const m = /actions\/jobs\/(\d+)/.exec(args.find((a) => a.startsWith("repos/")) ?? "");
+  if (args[0] === "api" && m !== null && jobs[Number(m[1])] !== undefined) {
+    return args.some((a) => a.endsWith("/logs")) ? jobs[Number(m[1])].log : JSON.stringify(jobs[Number(m[1])]);
+  }
+  return gh.run(args);
+};
+
+test("shared failure -- NEGATIVE CONTROL: a PR whose own diff fails is still woken as today, and writes nothing", () => {
+  const own: Job = { steps: [{ name: "Run tests", conclusion: "failure" }], log: "AssertionError [ERR_ASSERTION]: expected 3, got 4\n" };
+  const gh = ghFake({ jobs: { 11: installJob(), 12: installJob(), 21: own } });
+  // the two shared PRs are held; the third fails `gate` at a different step with a different line, and is NOT in their group
+  const out = sharedFailureTick([redOrder(4969), redOrder(4977), redOrder(5100)], { prs: [redPr(4969, 11), redPr(4977, 12), redPr(5100, 21)], run: gh.run, log });
+  assert.deepEqual(out.orders.map((o) => o.subject), ["pr-5100"]);
+  // alone, the same own failure is nobody's incident: no read of a log, no row, the order unchanged
+  const alone = ghFake({ jobs: { 21: own } });
+  const lone = sharedFailureTick([redOrder(5100)], { prs: [redPr(5100, 21)], run: alone.run, log });
+  assert.deepEqual(lone.orders, [redOrder(5100)]);
+  assert.deepEqual(alone.writes, []);
+  // two PRs red on the same check for DIFFERENT own reasons are not one incident either
+  const twoOwn = ghFake({ jobs: { 21: own, 22: { ...own, log: "AssertionError: a different test failed\n" } } });
+  assert.equal(holdSharedFailures([redOrder(1), redOrder(2)], { prs: [redPr(1, 21), redPr(2, 22)], run: twoOwn.run }).held.length, 0);
+});
+
+test("shared failure: a log that cannot be read, a hung check and a PR with a second red check are never held", () => {
+  const gh = ghFake({ jobs: { 11: installJob() } }); // job 12's read is refused
+  assert.equal(holdSharedFailures([redOrder(1), redOrder(2)], { prs: [redPr(1, 11), redPr(2, 12)], run: gh.run }).held.length, 0);
+  const both = ghFake({ jobs: { 11: installJob(), 12: installJob() } });
+  const hung = { ...redOrder(1), discriminator: "hung-check" };
+  assert.deepEqual(holdSharedFailures([hung, redOrder(2)], { prs: [redPr(1, 11), redPr(2, 12)], run: both.run }).orders, [hung, redOrder(2)]);
+  const second = { ...redPr(2, 12), checks: [...redPr(2, 12).checks, { name: "unit", detailsUrl: jobUrl(30) }] };
+  const out = holdSharedFailures([redOrder(1), redOrder(2)], { prs: [redPr(1, 11), second], run: both.run });
+  assert.deepEqual(out.orders.map((o) => o.subject), ["pr-2"]);
+});
+
+test("the fix refreshes its victims: merging the incident's PR updates both branches, once, with no worker turn", () => {
+  const body = ["Check: gate", "First error line: npm ERR! # Not Found - GET https://registry/agent-org-#.#.#.tgz", "Shared-failure-prs: a11ign/a11ign#4969, a11ign/a11ign#4977"].join("\n");
+  const closedBy = [{ number: 5004, repository: { nameWithOwner: "a11ign/agent-org" } }];
+  const gh = ghFake({ issues: [{ number: 4988, state: "closed", body, closedByPullRequestsReferences: closedBy }],
+    pulls: { 5004: { merged_at: "2026-10-11T10:32:00Z" } } });
+  const out = refreshFixed({ run: gh.run, log, nowMs: Date.parse("2026-10-11T10:33:00Z") });
+  assert.deepEqual(out.refreshed, ["a11ign/a11ign#4969", "a11ign/a11ign#4977"]);
+  assert.deepEqual(gh.writes.filter((w) => w.includes("PUT")).map((w) => w.at(-1)), ["repos/a11ign/a11ign/pulls/4969/update-branch", "repos/a11ign/a11ign/pulls/4977/update-branch"]);
+  // stamped, so the next tick does it no more
+  assert.match(String(gh.issues[0].body), /^Refreshed-at: /m);
+  gh.issues[0].state = "closed";
+  assert.deepEqual(refreshFixed({ run: gh.run, log, nowMs: Date.parse("2026-10-11T10:50:00Z") }).refreshed, []);
+});
+
+test("the fix is not merged, or a PR is not behind, or the refresh is refused: nothing is updated, and a conflict is the worker's again", () => {
+  const body = "Check: gate\nFirst error line: x\nShared-failure-prs: a11ign/a11ign#1, a11ign/a11ign#2";
+  const closedBy = [{ number: 5004, repository: { nameWithOwner: "a11ign/agent-org" } }];
+  const unmerged = ghFake({ issues: [{ number: 7, state: "closed", body, closedByPullRequestsReferences: closedBy }], pulls: { 5004: { merged_at: null } } });
+  assert.deepEqual(refreshFixed({ run: unmerged.run, log }).refreshed, []);
+  assert.deepEqual(unmerged.writes, []);
+  const upToDate = ghFake({ issues: [{ number: 7, state: "closed", body, closedByPullRequestsReferences: closedBy }], pulls: { 5004: { merged_at: "2026-10-11T10:32:00Z" } }, behind: 0 });
+  assert.deepEqual(refreshFixed({ run: upToDate.run, log }).refreshed, []);
+  const conflict = ghFake({ issues: [{ number: 7, state: "closed", body, closedByPullRequestsReferences: closedBy }], pulls: { 5004: { merged_at: "2026-10-11T10:32:00Z" } }, refuse: [2] });
+  const out = refreshFixed({ run: conflict.run, log });
+  assert.deepEqual([out.refreshed, out.refused], [["a11ign/a11ign#1"], ["a11ign/a11ign#2"]]);
+  // the refused PR is released: its red order is delivered again instead of held
+  const gh = ghFake({ jobs: { 11: installJob(), 12: installJob() }, issues: conflict.issues });
+  const tick = sharedFailureTick([redOrder(1), redOrder(2)], { prs: [redPr(1, 11), redPr(2, 12)], run: gh.run, log });
+  assert.deepEqual(tick.orders.map((o) => o.subject), ["pr-2"]);
+});
+
+test("the detector: a PR red before the fix merged, unnoted, is refreshed only 10 minutes after the merge", () => {
+  const body = "Check: gate\nFirst error line: npm ERR! # Not Found - GET https://registry/agent-org-#.#.#.tgz\nShared-failure-prs: a11ign/a11ign#4969";
+  const closedBy = [{ number: 5004, repository: { nameWithOwner: "a11ign/agent-org" } }];
+  const mk = () => ghFake({ jobs: { 12: installJob() }, issues: [{ number: 4988, state: "closed", body, closedByPullRequestsReferences: closedBy }],
+    pulls: { 5004: { merged_at: "2026-10-11T10:32:00Z" } } });
+  const early = refreshFixed({ run: mk().run, log, nowMs: Date.parse("2026-10-11T10:35:00Z"), open: [redPr(4977, 12)] });
+  assert.deepEqual(early.refreshed, ["a11ign/a11ign#4969"]);
+  const late = refreshFixed({ run: mk().run, log, nowMs: Date.parse("2026-10-11T10:43:00Z"), open: [redPr(4977, 12)] });
+  assert.deepEqual(late.refreshed, ["a11ign/a11ign#4969", notedAs(redPr(4977, 12))]);
 });

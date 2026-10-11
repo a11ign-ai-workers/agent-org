@@ -13,6 +13,8 @@
  * resource rules, and the list is a rule rather than a path test (`"../engineer"` is not a role).
  */
 import { existsSync } from "node:fs";
+import { isAbsolute, join } from "node:path";
+import { HOME_CHECKOUT } from "./project-config.ts";
 import { roleBriefPath } from "./project-roles.ts";
 
 /** The briefs a spawned seat can be sent to, by role name (the brief is `<role>.md` in the project's roles directory). */
@@ -24,11 +26,19 @@ const BRIEF_CONTENTS: Readonly<Record<string, string>> = Object.freeze({
   orchestrator: "what the role owns, the judgements that cannot be delegated and the habits every orchestrator is held to",
 });
 
+/**
+ * THE BRIEF IS NAMED BY ITS ABSOLUTE PATH IN THE HOME PROJECT, NEVER RELATIVE TO THE WORKTREE (#850, chairman a11ign#4957 cause 1).
+ * A spawned seat starts in a worktree of whichever repository its row is in, and an agent-org one holds no `.agent-org/roles`, so
+ * a relative path sent the seat to a stray copy in a sibling worktree or to none, and it never learned that opening its pull
+ * request was its job. A relative `brief` is resolved against the home checkout HERE, so no caller can send one.
+ */
+const absoluteBrief = (brief: string) => (isAbsolute(brief) ? brief : join(HOME_CHECKOUT, brief));
+
 const sentenceFor = (role: string, brief: string) =>
-  `Before you start, read \`${brief}\`: ${BRIEF_CONTENTS[role]}. Nothing else tells you them.`;
+  `Before you start, read \`${absoluteBrief(brief)}\`: ${BRIEF_CONTENTS[role]}. Nothing else tells you them.`;
 
 /**
- * The engineer's sentence for the brief path `wake.ts` already holds (`ENGINEER_BRIEF`); no file is read, as before (#3444).
+ * The engineer's sentence for the brief path `wake.ts` already holds (`ENGINEER_BRIEF`), made absolute; no file is read, as before (#3444).
  *
  * A FUNCTION, NOT A CONSTANT, ON PURPOSE: this module is imported by `wake.ts`, which sits in an import cycle with
  * `project-config.ts` (`HOME_CHECKOUT`). A top-level `roleBriefPath` call here ran BEFORE `HOME_CHECKOUT` was initialized
@@ -50,5 +60,5 @@ export function briefRoleSentence(role: string = "engineer", root?: string): str
   if (!existsSync(brief.absolute)) {
     throw new Error(`briefRole ${JSON.stringify(role)} has no brief file: ${brief.absolute} does not exist`);
   }
-  return sentenceFor(role, brief.relative);
+  return sentenceFor(role, brief.absolute);
 }

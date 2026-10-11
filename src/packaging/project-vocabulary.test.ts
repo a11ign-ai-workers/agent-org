@@ -179,6 +179,11 @@ const DECLARED_NON_VOCABULARY_HITS: Declaration[] = [
   // English word "answer:" (`REFUSED_CLAIM_IS_AN_ANSWER`: "...that is an answer: report it and stop...").
   ...nonVocabulary("wake.ts", ['"blocked"'], "an agent's `herdr` status, and `claim-stall.ts`'s `why: \"blocked\"` consumed (`releaseHeadline`)"),
   ...nonVocabulary("wake.ts", ['"answer:'], "prose that starts a string segment with the English word (`REFUSED_CLAIM_IS_AN_ANSWER`)"),
+  // `pr-hold-state.ts` (#4970): `"blocked"` is the worker's declared STATE (`worker-state.ts`'s `DECLARED_STATES`, read by `declarationExcusesHold`), never the `blocked` label, and the leaf
+  // cannot import `worker-state.ts` (it reads the file system); and "`answer:" opens the wake text's prose naming the `answer:<session>` field, which is the vocabulary's own prefix
+  // quoted for a reader and not matched against anything.
+  ...nonVocabulary("pr-hold-state.ts", ['"blocked"'], "a worker's declared state (`blocked <row> <reason>`), not the `blocked` label"),
+  ...nonVocabulary("pr-hold-state.ts", ["`answer:"], "prose in an order's text naming the `answer:<session>` field, quoted and never matched"),
   // `work-gate.ts`: the same `herdr` STATUS mentioned in a report string, and `run(["pr", "ready", ...])` -- GitHub's own `gh pr ready` CLI verb,
   // not the row `ready` label.
   ...nonVocabulary("work-gate.ts", ["`blocked`"], "the `herdr` status mentioned in a report string"),
@@ -205,11 +210,11 @@ test("the messaging sources' label literals equal the vocabulary's", () => {
 });
 
 /**
- * Files the walk skips whole, each with its reason. `project-vocabulary.ts` is where the literals are declared. `prefix-pins.mjs` is the project's
+ * Files the walk skips whole, each with its reason. `project-vocabulary.ts` is where the literals are declared. `prefix-pins.ts` (`.mjs` until a11ign#4393 renamed it, which the lab carries from v0.1.28) is the project's
  * lab helper, which the gate copies in beside the tests (`rsync` from `packages/lab/src/packaging/`, ci.yml) so that `packaging/` tests that import it
  * can run; it pins the `lane:` prefix for the project's own lab tests, is no part of the tool, and is not in this repository.
  */
-const WALK_SKIPS = new Set(["project-vocabulary.ts", "prefix-pins.mjs"]);
+const WALK_SKIPS = new Set(["project-vocabulary.ts", "prefix-pins.ts"]);
 
 /** Every distinct (file, literal) the walk of `srcDir` finds, named relative to it. */
 function vocabularyEntries(srcDir: string): string[] {

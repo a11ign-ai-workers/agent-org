@@ -192,7 +192,7 @@ test("(11) pr:open: a create with no nameable owner is REFUSED before anything i
   const sent: string[][] = [];
   const err: string[] = [];
   const body = "## Acceptance\n\nnode -e \"process.exit(0)\"\n\nCloses: none -- a test fixture\n";
-  const open = (owner: string | null) => prOpen(["create", "--draft", "--body", body], { run: (a) => { sent.push(a); }, ...withAcceptanceFile(body),
+  const open = (owner: string | null) => prOpen(["create", "--draft", "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`], { run: (a) => { sent.push(a); }, ...withAcceptanceFile(body),
     prHead: () => ({ ref: "x", oid: "x" }), runAcceptance: () => 0, runMutation: () => 0, owner: () => owner, rowLabels: () => [],
     labelExists: () => false, out: () => {}, err: (line) => { err.push(line); } });
   assert.equal(open(null), EXIT_NOTHING_SENT);

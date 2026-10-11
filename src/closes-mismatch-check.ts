@@ -53,6 +53,12 @@
  * a tracker that cannot be read is "could not tell" for the absence of a match and never "no claim"; a match in a readable one still refuses.
  * `pr-open.ts` asks the same question before it sends, so the author is told at the command and not after the merge.
  *
+ * A FOURTH DIRECTION (agent-org#873, class `closed-on-merge-not-outcome`; a11ign/a11ign#4953): A PR THAT SAYS A CONSUMER'S FILE MUST CARRY A VALUE
+ * CANNOT CLOSE A ROW WHILE IT DOES NOT. agent-org#782 added `routing.question`, wrote "not in this change" for a11ign's declaration in its acceptance
+ * file, closed a11ign/a11ign#4904 on merge, and a11ign routed by `traits` for seven hours. The refusal reads the STRUCTURED line
+ * `Consumer-declaration: <owner/repo>:<path> <key>=<value>` (`consumer-declaration.ts`, the one grammar) and never that prose. See `consumerDeclarationReport`.
+ * KNOWN UNCOVERED: an author who adds an option and writes no such line is not seen; that is the detector's, by another route.
+ *
  * A PR ABOUT "TEXT THAT PARSES AS AN INSTRUCTION" CANNOT DESCRIBE ITSELF WITHOUT BECOMING AN INSTANCE --
  * expect this, do not read it as having broken something. The PR that built this check tripped its own
  * two example patterns while drafting the body that explains them: `Closes: none` inside a sentence
@@ -67,7 +73,9 @@
  */
 import { pathToFileURL } from "node:url";
 import { realpathSync } from "node:fs";
-import { extractClosesDeclaration, closesReferences } from "./acceptance-commands.ts";
+import { extractClosesDeclaration, closesReferences, acceptanceSourceOfThisPullRequest, prAuthorFromEnv } from "./acceptance-commands.ts";
+import { sourceLine } from "./acceptance-file.ts";
+import { parseConsumerDeclarations, valueAtKey, valueMatches, CONSUMER_DECLARATION_KEYWORD } from "./consumer-declaration.ts";
 import { REPO } from "./project-identity.ts";
 import { gh, lookup, lookupClosingIssues, lookupRecentClosesPrs } from "./merge-guard/lookups.ts";
 import { refuseUnknownFlags } from "./lib/cli-flags.ts";
@@ -403,6 +411,103 @@ export function claimedBranchStep(declaration: import("./acceptance-commands.ts"
   return claimedBranchVerdict(claimedBranchReport(declaration, reads.head(pr.prNumber, pr.prRepo), reads.rows(pr.prRepo), pr.prRepo));
 }
 
+// --- THE FOURTH DIRECTION: A CONSUMER'S DECLARATION THE PR SAYS MUST CARRY A VALUE (agent-org#873) -----------------------------------------
+
+/** One file of a consumer repository's default branch: its text, or `null` when it could not be READ (missing, unreadable, or the call failed). */
+export type ConsumerFileReader = (repo: string, path: string) => string | null;
+export type ConsumerDeclarationReport =
+  | { ok: true, note: string | null }
+  | { ok: false, reasons: string[] };
+
+/**
+ * Pure, over an injected reader. A pull request with `Consumer-declaration:` lines (`consumer-declaration.ts`) that closes a row is refused while any
+ * `<key>` of the named file, on the consumer's default branch, is not `<value>`. The message names the file, the key, what it holds now (or that it is
+ * absent), and the two ways out. EVERY way of not knowing is a refusal that names it: a file that cannot be read, JSON that does not parse, a line
+ * that does not fit the grammar. `Closes: none -- <reason>` closes nothing, so nothing is asked of the consumer (the directing row stays open and the
+ * consumer's own switch row closes it); the malformed lines are still named. Each distinct file is read once.
+ *
+ * `declaration` is the BODY's: GitHub acts on it at merge. `acceptanceText` is the file the pull request adds, as `acceptanceSourceOf` resolves it.
+ * @param {import("./acceptance-commands.ts").ClosesDeclaration} declaration
+ * @param {string} acceptanceText
+ * @param {ConsumerFileReader} read
+ * @returns {ConsumerDeclarationReport}
+ */
+export function consumerDeclarationReport(declaration: import("./acceptance-commands.ts").ClosesDeclaration, acceptanceText: string, read: ConsumerFileReader): ConsumerDeclarationReport {
+  const { declarations, errors } = parseConsumerDeclarations(acceptanceText);
+  if (declarations.length === 0 && errors.length === 0) return { ok: true, note: null };
+  const unreadLine = (error: { line: number, text: string, reason: string }) => `line ${error.line} \`${error.text}\` is not a ${CONSUMER_DECLARATION_KEYWORD} line: ${error.reason}`;
+  const closes = declaration.kind === "closes" ? closesReferences(declaration) : [];
+  if (closes.length === 0) {
+    return { ok: true, note: `${declarations.length} ${CONSUMER_DECLARATION_KEYWORD} line(s), and this PR closes no row, so no consumer file was read`
+      + (errors.length > 0 ? `; NOT READ as declarations: ${errors.map(unreadLine).join("; ")}` : "") };
+  }
+  const reasons = errors.map(unreadLine);
+  const files = new Map<string, string | null>();
+  const fileText = (repo: string, path: string) => {
+    const id = `${repo}:${path}`;
+    if (!files.has(id)) files.set(id, read(repo, path));
+    return files.get(id) as string | null;
+  };
+  for (const wanted of declarations) {
+    const at = `${wanted.repo}:${wanted.path}`;
+    const text = fileText(wanted.repo, wanted.path);
+    if (text === null) {
+      reasons.push(`line ${wanted.line}: could not READ ${at} from ${wanted.repo}'s default branch, so \`${wanted.key}\` cannot be shown to be \`${wanted.value}\``);
+      continue;
+    }
+    let json: unknown;
+    try { json = JSON.parse(text); } catch {
+      reasons.push(`line ${wanted.line}: ${at} is not JSON, so \`${wanted.key}\` cannot be shown to be \`${wanted.value}\``);
+      continue;
+    }
+    const got = valueAtKey(json, wanted.key);
+    if (!got.found) reasons.push(`line ${wanted.line}: ${at} has no \`${wanted.key}\` (absent) and must hold \`${wanted.value}\``);
+    else if (!valueMatches(got.value, wanted.value)) reasons.push(`line ${wanted.line}: ${at} holds \`${wanted.key}\` = ${JSON.stringify(got.value)} and must hold \`${wanted.value}\``);
+  }
+  if (reasons.length === 0) return { ok: true, note: `${declarations.length} ${CONSUMER_DECLARATION_KEYWORD} line(s) hold in the consumer's default branch` };
+  return { ok: false, reasons };
+}
+
+/**
+ * Pure. What the fourth direction prints and exits with: a refusal exits 1 and names both ways out; `null` when nothing was declared.
+ * @param {ConsumerDeclarationReport} report
+ * @returns {{ exit: 0 | 1, lines: string[] } | null}
+ */
+export function consumerDeclarationVerdict(report: ConsumerDeclarationReport): { exit: 0 | 1; lines: string[]; } | null {
+  if (report.ok) return report.note === null ? null : { exit: 0, lines: [`CLOSES MISMATCH: consumer declaration ok -- ${report.note}`] };
+  return { exit: 1, lines: [
+    "CLOSES MISMATCH: REFUSED -- this PR says a consumer's declaration must carry a value and closes a row while it does not (class closed-on-merge-not-outcome):",
+    ...report.reasons.map((reason) => `  ${reason}`),
+    "  Either (a) write `Closes: none -- <reason>`: the directing row then stays open and the consumer's switch row closes it; or (b) land the consumer's declaration first.",
+  ] };
+}
+
+/**
+ * THE ONE DIRECT CALL THIS DIRECTION ADDS (agent-org#873, `ceo` ruling on agent-org#838, option 1: the gh-call baseline of this file rises 2 -> 3): ONE
+ * file of the consumer's default branch, with no `ref` so GitHub answers from the default branch, raw. It moves into the code-host port when its adapter
+ * is built; it is not a fifth ticket operation (ADR 0046 decision 3). The parser's closed character set for `repo` and `path` is what lets them into
+ * the URL. `ref` (agent-org#839) names a commit; absent is the default branch. `null` on any failure: "could not read" is never "read, and it held it".
+ * @param {string} repo @param {string} path @returns {string | null}
+ */
+export function lookupConsumerFile(repo: string, path: string, ref?: string): string | null {
+  const at = ref === undefined ? "" : `?ref=${ref}`; // agent-org#839: the detector reads a file AS A MERGE LEFT IT; a caller's `ref` is a validated commit oid
+  return lookup(() => gh(["api", `repos/${repo}/contents/${path}${at}`, "-H", "Accept: application/vnd.github.raw"]));
+}
+
+/**
+ * The fourth direction end to end: the acceptance text is asked of `readText` (null when the source could not be resolved, which is reported and
+ * not read as "no declaration"), and no consumer file is asked for unless a declaration line exists and a row is closed.
+ * @param {import("./acceptance-commands.ts").ClosesDeclaration} declaration
+ * @param {() => { text: string | null, named: string }} readText
+ * @param {ConsumerFileReader} [read]
+ * @returns {{ exit: 0 | 1, lines: string[] } | null}
+ */
+export function consumerDeclarationStep(declaration: import("./acceptance-commands.ts").ClosesDeclaration, readText: () => { text: string | null; named: string; }, read: ConsumerFileReader = lookupConsumerFile): { exit: 0 | 1; lines: string[]; } | null {
+  const { text, named } = readText();
+  if (text === null) return { exit: 0, lines: [`CLOSES MISMATCH: skipped the consumer-declaration comparison -- ${named}, which the acceptance job's own report refuses`] };
+  return consumerDeclarationVerdict(consumerDeclarationReport(declaration, text, read));
+}
+
 function main() {
   refuseUnknownFlags([], { entry: import.meta.url, command: "node packages/agent-org/src/closes-mismatch-check.ts" });
   const prNumber = Number(process.argv[2]);
@@ -423,6 +528,19 @@ function main() {
   const claimed = claimedBranchStep(declaration, { prNumber, prRepo });
   for (const line of claimed?.lines ?? []) console.log(line);
   if (claimed?.exit === 1) process.exit(1);
+  const consumer = consumerDeclarationStep(declaration, () => {
+    const source = acceptanceSourceOfThisPullRequest(body, process.cwd(), prAuthorFromEnv(process.env));
+    // A refused or duplicate source has no text to read, and `sectionsTextOf`'s "" for the first would read as "declares nothing".
+    return { text: source.kind === "file" || source.kind === "body" ? source.text : null, named: sourceLine(source) };
+  });
+  // A refusal is printed and exits now. A pass or a named skip is held and printed AFTER the verdict below, so the line this check has always led
+  // with (`WARNING`, `ok`, `REFUSED`) is still first, and the note is not lost on any exit.
+  if (consumer?.exit === 1) {
+    for (const line of consumer.lines) console.log(line);
+    process.exit(1);
+  }
+  const heldNotes = consumer?.lines ?? [];
+  const printHeldNotes = () => { for (const line of heldNotes) console.log(line); };
   const resolved = lookupClosingIssues(prNumber, prRepo);
   const report = closesMismatchReport(declaration, resolved, body, prRepo);
   if (report.ok === null) {
@@ -437,6 +555,7 @@ function main() {
     // `update-branch` sweep's own re-push re-runs this); a real accidental closure sailing through
     // silently is not.
     console.log(`CLOSES MISMATCH: CANNOT ASK -- ${report.reason}`);
+    printHeldNotes();
     process.exit(2);
   }
   if (!report.ok) {
@@ -446,9 +565,11 @@ function main() {
     const siblings = fits ? recentClosesSiblings(lookupRecentClosesPrs(), prNumber) : null;
     const { exit, lines } = mismatchVerdict(report, underTest, siblings);
     for (const line of lines) console.log(line);
+    printHeldNotes();
     process.exit(exit);
   }
   console.log("CLOSES MISMATCH: ok -- declared and resolved agree");
+  printHeldNotes();
   process.exit(0);
 }
 

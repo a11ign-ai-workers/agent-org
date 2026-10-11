@@ -208,3 +208,279 @@ const ROUTE_WORDS: Readonly<Record<CiFailureRoute, string>> = Object.freeze({
 export function classNote(decision: CiFailureDecision): string {
   return `${classLine(decision)}. ${ROUTE_WORDS[decision.route]}`;
 }
+
+// ---------------------------------------------------------------------------------------------------
+// A FAILURE SHARED BY MANY PULL REQUESTS IS ONE INCIDENT (a11ign#5008). The four classes above are PER pull request, so the same broken setup step (#4988: the agent-org tool install) woke
+// every red PR's worker and two of them diagnosed it separately; and when its fix merged nothing re-ran the red PRs, because a re-run tests the OLD merge commit.
+//
+//   1. {@link holdSharedFailures}: red orders whose failing check, failing step and first error line MATCH across two or more open PRs (or whose failing step is the runner's own setup,
+//      which is never the PR's diff) are HELD -- nothing is written, as `holdForGithubIncident` does it -- and ONE incident row is filed or joined ({@link recordIncident}), its body
+//      listing the PRs. A PR with any red check that is NOT shared still goes out as today, and so does one whose log could not be read (ABSENCE IS NOT PROOF).
+//   2. {@link refreshFixed}: when the pull request closing an incident row has MERGED, every PR it notes is updated from main (`PUT /pulls/{n}/update-branch`), so CI runs against the fix
+//      with no worker turn. A refusal (a conflict) is written on the row as `Refresh-failed:`, which stops that PR being held: its worker gets the order again.
+//   3. The detector: an open PR whose red check failed BEFORE the fix merged, named like the incident's check, and still behind 10 minutes after the merge, is read, and refreshed
+//      and noted on the row when its failure matches the incident's.
+// THE ROW IS THE STATE: nothing is kept in a file. Every read that is refused leaves today's behaviour.
+
+export const SHARED_FAILURE_LABEL = "ci-shared-failure";
+/** A fix this young is still the notified PRs' to refresh; the detector waits this long before it takes a PR nobody noted. */
+export const REFRESH_GRACE_MS = 10 * 60 * 1000;
+const MAX_SIGNATURE_READS = 12;
+const MAX_INCIDENT_ROWS = 20;
+const SETUP_STEP = /^(set up job|initialize containers|complete job|checkout|run actions\/checkout)/i;
+const SIGNATURE_NOISE: readonly [RegExp, string][] = [
+  [/\d{4}-\d\d-\d\dT[\d:.]+Z\s*/g, ""], [/##\[error\]/g, ""], [/\b[0-9a-f]{7,40}\b/g, "<sha>"], [/\/home\/runner\/work\/\S*/g, "<path>"], [/\d+/g, "#"],
+];
+
+export type Run = (args: string[]) => string;
+/** One red Actions check of an open pull request, as the rollup carries it. */
+export type RedCheck = { name: string; detailsUrl: string; completedAt?: string };
+/** An open pull request with red checks: `ref` is the order's own subject (`pr-7`, `pr-agent-org#7`), `repo` is `owner/name`. */
+export type RedPr = { ref: string; repo: string; number: number; checks: RedCheck[]; headBehind?: boolean };
+export type FailureSignature = { check: string; step: string; line: string };
+
+const normalise = (line: string): string => SIGNATURE_NOISE.reduce((text, [pattern, to]) => text.replace(pattern, to), line.replace(ANSI, "")).trim().slice(0, MAX_LINE_CHARS);
+/** The key two failures share when they are the same failure. */
+export const signatureKey = ({ check, step, line }: FailureSignature): string => `${check} | ${step} | ${line}`;
+const isSetup = (signature: FailureSignature): boolean => SETUP_STEP.test(signature.step);
+
+/** The failing step and the first error line of one job, or `null` when either read was refused or the job has no failed step. Normalised, so two runs compare equal. */
+export function readSignature(check: RedCheck, run: Run): FailureSignature | null {
+  const ids = RUN_AND_JOB.exec(check.detailsUrl);
+  const repo = /^https:\/\/github\.com\/([^/]+\/[^/]+)\//.exec(check.detailsUrl)?.[1];
+  if (ids === null || repo === undefined) return null;
+  try {
+    const job = JSON.parse(run(["api", `repos/${repo}/actions/jobs/${ids[2]}`]));
+    const step = (job?.steps ?? []).find((s: { conclusion?: string }) => s.conclusion === "failure");
+    if (step === undefined) return null;
+    const log = run(["api", `repos/${repo}/actions/jobs/${ids[2]}/logs`, "--allow-escape-sequences"]).replace(ANSI, "");
+    const first = log.split("\n").find((line) => ERROR_LINE.test(line));
+    return first === undefined ? null : { check: check.name, step: String(step.name), line: normalise(first) };
+  } catch {
+    return null; // a refused read: UNCLASSIFIED, never "shared"
+  }
+}
+
+/** `prs` are the orders' subjects; `noted` the same pull requests as `owner/name#n`, which is how an incident row names them. */
+export type SharedGroup = { key: string; signature: FailureSignature; prs: string[]; noted: string[] };
+export const notedAs = (pr: Pick<RedPr, "repo" | "number">): string => `${pr.repo}#${pr.number}`;
+
+/**
+ * THE GROUPS OF THE TICK. A check name red on two or more of `prs` is read (one job each, at most {@link MAX_SIGNATURE_READS}); a group is the PRs whose signature key is equal and which
+ * number two or more, or one PR whose failing step is the runner's own setup. A PR is in a group only when EVERY one of its red checks is (a second, own failure sends its order).
+ */
+export function sharedFailureGroups(prs: readonly RedPr[], read: (check: RedCheck) => FailureSignature | null): SharedGroup[] {
+  let reads = 0;
+  const keyed = new Map<string, { signature: FailureSignature; prs: Set<string> }>();
+  const unshared = new Set<string>();
+  for (const pr of prs) {
+    for (const check of pr.checks) {
+      const signature = reads < MAX_SIGNATURE_READS ? (reads++, read(check)) : null;
+      if (signature === null) { unshared.add(pr.ref); continue; }
+      const group = keyed.get(signatureKey(signature)) ?? { signature, prs: new Set<string>() };
+      group.prs.add(pr.ref);
+      keyed.set(signatureKey(signature), group);
+    }
+  }
+  const shared = [...keyed.entries()].filter(([, g]) => g.prs.size >= 2 || isSetup(g.signature));
+  const sharedRefs = new Map<string, number>();
+  for (const [, g] of shared) for (const ref of g.prs) sharedRefs.set(ref, (sharedRefs.get(ref) ?? 0) + 1);
+  const redCount = new Map(prs.map((pr) => [pr.ref, pr.checks.length]));
+  const whole = (ref: string) => !unshared.has(ref) && (sharedRefs.get(ref) ?? 0) === redCount.get(ref);
+  const noted = new Map(prs.map((pr) => [pr.ref, notedAs(pr)]));
+  return shared.map(([key, g]) => ({ key, signature: g.signature, prs: [...g.prs].filter(whole) }))
+    .filter((g) => g.prs.length > 0).map((g) => ({ ...g, noted: g.prs.map((ref) => noted.get(ref)!) }));
+}
+
+/** Filter-cheap: only a PR with a red check name that is red on two PRs is worth a log read (whether ALL its red checks are shared is decided after). A lone red PR costs no read, so a lone setup failure is today's order. */
+export const candidates = (prs: readonly RedPr[]): RedPr[] => {
+  const seen = new Map<string, number>();
+  for (const pr of prs) for (const name of new Set(pr.checks.map((c) => c.name))) seen.set(name, (seen.get(name) ?? 0) + 1);
+  return prs.filter((pr) => pr.checks.some((c) => (seen.get(c.name) ?? 0) >= 2));
+};
+
+export type HeldOrder = { subject: string; session: string; key: string };
+/**
+ * HOLD, DO NOT WAKE: the settled-red `pr-checks-failing` orders of a shared failure are withheld and everything else goes out unchanged. `refused` are the PRs whose refresh was refused,
+ * which are never held again. Pure given `run`.
+ */
+export function holdSharedFailures<O extends { cause?: string; subject?: string; session?: string; discriminator?: string }>(
+  orders: readonly O[], { prs, run, refused = [] }: { prs: readonly RedPr[]; run: Run; refused?: readonly string[] },
+): { orders: O[]; held: HeldOrder[]; groups: SharedGroup[] } {
+  const ordered = new Set(orders.filter((o) => o.cause === "pr-checks-failing" && o.discriminator !== "hung-check" && o.discriminator !== "ejected").map((o) => o.subject));
+  const open = candidates(prs.filter((pr) => ordered.has(pr.ref)));
+  const released = new Set(prs.filter((pr) => refused.includes(notedAs(pr))).map((pr) => pr.ref));
+  const groups = sharedFailureGroups(open, (check) => readSignature(check, run));
+  const keyOf = new Map(groups.flatMap((g) => g.prs.filter((ref) => !released.has(ref)).map((ref) => [ref, g.key] as const)));
+  const held: HeldOrder[] = [];
+  const kept = orders.filter((o) => {
+    const key = o.cause === "pr-checks-failing" ? keyOf.get(String(o.subject)) : undefined;
+    if (key !== undefined) held.push({ subject: String(o.subject), session: String(o.session), key });
+    return key === undefined;
+  });
+  return { orders: kept, held, groups };
+}
+
+// ---- the incident row
+const hashOf = (key: string): string => {
+  let h = 0;
+  for (const ch of key) h = (Math.imul(h, 31) + ch.charCodeAt(0)) >>> 0;
+  return h.toString(16).padStart(8, "0");
+};
+const markerOf = (key: string): string => `<!-- ${SHARED_FAILURE_LABEL}:${hashOf(key)} -->`;
+const PRS_LINE = /^Shared-failure-prs: (.*)$/m;
+const FAILED_LINE = /^Refresh-failed: (.*)$/m;
+const REFRESHED_LINE = /^Refreshed-at: /m;
+const CHECK_LINE = /^Check: (.*)$/m;
+const listOf = (body: string, line: RegExp): string[] => (line.exec(body)?.[1] ?? "").split(",").map((s) => s.trim()).filter((s) => s !== "");
+
+type IncidentRow = { number: number; body: string; state?: string; closedByPullRequestsReferences?: { number: number; repository?: { nameWithOwner?: string } }[] };
+const readRows = (run: Run, state: "open" | "closed"): IncidentRow[] => {
+  try {
+    const rows = JSON.parse(run(["issue", "list", "--label", SHARED_FAILURE_LABEL, "--state", state, "--limit", String(MAX_INCIDENT_ROWS), "--json", "number,body,closedByPullRequestsReferences"]));
+    return Array.isArray(rows) ? rows : [];
+  } catch {
+    return [];
+  }
+};
+
+const bodyOf = (group: SharedGroup, prs: readonly string[]): string => [
+  `A failure shared by ${prs.length} open pull request(s), found by the gate: one incident, and the workers of these PRs are not woken for it.`, "",
+  `Check: ${group.signature.check}`, `Step: ${group.signature.step}`, `First error line: ${group.signature.line}`, "",
+  `Shared-failure-prs: ${prs.join(", ")}`, "",
+  "When the pull request that closes this row MERGES, the gate updates each PR above from main so CI runs against the fix. Close this row with the fix's `Closes`.", markerOf(group.key),
+].join("\n");
+
+/** File the incident row for `group`, or add its PRs to the open one. Returns the row number, or `null` when `gh` refused (the next tick retries). */
+export function recordIncident(group: SharedGroup, { run, log }: { run: Run; log: (line: string) => void }): number | null {
+  try {
+    const found = readRows(run, "open").find((row) => String(row.body).includes(markerOf(group.key)));
+    if (found === undefined) {
+      run(["label", "create", SHARED_FAILURE_LABEL, "--force", "--description", "One CI failure shared by several open pull requests"]);
+      const title = `CI failure shared by ${group.prs.length} PRs: ${group.signature.check}: ${group.signature.line}`.slice(0, 120);
+      const out = run(["issue", "create", "--title", title, "--label", SHARED_FAILURE_LABEL, "--body", bodyOf(group, group.noted)]);
+      return Number(/\/issues\/(\d+)/.exec(out)?.[1] ?? NaN) || null;
+    }
+    const noted = listOf(found.body, PRS_LINE);
+    const merged = [...new Set([...noted, ...group.noted])];
+    if (merged.length !== noted.length) run(["issue", "edit", String(found.number), "--body", bodyOf(group, merged)]);
+    return found.number;
+  } catch (error) {
+    log(`ci-shared-failure: could not file or join the incident for ${group.key} (${String((error as Error).message).split("\n")[0]}); the next tick retries\n`);
+    return null;
+  }
+}
+
+// ---- the refresh
+/** `PUT update-branch` for one pull request, `true` when GitHub accepted it, `false` when it refused (a conflict) -- never throws. */
+function updateBranch(repo: string, number: number, run: Run): boolean {
+  try {
+    run(["api", "-X", "PUT", `repos/${repo}/pulls/${number}/update-branch`]);
+    return true;
+  } catch {
+    return false;
+  }
+}
+const parseRef = (ref: string): { repo: string; number: number } | null => {
+  const m = /^([^/\s]+\/[^#\s]+)#(\d+)$/.exec(ref);
+  return m === null ? null : { repo: m[1], number: Number(m[2]) };
+};
+
+/**
+ * THE FIX REFRESHES ITS VICTIMS. Each closed incident row not yet `Refreshed-at` whose closing pull request
+ * merged is handled once: its noted PRs, still open and behind, are updated; a refusal is written as `Refresh-failed:`; then the row is stamped. Returns what was refreshed and what refused.
+ */
+export function refreshFixed({ run, log, nowMs = Date.now(), open = [] }: {
+  run: Run; log: (line: string) => void; nowMs?: number; open?: readonly RedPr[];
+}): { refreshed: string[]; refused: string[] } {
+  const refreshed: string[] = [];
+  const refused: string[] = [];
+  for (const row of readRows(run, "closed").filter((r) => !REFRESHED_LINE.test(String(r.body)))) {
+    const mergedAt = mergedFixAt(row, run);
+    if (mergedAt === null) continue;
+    const noted = listOf(row.body, PRS_LINE);
+    const late = nowMs - mergedAt >= REFRESH_GRACE_MS ? lateVictims(row, { open, mergedAt, run }).filter((ref) => !noted.includes(ref)) : [];
+    const failed: string[] = [];
+    for (const ref of [...noted, ...late]) {
+      const parsed = parseRef(ref);
+      if (parsed === null) continue;
+      if (!stillOpenAndBehind(parsed.repo, parsed.number, run)) continue;
+      (updateBranch(parsed.repo, parsed.number, run) ? refreshed : failed).push(ref);
+    }
+    refused.push(...failed);
+    stamp(row, { late, failed, run, log, nowMs });
+  }
+  return { refreshed, refused };
+}
+
+const mergedFixAt = (row: IncidentRow, run: Run): number | null => {
+  for (const pr of row.closedByPullRequestsReferences ?? []) {
+    try {
+      const repo = pr.repository?.nameWithOwner;
+      const read = JSON.parse(run(["api", `repos/${repo}/pulls/${pr.number}`]));
+      if (read?.merged_at) return Date.parse(read.merged_at);
+    } catch {
+      continue;
+    }
+  }
+  return null;
+};
+
+function stillOpenAndBehind(repo: string, number: number, run: Run): boolean {
+  try {
+    const pull = JSON.parse(run(["api", `repos/${repo}/pulls/${number}`]));
+    if (pull?.state !== "open") return false;
+    const cmp = JSON.parse(run(["api", `repos/${repo}/compare/${pull.base?.ref ?? "main"}...${pull.head?.sha}`]));
+    return Number(cmp?.behind_by ?? 0) > 0;
+  } catch {
+    return false; // could not tell: not touched
+  }
+}
+
+/** Open PRs red on the incident's check since BEFORE the fix merged, whose failure matches the incident's: the ones nobody noted. */
+function lateVictims(row: IncidentRow, { open, mergedAt, run }: { open: readonly RedPr[]; mergedAt: number; run: Run }): string[] {
+  const check = CHECK_LINE.exec(row.body)?.[1]?.trim();
+  const wanted = /^First error line: (.*)$/m.exec(row.body)?.[1]?.trim();
+  if (check === undefined || wanted === undefined) return [];
+  return open.filter((pr) => pr.checks.some((c) => c.name === check && Date.parse(String(c.completedAt)) < mergedAt && readSignature(c, run)?.line === wanted)).map(notedAs);
+}
+
+function stamp(row: IncidentRow, { late, failed, run, log, nowMs }: { late: string[]; failed: string[]; run: Run; log: (line: string) => void; nowMs: number }): void {
+  const prior = listOf(row.body, FAILED_LINE);
+  const lines = [
+    ...(late.length > 0 ? [`Late-victims: ${late.join(", ")}`] : []),
+    ...(failed.length + prior.length > 0 ? [`Refresh-failed: ${[...new Set([...prior, ...failed])].join(", ")}`] : []),
+    `Refreshed-at: ${new Date(nowMs).toISOString()}`,
+  ];
+  try {
+    run(["issue", "edit", String(row.number), "--body", `${row.body}\n\n${lines.join("\n")}`]);
+  } catch (error) {
+    log(`ci-shared-failure: refreshed but could not stamp #${row.number} (${String((error as Error).message).split("\n")[0]}); the next tick tries again\n`);
+  }
+}
+
+/** PRs whose refresh a refusal stopped: they are never held again, so the worker's order goes out as today. */
+export function refusedRefreshes(run: Run): string[] {
+  return [...readRows(run, "open"), ...readRows(run, "closed")].flatMap((row) => listOf(String(row.body), FAILED_LINE));
+}
+
+/**
+ * THE TICK'S ONE CALL. Refresh what a merged fix owes, hold what a shared failure owes nobody, file or join the incident, and return what remains. Never throws: a tick that cannot
+ * do this sends the orders as it always did.
+ */
+export function sharedFailureTick<O extends { cause?: string; subject?: string; session?: string; discriminator?: string }>(
+  orders: readonly O[], deps: { prs: readonly RedPr[]; run: Run; log?: (line: string) => void; nowMs?: number },
+): { orders: O[]; held: HeldOrder[]; refreshed: string[] } {
+  const log = deps.log ?? ((line: string) => void process.stderr.write(line));
+  try {
+    const { refreshed, refused } = refreshFixed({ run: deps.run, log, nowMs: deps.nowMs, open: deps.prs });
+    for (const ref of refreshed) log(`ci-shared-failure: updated ${ref} from main (its incident's fix merged) -- no worker woken\n`);
+    const held = holdSharedFailures(orders, { prs: deps.prs, run: deps.run, refused: [...refused, ...refusedRefreshes(deps.run)] });
+    for (const group of held.groups.filter((g) => held.held.some((h) => h.key === g.key))) recordIncident(group, { run: deps.run, log });
+    if (held.held.length > 0) log(`ci-shared-failure: holding ${held.held.length} red order(s) of a shared failure:${held.held.map((h) => ` ${h.subject}`).join("")}\n`);
+    return { orders: held.orders, held: held.held, refreshed };
+  } catch (error) {
+    log(`ci-shared-failure: could not run (${String((error as Error).message).split("\n")[0]}); the orders go out as they were\n`);
+    return { orders: [...orders], held: [], refreshed: [] };
+  }
+}

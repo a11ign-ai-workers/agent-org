@@ -1,0 +1,9 @@
+The daily retro trends `idleClaimedHours` (a11ign/agent-org#862): worker-hours idle on a claimed row with no open pull request and no fresh declaration, over every declared tracker.
+
+Acceptance: `git grep -q "POSITIVE CONTROL" -- src/packaging/org-retro.test.ts && AGENT_ORG_HOST=$HOME/repos/role-product-manager/.agent-org/host.json node --test src/packaging/org-retro.test.ts`
+
+Mutation: three, each red in its own test only and each restore byte-identical: a declaration never excusing a holder (the POSITIVE CONTROL), an open pull request never excusing (the same), a declaration always excusing however stale (the stale-declaration test).
+
+Outside-Region: .acceptance/agent~the-daily-retro-reads-agent-org-862.md — the PR's Acceptance file (ADR 0044).
+
+First reading (measured 2026-10-11T08:36Z, `readIdleClaimedHours` against the live trackers, `~/.cache/a11ign` for declarations and the wake ledger): **1.5 worker-hours**, 7 of 16 claimed rows idle, `a11ign/agent-org#850` undated and not counted. Method: for each claimed row of each declared tracker, the holder (its `session:` label) with no open pull request (by `session:` label, every declared code repository) and no declaration made after the claim and after its last turn began, counted from the latest of the window's start, the claim record's time, its last declaration and its last turn's start, to now. **Against the chairman's ~60 at 07:55Z (a hand count of 12 workers idle up to 10 h): the two are not the same measurement and 58 hours of the gap is not hidden by this number.** The chairman's count was the cumulative idle of workers over their whole claim; this one is the idle run standing at read time, since the gate keeps no history of a run that ended, so it is a floor and cannot see hours already spent. It was read 41 minutes later, after a11ign#4960 and the idle nudges. The day's first retro reading is the first full-day figure.

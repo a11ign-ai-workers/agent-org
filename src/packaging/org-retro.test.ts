@@ -18,7 +18,7 @@ import { join } from "node:path";
 import { buildReport, renderReport, retrospectiveDue, retrospectiveOrder, retrospectiveKey, retrospectiveTick, ledgerEntries, ledgerStats,
   idleStats, journalLines, releaseStats, redPrStats, mergedStats, tokenStats, CLASS_FIX_INSTRUCTION, RETRO_CAUSE, RETRO_DESTINATION, UNKNOWN,
   utcDate, NUMBERS, READINGS_FILE, compareReadings, previousReading, parseReadings, readReadings, recordReading, undeclaredDirections,
-  verdictFor } from "../org-retro.ts";
+  verdictFor, readIdleClaimedHours } from "../org-retro.ts";
 import { isBrokenRed, isHeldRed, HOLD_OWN_JOBS } from "../red-pr.ts";
 import { readLedger as readHandFixLedger, ledgerLine as handFixLine } from "../hand-fix-ledger.ts";
 import { CAUSES, JUDGMENT_CAUSES, START_CAUSES, HOLD_RED_JOBS } from "../work-gate.ts";
@@ -513,4 +513,75 @@ test("a manual run of the CLI reads the previous line and writes nothing", () =>
   assert.match(out, /Against the previous reading, 2026-10-01:/, "it compared against the line");
   assert.equal(readFileSync(path, "utf8"), readingsText(YESTERDAY), "and wrote nothing");
   assert.deepEqual(readdirSync(stateDir), [READINGS_FILE], "not even another file");
+});
+
+// --- #4957: WORKER-HOURS IDLE ON A CLAIMED ROW, on every declared tracker -------------------------------------------------------------------------
+
+/** A project with TWO trackers and one code repository, and a fake `gh` over it: six of the holders sit on the second tracker, so a read of the home tracker alone reads 60. */
+const TWO_TRACKERS = { tracker: [{ key: "a11ign", repo: "a11ign/a11ign" }, { key: "agent-org", repo: "a11ign/agent-org" }], code: [{ key: "a11ign", repo: "a11ign/a11ign" }] } as never;
+const claimedRow = (number: number, session: string, claimedAt: number) => ({ number, labels: [{ name: "claimed" }, { name: `session:${session}` }],
+  comments: Number.isNaN(claimedAt) ? [] : [{ body: "<!-- row-claim: claim record -->\nClaim record -- claimed by", createdAt: new Date(claimedAt).toISOString() }] });
+
+function idleReading({ holders, prs = [], declare = {}, ledger = "" }: { holders: { tracker: number; row: number; session: string; claimedAt: number }[];
+  prs?: { session: string }[]; declare?: Record<string, number>; ledger?: string; }) {
+  const stateDir = tmpDir("org-retro-idle-");
+  mkdirSync(join(stateDir, "worker-state"));
+  for (const [session, declaredAt] of Object.entries(declare)) {
+    writeFileSync(join(stateDir, "worker-state", `${session}.json`), JSON.stringify({ session, state: "waiting-ci", at: declaredAt, pr: { number: 1 } }));
+  }
+  writeFileSync(join(stateDir, "wake-ledger"), ledger);
+  const repos = ["a11ign/a11ign", "a11ign/agent-org"];
+  const read = (args: string[]) => {
+    const repo = args[args.indexOf("-R") + 1];
+    if (args[0] === "pr") return args.includes("merged") ? [] : prs.map((p, i) => ({ number: i + 1, body: "", headRefName: `b${i}`, labels: [{ name: `session:${p.session}` }] }));
+    const here = holders.filter((h) => repos[h.tracker] === repo);
+    return args.includes("--label") ? here.map((h) => ({ number: h.row, comments: claimedRow(h.row, h.session, h.claimedAt).comments }))
+      : here.map((h) => ({ number: h.row, labels: claimedRow(h.row, h.session, h.claimedAt).labels }));
+  };
+  return readIdleClaimedHours({ now: NOW, stateDir, declaration: TWO_TRACKERS, read });
+}
+
+test("POSITIVE CONTROL: twelve keyed holders idle ten hours across two trackers read 120, and a holder with a fresh declaration reads 0", () => {
+  const idleFor10h = Array.from({ length: 12 }, (_, i) => ({ tracker: i % 2, row: 100 + i, session: `worker-${i}`, claimedAt: NOW - 10 * HOUR_MS }));
+  const all = idleReading({ holders: idleFor10h });
+  assert.equal(all?.hours, 120, "12 holders x 10 h, each tracker's rows counted");
+  assert.equal(all?.idleClaims, 12);
+  assert.equal(idleReading({ holders: idleFor10h.filter((h) => h.tracker === 0) })?.hours, 60, "the home tracker alone would read half: the second tracker is part of the number");
+  const declared = idleReading({ holders: [idleFor10h[0]], declare: { "worker-0": NOW - 9 * HOUR_MS } });
+  assert.equal(declared?.hours, 0, "a declaration made after the claim excuses the holder");
+  assert.equal(declared?.claims, 1, "and the row is still counted as a claimed row");
+  const withPr = idleReading({ holders: [idleFor10h[0]], prs: [{ session: "worker-0" }] });
+  assert.equal(withPr?.hours, 0, "an open pull request of the holder (by session label) is not idle either");
+});
+
+test("a declaration older than the claim, or than the holder's last turn start, is stale: idle from the later of them", () => {
+  const holder = { tracker: 0, row: 7, session: "worker-7", claimedAt: NOW - 10 * HOUR_MS };
+  assert.equal(idleReading({ holders: [holder], declare: { "worker-7": NOW - 12 * HOUR_MS } })?.hours, 10, "declared before the claim");
+  const turnStart = NOW - 4 * HOUR_MS;
+  const ledger = `${turnStart}\tworker-7/ready-row-unclaimed/7\n`;
+  assert.equal(idleReading({ holders: [holder], declare: { "worker-7": NOW - 6 * HOUR_MS }, ledger })?.hours, 4, "declared, then a new turn began: the floor runs from that turn's start");
+});
+
+test("a claim older than the window counts only the window, and an undated claim is named and not counted", () => {
+  assert.equal(idleReading({ holders: [{ tracker: 0, row: 8, session: "worker-8", claimedAt: NOW - 30 * HOUR_MS }] })?.hours, 24);
+  const undated = idleReading({ holders: [{ tracker: 0, row: 9, session: "worker-9", claimedAt: Number.NaN }] });
+  assert.deepEqual(undated?.undated, ["a11ign/a11ign#9"]);
+  assert.equal(undated?.hours, 0);
+});
+
+test("a refused list is unknown, never 0, and the number is in the report and the readings line", () => {
+  const stateDir = tmpDir("org-retro-idle-");
+  assert.equal(readIdleClaimedHours({ now: NOW, stateDir, declaration: TWO_TRACKERS, read: () => null }), null, "no tracker list");
+  assert.equal(readIdleClaimedHours({ now: NOW, stateDir, declaration: TWO_TRACKERS, read: (args) => (args[0] === "pr" ? null : []) }), null, "no pull-request list");
+  const reading = { hours: 120, claims: 12, idleClaims: 12, undated: [] };
+  const base = { merged: [], openPrs: [], journal: "", ledger: "", turns: [], handFixes: HAND_FIXES_ONE, readings: parseReadings("") };
+  const report = buildReport({ ...base, idleClaimedHours: reading }, NOW);
+  assert.equal(report.numbers.idleClaimedHours, 120);
+  assert.match(renderReport(report), /^- Worker-hours idle on a claimed row with no declaration: 120 \(12 of 12 claimed rows across every declared tracker; a floor/m, "printed in the report");
+  assert.match(renderReport(report), /^- Worker-hours idle on a claimed row with no declaration: (better|worse|same|no baseline|unknown) \(now 120/m, "and trended");
+  assert.equal(buildReport(base, NOW).numbers.idleClaimedHours, null, "a read nobody made is null, not 0");
+  assert.match(renderReport(buildReport({ ...base, idleClaimedHours: null }, NOW)), /^- Worker-hours idle on a claimed row with no declaration: unknown \(/m);
+  const dir = tmpDir("org-retro-");
+  assert.equal(recordReading({ stateDir: dir, date: report.date, numbers: report.numbers }), "recorded");
+  assert.equal(JSON.parse(readFileSync(join(dir, READINGS_FILE), "utf8").trim()).numbers.idleClaimedHours, 120, "the readings file carries it");
 });

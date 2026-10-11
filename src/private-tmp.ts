@@ -23,7 +23,7 @@
 // root holds a few thousand entries at most, but the habit is the point and the cost is nothing.
 
 import { randomBytes } from "node:crypto";
-import { mkdir, readdir, rmdir, unlink } from "node:fs/promises";
+import { lstat, mkdir, readdir, rmdir, unlink } from "node:fs/promises";
 import { homedir } from "node:os";
 import { isAbsolute, join, relative, resolve, sep } from "node:path";
 
@@ -35,14 +35,26 @@ export const BASE_ENV = "A11Y_PRIVATE_TMP_BASE";
 export const LEAK_POLICY_ENV = "A11Y_PRIVATE_TMP_LEAKS";
 const RUN_PREFIX = "run-";
 const ENTRIES_NAMED_PER_FILE = 5;
+const NAMES_SHOWN_PER_DIRECTORY = 3;
 // Caches the RUNTIME writes into `TMPDIR` for any process, which no test made and none can remove: `tsx-<uid>` (tsx's transform cache), `v8-compile-cache-<uid>`
 // and `node-compile-cache` (node's; CI's `installed-layout.test.ts` left the latter on #312's first run, from the `pnpm` it spawns, and no local run showed it).
 // Measured on the first full run after #3848: the first two were the ONLY entries left in 5 files, and a report that always names the same entries is a report
 // people learn to ignore, which would also make a leak red on every run, whatever it was. Exact names only: `tsx-1000-x` is still a leak.
 const RUNTIME_CACHE = /^(?:(?:tsx|v8-compile-cache)-\d+|node-compile-cache)$/;
 
-/** A test file that left something behind: its path from the project root, and the names of what is in its directory. */
-export type Leak = { file: string; entries: string[] };
+/**
+ * What one leaked entry is, read with `lstat` and at most one `readdir` of the entry itself, never a walk. `ageMs` is how long before the teardown read it was
+ * last modified. A directory's mtime moves when something is added to or removed from it, which is what tells a late writer from a removal that never ran.
+ * `vanished` and `unreadable` are facts too: an entry the report could not read is still a leak and is never dropped for it.
+ */
+export type EntryDetail =
+  | { name: string; kind: "directory"; count: number; first: string[]; ageMs: number }
+  | { name: string; kind: "file" | "other"; ageMs: number }
+  | { name: string; kind: "vanished" }
+  | { name: string; kind: "unreadable"; reason: string };
+
+/** A test file that left something behind: its path from the project root, the names of what is in its directory, and what the first `ENTRIES_NAMED_PER_FILE` of them are. */
+export type Leak = { file: string; entries: string[]; details: EntryDetail[] };
 
 export function privateBase(env: NodeJS.ProcessEnv = process.env): string {
   return env[BASE_ENV] || join(homedir(), ".cache", "a11ign", "tmp");
@@ -100,25 +112,79 @@ export async function enterFileDir({ runRoot, testPath, projectRoot, env = proce
 }
 
 /**
- * Each test file whose directory still holds something, with what it holds. Absence of a directory is not a leak: a file whose worker never started has none. The runtime's own caches (`RUNTIME_CACHE`) are not a test's.
+ * What `name` in `dir` is. ENOENT is `vanished` (it was listed, then removed before it was read); any other failure is `unreadable` with its code. An `lstat`,
+ * so a symlink is reported as itself and never followed out of the run root.
  */
-export async function findLeaks(runRoot: string, base: string = privateBase()): Promise<Leak[]> {
+export async function describeEntry(dir: string, name: string, now: number): Promise<EntryDetail> {
+  const path = join(dir, name);
+  try {
+    const info = await lstat(path);
+    const ageMs = Math.max(0, now - info.mtimeMs);
+    if (!info.isDirectory()) return { name, kind: info.isFile() ? "file" : "other", ageMs };
+    const inside = (await readdir(path)).toSorted();
+    return { name, kind: "directory", count: inside.length, first: inside.slice(0, NAMES_SHOWN_PER_DIRECTORY), ageMs };
+  } catch (error) {
+    const code = (error as NodeJS.ErrnoException).code;
+    return code === "ENOENT" ? { name, kind: "vanished" } : { name, kind: "unreadable", reason: code ?? String(error) };
+  }
+}
+
+/**
+ * Each test file whose directory still holds something, with what it holds. Absence of a directory is not a leak: a file whose worker never started has none. The runtime's own caches (`RUNTIME_CACHE`) are not a test's.
+ * Only the names listed come from the directory read; `describe` annotates them and can never remove one, so an entry that cannot be read is still a leak.
+ */
+export async function findLeaks(
+  runRoot: string,
+  base: string = privateBase(),
+  { now = Date.now(), describe = describeEntry }: { now?: number; describe?: typeof describeEntry } = {},
+): Promise<Leak[]> {
   const root = requirePrivate(runRoot, base);
   const dirs = (await readdir(root, { withFileTypes: true })).filter((entry) => entry.isDirectory());
   const left = async (name: string) => (await readdir(join(root, name))).filter((entry) => !RUNTIME_CACHE.test(entry)).toSorted();
-  const read = await Promise.all(dirs.map(async ({ name }) => ({ file: testFileOf(name), entries: await left(name) })));
+  const read = await Promise.all(dirs.map(async ({ name }) => {
+    const entries = await left(name);
+    const details = await Promise.all(entries.slice(0, ENTRIES_NAMED_PER_FILE).map((entry) => describe(join(root, name), entry, now)));
+    return { file: testFileOf(name), entries, details };
+  }));
   return read.filter(({ entries }) => entries.length > 0).toSorted((a, b) => a.file.localeCompare(b.file));
+}
+
+/** `120ms`, `5.0s`, `3m07s`, `2h05m`: how long before the teardown, to the precision that tells a late writer from a removal that never ran. */
+function ago(ms: number): string {
+  if (ms < 1000) return `${Math.round(ms)}ms`;
+  const seconds = ms / 1000;
+  if (seconds < 60) return `${seconds.toFixed(1)}s`;
+  const minutes = Math.floor(seconds / 60);
+  if (minutes < 60) return `${minutes}m${String(Math.floor(seconds % 60)).padStart(2, "0")}s`;
+  return `${Math.floor(minutes / 60)}h${String(minutes % 60).padStart(2, "0")}m`;
+}
+
+function describeDetail(detail: EntryDetail): string {
+  switch (detail.kind) {
+    case "vanished": return `${detail.name}: vanished before it could be read`;
+    case "unreadable": return `${detail.name}: unreadable (${detail.reason})`;
+    case "file": return `${detail.name}: file, modified ${ago(detail.ageMs)} before the teardown`;
+    case "other": return `${detail.name}: not a file or directory, modified ${ago(detail.ageMs)} before the teardown`;
+    case "directory": {
+      const what = detail.count === 0
+        ? "empty directory"
+        : `directory of ${detail.count} ${detail.count === 1 ? "entry" : "entries"} (${detail.first.join(", ")}${detail.count > detail.first.length ? ", ..." : ""})`;
+      return `${detail.name}: ${what}, modified ${ago(detail.ageMs)} before the teardown`;
+    }
+  }
 }
 
 /**
  * The report's lines: one per leaking file naming the file and what it left, then a total. Empty when nothing leaked, so a clean run adds nothing to the output.
+ * Each line KEEPS its earlier text as a prefix and appends what each named entry is, so a log grep for `<file> left N in its TMPDIR` still matches.
  */
 export function leakReport(leaks: Leak[]): string[] {
   if (leaks.length === 0) return [];
-  const lines = leaks.map(({ file, entries }) => {
+  const lines = leaks.map(({ file, entries, details }) => {
     const shown = entries.slice(0, ENTRIES_NAMED_PER_FILE).join(", ");
     const more = entries.length > ENTRIES_NAMED_PER_FILE ? `, ... and ${entries.length - ENTRIES_NAMED_PER_FILE} more` : "";
-    return `  ${file} left ${entries.length} in its TMPDIR: ${shown}${more}`;
+    const what = details.length > 0 ? `; ${details.map(describeDetail).join("; ")}` : "";
+    return `  ${file} left ${entries.length} in its TMPDIR: ${shown}${more}${what}`;
   });
   return [`private-tmp: ${leaks.length} test file(s) left something in their private TMPDIR (removed with the run):`, ...lines];
 }

@@ -41,6 +41,7 @@ export { verdictAmong };
 import { waitingOn, fleetWaitingOn, todayIso, describeWaiting, ANSWER_PREFIX, answersOwedBy, bareAnswerLabel, answersGiven, ANSWER_GIVEN_WINDOW_MS }
   from "./waiting-condition.ts";
 import { newestPerName } from "./newest-check-run.ts";
+import { sharedFailureTick, type RedPr } from "./ci-failure-class.ts";
 import { reviewerInstance, subjectIdentity, subjectMention, subjectRef } from "./review-attribution.ts";
 // B4, ASKED EARLY. These are the SAME two functions `row-claim.ts` runs at claim time, imported
 // rather than reimplemented: `region-paths.ts`'s own header records why a second copy of "what
@@ -96,7 +97,7 @@ import { tapShadowReads } from "./shadow-reads.ts"; // #2849
 // Both are leaf-shaped: `auto-arm-sweep.ts` imports only `node:*`, `cli-flags.ts` (already here) and
 // `pr-hold-state.ts` (no imports at all), so the gate keeps the property its own header states.
 import { armedFromApi, openPullRequestsQueryArgs } from "./auto-arm-sweep.ts";
-import { armabilityOf, holdersOf } from "./pr-hold-state.ts";
+import { armabilityOf, holdersOf, holderOrdersOf } from "./pr-hold-state.ts";
 // #3019: ARMED-AND-EJECTED IS READ WHERE `armed` IS DECIDED. `pr-armed-state.ts` is the leaf `armedFromApi` lives in; the
 // timeline reading is its sibling and this file only RUNS the query it builds, so there is still one place deciding it.
 import { ejectionQueryArgs, queueEjectionOf } from "./pr-armed-state.ts";
@@ -125,6 +126,7 @@ import { recordIgnoredChairmanLabels, recordTickFailures as recordFailuresOf } f
 import { diskHeadroom, MIN_FREE_FRACTION } from "./disk-headroom.ts";
 // #2470: A CLAIM THAT DOES NOT MOVE. A leaf, like every import above, so the gate keeps the property its own header states.
 import { KEPT_CLAIMS_FILE, readJsonObject, writeJsonObject } from "./claim-stall.ts";
+import { WORKER_STATE_DIR, readDeclarations } from "./worker-state.ts";
 // #2845: WHO STAMPED A WORKTREE -- the reading a refused claim names. Imports only `node:*` and `lib/`, like the rest.
 import { worktreeOwner } from "./worktree-owner.ts";
 // #2542: THE PULL-REQUEST ORDERS -- the orders that ask a session to act on a pull request's state -- live in
@@ -140,6 +142,7 @@ import { labJobFinishedOrders, readLabJobRecords, readDispatchedLabJobs } from "
 // #2898: THE ORG-HEALTH FACTS AND ORDERS live in `work-gate/org-health.ts`, which imports the shared reads BACK from this file (the cycle `pr-orders.ts` above describes);
 // every name it exported is re-exported here, so no caller of `work-gate.ts` changes.
 import { orgHealthNow, rulingOrdersNow, readWaitFacts, boardTruthNow, waitTickFacts } from "./work-gate/org-health.ts";
+import { recordRouteOutcomesOnHost } from "./work-gate/route-outcome-pass.ts";
 import { quietOrgHealth, classAndKeyOf as orgHealthClassAndKey } from "./work-gate/org-health-suppression.ts"; // #4065
 import { TABLE_ROW as STANDING_ROW } from "./board-truth-audit.ts"; // agent-org#491: the row every org-health prompt already says to write on (#928)
 import { unparkingWaits } from "./unpark-satisfied.ts"; // #4050: a parked row whose every condition is true is un-parked where the tick reads the waits
@@ -160,7 +163,7 @@ import { stallOrdersOrNone, claimStallsNow, closedClaimsNow } from "./work-gate/
 import { readAgents, listingIsComplete } from "./herdr-agents.ts";
 // #3883: THE STRIP A CLOSED ROW'S CLAIM LABELS TAKE, from the leaf both it and `close-rows-for-merged-pr.ts` import -- never a second copy of the label list.
 import { stripClaimLabelsVia } from "./claim-label-strip.ts";
-import { armedAlready, EXIT as ARM_EXIT, familyNumber, runArmPr } from "./arm-pr.ts"; // agent-org#488: `runArmPr` is the command the order names, run by the gate
+import { armedAlready, EXIT as ARM_EXIT, familyMember, familyNumber, undeclaredFamilyKey, runArmPr } from "./arm-pr.ts"; // agent-org#488: `runArmPr` is the command the order names, run by the gate
 export { claimStallTick, claimStallsNow, closedClaimsNow } from "./work-gate/claim-stall-tick.ts";
 export { ROW_CALL_COUNT_SPLIT_THRESHOLD, claimedRowSession, rowCallCountSignals, ROW_CALL_COUNT_ASSESSED_MARKER,
   rowCallCountAssessedCalls, formatRowCallCountAssessment, rowCallCountOrders } from "./work-gate/row-call-count-orders.ts";
@@ -680,7 +683,7 @@ export const GH_READS = Object.freeze({
   // #3883: ONE CALL, EVERY TICK THAT HAS A COMPLETE HERDR LISTING (always, on a live org): the CLOSED rows still carrying `in-progress`, `number,labels` only, filtered
   // server-side, so what comes back is the claim debris and nothing else (the 25 live-seat rows plus whatever a hand close left since the last tick), never 264 rows' comments.
   conditionalOnCompleteHerdrListing: "issue list --state closed --label in-progress --limit 1000 --json number,labels,closedAt (readClosedClaimLabelRows, once per declared tracker -- a closed row's claim labels, stripped when the holder is not listed, or is an idle worker past ten minutes)",
-  conditionalOnListedWorker: "api graphql repository { issue(number: <each listed worker-<n>>) { state labels comments } } (readClosedClaimedRows -- a closed row's claim)",
+  conditionalOnListedWorker: "api graphql repository { issue(number: <each listed worker-<n>, and each worker-<key>-<n> in its own tracker>) { state labels comments } } (readClosedClaimedRows -- a closed row's claim, one call per tracker a listed instance is of)",
   // #3390: TWO REST CALLS PER ROW LABELLED `needs:chairman` (its `labeled` events, and its comments), and NONE when nothing carries the label.
   conditionalOnChairmanLabelledRow: "api repos/{owner}/{repo}/issues/{n}/events and /comments (withChairmanEventTimes -- chairman-answered)",
   // #3079: THREE REST CALLS PER NON-PRIMARY CODE REPOSITORY, every tick (agent-org#539; it was one) -- the newest push runs and the newest schedule runs of its `ci.yml` on
@@ -695,7 +698,8 @@ export const GH_READS = Object.freeze({
   // `branches/main` as the discriminator for its 404 (#2106, #2022) -- and the discriminator's only job
   // was to explain the admin-only 404, which `branches/main` does not give a non-admin credential. Conditional on a settled-red check.
   // #3448: AND ON A GREEN DRAFT, which the ready-flip over a red verify stamp needs the required list for (`requiredWhenNeeded`).
-  conditionalOnRed: "api branches/main (requiredCheckNames)",
+  // #5020: TWO calls when the rulesets give nothing -- `rules/branches/main` first, `branches/main` only then.
+  conditionalOnRed: "api rules/branches/main, then branches/main only if that gave no list (requiredCheckNames)",
   // #2117: ONE MORE CORE READ ON THE SAME RED TICK -- `main`'s tip commit, so the `pr-checks-failing` prompt can
   // say whether `main` moved after the failing run started. `branches/main` already carries that commit, but
   // `requiredCheckNames` returns a bare list and four tests pin its shape; a second read costs one call on a tick
@@ -1276,6 +1280,40 @@ export const MAX_ROW_ORDERS_PER_TICK = 8;
  */
 export const chairmanAsksNow = (openRowsRead: any[] | null): any[] => chairmanAskOrders({ rows: openRowsRead, now: Date.now() },
   { run: defaultRun, repo: repoNow, readItemFacts: readWaitFacts, limit: MAX_ROW_ORDERS_PER_TICK });
+
+/** Where the hold-holder check (#4970) remembers, per hold, when its holder was first read idle and when it was woken and asked about. Beside the stall memory. */
+export const HOLD_HOLDERS_FILE = "hold-holders.json";
+
+/**
+ * #4970: A HOLD ON A PULL REQUEST OUTLIVES NO HOLDER. The tick's step over the held pull requests it already read: a holder idle 30 minutes with no declared state, or whose session
+ * no workspace carries, is woken ONCE; 30 minutes later, still idle or gone, `orchestrator` is asked to decide (`pr-hold-state.ts`'s `holderStep` is the reading). It COSTS NO `gh` CALL
+ * (the pull requests are in hand) and makes one `herdr` listing when something is held. NEVER LIFTS A HOLD, and never throws: a refused pull-request list, a listing that is not the
+ * whole org or declarations that cannot be read are silence, and the memory stays as it was.
+ */
+export function holdHolderOrdersNow({ prs, now = Date.now(), stateDir = REVIEWER_STATE_DIR, agents = readAgents, log = (line: string) => process.stderr.write(line) }:
+  { prs: any[] | null; now?: number; stateDir?: string; agents?: typeof readAgents; log?: (line: string) => void; }): any[] {
+  if (prs === null) return [];
+  try {
+    const path = `${stateDir}/${HOLD_HOLDERS_FILE}`;
+    const before = readJsonObject(path);
+    const held = prs.some((pr) => holdersOf(labelsOf(pr)).length > 0);
+    if (!held) {
+      if (Object.keys(before).length > 0) writeJsonObject(path, {});
+      return [];
+    }
+    const declarations = readDeclarations(`${stateDir}/${WORKER_STATE_DIR}`);
+    if (declarations === null) {
+      log("hold-holders: the worker-state directory could not be read -- no hold is judged idle this tick.\n");
+      return [];
+    }
+    const { orders, memory } = holderOrdersOf({ prs, agents: agents(), declarations: declarations.byClaimant, memory: before, now });
+    if (JSON.stringify(memory) !== JSON.stringify(before)) writeJsonObject(path, memory);
+    return orders;
+  } catch (err) {
+    log(`hold-holders: could not run (${String((err as Error)?.message ?? err).split("\n")[0].slice(0, 160)}) -- no order this tick.\n`);
+    return [];
+  }
+}
 
 /** The label `ceo` created for "offer this row before others"; `offerOrder` reads it (#2296). */
 export const PRIORITY_LABEL = "priority";
@@ -3472,14 +3510,16 @@ function amendedOrder({ row, session, markers }: { row: any; session: string; ma
  * its END (`readNewestComments`), in ONE batched call for all such rows and none on a tick where no row is at the cap. A row whose end could not be
  * read is LEFT OUT of the page: the claim-stall pass finds no claim record for it and SKIPS it, which costs a tick, where a release destroys a worktree's claim.
  *
+ * agent-org#747: `repo` is the tracker the claimed rows are of, which the capped re-read must ask too: `run` is already aimed at it, but the batched read names its
+ * repository in the query itself, and the ambient one would read the home tracker's rows of the same numbers.
  *
  * @returns `null` when refused, never `[]`
  */
-export function readClaimedRowComments(run: (args: string[]) => string = defaultRun): any[] | null {
+export function readClaimedRowComments(run: (args: string[]) => string = defaultRun, repo: string = repoNow()): any[] | null {
   try {
     const parsed = JSON.parse(run(["issue", "list", "--state", "open", "--label", CLAIM_LABEL,
       "--limit", "200", "--json", "number,comments"]));
-    return Array.isArray(parsed) ? withNewestCommentsOfCappedRows(parsed, run) : null;
+    return Array.isArray(parsed) ? withNewestCommentsOfCappedRows(parsed, run, repo) : null;
   } catch {
     return null;
   }
@@ -3492,10 +3532,10 @@ export const ISSUE_LIST_COMMENT_CAP = 100;
  * `rows` with each capped row's comments replaced by its LAST `ISSUE_LIST_COMMENT_CAP`, oldest first -- the shape `issue list` gives, so no reader changes --
  * and a capped row whose end could not be read dropped.
  */
-function withNewestCommentsOfCappedRows(rows: any[], run: (args: string[]) => string): any[] {
+function withNewestCommentsOfCappedRows(rows: any[], run: (args: string[]) => string, repo: string): any[] {
   const capped = rows.filter((row) => (row?.comments?.length ?? 0) >= ISSUE_LIST_COMMENT_CAP);
   if (capped.length === 0) return rows;
-  const newest = readNewestComments(capped.map((row) => Number(row.number)), run);
+  const newest = readNewestComments(capped.map((row) => Number(row.number)), run, repo);
   return rows.flatMap((row) => {
     if (!capped.includes(row)) return [row];
     const comments = newest?.get(Number(row.number));
@@ -3510,8 +3550,8 @@ function withNewestCommentsOfCappedRows(rows: any[], run: (args: string[]) => st
  * how many rows are capped), or `null` when the call was refused or its answer is not whole: `errors` beside `data` is refused too (#555), and a row the
  * answer does not carry is left out of the map, never filled with `[]`.
  */
-function readNewestComments(numbers: number[], run: (args: string[]) => string): Map<number, any[]> | null {
-  const [owner, name] = repoNow().split("/");
+function readNewestComments(numbers: number[], run: (args: string[]) => string, repo: string): Map<number, any[]> | null {
+  const [owner, name] = repo.split("/");
   const fields = numbers.map((n) => `r${n}: issue(number: ${Number(n)}) { number comments(last: ${ISSUE_LIST_COMMENT_CAP}) { nodes { id body createdAt author { login } } } }`);
   try {
     const parsed = JSON.parse(run(["api", "graphql", "-f", `query=query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${fields.join(" ")} } }`,
@@ -3535,25 +3575,32 @@ function readNewestComments(numbers: number[], run: (args: string[]) => string):
  * is exactly the population whose instance can still be stopped.
  *
  * `null` FOR A REFUSAL, NEVER `[]` (#1286): an unread list is not "no closed claim", and `closedClaimOrders` says it was unread.
+ * agent-org#757: A KEYED INSTANCE (`worker-agent-org-<n>`) HOLDS A ROW OF ITS OWN TRACKER, so `tracker` aims the read there and tags each row it returns with the tracker's key and
+ * repository (`closedClaimsWhenWorkerListed` asks once per tracker). Absent, the read is the home tracker's, made exactly as it always was.
  * @param numbers the rows of the listed per-row instances
+ * @param [tracker] the declared tracker the numbers are rows of, `undefined` being the home tracker
  */
-export function readClosedClaimedRows(numbers: number[], run: (args: string[]) => string = defaultRun): import("./claim-stall.ts").ClosedClaimedRow[] | null {
-  const [owner, name] = repoNow().split("/");
+export function readClosedClaimedRows(numbers: number[], run: (args: string[], repo?: string) => string = defaultRun, tracker?: { key: string; repo: string; }): KeyedClosedClaimedRow[] | null {
+  const [owner, name] = (tracker?.repo ?? repoNow()).split("/");
   const row = "number state closedByPullRequestsReferences(first: 5) { nodes { number headRefName title } } labels(first: 50) { nodes { name } }"
     + " comments(last: 100) { nodes { body createdAt author { login } } }";
   const query = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${numbers.map((n) => `r${n}: issue(number: ${n}) { ${row} }`).join(" ")} } }`;
   try {
-    const repository = JSON.parse(run(["api", "graphql", "-f", `query=${query}`, "-F", `owner=${owner}`, "-F", `name=${name}`]))?.data?.repository;
+    const args = ["api", "graphql", "-f", `query=${query}`, "-F", `owner=${owner}`, "-F", `name=${name}`];
+    const repository = JSON.parse(tracker === undefined ? run(args) : run(args, tracker.repo))?.data?.repository;
     if (repository === null || typeof repository !== "object") return null;
     const issues: any[] = Object.values(repository);
     return issues
       .filter((issue) => issue !== null && issue.state === "CLOSED" && issue.labels.nodes.some((l: { name: string; }) => l.name === CLAIM_LABEL))
       .map((issue) => ({ number: issue.number, labels: issue.labels.nodes, comments: issue.comments.nodes,
-        closedByPullRequestsReferences: issue.closedByPullRequestsReferences.nodes }));
+        closedByPullRequestsReferences: issue.closedByPullRequestsReferences.nodes, ...(tracker === undefined ? {} : { tracker }) }));
   } catch {
     return null;
   }
 }
+
+/** A closed claimed row as `readClosedClaimedRows` returns it; `tracker` is set for a row of a tracker other than the home one (agent-org#757). */
+type KeyedClosedClaimedRow = import("./claim-stall.ts").ClosedClaimedRow & { tracker?: { key: string; repo: string; }; };
 
 /** How many closed rows carrying the claim label one read asks for: the row's own acceptance asks for the same page, and a capped read strips the rest on the next tick. */
 const CLOSED_CLAIM_LABEL_LIMIT = 1000;
@@ -3624,7 +3671,7 @@ const BETWEEN_TURNS = ["idle", "done"];
  */
 function holdsClosedRow(holder: string, closedAt: unknown, nowMs: number, status?: string) {
   const closedMs = typeof closedAt === "string" ? Date.parse(closedAt) : NaN;
-  if (familyNumber(holder) === null) return !(nowMs - closedMs > STANDING_SEAT_GRACE_MS);
+  if (familyMember(holder) === null) return !(nowMs - closedMs > STANDING_SEAT_GRACE_MS); // agent-org#757: a KEYED instance is a worker pane, not a standing seat
   if (status === undefined || !BETWEEN_TURNS.includes(status)) return true;
   return !(nowMs - closedMs > WORKER_GRACE_MS);
 }
@@ -3981,14 +4028,101 @@ export function anyChecksRed(prs: any[]) {
  * only, and this gate runs as `a11ign-ai-workers` (`permissions.admin: false`), so it 404'd on every tick
  * for four days (#2106). `branches/main` needs only `pull` and carries the same list.
  */
-const BRANCH_ENDPOINT = "repos/{owner}/{repo}/branches/main";
+const BRANCH_ENDPOINT = "branches/main";
 
 /**
- * What the gate asks of `BRANCH_ENDPOINT`: the list, plus `protected` so the "no usable list" report quotes
- * whether `main` is protected at all (`false` is a trunk fact worth escalating) instead of leaving the
- * reader to guess. Small enough to quote whole.
+ * WHERE THE REQUIRED CHECKS ARE NOW (#5020). On 2026-10-11 classic branch protection was deleted on every repo and
+ * each `merge-queue-main` ruleset took over `required_status_checks`, so `BRANCH_ENDPOINT`'s `protection` object
+ * answers `{"enabled": false, "contexts": []}` -- a read that "works" and lists nothing. `rules/branches/main`
+ * lists every rule that applies to the branch whichever ruleset it comes from, and needs only `pull`.
+ * One page is enough: a branch carries a handful of rules, far under the page size.
  */
-const BRANCH_JQ = "{protected, contexts: .protection.required_status_checks.contexts}";
+const RULES_ENDPOINT = "rules/branches/main";
+
+/**
+ * The union of the contexts of every `required_status_checks` rule in a `rules/branches/main` answer, or `null`.
+ * Filtered HERE and not by a `--jq`, so the rule shapes a branch really carries (`pull_request`, `deletion`,
+ * `merge_queue`, ...) are exercised by tests rather than by a jq string nobody runs.
+ */
+function rulesetContexts(rules: unknown): unknown {
+  if (!Array.isArray(rules)) return null;
+  return rules
+    .filter((rule) => rule?.type === "required_status_checks")
+    .flatMap((rule) => rule?.parameters?.required_status_checks ?? [])
+    .map((check: any) => check?.context);
+}
+
+/** One `gh` read: what it answered, or the first line of why it was refused. Never both, never thrown. */
+type Attempt = { answer: string; refusal?: undefined } | { refusal: string; answer?: undefined };
+
+function attempt(run: (args: string[]) => string, args: string[]): Attempt {
+  try {
+    return { answer: run(args) };
+  } catch (error) {
+    // THE REFUSAL AND THE UNUSABLE ANSWER ARE DIFFERENT FACTS, so the call is separated from the parse.
+    // A refusal says nothing about whether `main` is protected, and #2022 forbids reading it as if it did.
+    return { refusal: String((error as any)?.message ?? error).split("\n")[0].trim() };
+  }
+}
+
+/** A non-empty list of names, or `null`: an empty required set is "could not read", never "nothing blocks". */
+function usableNames(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0 || !value.every((v) => typeof v === "string" && v)) return null;
+  return [...new Set<string>(value)];
+}
+
+/**
+ * The two facts of a `branches/main` answer this gate uses: whether `main` is protected at all (`false` is a trunk fact
+ * worth escalating) and the classic list. Quoted in the report instead of the whole body, which carries a commit.
+ */
+function classicProtection(branch: any): { protected: unknown; contexts: unknown } | null {
+  if (branch === null || typeof branch !== "object") return null;
+  return { protected: branch.protected, contexts: branch.protection?.required_status_checks?.contexts };
+}
+
+/** One source's contribution to the "CANNOT READ" report; `shown` replaces the raw answer where one is smaller. */
+function describeAttempt(endpoint: string, read: Attempt, shown?: unknown): string {
+  if (read.refusal !== undefined) return `\`gh api ${endpoint}\` was REFUSED (${read.refusal})`;
+  const answer = shown === undefined || shown === null ? read.answer : JSON.stringify(shown);
+  return `\`gh api ${endpoint}\` answered, but with no usable list of contexts: ${quoted(answer)}`;
+}
+
+/** A place the required checks may be listed, in the order they are asked. */
+type RequiredSource = { path: string; names: (parsed: any) => unknown; shown?: (parsed: any) => unknown };
+
+const REQUIRED_SOURCES: RequiredSource[] = [
+  { path: RULES_ENDPOINT, names: rulesetContexts },
+  { path: BRANCH_ENDPOINT, names: (branch) => classicProtection(branch)?.contexts, shown: classicProtection },
+];
+
+/** What `readRequiredContexts` found: the contexts, or `null` and the report of why neither source gave any. */
+export type RequiredContexts = { contexts: string[]; diagnosis?: undefined } | { contexts: null; diagnosis: string };
+
+/**
+ * THE ONE READER OF "WHICH CHECKS CAN BLOCK A MERGE ON `main`" (#5020), shared by this gate's
+ * `requiredCheckNames` and `queue-table.ts`'s `requiredContexts`, which had each carried its own copy of the
+ * classic-only read and so went blind together when classic protection was deleted.
+ *
+ * RULESETS FIRST, CLASSIC ONLY WHEN THE RULESET SOURCE GIVES NOTHING: a repository the rulesets do not cover
+ * (or a refused read of them) still answers from `branches/main`'s classic list. Neither -> `null`, which is
+ * still UNKNOWN and still fails open at every caller -- never `[]`, which would read as "nothing blocks".
+ *
+ * `repo` is `owner/name`, or gh's own `{owner}/{repo}` placeholder (the gate's default) which resolves from the
+ * working directory. Never throws: a refusal becomes part of `diagnosis`.
+ */
+export function readRequiredContexts(run: (args: string[]) => string, repo = "{owner}/{repo}"): RequiredContexts {
+  const reports: string[] = [];
+  for (const source of REQUIRED_SOURCES) {
+    const endpoint = `repos/${repo}/${source.path}`;
+    // ONE CALL SITE for both sources: they differ only in path and parse, and `gh-call-ratchet` counts sites.
+    const read = attempt(run, ["api", endpoint]);
+    const parsed = read.answer === undefined ? null : parsedOrNull(read.answer);
+    const names = usableNames(source.names(parsed));
+    if (names) return { contexts: names };
+    reports.push(describeAttempt(endpoint, read, source.shown?.(parsed)));
+  }
+  return { contexts: null, diagnosis: `${reports.join("; ")}.` };
+}
 
 /**
  * The checks that can actually BLOCK A MERGE, or `null` when that could not be read.
@@ -3999,6 +4133,9 @@ const BRANCH_JQ = "{protected, contexts: .protection.required_status_checks.cont
  *
  * -- and `gate` is an aggregator whose `needs` names the nine jobs that matter. EVERY OTHER JOB IS RED
  * WITHOUT BLOCKING ANYTHING, and the gate woke a session for all of them equally.
+ *
+ * SINCE 2026-10-11 THE LIST LIVES IN THE RULESETS (#5020), not in classic protection: see `readRequiredContexts`,
+ * which reads `rules/branches/main` first and `branches/main` only when that gives nothing.
  *
  * THE WASTED PROMPT THAT FOUND THIS. `sweep` (in `auto-arm.yml`, not in `gate`'s `needs`) went red on
  * #1750 at 14:34Z. The gate woke `worker-capture` with "#1750 at 7a9d8340 has FAILING checks and is
@@ -4023,20 +4160,9 @@ const BRANCH_JQ = "{protected, contexts: .protection.required_status_checks.cont
  * ONCE PER TICK, because `requiredWhenNeeded` is the only caller and calls this at most once.
  */
 export function requiredCheckNames(run: (args: string[]) => string = defaultRun, log: (line: string) => void = (line) => process.stderr.write(line)): string[] | null {
-  let answer;
-  try {
-    answer = run(["api", BRANCH_ENDPOINT, "--jq", BRANCH_JQ]);
-  } catch (error) {
-    // THE REFUSAL AND THE UNUSABLE ANSWER ARE DIFFERENT FACTS, so the call is separated from the parse.
-    // A refusal says nothing about whether `main` is protected, and #2022 forbids reading it as if it did.
-    const why = String((error as any)?.message ?? error).split("\n")[0].trim();
-    log(cannotReadRequiredChecks(`was REFUSED (${why}).`));
-    return null;
-  }
-  const contexts = parsedOrNull(answer)?.contexts;
-  if (Array.isArray(contexts) && contexts.length > 0) return contexts;
-  log(cannotReadRequiredChecks(`answered, but with no usable list of contexts: ${quoted(answer)}.`));
-  return null;
+  const read = readRequiredContexts(run);
+  if (read.contexts === null) log(cannotReadRequiredChecks(read.diagnosis));
+  return read.contexts;
 }
 
 /** How much of an unusable answer is worth echoing before it becomes the noise it is reporting. */
@@ -4069,7 +4195,7 @@ function parsedOrNull(text: string) {
  * read as an outage. Nothing is missed -- the SAVING is.
  */
 function cannotReadRequiredChecks(diagnosis: string) {
-  return `CANNOT READ the required checks: \`gh api ${BRANCH_ENDPOINT}\` ${diagnosis} `
+  return `CANNOT READ the required checks: ${diagnosis} `
     + "Falling back to EVERY check on the head (pre-#1750 behaviour): no red pull request is missed, "
     + "but the wasted prompts #1750 was filed to stop are still being sent.\n";
 }
@@ -5339,16 +5465,18 @@ export const CLAIM_REFUSALS_FILE = "claim-refusals.json";
  *
  * A TREE A RELEASE KEPT FOR THIS ROW IS NOT A REFUSAL: the spawner adopts it (`--adopt`, #2470), so the claim lands.
  */
-export function claimRefusalOf(row: { number: number; }, { worktreesDir, kept = {}, exists = existsSync, owner = worktreeOwner }: {
+export function claimRefusalOf(row: { number: number; repoKey?: string; }, { worktreesDir, kept = {}, exists = existsSync, owner = worktreeOwner }: {
         worktreesDir: string; kept?: Record<string, { worktree?: string; }>; exists?: (path: string) => boolean;
         owner?: typeof worktreeOwner;
     }): string | null {
   const keptTree = kept[String(row.number)]?.worktree;
   if (keptTree !== undefined && exists(keptTree)) return null;
-  const path = join(worktreesDir, `wt-${row.number}`);
+  // agent-org#819: a KEYED row is claimed into `wt-<key>-<n>` (`claimNames`, `row-claim.ts`), which this file cannot import; a test pins the two.
+  const tree = `wt-${row.repoKey ? `${row.repoKey}-` : ""}${row.number}`;
+  const path = join(worktreesDir, tree);
   if (!exists(path)) return null;
   const who = owner(path);
-  return `--worktree=../wt-${row.number} ALREADY EXISTS, ${who ? `stamped by \`${who}\`` : "UNSTAMPED (nobody recorded an owner, which is not the same as free)"}. `
+  return `--worktree=../${tree} ALREADY EXISTS, ${who ? `stamped by \`${who}\`` : "UNSTAMPED (nobody recorded an owner, which is not the same as free)"}. `
     + "Refusing before any write: a claim that went on would act inside a tree it did not create.";
 }
 
@@ -7455,19 +7583,73 @@ function reportClearingDrops({ openRows, prs, closings, claimFacts }: Parameters
  *
  * @param otherScopes the other repositories' lanes, already read this tick (#3566): their open lists are not asked again
  */
-function claimStallsWithFacts(rows: Parameters<typeof claimStallsNow>[0], claimedComments: Parameters<typeof claimStallsNow>[1], prs: Parameters<typeof claimStallsNow>[2], otherScopes: ReturnType<typeof readOtherScopes>): { claimStalls: ReturnType<typeof claimStallsNow>; claimFacts: import("./work-gate/claim-stall-tick.ts").ClaimFactsOfTick | null | undefined; } {
+export function claimStallsWithFacts(rows: Parameters<typeof claimStallsNow>[0], claimedComments: Parameters<typeof claimStallsNow>[1], prs: Parameters<typeof claimStallsNow>[2], otherScopes: ReturnType<typeof readOtherScopes>,
+  seams: Pick<NonNullable<Parameters<typeof claimStallsNow>[3]>, "tick" | "merged" | "elsewhere" | "log"> & { run?: (args: string[], repo?: string) => string; } = {}): { claimStalls: ReturnType<typeof claimStallsNow>; claimFacts: import("./work-gate/claim-stall-tick.ts").ClaimFactsOfTick | null | undefined; } {
   let claimFacts: import("./work-gate/claim-stall-tick.ts").ClaimFactsOfTick | null | undefined;
+  const { run, ...stubs } = seams;
+  // agent-org#747: `trackers` is every OTHER declared tracker's claimed rows, from the lanes already read, so the stall pass evaluates their holders too
   const claimStalls = claimStallsNow(rows, claimedComments, prs, { onFacts: (facts) => { claimFacts = facts; },
-    elsewhere: () => readElsewherePrs(undefined, undefined, otherScopes) });
+    elsewhere: () => readElsewherePrs(undefined, undefined, otherScopes), trackers: () => otherTrackerClaims(otherScopes, run), ...stubs });
   return { claimStalls, claimFacts };
+}
+
+/**
+ * agent-org#747: THE CLAIMED ROWS OF EVERY OTHER DECLARED TRACKER, which the stall pass evaluates beside the home tracker's. `rows` are the lanes' own open rows
+ * (already read this tick, and `null` for a refusal, which the pass says as unread); the comments of the claimed ones are one `issue list` of THAT tracker's
+ * repository, asked only for a tracker that holds a claimed row, so a quiet tracker costs nothing. A scope with no tracker of its own has no rows to claim.
+ *
+ * @param otherScopes the other repositories' lanes, already read this tick (#3566)
+ * @param [run] the `gh` seam, handed the repository to aim at as its second argument (a test stubs it)
+ */
+export function otherTrackerClaims(otherScopes: ReturnType<typeof readOtherScopes>, run: (args: string[], repo?: string) => string = defaultRun): import("./work-gate/claim-stall-tick.ts").TrackerClaims[] {
+  return otherScopes.flatMap(({ scope, read }) => {
+    if (scope.tracker === null) return [];
+    const { repo } = scope.tracker;
+    const claimed = read.openRows !== null && read.openRows.some((row) => labelsOf(row).includes(CLAIM_LABEL));
+    return [{ key: scope.key, repo, rows: read.openRows, claimedComments: claimed ? readClaimedRowComments((args) => run(args, repo), repo) : null }];
+  });
 }
 
 /**
  * #3535: A CLOSED ROW'S CLAIM RIDES THE SAME ORDERS as the open claims': the release (and the interrupt) is one more `claim-stalled` order. The read was made with the
  * follow-ups (`closedClaimsWhenWorkerListed`), so this costs no call; `claimFacts` is untouched, because it describes the OPEN claims the blocker-cleared reading is about.
  */
-function withClosedClaims(stalls: ReturnType<typeof claimStallsWithFacts>, closedClaims: ReturnType<typeof closedClaimsWhenWorkerListed>): ReturnType<typeof claimStallsWithFacts> {
-  return { ...stalls, claimStalls: [...stalls.claimStalls, ...closedClaimsNow(closedClaims, { trackerRepo: repoNow() })] };
+export function withClosedClaims(stalls: ReturnType<typeof claimStallsWithFacts>, read: ReturnType<typeof closedClaimsWhenWorkerListed>): ReturnType<typeof claimStallsWithFacts> {
+  const { home: closedClaims, keyed } = splitClosedClaimsByTracker(read);
+  return { ...stalls, claimStalls: [...stalls.claimStalls, ...closedClaimsNow(closedClaims, { trackerRepo: repoNow() }), ...keyedClosedClaimOrders(keyed)] };
+}
+
+/**
+ * agent-org#757: THE CLOSED CLAIMS OF THE HOME TRACKER, and those of each OTHER tracker by key. The home part keeps `rows: null` (an unread list, said by `closedClaimOrders`) and
+ * the listing it was decided from; a keyed row is never decided as the home tracker's of the same number.
+ */
+function splitClosedClaimsByTracker(read: ReturnType<typeof closedClaimsWhenWorkerListed>): { home: ReturnType<typeof closedClaimsWhenWorkerListed>; keyed: Map<string, { repo: string; rows: KeyedClosedClaimedRow[]; agents: { label: string; status: string; }[] | null; }>; } {
+  const keyed = new Map<string, { repo: string; rows: KeyedClosedClaimedRow[]; agents: { label: string; status: string; }[] | null; }>();
+  if (read === null || read.rows === null) return { home: read, keyed };
+  for (const row of read.rows) {
+    if (row.tracker === undefined) continue;
+    const entry = keyed.get(row.tracker.key) ?? { repo: row.tracker.repo, rows: [], agents: read.agents };
+    entry.rows.push(row);
+    keyed.set(row.tracker.key, entry);
+  }
+  return { home: { ...read, rows: read.rows.filter((row) => row.tracker === undefined) }, keyed };
+}
+
+/**
+ * agent-org#757: A KEYED INSTANCE'S CLOSED ROW ENDS ITS CLAIM IN THE SAME PASS as a bare-number one's. The decision is `closedClaimsNow`'s own, asked of that tracker's repository
+ * (the `ownsPr` rungs name a pull request by it) with a keyed label counted as the per-row instance it is (`familyMember`, so a `working` one is interrupted). The release carries the
+ * tracker's key (agent-org#834), which is how `performRelease` reads, comments on and declines the row in THAT tracker; its subject and delivery key are spelled as the stall
+ * pass spells another tracker's row (`agent-org#730`), so the two passes' orders for one row are one entry in the ledger.
+ */
+function keyedClosedClaimOrders(keyed: ReturnType<typeof splitClosedClaimsByTracker>["keyed"]): import("./claim-stall.ts").StallOrder[] {
+  return [...keyed].flatMap(([key, { repo, rows, agents }]) => closedClaimsNow({ rows, agents }, { trackerRepo: repo, isInstance: (session) => familyMember(session) !== null })
+    .map((order) => {
+      const row = /^row-(\d+)$/.exec(order.subject)?.[1];
+      const ref = row === undefined ? null : subjectRef(key, Number(row));
+      return { ...order, ...(ref === null ? {} : { subject: `row-${ref}`, causeKey: order.causeKey.replace(/\/row-(\d+)\//, `/row-${ref}/`),
+        prompt: `${order.prompt}\n\nTHIS ROW IS \`${ref}\` OF \`${repo}\`, NOT THE PRIMARY'S #${row}: put \`--repo ${repo}\` on every \`gh\` command that names it, and read its number as \`${ref}\`.` }),
+      ...(order.release === undefined ? {} : { release: { ...order.release, tracker: key } }) };
+    }));
 }
 
 /**
@@ -7710,6 +7892,20 @@ export function githubIncidentOrder(incident: GithubIncident, held: { subject: s
   }];
 }
 
+/** The open PRs with a red Actions check, in the shape `ci-failure-class.ts` reads: `ref` is the order's own subject. */
+function redPrsOf(prs: any[]): RedPr[] {
+  return prs.map((pr) => ({
+    ref: `pr-${subjectRef(pr.repoKey, pr.number)}`, repo: pr.repo ?? repoNow(), number: pr.number,
+    checks: newestPerName(pr.statusCheckRollup ?? []).filter((c: any) => ["FAILURE", "TIMED_OUT"].includes(String(c.conclusion).toUpperCase()) && ACTIONS_JOB_URL.test(String(c.detailsUrl ?? "")))
+      .map((c: any) => ({ name: String(c.name), detailsUrl: String(c.detailsUrl), completedAt: c.completedAt })),
+  })).filter((pr) => pr.checks.length > 0);
+}
+
+/** `ci-failure-class.ts`'s `sharedFailureTick`, on this tick's open PRs. Never throws. */
+function sharedFailuresNow(orders: any[], prs: any[]): any[] {
+  return sharedFailureTick(orders, { prs: redPrsOf(prs), run: defaultRun }).orders;
+}
+
 /**
  * The tick's end of it: collect the reading, say it on stderr (its wall is the cost of the call, per tick), hold what a runner outage holds, and return the
  * signal beside what remains. `required` is the primary's, so only a pull request of the primary's repository is read against it.
@@ -7717,7 +7913,8 @@ export function githubIncidentOrder(incident: GithubIncident, held: { subject: s
 function holdForIncidentNow(status: { settle: () => GithubIncident; }, orders: any[], facts: { prs: any[]; required: string[] | null; }) {
   const incident = status.settle();
   const wall = incident.wallMs === undefined ? "wall not read" : `${incident.wallMs} ms`;
-  const { orders: kept, held } = holdForGithubIncident(orders, incident, facts);
+  const { orders: runnerKept, held } = holdForGithubIncident(orders, incident, facts);
+  const kept = sharedFailuresNow(runnerKept, facts.prs); // a11ign#5008: a failure SHARED by open PRs is one incident row and no wake each; a merged fix refreshes them
   if (incident.state === "unknown") process.stderr.write(`github-status: UNKNOWN (${incident.why}; ${wall}) -- nothing is held, the gate reads as it always did.\n`);
   else if (incident.state === "clear") process.stderr.write(`github-status: operational (call ${wall}).\n`);
   else process.stderr.write(`GITHUB INCIDENT: ${incident.name} (call ${wall}); holding ${held.length} runner-start order(s)${held.map((h) => ` ${h.subject}`).join("")}.\n`);
@@ -7760,11 +7957,36 @@ export function readLanesAfterOutageCheck(run: (args: string[], repo?: string) =
  * be read, so whether an instance exists is unknown), and `{ rows }` is the closed rows read. The listing rides along because the interrupt is decided from it.
  * @param agents herdr's own listing, or `null` when herdr could not be asked
  */
-export function closedClaimsWhenWorkerListed(agents: { label: string; status: string; }[] | null, run: (args: string[]) => string = defaultRun): { rows: import("./claim-stall.ts").ClosedClaimedRow[] | null; agents: { label: string; status: string; }[] | null; } | null {
+export function closedClaimsWhenWorkerListed(agents: { label: string; status: string; }[] | null, run: (args: string[], repo?: string) => string = defaultRun,
+  log: (line: string) => void = (line) => process.stderr.write(line)): { rows: KeyedClosedClaimedRow[] | null; agents: { label: string; status: string; }[] | null; } | null {
   if (agents === null) return { rows: null, agents };
-  const numbers = agents.flatMap((a) => familyNumber(a.label) ?? []);
-  if (numbers.length === 0) return null;
-  return { rows: readClosedClaimedRows(numbers, run), agents };
+  // agent-org#757: ONE READ PER TRACKER a listed instance is of. `familyMember` names a keyed label's row and tracker (`worker-agent-org-730` is row 730 of `agent-org`), where
+  // `familyNumber` is `null` for it BY DESIGN (730 alone would name the home tracker's row 730) and so asked about no row at all.
+  const asked = new Map<string, number[]>();
+  for (const { label } of agents) {
+    const member = familyMember(label);
+    if (member !== null) {
+      asked.set(member.key, [...(asked.get(member.key) ?? []), member.number]);
+      continue;
+    }
+    const undeclared = undeclaredFamilyKey(label);
+    if (undeclared !== null) log(`closed-claim: ${label} names tracker \`${undeclared}\`, which the project does not declare -- its row was NOT read (nothing says whose row it holds).\n`);
+  }
+  if (asked.size === 0) return null;
+  const rows: KeyedClosedClaimedRow[] = [];
+  let answered = 0;
+  for (const [key, numbers] of asked) {
+    const tracker = key === "" ? undefined : homeProjectDeclaration().tracker.find((t) => t.key === key);
+    const read = tracker === undefined && key !== "" ? null : readClosedClaimedRows(numbers, run, tracker);
+    if (read === null) {
+      if (asked.size > 1) log(`closed-claim: the closed rows of ${key === "" ? "the home tracker" : `tracker \`${key}\``} were NOT read this tick (UNREAD, which is not "no closed claim").\n`);
+      continue;
+    }
+    answered++;
+    rows.push(...read);
+  }
+  // `null` ONLY WHEN EVERY READ WAS REFUSED: one tracker's refusal must not hold another's closed rows, and is said above.
+  return { rows: answered === 0 ? null : rows, agents };
 }
 
 /**
@@ -8312,6 +8534,7 @@ function main() {
   const allOpen = promotedWhenUnblocked(openRowsRead ?? []); // #4064: BEFORE any cause reads the rows, so a row promoted here is not offered to `product-manager` as unpromoted
   const { claimedComments, closedRows, closings, closedClaims, closedClaimLabels, agents: herdrListing } = readOpenRowFollowUps(allOpen); // #3566: asked together, each still conditional on the rows in hand
   const strippedClosedClaims = stripClosedClaims(closedClaimLabels); // #3883: the closed rows whose holder herdr does not list lose their claim labels, in the tick that read them
+  recordRouteOutcomesOnHost(closedClaimLabels !== null, { gh: defaultRun }); // agent-org#752: the outcome of each closed routed row, written here because the log is on this host and the close script runs on a runner
   // #2031: A LOCAL git CALL, NOT AN API ONE -- it adds nothing to `GH_READS` and cannot be refused by an
   // exhausted pool, which is the whole reason the detection can exist. `GIT_READS` counts it.
   const offerHierarchy = offerHierarchyNow(rows, allOpen); // #4524: who the chairman's rows are, from the tracker's history, and the declared milestone ranking
@@ -8364,7 +8587,8 @@ function main() {
   const shelvedElsewhere = others.flatMap((tick, at) => tick.blocked.map((row) => ({ ...row, repo: otherScopes[at].scope.tracker?.repo })));
   orders.push(...blockingImpactOrders({ shelved: [...shelvedHere, ...shelvedElsewhere], openRows: allOpen, trackers: Object.fromEntries(keyedTrackers), prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], stateDir: REVIEWER_STATE_DIR }));
   orders.push(...reviewerAuthTick({ orders }), ...repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) }), ...orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => readReleaseRuns(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) }),
-    ...rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() }), ...chairmanAsksNow(openRowsRead)); // #2848, #2936, #2997, #4020: before the dead man's switch -- a repeating line, a stuck org: something found
+    ...rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() }), ...chairmanAsksNow(openRowsRead),
+    ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
   // FIRST OF ALL, AND ON PURPOSE (#2163): `wake` delivers in this order and records each delivery with a write, so
   // on a full disk the tick can end partway. The order that says the disk is full must not be the one behind it.
   orders.unshift(...diskOrders);

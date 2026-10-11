@@ -14,15 +14,20 @@ import { mkdtempSync, mkdirSync, rmSync, writeFileSync, readFileSync } from "nod
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { addressed, ENGINEER_BRIEF } from "./wake.ts";
+import { HOME_CHECKOUT } from "./project-config.ts";
 import { SPAWN_BRIEF_ROLES, engineerBriefSentence, briefRoleSentence } from "./spawn-role-brief.ts";
 
 const ORDER = { session: "engineers", prompt: "claim row 1 as `<you>`", cause: "ready-row-unclaimed" };
 const SPAWNED = { row: 828, branch: "agent/a-spawned-seat-828", worktree: "/tmp/wt-828", launchDir: "/tmp/wt-828" };
 const spawn = (extra: { briefRole?: string; } = {}) => addressed(ORDER, "worker-9", { spawned: SPAWNED, ...extra });
 
-/** The sentence at `origin/main` 5b68f561 (`wake.ts`'s `ENGINEER_BRIEF_SENTENCE`), as a literal. */
-const MAIN_SENTENCE = "Before you start, read `.agent-org/roles/engineer.md`: the resource ban, the acceptance standard and "
+/**
+ * The sentence at `origin/main` 5b68f561 (`wake.ts`'s `ENGINEER_BRIEF_SENTENCE`), as a literal, with the one change #850 made: the
+ * brief is named by its ABSOLUTE path under `root` (the home project's by default), never relative to the worktree.
+ */
+const mainSentenceAt = (root: string) => `Before you start, read \`${root}/.agent-org/roles/engineer.md\`: the resource ban, the acceptance standard and `
   + "the habits every engineer is held to. Nothing else tells you them.";
+const MAIN_SENTENCE = mainSentenceAt(HOME_CHECKOUT);
 
 /** A project root with a declaration and a roles directory holding exactly `files`. */
 function fixtureRoot(files: string[]): string {
@@ -65,7 +70,7 @@ test("a listed role whose brief file is absent throws, naming the path; the pres
   try {
     const wanted = join(root, ".agent-org/roles/orchestrator.md");
     assert.throws(() => briefRoleSentence("orchestrator", root), (error: Error) => error.message.includes(wanted));
-    assert.equal(briefRoleSentence("engineer", root), MAIN_SENTENCE, "the positive control: the engineer's file is there, so it answers");
+    assert.equal(briefRoleSentence("engineer", root), mainSentenceAt(root), "the positive control: the engineer's file is there, so it answers");
     writeFileSync(wanted, "# orchestrator\n");
     assert.match(briefRoleSentence("orchestrator", root), /\.agent-org\/roles\/orchestrator\.md/, "and once the file exists the same call answers");
   } finally {
