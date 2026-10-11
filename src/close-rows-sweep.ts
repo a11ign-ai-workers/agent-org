@@ -83,6 +83,9 @@ export const DEFAULT_WINDOW_MINUTES = 45;
 /** @param {string[]} args */
 const gh = (args: string[]) => execFileSync("gh", args, { encoding: "utf8" }).trim();
 
+/** The sweep's one GraphQL read, so the PR lookup and the `Closes: none` row lookup (a11ign/agent-org#750) are ONE `gh` call site, not two (gh-call-baseline.json only goes down). */
+const graphqlRead = (gh_: (args: string[]) => string, query: string, jq: string): string => gh_(["api", "graphql", "-f", `query=${query}`, "--jq", jq]);
+
 /**
  * Every PR merged into `main` within the last `windowMinutes`, via GitHub's own search -- never inferred
  * from a commit range. `gh_` is injectable so this is testable without a live repo.
@@ -149,8 +152,7 @@ export function closeOnePr(number: number, repo: string, { gh_ = gh, strip = str
       + `title body milestone{title} parent{number} `
       + `labels(first:20){nodes{name}} timelineItems(itemTypes:[REOPENED_EVENT],last:1){nodes{`
       + `... on ReopenedEvent{createdAt}}}}}}}}`;
-    const pr = JSON.parse(gh_(["api", "graphql", "-f", `query=${query}`,
-      "--jq", ".data.repository.pullRequest"]));
+    const pr = JSON.parse(graphqlRead(gh_, query, ".data.repository.pullRequest"));
     const nodes: {
         number: number; state: string; labels: { nodes: { name: string; }[]; };
         timelineItems: { nodes: { createdAt: string; }[]; };
@@ -239,7 +241,7 @@ function closesNoneOwnRowPlan({ number, repo, prMergedAt, headRefName, prBody }:
     const query = `{repository(owner:"${owner}",name:"${name}"){issue(number:${n}){number state title body milestone{title} parent{number} `
       + `labels(first:20){nodes{name}} timelineItems(itemTypes:[REOPENED_EVENT],last:1){nodes{... on ReopenedEvent{createdAt}}}}}}`;
     try {
-      const issue = JSON.parse(gh_(["api", "graphql", "-f", `query=${query}`, "--jq", ".data.repository.issue"]));
+      const issue = JSON.parse(graphqlRead(gh_, query, ".data.repository.issue"));
       if (issue === null) return null;
       const labels: string[] = (issue.labels?.nodes ?? []).map((l: { name: string; }) => l.name);
       builds.set(issue.number, typeof issue.title !== "string" ? null : { number: issue.number, title: issue.title, body: issue.body ?? "", labels,
