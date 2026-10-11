@@ -66,7 +66,7 @@ test("#2999 an idle holder short of N is `watching`, and N itself is the stall (
   assert.equal(reading({ idleSince: NOW - IDLE_CLAIMANT_MS + 1 }).kind, "watching");
   assert.equal(reading({ idleSince: NOW - IDLE_CLAIMANT_MS }).kind, "stall");
   assert.equal(reading({ idleSince: null }).kind, "watching", "no memory yet: the first idle tick starts the clock, it does not end it");
-  assert.equal(IDLE_CLAIMANT_MINUTES, 45);
+  assert.equal(IDLE_CLAIMANT_MINUTES, 30);
 });
 
 // --- Acceptance 2: each wait kind clears it, one case per entry of the exported set --------------------------------------------------------

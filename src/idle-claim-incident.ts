@@ -3,7 +3,7 @@
 //
 // CHAIRMAN, 2026-10-09: READY MEANS FINISHABLE -- a row offered to an engineer runs claim to merged waiting on nothing outside its own CI and review. worker-3870 sat idle
 // holding #3870 (a reading due a day later) while the gate deferred other ready rows for lack of an engineer, and #4438 and #4441 were held claimed 10.5 h by a read-back
-// an engineer could not do. `idle-claimant.ts` already NUDGES such a holder after 45 minutes and `claim-stall.ts` carries the nudge; neither RECORDS anything, so the daily
+// an engineer could not do. `idle-claimant.ts` already NUDGES such a holder after 45 minutes (30 since agent-org#860) and `claim-stall.ts` carries the nudge; neither RECORDS anything, so the daily
 // root-cause pass never saw the class. This leaf is the record.
 //
 // PURE, AND A LEAF (`idle-claimant.ts`, `failure-ledger.ts` and the vocabulary only): claims, pull requests, the herdr listing and the clock in, events out. THE IDLE DECISION IS
@@ -19,7 +19,7 @@ const MINUTE_MS = 60_000;
 
 /**
  * M: how long a claim may sit idle with nothing pending before it is an INCIDENT rather than a nudge. THE CHAIRMAN'S FIGURE (2026-10-09, #4642), not a derived one:
- * 15 minutes above `IDLE_CLAIMANT_MINUTES` (45, the nudge) so a holder is nudged first and the incident is the nudge having failed to move it.
+ * 15 minutes above `IDLE_CLAIMANT_MINUTES` when it was 45, 30 above it at the 30 of agent-org#860, so a holder is nudged first and the incident is the nudge having failed to move it.
  */
 export const IDLE_CLAIM_INCIDENT_MINUTES = 60;
 export const IDLE_CLAIM_INCIDENT_MS = IDLE_CLAIM_INCIDENT_MINUTES * MINUTE_MS;
