@@ -79,6 +79,13 @@
 // none, and it is reported as its own outcome. It never fires when GitHub resolved ANY row (a partial
 // resolution is GitHub's answer, not an outage), and `Closes: none` and prose mentions close nothing.
 //
+// ## agent-org#750: A `Closes: none` THAT NAMES ITS OWN ROW CLOSES THAT ROW AND FILES WHAT IT LEFT
+//
+// A holder whose last Done-when items come after the merge (a host run, a comment) wrote `Closes: none -- <the row, and what is still to do>` and the row stayed open
+// and claimed (#475 and #560, 2026-10-10). When GitHub resolved nothing and the body names no `Closes #N`, a `Closes: none` line whose reason names the row the PR's own
+// branch was built for (`closesNoneOwnRow`) is the row's deliverable merging: the row closes as built, and what the reason says is left is its verify row
+// (`planLeftoverVerifyRow`). A `Closes: none` that names no row of its own (docs and tests) is untouched, as is a row nobody holds (`planClosesNone`).
+//
 // Exit codes are the contract:
 //   0  every declared row is closed -- by this run or already
 //   1  one or more could not be closed. NAMED, never counted.
@@ -121,9 +128,12 @@ import { answersOwedBy, ANSWER_PREFIX } from "./waiting-condition.ts";
 // carries above.
 import { assertNoLeakInArgv } from "./lib/leak-patterns.ts";
 // #4641: a closed build row whose Done-when named a live reading gets its verify row filed in the same turn.
-import { fileVerifyRow, verifyMarker, type BuildRow, type DeclinedItem, type VerifyEffects, type VerifyOutcome } from "./verify-row.ts";
+import { fileLeftoverVerifyRow, fileVerifyRow, verifyMarker, type BuildRow, type DeclinedItem, type VerifyEffects, type VerifyOutcome } from "./verify-row.ts";
 
 export const EXIT = { DONE: 0, COULD_NOT_CLOSE: 1, CANNOT_ASK: 2, STATUS_NOT_MOVED: 3 };
+
+/** Whose word a closure is made on: GitHub's own resolution, the body's `Closes #N` lines (#2822), or a `Closes: none` that names its own row (agent-org#750). */
+export type ClosureBasis = "github" | "body" | "closes-none";
 
 /**
  * THE EXIT BOTH CLOSE-ROWS PATHS TAKE, PURE (#1299). A row that could not be closed outranks a closed row whose
@@ -250,6 +260,53 @@ export { labelsToStrip };
 export function rowNumberFromBranch(headRefName: string | null | undefined): number | null {
   const match = /-(\d+)$/.exec((headRefName ?? "").trim());
   return match ? Number(match[1]) : null;
+}
+
+/** `owner/repo#7` or a bare `#7` in a reason; a bare one is the pull request's own repository's. NOT `a11ign#7`: an owner alone is no repository. */
+const ROW_REFERENCE = /(?<![A-Za-z0-9_./-])(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+)\b/g;
+
+/**
+ * agent-org#750: THE ROW A `Closes: none` NAMES AS ITS OWN. A LINE that starts with `Closes: none`, with a reason, that names (as `#N` or `owner/repo#N`) the row the PR's
+ * branch ends in (`rowNumberFromBranch`): the two together, never either alone. The branch alone is #2036's hint and is common on a PR that finishes nothing; the reason alone
+ * names a row in prose (`follows #99`) that this PR was not built for. Line-anchored like `declaredRowsFromBody`, for its reason (#549: a prose mention is not a declaration).
+ * A reference counts only when it resolves to `rowsRepo`, the repository whose rows this run closes: a bare `#N` is `prRepo`'s (#2995).
+ * @param {{ body: string | null | undefined, headRefName: string | null | undefined, prRepo: string, rowsRepo: string }} pr
+ * @returns {{ number: number, reason: string } | null}
+ */
+export function closesNoneOwnRow({ body, headRefName, prRepo, rowsRepo }: { body: string | null | undefined; headRefName: string | null | undefined; prRepo: string; rowsRepo: string; }): { number: number; reason: string; } | null {
+  const own = rowNumberFromBranch(headRefName);
+  if (own === null) return null;
+  for (const line of (body ?? "").split(/\r?\n/)) {
+    const match = /^\s*closes:\s*none\b(.*)$/i.exec(line);
+    if (!match) continue;
+    const reason = match[1].replace(/^[\s:\u2014\u2013-]+/, "").trim();
+    if (reason === "") continue;
+    const named = [...reason.matchAll(ROW_REFERENCE)].some((ref) => Number(ref[2]) === own && (ref[1] ?? prRepo).toLowerCase() === rowsRepo.toLowerCase());
+    if (named) return { number: own, reason };
+  }
+  return null;
+}
+
+export type ClosesNonePlan =
+  | { kind: "none" }
+  | { kind: "unclaimed"; number: number; reason: string }
+  | { kind: "plan"; plan: ReturnType<typeof closurePlan> & { unreadable?: number[]; }; leftover: { number: number; reason: string; }; unreadable: number[]; };
+
+/**
+ * agent-org#750: WHAT A MERGED PR'S `Closes: none` OWN-ROW DECLARATION CLOSES. `none` when it names no row of its own (the control: docs and tests are untouched). The row is
+ * then READ and weighed as every declared row is: a row nobody holds (open, no claim label) is `unclaimed` and left, a row that cannot be read is named `unreadable` and not
+ * closed ("could not read" is never "closed"), a row reopened after this merge is `skip`, and a row already closed is `already` (its verify row is still owed, and idempotent).
+ * Called only when GitHub resolved nothing and the body names no `Closes #N`: GitHub's answer and the body's own list both outrank it.
+ */
+export function planClosesNone({ prMergedAt, prBody, headRefName, prRepo, rowsRepo }: {
+  prMergedAt: string | null; prBody: string | null | undefined; headRefName: string | null | undefined; prRepo: string; rowsRepo: string;
+}, lookupRow: (n: number) => { number: number; state: string; labels: string[]; reopenedAt: string | null; } | null): ClosesNonePlan {
+  const leftover = closesNoneOwnRow({ body: prBody, headRefName, prRepo, rowsRepo });
+  if (leftover === null) return { kind: "none" };
+  const row = lookupRow(leftover.number);
+  if (row === null) return { kind: "plan", plan: { ...closurePlan([], { prMergedAt }), none: false, unreadable: [leftover.number] }, leftover, unreadable: [leftover.number] };
+  if (row.state === "OPEN" && !row.labels.includes(CLAIM_LABEL)) return { kind: "unclaimed", ...leftover };
+  return { kind: "plan", plan: closurePlan([row], { prMergedAt }), leftover, unreadable: [] };
 }
 
 /**
@@ -441,10 +498,15 @@ const rowName = (n: number, prNumber: string) => (prNumber.includes("#") ? `${RE
 /**
  * #2822: THE SENTENCE A CLOSING COMMENT OPENS WITH. A closure made from the body's declaration says so, and
  * says why, because a reader of the row would otherwise take GitHub's silence for a closure GitHub made.
- * @param {number} n @param {string} prNumber @param {string} sha @param {"github" | "body"} basis
+ * @param {number} n @param {string} prNumber @param {string} sha @param {ClosureBasis} basis
  * @returns {string}
  */
-function openingSentence(n: number, prNumber: string, sha: string, basis: "github" | "body"): string {
+function openingSentence(n: number, prNumber: string, sha: string, basis: ClosureBasis): string {
+  if (basis === "closes-none") {
+    return `Closed by the pipeline: PR ${prName(prNumber)} merged as \`${sha}\` and declared \`Closes: none\` with a reason that names this row (${rowName(n, prNumber)}) as `
+      + "the pull request's own, so the merge is the row's deliverable and the row closes with it (agent-org#750; the chairman, a11ign#4437: a row closes when its "
+      + "deliverable merges). What the reason says is still to do is filed as this row's verify row by the same pass.\n\n";
+  }
   if (basis === "body") {
     return `Closed by the pipeline FROM THE PR BODY'S DECLARATION: PR ${prName(prNumber)} merged as \`${sha}\` and `
       + `declared \`Closes ${rowName(n, prNumber)}\`, but GitHub resolved NO closing reference for it (a repo-wide condition from `
@@ -462,10 +524,10 @@ function openingSentence(n: number, prNumber: string, sha: string, basis: "githu
  * The whole closing comment, PURE so a test reads the words a row will carry. The `github` basis is the comment
  * this job has always posted, byte for byte.
  * @param {number} n
- * @param {{ prNumber: string, sha: string, owedBy?: string[], basis?: "github" | "body" }} ctx
+ * @param {{ prNumber: string, sha: string, owedBy?: string[], basis?: ClosureBasis }} ctx
  * @returns {string}
  */
-export function closingComment(n: number, { prNumber, sha, owedBy = [], basis = "github" }: { prNumber: string; sha: string; owedBy?: string[]; basis?: "github" | "body"; }): string {
+export function closingComment(n: number, { prNumber, sha, owedBy = [], basis = "github" }: { prNumber: string; sha: string; owedBy?: string[]; basis?: ClosureBasis; }): string {
   return `${openingSentence(n, prNumber, sha, basis)}If the work did not land, reopen and say so on `
     + `the row: \`git show ${sha}\` is what actually merged.${owedNote(owedBy)}`;
 }
@@ -476,14 +538,14 @@ export function closingComment(n: number, { prNumber, sha, owedBy = [], basis = 
  * #2202: `owedBy` names the sessions still owing an answer on this row, and the closing comment says so IN THE
  * SAME ACT as the close -- the row's own record that the question survived it and who still owes it.
  * @param {number} n
- * @param {{ prNumber: string, sha: string, repo: string, owedBy?: string[], basis?: "github" | "body" }} ctx
+ * @param {{ prNumber: string, sha: string, repo: string, owedBy?: string[], basis?: ClosureBasis }} ctx
  * @returns {boolean}
  */
-function closeOneRow(n: number, { prNumber, sha, repo, owedBy = [], basis = "github" }: { prNumber: string; sha: string; repo: string; owedBy?: string[]; basis?: "github" | "body"; }): boolean {
+function closeOneRow(n: number, { prNumber, sha, repo, owedBy = [], basis = "github" }: { prNumber: string; sha: string; repo: string; owedBy?: string[]; basis?: ClosureBasis; }): boolean {
   const sentence = closingComment(n, { prNumber, sha, owedBy, basis });
   try {
     gh(["issue", "close", String(n), "--repo", repo, "--comment", sentence, "--reason", "completed"]);
-    console.log(`CLOSE-ROWS: #${n} CLOSED${basis === "body" ? " FROM THE BODY'S DECLARATION" : ""} (PR ${prName(prNumber)}, merge ${sha}).`);
+    console.log(`CLOSE-ROWS: #${n} CLOSED${basis === "body" ? " FROM THE BODY'S DECLARATION" : basis === "closes-none" ? " FROM A `Closes: none` THAT NAMES IT" : ""} (PR ${prName(prNumber)}, merge ${sha}).`);
     return true;
   } catch (cause) {
     console.log(`CLOSE-ROWS: #${n} COULD NOT CLOSE -- ${cause instanceof Error ? cause.message : cause}`);
@@ -591,7 +653,7 @@ export function liveOrphanEffects(repo: string): {
  *
  * @param {{ close: {number:number, labels:string[]}[], already: {number:number, labels:string[]}[],
  *   skip?: {number:number, labels:string[]}[], owed?: {number:number, session:string}[], unreadable?: number[] }} plan
- * @param {{ prNumber: string, sha: string, repo: string, basis?: "github" | "body" }} ctx
+ * @param {{ prNumber: string, sha: string, repo: string, basis?: ClosureBasis }} ctx
  * @param {ClosureEffects} effects
  * @returns {{ failed: number[], unsettled: import("./settle-closed-status.ts").Refusal[], skipped: number[],
  *   owed: { number: number, session: string }[] }}
@@ -602,7 +664,7 @@ export function liveOrphanEffects(repo: string): {
 export function applyClosurePlan({ close, already, skip = [], owed = [], unreadable = [] }: {
         close: { number: number; labels: string[]; }[]; already: { number: number; labels: string[]; }[];
         skip?: { number: number; labels: string[]; }[]; owed?: { number: number; session: string; }[]; unreadable?: number[];
-    }, ctx: { prNumber: string; sha: string; repo: string; basis?: "github" | "body"; }, effects: ClosureEffects): {
+    }, ctx: { prNumber: string; sha: string; repo: string; basis?: ClosureBasis; }, effects: ClosureEffects): {
     failed: number[]; unsettled: import("./settle-closed-status.ts").Refusal[]; skipped: number[];
     owed: { number: number; session: string; }[];
 } {
@@ -707,9 +769,15 @@ export function planForMergedPr({ issues, prMergedAt, prBody }: {
  * nothing and the plan is the body's own declaration. A declared row that could not be read is named here too.
  * Says nothing for a plan GitHub made.
  * @param {string} number
- * @param {{ basis: "github" | "body", declared: number[], unreadable: number[] }} planned
+ * @param {{ basis: ClosureBasis, declared: number[], unreadable: number[] }} planned
  */
-function announceBodyPlan(number: string, { basis, declared, unreadable }: { basis: "github" | "body"; declared: number[]; unreadable: number[]; }) {
+function announceBodyPlan(number: string, { basis, declared, unreadable }: { basis: ClosureBasis; declared: number[]; unreadable: number[]; }) {
+  if (basis === "closes-none") {
+    console.log(`CLOSE-ROWS: #${number} GitHub resolved NO closing reference and the body lists none, but its \`Closes: none\` reason names #${declared.join(", #")}, `
+      + "the row this branch was built for -- closing it as built and filing what is left (agent-org#750).");
+    for (const n of unreadable) console.log(`CLOSE-ROWS: #${n} COULD NOT BE READ -- declared, not closed.`);
+    return;
+  }
   if (basis !== "body") return;
   console.log(`CLOSE-ROWS: #${number} GitHub resolved NO closing reference, but the body declares `
     + `#${declared.join(", #")} -- closing FROM THE BODY'S DECLARATION (#2822).`);
@@ -783,23 +851,26 @@ export function verifyOutcomeLine(n: number, outcome: VerifyOutcome): string | n
   if (outcome.kind === "already") return `VERIFY-ROW: #${n} already has verify row #${outcome.number} -- none filed.`;
   if (outcome.kind === "failed") return `VERIFY-ROW: #${n} NOT FILED -- ${outcome.reason}.`;
   const problems = outcome.problems.length ? ` BUT ${outcome.problems.join("; ")}` : "";
-  return `VERIFY-ROW: #${n} verify row #${outcome.number} FILED (Not-before ${outcome.plan.notBefore})${problems}.${declinedClause(outcome.declined)}`;
+  return `VERIFY-ROW: #${n} verify row #${outcome.number} FILED (${outcome.plan.notBefore === null ? "no Not-before" : `Not-before ${outcome.plan.notBefore}`})${problems}.${declinedClause(outcome.declined)}`;
 }
 
 /**
  * #4641: FILES THE VERIFY ROW OF EVERY ROW THIS RUN CLOSED (or found closed by this merge), and returns the rows with a live reading whose verify row could not be filed, so the exit says so --
  * a lost verify row is a build the epic never learns the reading of. A row that cannot be READ is named `NOT CHECKED` and does not fail the job: most rows name no reading, and a read
  * hiccup must not turn every merge red. The job is idempotent, so its re-run files what failed. BOTH closing paths call this (a11ign/agent-org#719): the sweep is the one a push takes.
- * @param {number[]} closed @param {{ prNumber: string, mergedAt: string }} ctx
+ * @param {number[]} closed @param {{ prNumber: string, mergedAt: string, leftover?: { number: number, reason: string } }} ctx `leftover` is the row a `Closes: none` named as its
+ *   own (agent-org#750): its verify row carries what the reason left, through `fileLeftoverVerifyRow`, and not what the classifier reads off its Done-when.
  * @param {{ read: (n: number) => BuildRow | null, effects: VerifyEffects, say: (line: string) => void }} deps
  * @returns {number[]}
  */
-export function fileVerifyRowsFor(closed: number[], ctx: { prNumber: string; mergedAt: string; }, deps: { read: (n: number) => BuildRow | null; effects: VerifyEffects; say: (line: string) => void; }): number[] {
+export function fileVerifyRowsFor(closed: number[], ctx: { prNumber: string; mergedAt: string; leftover?: { number: number; reason: string; }; }, deps: { read: (n: number) => BuildRow | null; effects: VerifyEffects; say: (line: string) => void; }): number[] {
   const lost: number[] = [];
   for (const n of closed) {
     const build = deps.read(n);
     if (build === null) { deps.say(`VERIFY-ROW: #${n} NOT CHECKED -- the row could not be read, so whether it names a live reading is unknown.`); continue; }
-    const outcome = fileVerifyRow(build, { pr: prName(ctx.prNumber), mergedAt: ctx.mergedAt }, deps.effects);
+    const outcome = ctx.leftover?.number === n
+      ? fileLeftoverVerifyRow(build, { pr: prName(ctx.prNumber), mergedAt: ctx.mergedAt, reason: ctx.leftover.reason }, deps.effects)
+      : fileVerifyRow(build, { pr: prName(ctx.prNumber), mergedAt: ctx.mergedAt }, deps.effects);
     const line = verifyOutcomeLine(n, outcome);
     if (line !== null) deps.say(line);
     if (outcome.kind === "failed") lost.push(n);
@@ -890,8 +961,23 @@ function main() {
 
   // #2995: from another repository a bare `Closes #N` is not a tracker row, so the body fallback is not asked.
   const prRef = repo === REPO ? number : `${repo}#${number}`;
-  const { plan, basis, declared, unreadable } = planForMergedPr({ issues, prMergedAt, prBody: repo === REPO ? prBody : "" },
+  const planned = planForMergedPr({ issues, prMergedAt, prBody: repo === REPO ? prBody : "" },
     (n) => liveLookupDeclaredRow(n, REPO));
+  let { plan, declared, unreadable } = planned;
+  let basis: ClosureBasis = planned.basis;
+  // agent-org#750: GitHub resolved nothing and the body lists no `Closes #N`; a `Closes: none` that names the PR's own row is the last reading.
+  let leftover: { number: number; reason: string; } | undefined;
+  if (plan.none && declared.length === 0) {
+    const own = planClosesNone({ prMergedAt, prBody, headRefName, prRepo: repo, rowsRepo: REPO }, (n) => liveLookupDeclaredRow(n, REPO));
+    if (own.kind === "unclaimed") {
+      console.log(`CLOSE-ROWS: #${number}'s \`Closes: none\` names #${own.number}, which is open and not claimed -- nobody holds it, so it is left (agent-org#750).`);
+    } else if (own.kind === "plan") {
+      ({ plan, unreadable } = own);
+      basis = "closes-none";
+      declared = [own.leftover.number];
+      leftover = own.leftover;
+    }
+  }
 
   if (plan.none && declared.length === 0) {
     // NOT a failure, and not silence either. Most PRs declare nothing.
@@ -909,7 +995,7 @@ function main() {
   for (const line of lines) console.error(line);
   // #4641: the verify row of each build row that left the open population at this merge, filed in the same turn.
   const closedHere = [...plan.close, ...plan.already].map((row) => row.number).filter((n) => !result.failed.includes(n));
-  const lost = prMergedAt === null ? [] : fileVerifyRowsFor(closedHere, { prNumber: prRef, mergedAt: prMergedAt },
+  const lost = prMergedAt === null ? [] : fileVerifyRowsFor(closedHere, { prNumber: prRef, mergedAt: prMergedAt, ...(leftover ? { leftover } : {}) },
     { read: (n) => liveReadBuildRow(n, REPO), effects: liveVerifyEffects(REPO), say: (line) => console.log(`CLOSE-ROWS: ${line}`) });
   if (lost.length) console.error(`CLOSE-ROWS: no verify row for ${lost.length} closed build row(s): ${lost.map((n) => `#${n}`).join(" ")} -- the job is idempotent, so a re-run files it.`);
   exitAfterSweep(code === EXIT.DONE && lost.length ? EXIT.COULD_NOT_CLOSE : code);
