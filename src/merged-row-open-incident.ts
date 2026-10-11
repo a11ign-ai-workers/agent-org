@@ -32,14 +32,14 @@ export type NamingPr = { repo: string, number: number, body?: string | null, hea
 
 export type MergedRowOpenIncident = { row: OpenRow, pr: NamingPr, openMinutes: number, ref: string };
 
-type RowRef = { repo: string | null, number: number };
+export type RowRef = { repo: string | null, number: number };
 
 const keyOf = ({ repo, number }: { repo: string, number: number }): string => `${repo}#${number}`;
 
 /** `owner/repo#7` or a bare `#7`: the shapes a `Closes: none` reason can name a row in. */
 const NAMED_IN_REASON = /(?:([A-Za-z0-9_.-]+\/[A-Za-z0-9_.-]+))?#(\d+)/g;
 
-function referencesInReason(reason: string): RowRef[] {
+export function referencesInReason(reason: string): RowRef[] {
   return [...reason.matchAll(NAMED_IN_REASON)].map((match) => ({ repo: match[1] ?? null, number: Number(match[2]) }));
 }
 
