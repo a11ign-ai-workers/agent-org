@@ -8,6 +8,6 @@ Measured: `src/pr-open.test.ts` is `19 passed` in the worktree `~/repos/agent-or
 
 Not here, and named: `tsc --noEmit` cannot load `@types/node` in this worktree (`node_modules` is a link to the primary checkout's, which has no `@types`), so CI is the first typecheck of this change; run with `--typeRoots` at a11y-witness's `@types` it reported nothing in `pr-open`. `eslint` is not installed in the worktree.
 
-Closes: none -- first half of a11ign/a11ign#5036 (the pr-open refusal); the engineer brief's half, in a11ign/a11ign, carries the Closes
+Closes: none -- the pr-open refusal; the row it serves is closed by the pull request on its claimed branch in a11ign/a11ign, which carries the Closes
 
 platform: nothing in GitHub refuses `--draft` at create time; a branch-protection or ruleset rule cannot see the flag, only the draft state afterwards.
