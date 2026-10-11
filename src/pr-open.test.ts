@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "./lib/tmp-fixture.ts";
-import { armAfterCreate, checkRegion, draftRefusal, EXIT_NOTHING_SENT, EXIT_QUEUED, main, readQueuedEntry, sendToGitHub } from "./pr-open.ts";
+import { armAfterCreate, checkRegion, draftRefusal, EXIT_NOTHING_SENT, EXIT_QUEUED, labelAfterCreate, main, readQueuedEntry, sendToGitHub } from "./pr-open.ts";
 import { REPO } from "./project-identity.ts";
 import { QUEUED_EXIT } from "./gh-ledger.ts";
 
@@ -271,4 +271,45 @@ test("a11ign#5036: a Draft-because line with a reason lets `--draft` through, an
 test("a11ign#5036 (NEGATIVE CONTROL): a create without --draft, and an edit, are never refused for a missing reason", () => {
   assert.equal(draftRefusal("create", ["--head", "agent/x"], "no reason, and no draft"), null);
   assert.equal(draftRefusal("edit", ["--draft"], "an edit has no --draft to explain"), null);
+});
+
+// agent-org#952: `pr:open create --repo R` with no `--head` armed with `gh pr merge --auto --merge --repo R` and NO selector, which gh refuses
+// ("argument required when using the --repo flag"), so the PR was left unarmed and its session label never ran. The create was made from the
+// tree's own branch, so the arm and the label name that branch when `--repo` is given. Without `--repo` the argv is what it always was.
+const REPO_952 = "a11ign/agent-org";
+test("#952: a create with --repo and no --head arms the branch it was made from", () => {
+  assert.deepEqual(armAfterCreate("create", ["--repo", REPO_952, "--title", "t"], "agent/x"),
+    [["pr", "merge", "--auto", "--merge", "agent/x", "--repo", REPO_952]]);
+});
+
+test("#952: --head still names the pull request, and wins over the tree's branch", () => {
+  assert.deepEqual(armAfterCreate("create", ["--head", "agent/h", "--repo", REPO_952], "agent/x"),
+    [["pr", "merge", "--auto", "--merge", "agent/h", "--repo", REPO_952]]);
+});
+
+test("#952 (NEGATIVE CONTROL): with no --repo and no --head the arm is unchanged, and --draft still arms nothing with --repo", () => {
+  assert.deepEqual(armAfterCreate("create", ["--title", "t"]), [["pr", "merge", "--auto", "--merge"]]);
+  assert.deepEqual(armAfterCreate("create", ["--draft", "--repo", REPO_952], "agent/x"), []);
+});
+
+test("#952: --repo with no branch to name arms nothing, rather than the argv gh refuses", () => {
+  assert.deepEqual(armAfterCreate("create", ["--repo", REPO_952], null), []);
+});
+
+test("#952: the session label names the same branch with --repo", () => {
+  assert.deepEqual(labelAfterCreate("create", ["--repo", REPO_952], "ceo", "agent/x"),
+    [["pr", "edit", "agent/x", "--repo", REPO_952, "--add-label", "session:ceo"]]);
+});
+
+test("#952 THROUGH sendToGitHub: the arm and the label of a `--repo` create reach `run` naming the branch", () => {
+  const ran: string[][] = [];
+  const code = sendToGitHub("create", ["--repo", REPO_952, "--title", "t", "--body", "b"], {
+    run: (a) => { ran.push(a); }, git: (a) => (a.includes("--abbrev-ref") ? "agent/x" : "abc1234"), err: () => {},
+    owner: () => "ceo", labelExists: () => true,
+  });
+  assert.equal(code, 0);
+  assert.deepEqual(ran.slice(1), [
+    ["pr", "merge", "--auto", "--merge", "agent/x", "--repo", REPO_952],
+    ["pr", "edit", "agent/x", "--repo", REPO_952, "--add-label", "session:ceo"],
+  ]);
 });
