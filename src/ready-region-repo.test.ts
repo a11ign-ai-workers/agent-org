@@ -37,7 +37,7 @@ const hasTopLevel = (checkout: string, top: string): boolean | null =>
 
 const body = (region: string) => `## Repository\n\nThe repository is \`a11ign/agent-org\`.\n\n## Region\n\n${region}\n\n## Acceptance\n\n\`\`\`\nx\n\`\`\`\n`;
 const check = (region: string, deps: Partial<Parameters<typeof absentRegionTopDirReason>[1]> = {}) =>
-  absentRegionTopDirReason(body(region), { code: CODE, trackerRepo: "a11ign/agent-org", checkoutOf, hasTopLevel, ...deps });
+  absentRegionTopDirReason(body(region), { code: CODE, trackerRepo: "a11ign/agent-org", checkoutOf, hasTopLevel, present: () => true, ...deps });
 
 test("POSITIVE CONTROL: a bare Region path into a directory the repository lacks is refused, naming the path, the tracker and the holder", () => {
   // packages/ exists only in the nvda-worker clone, so the refusal must name that repository as the holder.
@@ -73,6 +73,11 @@ test("a keyed row is refused when its own clone lacks the directory, and names t
 test("a keyed entry whose clone is not declared on this host is not checked, so the filing is not refused (#2623)", () => {
   // The host has no clones.nvda-worker yet: the entry cannot be read, and refusing would stop every such row filing as it does today.
   assert.equal(check("nvda-worker:packages/x.ts", { checkoutOf: (key) => (key === "" ? "primary" : null) }), null);
+});
+
+test("a checkout that is not on this disk is skipped, not refused: the CI runner has no ~/repos/agent-org and the board suite files rows against it", () => {
+  // The primary is named but absent: nothing can be read, so nothing is refused. An unreadable checkout that IS present is still refused (below).
+  assert.equal(check("`packages/guards/src/x.test.ts`", { present: () => false }), null);
 });
 
 test("an unreadable origin/main is refused, never read as a pass", () => {

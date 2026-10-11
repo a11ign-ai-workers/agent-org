@@ -95,7 +95,7 @@ import {
   acceptancePathsReason, classifyCommand, extractAcceptanceSection, fleetOrLabAcceptance, jobCapabilities,
   unmetClosureRequirements, untrimmedFleetMention, declarationDisagreement, handRunAcceptanceReason, labFetchPathReason,
 } from "./acceptance-commands.ts";
-import { readFileSync, realpathSync, statSync } from "node:fs";
+import { existsSync, readFileSync, realpathSync, statSync } from "node:fs";
 import { pathToFileURL } from "node:url";
 import { flagValue, refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { leakRefusalReason } from "./lib/leak-patterns.ts";
@@ -375,12 +375,13 @@ export function bareKeyedRegionReason(body: string, { code = homeProjectDeclarat
  * read either. An UNREADABLE clone is a refusal, not a pass: `git ls-tree` failing is "could not tell", and this file refuses on silence.
  * @param {string} body
  * @param {{ code?: readonly { key: string, repo: string }[], trackerRepo?: string, checkoutOf?: (key: string) => string | null,
- *   hasTopLevel?: (checkout: string, top: string) => boolean | null }} [deps] every read is injectable; absent, it is the real one
+ *   hasTopLevel?: (checkout: string, top: string) => boolean | null, present?: (checkout: string) => boolean }} [deps] every read is injectable; absent, it is the real one
  * @returns {string | null}
  */
 export function absentRegionTopDirReason(body: string, { code = homeProjectDeclaration().code, trackerRepo = homeProjectDeclaration().repo,
-  checkoutOf = checkoutOfKey, hasTopLevel = repoHasTopLevelDir }: { code?: readonly { key: string; repo: string; }[]; trackerRepo?: string;
-  checkoutOf?: (key: string) => string | null; hasTopLevel?: (checkout: string, top: string) => boolean | null; } = {}): string | null {
+  checkoutOf = checkoutOfKey, hasTopLevel = repoHasTopLevelDir, present = existsSync }: { code?: readonly { key: string; repo: string; }[]; trackerRepo?: string;
+  checkoutOf?: (key: string) => string | null; hasTopLevel?: (checkout: string, top: string) => boolean | null;
+  present?: (checkout: string) => boolean; } = {}): string | null {
   const section = extractRegionSection(body);
   if (section === null) return null;
   for (const [, token] of section.matchAll(REGION_PATH_TOKEN)) {
@@ -388,8 +389,9 @@ export function absentRegionTopDirReason(body: string, { code = homeProjectDecla
     const top = path.split("/")[0];
     const repo = code.find((entry) => entry.key === key);
     if (repo === undefined) continue;
+    // A clone that is not on this disk (the CI runner has no ~/repos/agent-org) cannot be read at all: skipped, as an undeclared clone is (#2623).
     const checkout = checkoutOf(key);
-    if (checkout === null) continue;
+    if (checkout === null || !present(checkout)) continue;
     const has = hasTopLevel(checkout, top);
     if (has === null) {
       return `REFUSING to file --ready -- could not read origin/main of ${repo.repo} to see whether it has \`${top}/\`, so \`${token}\` `
