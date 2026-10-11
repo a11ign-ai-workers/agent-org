@@ -211,19 +211,39 @@ export function claimRecordOf(comments: RowComment[]): ClaimRecord | null {
 }
 
 /**
- * When the claimant last commented on the row after the claim: a comment by the claim record's own account, newer than
- * the record, that is not itself a record. `null` for none.
+ * The seat a comment says posted it: the role in the LAST `<!-- decided-by: <role> run: <id> -->` line `host/gh` appends to a comment
+ * (agent-org#486; the role alphabet is the one it accepts), or `null` for a body that carries none. The last line is the wrapper's own, appended
+ * after whatever the author wrote, so a marker quoted earlier in the body does not speak for the comment.
  *
- * KNOWN LIMIT, STATED: two sessions on one account (the workers' account, the leads' account) are one author. A comment
- * by `product-manager` on a row held by a leads-account seat therefore counts as a move. That reads MORE movement than
- * there is, which fires the nudge later and never earlier -- the direction `STALL_INTERVAL_MS` already chose.
- *
- * @param {RowComment[]} comments @param {ClaimRecord} record @returns {number | null}
+ * @param {unknown} body @returns {string | null}
  */
-export function commentMove(comments: RowComment[], record: ClaimRecord): number | null {
+export function decidedBy(body: unknown): string | null {
+  const marks = [...String(body ?? "").matchAll(/<!--\s*decided-by:\s*([A-Za-z0-9._-]+)(?:\s+run:\s*\S+)?\s*-->/g)];
+  return marks.at(-1)?.[1] ?? null;
+}
+
+/**
+ * When the claimant last commented on the row after the claim: a comment newer than the record that is not itself a record, and that is
+ * EITHER by the claim record's own account OR marked `decided-by` the holder's own session. `null` for none.
+ *
+ * THE MARKER IS HOW A HOLDER'S COMMENT IS RECOGNISED WHEN THE ACCOUNTS DIFFER (agent-org#913, class `claimed-worker-stalled`, a11ign#4892): the claim
+ * record is posted by the scheduler's account and the worker comments as the workers' account (#793), so the account test alone read no worker
+ * comment as a move, and a worker whose whole deliverable was a comment was nudged and then released for work that had finished.
+ *
+ * KNOWN LIMIT, STATED: two sessions on one account (the workers' account, the leads' account) are one author. A comment by `product-manager`
+ * on a row held by a leads-account seat therefore counts as a move by the ACCOUNT test, marker or not. That reads MORE movement than there is,
+ * which fires the nudge later and never earlier -- the direction `STALL_INTERVAL_MS` already chose. A marker naming another session does not
+ * COUNT by itself (it is not this holder's) but is not subtracted from the account test either: the role is a herdr workspace label and
+ * need not be the session's name, so subtracting it could read a holder's own comment as silence.
+ *
+ * @param {RowComment[]} comments @param {ClaimRecord} record @param {string} session the claimant's session, the one the marker must name
+ * @returns {number | null}
+ */
+export function commentMove(comments: RowComment[], record: ClaimRecord, session: string): number | null {
   let newest = null;
   for (const c of comments) {
-    if (record.author === null || c.author?.login !== record.author) continue;
+    const ownAccount = record.author !== null && c.author?.login === record.author;
+    if (!ownAccount && decidedBy(c.body) !== session) continue;
     if (String(c.body ?? "").includes(CLAIM_RECORD_MARKER)) continue;
     const at = Date.parse(String(c.createdAt ?? ""));
     if (!Number.isNaN(at) && at > record.at && (newest === null || at > newest)) newest = at;
@@ -826,7 +846,7 @@ export function claimFactsFrom(input: ClaimInput, io: HostReads): ClaimFacts | {
     const clock = claimClock({ record, input, io, labelledAt });
     return { row: input.row, session: input.session, claimedAt: clock.at, branch, worktree,
       ...(input.title === undefined ? {} : { title: input.title }),
-      comment: commentMove(input.comments, record),
+      comment: commentMove(input.comments, record, input.session),
       commit: branch === null ? null : newestOwnCommit(io.git, dir, branch),
       push: branch === null ? null : newestOwnCommit(io.git, dir, `origin/${branch}`),
       file: () => (worktree !== null && io.exists(worktree) ? fileMove(io, worktree) : null),
