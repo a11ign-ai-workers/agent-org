@@ -7136,8 +7136,38 @@ export function keptClaimsPath(ledgerPath: string) {
 }
 
 /** Everything a release needs from the host, every one a seam so the whole of it is tested without one. */
-export type ReleaseDeps = { run: (args: string[]) => string, exec: Exec, io: import("./claim-stall.ts").HostReads, now: number, agents: { label: string, status: string }[], isSpare: (label: string) => boolean, host: { worktreesDir: string, primary: string, exists: (path: string) => boolean }, env: Record<string, string>, gh: (args: string[]) => string, warn: (line: string) => void, cycle: (cycle: SpareCycle) => void, dropInstance: (role: string) => SpareInstance | undefined, keepInstance: (role: string, row: number) => SpareInstance, remember: (row: number, kept: KeptClaim | null) => void, };
+export type ReleaseDeps = { run: (args: string[]) => string, exec: Exec, io: import("./claim-stall.ts").HostReads, now: number, agents: { label: string, status: string }[], isSpare: (label: string) => boolean, host: { worktreesDir: string, primary: string, exists: (path: string) => boolean }, env: Record<string, string>, gh: (args: string[]) => string, warn: (line: string) => void, cycle: (cycle: SpareCycle) => void, dropInstance: (role: string) => SpareInstance | undefined, keepInstance: (role: string, row: number) => SpareInstance, remember: (row: number, kept: KeptClaim | null) => void,
+  /** agent-org#834: the repository a tracker KEY declares, and the host's clone of it -- seams for a keyed request, defaulting to the live declaration and `host.json` */
+  trackerRepo?: (key: string) => string | null, cloneOf?: (key: string) => { clone: string } | { refusal: string }, };
 export type ReleaseRequest = import("./claim-stall.ts").ReleaseRequest;
+
+/** Where a release's row and its tree are: `repo` is the repository the row's number is in, `primary` the checkout its branch and launch worktree are of. */
+type ReleaseSite = { repo: string, primary: string };
+
+/** `#747` for the home tracker's row and `agent-org#747` for another's, the spelling a refusal and a line in the journal use for it. */
+function rowOf(request: ReleaseRequest): string {
+  return rowMention({ key: trackerKeyOf(request), number: request.row });
+}
+
+/** The tracker key of the request's row: the empty key is the home tracker's, whether `tracker` is absent or empty. */
+function trackerKeyOf(request: ReleaseRequest): string {
+  return request.tracker ?? "";
+}
+
+/**
+ * WHERE A RELEASE READS, COMMENTS AND DECLINES (agent-org#834): the home tracker's repository and the primary checkout, or -- for a request carrying a tracker key --
+ * the repository the project declares for that key and the host's clone of it. A key the project does not declare, or a clone the host does not give, is a
+ * REFUSAL and never the home ones: the home tracker's row of the same number would be read, commented on and declined in its place.
+ */
+function releaseSite(request: ReleaseRequest, deps: ReleaseDeps): ReleaseSite | { refusal: string } {
+  const key = trackerKeyOf(request);
+  if (key === "") return { repo: REPO, primary: deps.host.primary };
+  const repo = (deps.trackerRepo ?? trackerRepositoryOf)(key);
+  if (repo === null) return { refusal: `the project declares no tracker \`${key}\`` };
+  const clone = (deps.cloneOf ?? keyedClone)(key);
+  if ("refusal" in clone) return { refusal: `no clone of tracker \`${key}\` to read its tree in (${clone.refusal})` };
+  return { repo, primary: clone.clone };
+}
 
 /**
  * WHAT A RELEASE DOES WITH THE HOLDER'S TREE, decided from a FRESH read of it (never the gate's, which is a tick old).
@@ -7155,12 +7185,12 @@ export type ReleaseRequest = import("./claim-stall.ts").ReleaseRequest;
  *
  *   `restored` is filled in AFTER the decline: whether `decline` put `ready` back (it does only for a row that was `ready` before the claim)
  */
-function releasePlan(request: ReleaseRequest, deps: ReleaseDeps): { keep: boolean; work: ReturnType<typeof workAtRisk>; onOrigin: boolean; restored?: boolean; } | { refusal: string; } {
-  const repo = deps.host.primary;
-  const holds = stillHolds(request, deps);
+function releasePlan(request: ReleaseRequest, deps: ReleaseDeps, site: ReleaseSite): { keep: boolean; work: ReturnType<typeof workAtRisk>; onOrigin: boolean; restored?: boolean; } | { refusal: string; } {
+  const repo = site.primary;
+  const holds = stillHolds(request, deps, site);
   if (holds !== true) {
-    return { refusal: holds === false ? `\`${SESSION_PREFIX}${request.session}\` is no longer on #${request.row} -- a stale order, nothing to release`
-      : `could not read #${request.row}'s labels -- not released, retried next tick` };
+    return { refusal: holds === false ? `\`${SESSION_PREFIX}${request.session}\` is no longer on ${rowOf(request)} -- a stale order, nothing to release`
+      : `could not read ${rowOf(request)}'s labels -- not released, retried next tick` };
   }
   // THE SAME PREDICATE THE GATE READ (#3453): a merged release whose pull request is in another repository also reads THAT clone's worktrees on the holder's branches.
   const merged = request.why === "merged" && request.mergedPrRepoKey !== undefined
@@ -7179,10 +7209,12 @@ function releasePlan(request: ReleaseRequest, deps: ReleaseDeps): { keep: boolea
  * Does the row STILL carry the holder's `session:` label? `null` when it cannot be read. ASKED BEFORE THE WORKSPACE IS CLOSED: a closed workspace is
  * looked up by LABEL, and an address is reused (a counter-named spare, freed and started again for another row), so an order that outlived its claim
  * -- a decline that failed after the close, retried next tick -- must not end whatever now runs under that name.
+ *
+ * THE ROW IS READ IN ITS OWN TRACKER'S REPOSITORY (agent-org#834, `site.repo`): another tracker's `#747` is not the home tracker's, which carries no such label.
  */
-function stillHolds(request: ReleaseRequest, deps: ReleaseDeps): boolean | null {
+function stillHolds(request: ReleaseRequest, deps: ReleaseDeps, site: ReleaseSite): boolean | null {
   try {
-    const labels = JSON.parse(deps.gh(["issue", "view", String(request.row), "--repo", REPO, "--json", "labels"]))?.labels;
+    const labels = JSON.parse(deps.gh(["issue", "view", String(request.row), "--repo", site.repo, "--json", "labels"]))?.labels;
     return Array.isArray(labels) && labels.some((l: any) => l?.name === `${SESSION_PREFIX}${request.session}`);
   } catch {
     return null;
@@ -7281,14 +7313,16 @@ function releaseComment(request: ReleaseRequest, plan: { keep: boolean; work: Re
  * Everything after the label edit landed, each step alone in its own guard: a comment that cannot be posted, a record that cannot be
  * written and a branch that cannot be deleted are SAID and do not undo a release that has happened.
  */
-function settleRelease(request: ReleaseRequest, plan: { keep: boolean; work: ReturnType<typeof workAtRisk>; onOrigin: boolean; restored?: boolean; }, deps: ReleaseDeps) {
+function settleRelease(request: ReleaseRequest, plan: { keep: boolean; work: ReturnType<typeof workAtRisk>; onOrigin: boolean; restored?: boolean; }, deps: ReleaseDeps, site: ReleaseSite) {
   const attempt = (what: string, act: () => void) => {
-    try { act(); } catch (err) { deps.warn(`release: #${request.row}: could not ${what} (${firstLine(err)}).`); }
+    try { act(); } catch (err) { deps.warn(`release: ${rowOf(request)}: could not ${what} (${firstLine(err)}).`); }
   };
   attempt("post the release comment", () => {
-    deps.gh(["issue", "comment", String(request.row), "--repo", REPO, "--body", releaseComment(request, plan)]);
+    deps.gh(["issue", "comment", String(request.row), "--repo", site.repo, "--body", releaseComment(request, plan)]);
   });
-  attempt("record the kept worktree", () => {
+  // The kept-tree ledger is keyed by the FIRST tracker's row number (`spawnClaimer` neither reads nor writes it for a keyed row), so a keyed release writes
+  // nothing to it: under the bare number it would be the record of a home row of the same number, and `null` would delete that row's.
+  if (trackerKeyOf(request) === "") attempt("record the kept worktree", () => {
     deps.remember(request.row, plan.keep && request.worktree !== null && request.branch !== null
       ? { worktree: request.worktree, branch: request.branch, from: request.session, at: deps.now, why: request.why,
         dirty: plan.work.dirty, unpushed: plan.work.unpushed } : null);
@@ -7296,7 +7330,7 @@ function settleRelease(request: ReleaseRequest, plan: { keep: boolean; work: Ret
   // A TREE WITH NOTHING IN IT ALSO LEAVES AN EMPTY LOCAL BRANCH, which `decline` does not delete and the respawn's claim then refuses over
   // (`--branch=... ALREADY EXISTS locally`). `-d`, never `-D`: it refuses a branch that holds anything git cannot find elsewhere.
   if (!plan.keep && request.branch !== null) {
-    attempt("delete the empty local branch", () => { deps.io.git(deps.host.primary, ["branch", "-d", (request.branch as string)]); });
+    attempt("delete the empty local branch", () => { deps.io.git(site.primary, ["branch", "-d", (request.branch as string)]); });
   }
 }
 
@@ -7311,13 +7345,17 @@ function recordReleaseCycle(request: ReleaseRequest, deps: ReleaseDeps, kept: bo
   const instance = request.why === "closed" ? deps.keepInstance(request.session, request.row) : deps.dropInstance(request.session);
   const rows = [...new Set([...(instance?.rows ?? []), request.row])];
   deps.cycle({ role: request.session, row: request.row, at: deps.now, rows, clean: false, released: request.why,
-    why: `claim on #${request.row} released (${request.why}); ${kept ? "worktree and unpushed work kept" : "nothing kept"}` });
+    why: `claim on ${rowOf(request)} released (${request.why}); ${kept ? "worktree and unpushed work kept" : "nothing kept"}` });
 }
 
 /**
  * PERFORM ONE RELEASE (a CLOSED row's, #3535, interrupts a working instance and leaves its workspace for `spareDecision`). Refuses BEFORE any write when the fresh read of the holder's tree disagrees with the gate's (blocked and merged
  * only); ends a spare's workspace FIRST -- so nothing it does can race the read -- then takes the claim back with `row-claim decline`, run
  * AS THE HOLDER (decline releases only its own session's claim) from the holder's launch worktree; then comments, records and cleans.
+ *
+ * A REQUEST OF ANOTHER TRACKER'S ROW (`tracker`, agent-org#834) does all of it THERE: the row is read and commented on in that tracker's repository, the decline
+ * carries `--tracker=<key>`, and the tree is read and the launch worktree made in the host's clone of it ({@link releaseSite}). A tracker that cannot be read is
+ * `null` to {@link stillHolds} -- never "no longer held" -- and nothing is changed.
  *
  * ORDER IS RECOVERABLE AT EVERY STEP. A workspace that will not close aborts with nothing changed; a decline that fails after the close
  * leaves a claimed row and no process, which the gate emits again next tick (the stall persists) and this finds `absent`, so the retry
@@ -7332,7 +7370,9 @@ function recordReleaseCycle(request: ReleaseRequest, deps: ReleaseDeps, kept: bo
  *   seat is not a place to send an order, and the tick that did it must not send one
  */
 export function performRelease(request: ReleaseRequest, deps: ReleaseDeps): { released: boolean; why: string; gone?: boolean; } {
-  const plan = releasePlan(request, deps);
+  const site = releaseSite(request, deps);
+  if ("refusal" in site) return { released: false, why: `${rowOf(request)}: ${site.refusal} -- not released, retried next tick` };
+  const plan = releasePlan(request, deps, site);
   if ("refusal" in plan) return { released: false, why: plan.refusal };
   const closed = request.why === "closed" ? interruptHolder(request, deps) : closeHolder(request.session, deps);
   if (closed === "failed") {
@@ -7340,18 +7380,19 @@ export function performRelease(request: ReleaseRequest, deps: ReleaseDeps): { re
   }
   const confirmedGone = closed === "closed" || closed === "absent";
   const launch = launchWorktree(request.session, { exec: deps.exec, exists: deps.host.exists,
-    worktreesDir: deps.host.worktreesDir, primary: deps.host.primary });
+    worktreesDir: deps.host.worktreesDir, primary: site.primary });
   if ("refusal" in launch) return { released: false, why: `no launch worktree for ${request.session} (${launch.refusal})` };
   const ran = deps.exec("node", [ROW_CLAIM, "decline", String(request.row), `--session=${request.session}`,
+    ...(trackerKeyOf(request) === "" ? [] : [`--tracker=${trackerKeyOf(request)}`]),
     ...(plan.keep ? ["--keep-worktree"] : []), ...(plan.keep && confirmedGone ? ["--predecessor-gone"] : []),
     ...(request.answer === undefined ? [] : [`--answer=${request.answer}`])],
   { cwd: launch.dir, env: deps.env });
   if (!(/^DECLINED/m.test(ran.output) && CLAIM_LANDED.includes(Number(ran.status)))) {
-    return { released: false, why: `decline of #${request.row} as ${request.session} did not land (${verdictLine(ran.output)})` };
+    return { released: false, why: `decline of ${rowOf(request)} as ${request.session} did not land (${verdictLine(ran.output)})` };
   }
-  settleRelease(request, { ...plan, restored: new RegExp(`restored to \`${READY_LABEL}\``).test(ran.output) }, deps);
+  settleRelease(request, { ...plan, restored: new RegExp(`restored to \`${READY_LABEL}\``).test(ran.output) }, deps, site);
   recordReleaseCycle(request, deps, plan.keep);
-  return { released: true, gone: closed === "closed", why: `#${request.row} (${request.session}, ${request.why}): ${plan.keep
+  return { released: true, gone: closed === "closed", why: `${rowOf(request)} (${request.session}, ${request.why}): ${plan.keep
     ? `worktree KEPT at ${request.worktree}` : "nothing kept"}` };
 }
 

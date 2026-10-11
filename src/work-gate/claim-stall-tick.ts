@@ -87,14 +87,6 @@ export type OnClaimFacts = (facts: ClaimFactsOfTick | null) => void;
  */
 export type TrackerClaims = { key: string; repo: string; rows: any[] | null; claimedComments: any[] | null };
 
-/**
- * WHY A SECOND TRACKER'S RELEASE IS NOT ORDERED (agent-org#747, product-manager ruling 2026-10-11): `wake.ts`'s `stillHolds` reads the HOME repository's
- * row and `row-claim decline` is run without `--tracker=`, so a release of `agent-org#522` would read home #522, find no `session:` label on it and be
- * refused as a stale order, on every tick for as long as the holder stays quiet. The nudge needs neither, so it is ordered; the release waits on
- * agent-org#834, which makes the performer read the holder's own tracker.
- */
-const RELEASE_WAITS_ON = "agent-org#834";
-
 /** A row's label history in ONE NAMED tracker: `io.labelEvents` is the home tracker's alone, and for another tracker's row number it would read the home row's. */
 export type LabelEventsOf = (row: number, repo: string) => ReturnType<NonNullable<import("../claim-stall.ts").HostReads["labelEvents"]>>;
 
@@ -153,7 +145,8 @@ export function claimStallTick({ io = LIVE_HOST_READS, repo = REPO_CHECKOUT, now
  * EVERY DECLARED TRACKER'S CLAIMED ROWS (agent-org#747). The home tracker's rows are read exactly as they were; each of `trackers` is read with the same
  * readings, the same memory file and the same orders, its rows' memory entries and order subjects namespaced by the tracker's key (`agent-org#476`, so
  * `476` of the home tracker is another entry), and two things differ and are SAID where they happen: a tracker that cannot be read is skipped as UNREAD with
- * its memory kept (an empty claim list would forget its nudges), and a release of its rows is withheld (`RELEASE_WAITS_ON`).
+ * its memory kept (an empty claim list would forget its nudges), and a release of its rows carries the tracker's key (`ReleaseRequest.tracker`, agent-org#834),
+ * which is how `wake.ts` reads the holder's `session:` label, comments and declines in THAT tracker's repository and not the home one's.
  * `onFacts` stays the home tracker's: `blockerClearedOrders` keys those facts by bare row number.
  */
 function evaluateClaims({ rows, claimedComments, openPrs, mergedPrs, elsewhere, restartAt, agents, agentSessions, ledger, io, repo, now, stateDir, log, read, write, onFacts, record = recordStalledNudges, trackers = [], labelEventsOf }: {
@@ -230,12 +223,7 @@ function evaluateClaims({ rows, claimedComments, openPrs, mergedPrs, elsewhere, 
     const told = restartNotices({ readings: mine.readings, sessions, acked: scopedView(acked, prefix),
       delivered: (causeKey) => nudgeDeliveredAt(wakeLedger(), scopedCauseKey(key, causeKey)) !== null });
     scopedInto(ackedAfter, prefix, told.after);
-    for (const order of [...claimStalledOrders(mine.readings, now), ...told.orders]) {
-      if (order.release === undefined) { orders.push(namespacedOrder(order, key, trackerRepo)); continue; }
-      log(`claim-stall: ${subjectMention({ repoKey: key, number: order.release.row })} (${order.session}) would be RELEASED (${order.release.why}) and is NOT ordered: a release of `
-        + `another tracker's row waits on ${RELEASE_WAITS_ON} (\`stillHolds\` and \`row-claim decline\` read the home repository's row, so the order would be refused as stale `
-        + "on every tick); the holder was nudged and the claim stands.\n");
-    }
+    for (const order of [...claimStalledOrders(mine.readings, now), ...told.orders]) orders.push(namespacedOrder(order, key, trackerRepo));
   }
   for (const [slot, value] of Object.entries(acked)) {
     if (slot.includes(SCOPE_MARK) && !(slot in ackedAfter) && !units.some((unit) => slot.startsWith(`${unit.tracker.key}${SCOPE_MARK}`))) ackedAfter[slot] = value;
@@ -275,13 +263,15 @@ function scopedCauseKey(key: string, causeKey: string): string {
 
 /**
  * An order of another tracker's row, with its subject and delivery key namespaced and its prompt saying which repository the number belongs to (a prompt
- * names a row as `#747`, which the holder's `gh` reads in the repository of its own checkout).
+ * names a row as `#747`, which the holder's `gh` reads in the repository of its own checkout). A RELEASE carries the tracker's key (agent-org#834), so the
+ * performer reads, comments on and declines the row in that tracker and not the home one's of the same number.
  */
 function namespacedOrder(order: import("../claim-stall.ts").StallOrder, key: string, repo: string): import("../claim-stall.ts").StallOrder {
   const row = /^row-(\d+)$/.exec(order.subject)?.[1];
   if (row === undefined) return order;
   const ref = subjectRef(key, Number(row));
   return { ...order, subject: `row-${ref}`, causeKey: scopedCauseKey(key, order.causeKey),
+    ...(order.release === undefined ? {} : { release: { ...order.release, tracker: key } }),
     prompt: `${order.prompt}\n\nTHIS ROW IS \`${ref}\` OF \`${repo}\`, NOT THE PRIMARY'S #${row}: put \`--repo ${repo}\` on every \`gh\` command that names it, and read its number as \`${ref}\`.` };
 }
 
