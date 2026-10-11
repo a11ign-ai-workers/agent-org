@@ -167,6 +167,48 @@ test("#484 adapter: subscribe delivers a published hint to a matching handler on
   assert.deepEqual(seen, ["state-changed"], "a cancelled handler hears nothing");
 });
 
+// --- the native blockedBy edge (#921): a write the four operations do not hold, so it is `BlockerWriter`, not `TicketPort` -----------
+
+/** A blocker in ANOTHER repository from the row: a native edge may cross repositories. */
+const BLOCKER: ItemRef = { tracker: "github", scope: "a11ign/a11ign", id: 7 };
+const EDGE_ANSWERS = (id: string, post: string | Error) => [
+  { when: (args: string[]) => args.includes("--jq"), reply: id },
+  { when: (args: string[]) => args.includes("--method"), reply: post },
+];
+
+test("#921 POSITIVE CONTROL: addBlocker reads the blocker's database id in ITS repository, then POSTs the edge on the item's, and writes nothing else", () => {
+  const { run, calls } = stub(EDGE_ANSWERS("707\n", ""));
+  githubTicketAdapter({ run, scope: SCOPE }).addBlocker(ROW, BLOCKER);
+  assert.deepEqual(calls, [
+    ["api", "repos/a11ign/a11ign/issues/7", "--jq", ".id"],
+    ["api", "--method", "POST", "repos/a11ign/agent-org/issues/484/dependencies/blocked_by", "-F", "issue_id=707"],
+  ], "the edge is native (`blocked_by`), keyed by the database id, and each side is named by its own repository");
+});
+
+test("#921 NEGATIVE CONTROL: addBlocker throws, and POSTs no edge, when the blocker cannot be read or its id is not a number (twin: a readable id is written)", () => {
+  const refused = stub([{ when: (args: string[]) => args.includes("--jq"), reply: new Error("HTTP 404") }]);
+  assert.throws(() => githubTicketAdapter({ run: refused.run, scope: SCOPE }).addBlocker(ROW, BLOCKER), /HTTP 404/);
+  assert.ok(!refused.calls.some((args) => args.includes("--method")), "no edge is POSTed without the id");
+  const blank = stub(EDGE_ANSWERS("\n", ""));
+  assert.throws(() => githubTicketAdapter({ run: blank.run, scope: SCOPE }).addBlocker(ROW, BLOCKER), /database id of a11ign\/a11ign#7, so no edge was written/);
+  assert.equal(blank.calls.length, 1, "nothing is POSTED after an id that is not a number");
+  const readable = stub(EDGE_ANSWERS("707\n", ""));
+  assert.doesNotThrow(() => githubTicketAdapter({ run: readable.run, scope: SCOPE }).addBlocker(ROW, BLOCKER), "twin: the same call with a readable id returns");
+});
+
+test("#921 NEGATIVE CONTROL: a refused POST THROWS, so the caller falls back to a label (twin: an accepted POST returns)", () => {
+  const refused = stub(EDGE_ANSWERS("707\n", new Error("HTTP 422: Validation Failed")));
+  assert.throws(() => githubTicketAdapter({ run: refused.run, scope: SCOPE }).addBlocker(ROW, BLOCKER), /HTTP 422/);
+  const accepted = stub(EDGE_ANSWERS("707\n", ""));
+  assert.doesNotThrow(() => githubTicketAdapter({ run: accepted.run, scope: SCOPE }).addBlocker(ROW, BLOCKER));
+});
+
+test("#921 NEGATIVE CONTROL: addBlocker refuses an item that is not GitHub's, by name, and asks `gh` nothing", () => {
+  const { run, calls } = stub([]);
+  assert.throws(() => githubTicketAdapter({ run, scope: SCOPE }).addBlocker({ ...ROW, tracker: "jira" }, BLOCKER), /only github items can be linked, got jira and github/);
+  assert.equal(calls.length, 0);
+});
+
 // --- 2. the source test --------------------------------------------------------------------------------------------------------------
 
 const SPAWNERS = new Set(["exec", "execSync", "execFile", "execFileSync", "spawn", "spawnSync", "fork"]);

@@ -18,6 +18,9 @@ import { claimRecordComment } from "./row-claim.ts";
 import { ANSWER_PREFIX, SESSION_PREFIX } from "./project-vocabulary.ts";
 import { COMMANDS } from "./commands.ts";
 import { STOPPED_CLAIMANT_MINUTES } from "./idle-claimant.ts";
+import { readClaim, type ClaimFacts } from "./claim-stall.ts";
+import { TRACKER } from "./ticket-port/github-adapter.ts";
+import type { BlockerWriter, ItemRef } from "./ticket-port/port.ts";
 import {
   BLOCKED_TOLD_FILE, DECLARED_STATES, DEFAULT_ANSWERER, WORKER_STATE_DIR, applyBlocked, blockedInstruction, blockedToTell, declarationReading,
   ghRowLook, lastDeliveredTo, main, parseDeclaration, readDeclarations, resolveBlockedRow, splitArgs, tellBlocked, writeDeclaration, type ClaimContext,
@@ -77,10 +80,28 @@ test("each malformed call is REFUSED BY NAME (twin: the well-formed call beside 
   assert.match(named.refused.why, /usage: agent-org worker:state/);
 });
 
-test("the flags are `--session` and `--to` and nothing else (twin: both spellings of a value)", () => {
+test("the flags are `--session`, `--to` and `--on` and nothing else (twin: both spellings of a value)", () => {
   assert.deepEqual(splitArgs(["blocked", "460", "why", "--session=worker-9", "--to", "ceo"]), { words: ["blocked", "460", "why"], flags: { session: "worker-9", to: "ceo" }, unknown: [] });
+  assert.deepEqual(splitArgs(["blocked", "12", "why", "--on=7"]), { words: ["blocked", "12", "why"], flags: { on: "7" }, unknown: [] });
+  assert.deepEqual(splitArgs(["blocked", "12", "why", "--on", "agent-org#7"]), { words: ["blocked", "12", "why"], flags: { on: "agent-org#7" }, unknown: [] });
   assert.deepEqual(splitArgs(["done", "--force"]).unknown, ["--force"]);
   assert.deepEqual(splitArgs(["done", "--session"]).unknown, ["--session"], "a flag with no value is refused, not read as empty");
+  assert.deepEqual(splitArgs(["blocked", "12", "why", "--on"]).unknown, ["--on"], "`--on` with no value is refused too");
+});
+
+test("`--on` is `blocked` only, is read as a row, owes no answer so carries no `to`, and cannot come with `--to` (twin: without it, the same call is as before)", () => {
+  const onParse = (words: string[], on: string | null, to: string | null = null) => parseDeclaration(words, { session: "worker-9", now: T0, on, to });
+  const edge = onParse(["blocked", "12", "waiting", "on", "a", "decision"], "7");
+  assert.deepEqual(edge, { declaration: { session: "worker-9", state: "blocked", at: T0, row: 12, reason: "waiting on a decision", on: 7 } });
+  assert.equal("to" in (edge as { declaration: object }).declaration, false, "no `to`: there is no answer to be owed");
+  assert.deepEqual((onParse(["blocked", "agent-org#12", "why"], "agent-org#7") as { declaration: object }).declaration,
+    { session: "worker-9", state: "blocked", at: T0, row: 12, rowKey: "agent-org", reason: "why", on: 7, onKey: "agent-org" }, "both rows keep the spelling the file needs to resolve them");
+  assert.deepEqual(onParse(["blocked", "460", "why"], null), parse("blocked", "460", "why"), "no `--on`: byte-identical to the declaration it was before");
+  assert.equal((onParse(["blocked", "12", "why"], "7", "ceo") as { refused: { refused: string } }).refused.refused, "unexpected-argument", "--on and --to say two things about one wait");
+  assert.equal((onParse(["done"], "7") as { refused: { refused: string } }).refused.refused, "unexpected-argument", "`done` names no row it waits on");
+  assert.equal((onParse(["waiting-ci", "9"], "7") as { refused: { refused: string } }).refused.refused, "unexpected-argument", "a pull request is not a row it waits on");
+  assert.equal((onParse(["blocked", "12", "why"], "abc") as { refused: { refused: string } }).refused.refused, "bad-on", "a malformed `--on` is refused by name");
+  assert.equal((onParse(["blocked", "12", "why"], "0") as { refused: { refused: string } }).refused.refused, "bad-on");
 });
 
 /** Runs the real `main` with stderr captured; the refusals return before the host's state directory is touched. */
@@ -305,7 +326,7 @@ test("`blocked` APPLIES the answer label and posts the reason; the excuse stands
   };
   const parsed = parse("blocked", "460", "the", "spelling", "is", "ambiguous");
   assert.ok("declaration" in parsed);
-  const lines = applyBlocked(parsed.declaration, { gh, tracker: "a11ign/agent-org", answerPrefix: ANSWER_PREFIX });
+  const { lines } = applyBlocked(parsed.declaration, { gh, tracker: "a11ign/agent-org", answerPrefix: ANSWER_PREFIX, writer: fakeWriter([]) });
   const wanted = `${ANSWER_PREFIX}${DEFAULT_ANSWERER}`;
   assert.deepEqual([...labels], [wanted], "the label the gate reads as `answer:<session>`");
   assert.deepEqual(calls.map((c) => c.slice(0, 2).join(" ")), ["label create", "issue edit", "issue comment"], "the label exists before it is applied, and the reason is posted");
@@ -328,7 +349,7 @@ test("`blocked` whose label GitHub refused writes NOTHING: the exit is 2 and the
     const gh = (): string => { throw Object.assign(new Error("HTTP 403"), { stderr: "HTTP 403: forbidden\n" }); };
     const parsed = parse("blocked", "460", "why");
     assert.ok("declaration" in parsed);
-    assert.throws(() => applyBlocked(parsed.declaration, { gh, tracker: "a11ign/agent-org", answerPrefix: ANSWER_PREFIX }), /403/);
+    assert.throws(() => applyBlocked(parsed.declaration, { gh, tracker: "a11ign/agent-org", answerPrefix: ANSWER_PREFIX, writer: fakeWriter([]) }), /403/);
     assert.deepEqual(readDeclarations(`${dir}/${WORKER_STATE_DIR}`)?.byClaimant.size, 0, "`main` writes only after the label stood, so nothing is on disk");
   } finally {
     rmSync(dir, { recursive: true, force: true });
@@ -421,12 +442,12 @@ test("a bare number that is a row in two trackers is read from the CLAIM: the on
 
 test("POSITIVE CONTROL: the version this replaces wrote the first tracker's row, closed, which is the row the product-manager was woken on", () => {
   const calls: string[][] = [];
-  applyBlocked(blockedOn("460"), { gh: (args) => (calls.push(args), ""), tracker: TRACKERS[0].repo, answerPrefix: ANSWER_PREFIX });
+  applyBlocked(blockedOn("460"), { gh: (args) => (calls.push(args), ""), tracker: TRACKERS[0].repo, answerPrefix: ANSWER_PREFIX, writer: fakeWriter([]) });
   assert.ok(calls.some((args) => args[0] === "issue" && args.includes("a11ign/a11ign")), "the old call targeted a11ign/a11ign#460");
   const calls2: string[][] = [];
   const result = resolve("460", BOTH);
   assert.ok("declaration" in result);
-  applyBlocked(result.declaration, { gh: (args) => (calls2.push(args), ""), tracker: result.declaration.repo as string, answerPrefix: ANSWER_PREFIX });
+  applyBlocked(result.declaration, { gh: (args) => (calls2.push(args), ""), tracker: result.declaration.repo as string, answerPrefix: ANSWER_PREFIX, writer: fakeWriter([]) });
   assert.ok(calls2.length === 3 && calls2.every((args) => args.includes("a11ign/agent-org") && !args.includes("a11ign/a11ign")), JSON.stringify(calls2));
 });
 
@@ -455,6 +476,131 @@ test("`blocked` on a CLOSED row is REFUSED, naming the state and the reopening (
   assert.equal(onlyClosed?.refused, "row-closed", "the one row of that number is closed, so a bare number does not label it either");
   const open = resolve("460", { "a11ign/a11ign": { state: "OPEN", labels: [] } });
   assert.ok("declaration" in open && open.declaration.repo === "a11ign/a11ign", "an open row in the one tracker that has it is accepted");
+});
+
+// --- 5. `--on`: a native edge from the held row to the row it waits on, and NO label -------------------------------------------
+
+/** A row fixture by repository AND number, for the `--on` cases, where the two rows can be in one repository. */
+const byNumber = (table: Record<string, RowFact>): RowLook => (repo, number) => table[`${repo}#${number}`] ?? null;
+const ON_OPEN: Record<string, RowFact> = {
+  "a11ign/agent-org#12": { state: "OPEN", labels: [] },
+  "a11ign/agent-org#7": { state: "OPEN", labels: [] },
+};
+const waitingOn = (row: string, on: string): Declaration => {
+  const parsed = parseDeclaration(["blocked", row, "waiting", "on", "the", "decision"], { session: "worker-agent-org-12", now: T0, on });
+  assert.ok("declaration" in parsed, JSON.stringify(parsed));
+  return parsed.declaration;
+};
+const resolveOn = (row: string, on: string, table: Record<string, RowFact>) =>
+  resolveBlockedRow(waitingOn(row, on), { trackers: TRACKERS, look: byNumber(table), sessionLabel: `${SESSION_PREFIX}worker-agent-org-12` });
+/** A `gh` fixture: every call is recorded and answered with nothing. The edge is NOT a `gh` call here: the ticket port writes it (see `fakeWriter`). */
+const fakeGh = (calls: string[][]) => (args: string[]): string => {
+  calls.push(args);
+  return "";
+};
+/** A port writer fixture: each edge is recorded, and `failing` makes it throw as GitHub refusing the write does. The real writer is `githubTicketAdapter`, tested in `ticket-port.test.ts`. */
+const fakeWriter = (edges: { ref: ItemRef; blocker: ItemRef }[], failing = false): BlockerWriter => ({
+  addBlocker(ref, blocker) {
+    if (failing) throw Object.assign(new Error("HTTP 422"), { stderr: "HTTP 422: Validation Failed\n" });
+    edges.push({ ref, blocker });
+  },
+});
+/** The edge `blocked 12 --on 7` names in `a11ign/agent-org`, which is what the port is asked to write. */
+const WRITTEN_EDGE = { ref: { tracker: TRACKER, scope: "a11ign/agent-org", id: 12 }, blocker: { tracker: TRACKER, scope: "a11ign/agent-org", id: 7 } };
+
+test("POSITIVE CONTROL: `blocked 12 --on 7` with 7 open writes the native edge and posts the reason, and makes NO label call", () => {
+  const calls: string[][] = [];
+  const edges: { ref: ItemRef; blocker: ItemRef }[] = [];
+  const result = resolveOn("12", "7", ON_OPEN);
+  assert.ok("declaration" in result, JSON.stringify(result));
+  assert.equal(result.declaration.onRepo, "a11ign/agent-org", "the row it waits on is resolved, and its repository is kept");
+  const { lines, declaration } = applyBlocked(result.declaration, { gh: fakeGh(calls), tracker: result.declaration.repo as string, answerPrefix: ANSWER_PREFIX, writer: fakeWriter(edges) });
+  assert.deepEqual(edges, [WRITTEN_EDGE], "the native edge is written through the port: 12 is blocked by 7, each in the repository it is in");
+  assert.equal(calls.length, 1, "the reason is the only `gh` call: the edge is the port's write, and worker-state.ts names no edge call");
+  assert.deepEqual(calls[0].slice(0, 2), ["issue", "comment"], "the reason is posted");
+  assert.ok(calls[0].join(" ").includes("the decision") && calls[0].join(" ").includes("a11ign/agent-org#7"), "the comment is the reason, and names what it waits on");
+  assert.ok(!calls.some((args) => args[0] === "label" || args.includes("--add-label")), "NO label call: nobody is owed an answer when the edge is the answer");
+  assert.equal(declaration.to, undefined, "nothing on disk owes an answer");
+  assert.equal(declaration.on, 7);
+  assert.match(lines.join("\n"), /native edge, no label/);
+});
+
+test("NEGATIVE CONTROL: `blocked 12` with NO `--on` keeps the label and the comment, with the calls pinned as literals", () => {
+  const calls: string[][] = [];
+  const parsed = parseDeclaration(["blocked", "12", "which", "label", "is", "it?"], { session: "worker-agent-org-12", now: T0 });
+  assert.ok("declaration" in parsed);
+  const resolved = resolveBlockedRow(parsed.declaration, { trackers: TRACKERS, look: byNumber(ON_OPEN), sessionLabel: `${SESSION_PREFIX}worker-agent-org-12` });
+  assert.ok("declaration" in resolved, JSON.stringify(resolved));
+  const edges: { ref: ItemRef; blocker: ItemRef }[] = [];
+  const { declaration } = applyBlocked(resolved.declaration, { gh: fakeGh(calls), tracker: "a11ign/agent-org", answerPrefix: ANSWER_PREFIX, writer: fakeWriter(edges) });
+  const label = `${ANSWER_PREFIX}${DEFAULT_ANSWERER}`;
+  assert.deepEqual(calls, [
+    ["label", "create", label, "--repo", "a11ign/agent-org", "--force", "--description", "a session owes this row an answer"],
+    ["issue", "edit", "12", "--repo", "a11ign/agent-org", "--add-label", label],
+    ["issue", "comment", "12", "--repo", "a11ign/agent-org", "--body",
+      `BLOCKED (\`worker-agent-org-12\`, declared with \`worker:state\`): which label is it?\n\nOwed by \`${DEFAULT_ANSWERER}\`; the row carries \`${label}\`.`],
+  ], "the label is created, applied, and the reason posted, with the calls pinned as literals");
+  assert.deepEqual(edges, [], "and no edge is written: without `--on` the port is never asked");
+  assert.equal(declaration.to, DEFAULT_ANSWERER);
+  assert.equal(declaration.on, undefined);
+});
+
+test("NEGATIVE CONTROL: `--on` of a CLOSED row is REFUSED by name, and nothing is labelled (twin: the same row open is accepted)", () => {
+  const refusal = refusalNamed(resolveOn("12", "7", { ...ON_OPEN, "a11ign/agent-org#7": { state: "CLOSED", labels: [] } }));
+  assert.equal(refusal?.refused, "on-closed");
+  assert.ok(refusal?.why.includes("CLOSED") && refusal.why.includes("no `blockedBy` edge is written"), refusal?.why);
+  assert.ok("declaration" in resolveOn("12", "7", ON_OPEN), "twin: the open row is accepted");
+  // `main` returns on the refusal before `applyBlocked` is reached, so no `gh` call labels or edges anything for it.
+});
+
+test("NEGATIVE CONTROL: `blocked 12 --on 12` is REFUSED as the row itself, and nothing is labelled (twin: `--on 7` is accepted)", () => {
+  assert.equal(refusalNamed(resolveOn("12", "12", ON_OPEN))?.refused, "on-self");
+  assert.ok("declaration" in resolveOn("12", "7", ON_OPEN));
+});
+
+test("NEGATIVE CONTROL: a failed edge write FALLS BACK to the label, so the worker is never blocked with nobody told (twin: the edge that succeeds labels nothing)", () => {
+  const label = `${ANSWER_PREFIX}${DEFAULT_ANSWERER}`;
+  const result = resolveOn("12", "7", ON_OPEN);
+  assert.ok("declaration" in result);
+  const refusedCalls: string[][] = [];
+  const refusedEdges: { ref: ItemRef; blocker: ItemRef }[] = [];
+  const edgeRefused = applyBlocked(result.declaration, { gh: fakeGh(refusedCalls), tracker: "a11ign/agent-org", answerPrefix: ANSWER_PREFIX, writer: fakeWriter(refusedEdges, true) });
+  assert.deepEqual(refusedEdges, [], "the edge was attempted and refused, so none is recorded");
+  assert.ok(refusedCalls.some((args) => args[0] === "issue" && args[1] === "edit" && args.includes(label)), "the label is applied after the edge is refused");
+  assert.equal(edgeRefused.declaration.to, DEFAULT_ANSWERER, "the declaration on disk is the labelled one, owed by the default answerer");
+  assert.equal(edgeRefused.declaration.on, undefined, "and it carries no edge the gate would read as a block nobody answers");
+  assert.match(edgeRefused.lines.join("\n"), /could not write the blockedBy edge on #7 of a11ign\/agent-org .*labelled instead/);
+
+  const edgeOk: string[][] = [];
+  const okEdges: { ref: ItemRef; blocker: ItemRef }[] = [];
+  const ok = applyBlocked(result.declaration, { gh: fakeGh(edgeOk), tracker: "a11ign/agent-org", answerPrefix: ANSWER_PREFIX, writer: fakeWriter(okEdges) });
+  assert.ok(!edgeOk.some((args) => args.includes(label)), "twin: when the edge is written, no label is applied");
+  assert.deepEqual(okEdges, [WRITTEN_EDGE], "twin: and the edge is the one written");
+  assert.equal(ok.declaration.on, 7);
+});
+
+test("NEGATIVE CONTROL: the gate reads a holder BLOCKED by `--on` the way the shipped decider does: released when nothing is built, HOLDING while it has dirty files or unpushed commits (twin: the same claim with no edge is read by the clock)", () => {
+  const claim = (work: ReturnType<ClaimFacts["work"]>, blockedBy: number[]): ClaimFacts => ({
+    row: 12, session: "worker-agent-org-12", claimedAt: T0, branch: "agent/x", worktree: "/w", comment: null, commit: null, push: null,
+    file: () => null, work: () => work, openPrs: 0, mergedPr: null, waiting: null, blockedBy,
+  });
+  const ctx = { now: T0 + 60 * MIN, restartAt: null, agents: null, nudge: null, goneSince: null, idleSince: null };
+  const clean = { state: "none" as const, dirty: 0, unpushed: 0 };
+  const dirty = { state: "at-risk" as const, dirty: 2, unpushed: 1 };
+
+  const released = readClaim(claim(clean, [7]), ctx);
+  assert.ok(released.kind === "release" && released.why === "blocked", JSON.stringify(released));
+  assert.deepEqual(released.kind === "release" ? released.edges : null, [7], "the edge is the reason, and it is the one written");
+  assert.equal(readClaim(claim(dirty, [7]), ctx).kind, "holding", "a dirty holder is HELD, not released by the edge");
+  const plain = readClaim(claim(clean, []), ctx);
+  assert.ok(!(plain.kind === "release" && plain.why === "blocked"), `twin: with no edge the same clean claim is not read as blocked (${JSON.stringify(plain)})`);
+});
+
+test("`--on` names a row by its tracker key, and an undeclared key is REFUSED by name, as the held row is", () => {
+  const keyed = resolveOn("12", "agent-org#7", ON_OPEN);
+  assert.ok("declaration" in keyed && keyed.declaration.onRepo === "a11ign/agent-org");
+  const undeclared = refusalNamed(resolveOn("12", "lab#7", ON_OPEN));
+  assert.equal(undeclared?.refused, "unknown-tracker");
 });
 
 test("no row of that number, and a row that could not be read, are REFUSED by name and neither is read as `closed` or `absent` for the other", () => {
