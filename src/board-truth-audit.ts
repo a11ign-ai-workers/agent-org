@@ -7,7 +7,7 @@
 //
 // NINE QUESTIONS, EACH A PURE FUNCTION OF ROWS THE CALLER ALREADY READ, so the rule is testable without a tracker and the reader that
 // fetches them (`readBoardFacts`, below) is the only part that spends a call:
-//   epic-all-closed       an open `epic` whose sub-issues are all closed                      -> product-manager (close it)
+//   epic-all-closed       an open `epic` whose sub-issues are all closed, and no `Waiting-for:`/`Not-before:` line of its body still unmet (a11ign/agent-org#840)  -> product-manager (close it)
 //   closing-pr-merged     an open row a merged PR names in `Closes #n`                        -> product-manager (close it)
 //   no-live-claimant      `in-progress` with no live `session:` holder and no fresh claim record, or a claim-only label
 //                         (`started`, `session:*`, `no-code-left`) on a row that is not `in-progress`          -> the row's owner
@@ -122,10 +122,24 @@ function ownerOf(row: BoardRow) {
 /** @param {BoardRow} row @param {string} question @param {string} field @param {string} detail @param {string} [route] @returns {Finding} */
 const finding = (row: BoardRow, question: string, field: string, detail: string, route: string = PRODUCT_MANAGER): Finding => ({ question, number: row.number, field, detail, route });
 
+/**
+ * AN EPIC A WAIT STILL HOLDS IS NOT DONE, whatever its children say (a11ign/agent-org#840: a11ign#4425 was re-raised three times on 2026-10-11, its owner having left it open on
+ * purpose for a `Not-before:` or `Waiting-for:` line that was not yet true). `epicsDone` reads only the sub-issue count, so nothing reads a comment that says more children are coming;
+ * the line is the DATA. The parser is `waitsTrueOf`'s, and this is its mirror: when the wait comes true the epic is flagged again. A condition that cannot be read is NOT held, so it
+ * still flags and is never silence.
+ * @param {BoardRow} row @param {BoardFacts} facts @returns {boolean}
+ */
+function epicHeldByWait(row: BoardRow, { now, waitFacts }: BoardFacts): boolean {
+  const notBefore = notBeforeDate(row.body);
+  if (notBefore !== null && Date.parse(notBeforeIso(notBefore)) > now) return true;
+  const waits = declaredWaitsOf(waitItemOf({ ...row, labels: labelsOf(row) }, "row")).waits;
+  return waitFacts !== null && waits.some((w) => conditionHolds(w, waitFacts) === false);
+}
+
 /** @param {BoardFacts} facts @returns {Finding[]} */
-function epicsDone({ openRows }: BoardFacts): Finding[] {
-  return openRows.filter((row) => labelsOf(row).includes("epic") && (row.subIssuesSummary?.total ?? 0) > 0
-    && row.subIssuesSummary?.completed === row.subIssuesSummary?.total).map((row) => finding(row, QUESTIONS.EPIC_DONE, "state (open)",
+function epicsDone(facts: BoardFacts): Finding[] {
+  return facts.openRows.filter((row) => labelsOf(row).includes("epic") && (row.subIssuesSummary?.total ?? 0) > 0
+    && row.subIssuesSummary?.completed === row.subIssuesSummary?.total && !epicHeldByWait(row, facts)).map((row) => finding(row, QUESTIONS.EPIC_DONE, "state (open)",
     `an epic whose ${row.subIssuesSummary?.completed} of ${row.subIssuesSummary?.total} children are closed`));
 }
 
