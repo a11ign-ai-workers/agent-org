@@ -10,7 +10,7 @@ Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json 
 
 Mutation: four, each red in exactly one of the six tests of `auto-arm-octo-sts.test.ts` and each restore byte-identical (`diff` clean, 6 of 6 after): the policy without `workflow_dispatch`; `relay` holding `id-token: write`; `relay` on any review state; `arm-approved` without its `github.ref == 'refs/heads/main'` guard.
 
-Closes: none -- a11ign/a11ign#4981 carries the Closes for a11ign/a11ign#4969; this is its agent-org half, and the live readings stay a new row.
+Closes a11ign/a11ign#4969 (the row's two PRs both declare it, as pr:open requires of the claimed branch: whichever merges first closes the row, and the live readings are filed as their own row).
 
 Outside-Region: .github/chainguard/auto-arm.sts.yaml — the row names it for a changed claim, and the new dispatch event is one (`event_name`).
 Outside-Region: src/packaging/auto-arm-octo-sts.test.ts — pins the policy's claims and the jobs' triggers (a11ign/a11ign#4199); it must name `relay` and `arm-approved`.
