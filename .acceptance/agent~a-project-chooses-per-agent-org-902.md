@@ -21,7 +21,7 @@ The row's third command is `bash -c 'cd ~/repos/agent-org && npx rstest run ...'
 VERDICT pass: 23 tests in 2 files -- full report: A11Y_RSTEST_FULL_REPORT=1
 ```
 
-Mutation (each applied once, run against both test files, restored from a scratchpad copy and checked with `diff` and `git diff --quiet`):
+Mutation: seven, each applied once, run against both test files, restored from a scratchpad copy and checked with `diff` and `git diff --quiet`:
 - `seatModeOf` never gives `run` (`return "seat"` for `run`): 4 of 23 fail, the two POSITIVE CONTROLs and the two negative tests that need a `run` neighbour or an own-key `run`.
 - gives `run` for any named value: 2 of 23 fail, the value-other-than-seat/run test and the per-cause test. The positive controls still pass, so the two directions break different tests.
 - ignores the registry (`known.has` removed): 2 of 23 fail, the unknown-cause and empty-registry tests.
