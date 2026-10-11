@@ -29,6 +29,8 @@ Mutation: four mutants, each red on named tests and each restore byte-identical 
 - **The key is validated against the declaration, the pre-existing worker regex is not.** `worker-1` to `worker-3` (below the roster family's floor, `arm-pr.ts`'s `familyMember`) still match as before, because `host-units.ts` cannot import `arm-pr.ts` (it reads the roster at module load, which the test fixture project does not declare) and the old code already treated them as workers.
 - **Not folded in, outside this Region:** the remedy line `host:check` prints for every finding, `Remedy for all of them: pnpm run host:install`, is wrong for a session-model finding (the orchestrator's comment on the row). It is in `host-units.ts` but five tests across two files pin its text, one of them in `reviewer-door-install.test.ts`, which is not this row's Region; it is its own row.
 
+Outside-Region: src/host-units.ts — the row's own Region entry; the row states no repository, so `pr-open` reads the bare path as the project's first code repository (a11ign/a11ign) and not as this tracker's (a11ign/agent-org), where the file is.
+Outside-Region: src/packaging/host-units.test.ts — the row's own Region entry, for the same reason.
 Outside-Region: .changeset/a-worker-the-router-started-on-haiku-is-not-model-drift.md — the entry a project that pins a tag reads.
 
 platform: n/a (no GitHub, pnpm, systemd or git feature; the check reads a herdr session list and a transcript tail it already read)
