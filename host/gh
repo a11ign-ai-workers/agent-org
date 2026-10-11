@@ -246,6 +246,66 @@ read_repo_slug() {
   repo_slug=$(printf %s "${r:-default}" | tr -c 'A-Za-z0-9._-' '_')
 }
 
+# --- #4899: A REST READ IS REVALIDATED, NOT RE-FETCHED ------------------------------------------------------------------------
+#
+# The 20 s entry and the tick's generation answer a read asked AGAIN SOON. Past them a `gh api <path>` GET went to GitHub and was charged a core
+# point for the same bytes. GitHub answers a request carrying `If-None-Match: <etag>` with a 304 when nothing changed, and a 304 is not counted
+# against the primary limit, so this block keeps, per read, the last ETag and the body it came with (`$RC/c/<repository>~<key>`: the tag on line 1,
+# the stdout the caller got after it) and asks with the tag. A 304 is replayed from the entry with exit 0 and nothing on stderr; a 200 replaces it.
+#
+#   - NOT A TIME BOUND: the server decides, so an entry of any age is as true as the answer to the request, for a session as much as the tick,
+#     and a write need not drop it (the next read finds a new tag and a 200).
+#   - THE TAG IS SENT WITHOUT ITS `W/` PREFIX, which came back 200 and cost a point when sent (measured 2026-10-08, `tick-snapshot.ts`).
+#   - ONLY A PLAIN GET: one path, optionally `--jq`/`-q` and a named GET. `gh api -i` prints the header block and then the body exactly as it
+#     would have printed it alone (`--jq` included, measured 2026-10-10, gh 2.100), so the block is cut off by its blank line and the caller gets
+#     its own bytes. A flag that changes what is printed (`--paginate`, `--slurp`, `--template`, `--input`, `--cache`, a body field, `-H`, `-i`)
+#     leaves the call exactly as it was.
+#   - A 304 with no entry to replay (it was swept) is NOT turned into an answer: gh's own exit status and message stand.
+#   - `A11Y_GH_READ_CACHE=off` skips it, with the rest.
+
+# Succeeds when the arguments are a plain `api <path>` GET (see above).
+etag_eligible() {
+  [ "$1" = api ] || return 1
+  shift
+  paths=0; want=
+  for a; do
+    if [ -n "$want" ]; then
+      [ "$want" = method ] && [ "$(printf %s "$a" | tr 'a-z' 'A-Z')" != GET ] && return 1
+      want=; continue
+    fi
+    case "$a" in
+      --jq|-q) want=jq ;;
+      -X|--method) want=method ;;
+      --jq=*|-X[Gg][Ee][Tt]|--method=[Gg][Ee][Tt]) ;;
+      -*) return 1 ;;
+      graphql|*rate_limit*) return 1 ;;
+      *) paths=$((paths + 1)) ;;
+    esac
+  done
+  [ -z "$want" ] && [ "$paths" = 1 ]
+}
+
+# Runs after a real call made with `-i` and an optional `If-None-Match`: cuts the header block off `$copy`, replays or stores the entry, and
+# leaves in `$copy` the stdout the caller would have got without `-i`, in `status` the status it would have got, and in `errcopy` its stderr.
+etag_settle() {
+  code=$(sed -n '1s/^HTTP\/[0-9.]* \{1,\}\([0-9]\{3\}\).*/\1/p' "$copy" 2>/dev/null)
+  [ -n "$code" ] || return 0 # no header block: gh failed before it spoke, and what it printed is the answer
+  split=$(grep -n -m1 '^[[:space:]]*$' "$copy" | cut -d: -f1)
+  tag=$(sed -n 's/^[Ee][Tt][Aa][Gg]: *\(W\/\)\{0,1\}\("[^"]*"\).*/\2/p' "$copy" | head -n 1)
+  stripped=$copy.body
+  if [ -n "$split" ]; then tail -n +"$((split + 1))" "$copy" > "$stripped"; else : > "$stripped"; fi
+  case "$code" in
+    304) if [ -f "$cond_file" ]; then
+           tail -n +2 "$cond_file" > "$stripped" && status=0 && : > "$errcopy" && LEDGER_RESOURCE=etag
+         fi ;;
+    2??) if [ -n "$tag" ]; then
+           { printf '%s\n' "$tag"; cat "$stripped"; } > "$cond_file.$$" 2>/dev/null && mv "$cond_file.$$" "$cond_file" 2>/dev/null
+           [ "$(($$ % 16))" -eq 0 ] && find "$RC/c" -type f -mmin +720 -exec rm -f {} + 2>/dev/null
+         fi ;;
+  esac
+  mv "$stripped" "$copy"
+}
+
 # Sets `repo_slug` for a WRITE: as `read_repo_slug`, except that `gh api repos/<owner>/<repo>/...` names its repository in the path, which
 # outranks $GH_REPO. A path with a `{owner}` placeholder is resolved by gh from elsewhere, so it names nothing here.
 write_repo_slug() {
@@ -604,11 +664,25 @@ if [ "$class" = read ] && [ "${A11Y_GH_READ_CACHE:-}" != off ] && [ ! -t 1 ]; th
   fi
   cache_on=1
 fi
+ledger_a=$1; ledger_b=$2
 
 # stdout is captured for the one call that can carry a cost and for a read that may be stored, and only when it is not a terminal.
 copy=
 if { [ "$1 $2" = "api graphql" ] || [ "$cache_on" = 1 ]; } && [ ! -t 1 ]; then
   copy=$(mktemp "${TMPDIR:-/tmp}/gh-call.XXXXXX" 2>/dev/null) || copy=
+fi
+# #4899: a plain `api <path>` GET that missed the entry above is asked with the ETag it was last answered under (`etag_eligible`, `etag_settle`).
+cond_on=0; cond_file=; errcopy=
+if [ "$cache_on" = 1 ] && [ -n "$copy" ] && etag_eligible "$@"; then
+  errcopy=$(mktemp "${TMPDIR:-/tmp}/gh-err.XXXXXX" 2>/dev/null) || errcopy=
+  if [ -n "$errcopy" ] && mkdir -p "$RC/c" 2>/dev/null; then
+    cond_on=1
+    cond_file=$RC/c/$(entry_prefix "$repo_slug")~$key
+    cond_tag=
+    [ -f "$cond_file" ] && IFS= read -r cond_tag 2>/dev/null < "$cond_file"
+    shift
+    if [ -n "$cond_tag" ]; then set -- api -i -H "If-None-Match: $cond_tag" "$@"; else set -- api -i "$@"; fi
+  fi
 fi
 # gh-real runs in the background so this shell can forward a signal, and dash gives a background command /dev/null for stdin
 # even for `<&0` (measured: the piped body vanished), so stdin is carried on fd 3. A closed stdin is tested first because a
@@ -616,7 +690,7 @@ fi
 if (exec 3<&0) 2>/dev/null; then exec 3<&0; else exec 3</dev/null; fi
 # #4898: a write's stderr is kept to be read for a rate-limit refusal, and echoed back unchanged after the call; a stdin the call names (`-`)
 # is kept too, since gh-real consumes it and the queued retry needs it again.
-queue_on=0; errcopy=; stdin_copy=
+queue_on=0; stdin_copy=
 if [ "$class" = write ] && [ "${A11Y_GH_QUEUE:-}" != off ] && [ -z "${A11Y_GH_QUEUE_RETRY:-}" ] && [ ! -t 2 ]; then
   errcopy=$(mktemp "${TMPDIR:-/tmp}/gh-err.XXXXXX" 2>/dev/null) && queue_on=1 || errcopy=
 fi
@@ -637,9 +711,10 @@ status=$?
 # a trapped signal ends the first `wait` early with 128+n while the child is still dying; wait for its real status
 kill -0 "$child" 2>/dev/null && { wait "$child"; status=$?; }
 trap - TERM INT HUP
+[ "$cond_on" = 1 ] && etag_settle
 [ -n "$copy" ] && cat "$copy"
 [ -n "$errcopy" ] && cat "$errcopy" >&2
-ledger_record "$status" "$copy" "$1" "$2" 2>/dev/null || :
+ledger_record "$status" "$copy" "$ledger_a" "$ledger_b" 2>/dev/null || :
 if [ "$queue_on" = 1 ] && [ "$status" -ne 0 ] && rate_limit_kind "$errcopy"; then
   queue_refused "$@" && status=75
 fi

@@ -351,6 +351,68 @@ export function runBatch(calls: { args: string[]; repo: string | undefined; }[],
 
 const callKey = (args: string[], repo: string | undefined) => JSON.stringify([repo ?? "", args]);
 
+/** How many open rows `readOpenRows` asks for (it spells the number itself: `packaging/work-gate.test.ts` pins that one literal); a list that comes back this long may have been cut, and answers nothing a narrower list could be taken from. A drift between the two turns the fold off, which `work-gate.test.ts` (1a) reads. */
+export const OPEN_ROWS_LIMIT = 500;
+
+type OpenRowsList = { label: string | null; limit: number; fields: string[] };
+
+/** @returns what `issue list --state open [--label L] --limit N --json F` asks, or `null` for any other call (an extra flag is a different question, and is never folded) */
+function openRowsListOf(args: string[]): OpenRowsList | null {
+  // a string, not an array literal: this PARSES a call and makes none, and `gh-call-inventory.ts` counts an `issue list` array as a call site
+  const labelled = args[4] === "--label";
+  const rest = args.slice(labelled ? 6 : 4);
+  const shaped = args.slice(0, 4).join(" ") === "issue list --state open" && rest.length === 4 && rest[0] === "--limit" && rest[2] === "--json" && /^\d+$/.test(rest[1]);
+  return shaped ? { label: labelled ? args[5] : null, limit: Number(rest[1]), fields: rest[3].split(",") } : null;
+}
+
+/**
+ * #4899: ONE LIST OF THE OPEN ROWS, ASKED ONCE, ANSWERS THE LISTS OF ITS LABELS. The wave asks `issue list --state open --limit 500` for every open row
+ * (`readOpenRows`) and, beside it, `--label chairman-blocked`, `--label backlog` (and `--label ready` for another repository's tracker): each a GraphQL read of
+ * the same rows with fewer fields, which the 500 already carries. A call whose fields the 500 names and whose label is one of the rows' own is not sent; its
+ * answer is made from the 500's, in the order and at the page size `gh` would have given it.
+ *
+ * `derived` maps a folded call to the call whose answer it is made from. WHEN THE 500 CAME BACK FULL it may have been cut, and a label's rows can lie beyond
+ * it, so the folded call is not answered here and is asked as it always was (`readWithFirstWaveTogether` falls through to `run`): the fold is a saving
+ * when the list is complete and never a different answer.
+ */
+function foldIntoOpenRows(calls: { args: string[]; repo: string | undefined }[]): { send: typeof calls; derived: Map<string, { from: string; list: OpenRowsList; call: (typeof calls)[number] }> } {
+  const asked = calls.map((call) => ({ key: callKey(call.args, call.repo), repo: call.repo ?? "", list: openRowsListOf(call.args) }));
+  const wholes = new Map<string, { key: string; list: OpenRowsList }>();
+  for (const { key, repo, list } of asked) if (list !== null && list.label === null && list.limit === OPEN_ROWS_LIMIT) wholes.set(repo, { key, list });
+  const derived = new Map<string, { from: string; list: OpenRowsList; call: (typeof calls)[number] }>();
+  for (const [at, { key, repo, list }] of asked.entries()) {
+    const whole = wholes.get(repo);
+    const foldable = list !== null && list.label !== null && whole !== undefined && list.limit <= OPEN_ROWS_LIMIT && list.fields.every((field) => whole.list.fields.includes(field));
+    if (foldable) derived.set(key, { from: whole.key, list, call: calls[at] });
+  }
+  return { send: calls.filter((call) => !derived.has(callKey(call.args, call.repo))), derived };
+}
+
+/**
+ * A folded call whose list could not answer it (the page came back full, or was refused) is asked as it always was: together with the others like it, in
+ * ONE more batch, and never one by one -- those reads were in the first wave before the fold. A single call is left to `run`, which is what a batch of one is.
+ * A batch that cannot be made leaves them to `run` too.
+ */
+function askTogether({ calls, batch, waiting, log }: { calls: { args: string[]; repo: string | undefined }[]; batch: typeof runBatch; waiting: Map<string, unknown>; log: (line: string) => void }): void {
+  if (calls.length < 2) return;
+  try {
+    const answers = batch(calls);
+    calls.forEach((call, at) => waiting.set(callKey(call.args, call.repo), answers[at]));
+  } catch (err) {
+    log(`NOTE: ${calls.length} folded gh calls could not be batched, so they run one by one: ${err instanceof Error ? err.message : String(err)}\n`);
+  }
+}
+
+/** @returns the folded call's answer made from the whole list's, or `undefined` when that list is not a complete array of rows */
+function answerFromOpenRows(whole: string, { label, limit, fields }: OpenRowsList): string | undefined {
+  let rows: any;
+  try { rows = JSON.parse(whole); } catch { return undefined; }
+  if (!Array.isArray(rows) || rows.length >= OPEN_ROWS_LIMIT) return undefined;
+  const hasLabel = (row: any) => Array.isArray(row?.labels) && row.labels.some((l: any) => l?.name === label);
+  const project = (row: any) => Object.fromEntries(fields.map((field) => [field, row[field]]));
+  return JSON.stringify(rows.filter(hasLabel).slice(0, limit).map(project));
+}
+
 /**
  * `read`, with the `gh` calls it makes FIRST asked together. A rehearsal runs `read` against a `run` that answers every call `[]` and notes it; those
  * calls go out as one batch; then `read` runs for real against the answers. So the commands, their parsing and every verdict are the reader's own, and
@@ -371,14 +433,23 @@ export function readWithFirstWaveTogether<T>(read: (run: (args: string[], repo?:
   }
   const calls = [...asked.values()];
   if (calls.length < 2) return read(run);
+  const { send, derived } = foldIntoOpenRows(calls);
   let answers;
   try {
-    answers = batch(calls);
+    answers = batch(send);
   } catch (err) {
     log(`NOTE: ${calls.length} gh calls could not be batched, so they run one by one: ${err instanceof Error ? err.message : String(err)}\n`);
     return read(run);
   }
-  const waiting = new Map(calls.map((call, at) => [callKey(call.args, call.repo), answers[at]]));
+  const waiting = new Map(send.map((call, at) => [callKey(call.args, call.repo), answers[at]]));
+  const notFolded: typeof calls = [];
+  for (const [key, { from, list, call }] of derived) {
+    const whole = waiting.get(from);
+    const answer = whole !== undefined && !("failed" in whole) ? answerFromOpenRows(whole.stdout, list) : undefined;
+    if (answer !== undefined) waiting.set(key, { stdout: answer });
+    else notFolded.push(call);
+  }
+  askTogether({ calls: notFolded, batch, waiting, log });
   return read((args, repo = activeRepo) => {
     const key = callKey(args, repo);
     const answer = waiting.get(key);
@@ -567,6 +638,12 @@ function writePagedFilesCache(path: string, cache: Record<string, string[]>, log
  * and `epicRowsOf` filters the epics out of it: the unconditional count is UNCHANGED at the number the test
  * pins, and the conditional read is gone, so a tick makes one `gh` call fewer on an empty shelf and none more
  * on a busy one.
+ *
+ * THE THREE LABEL LISTS BELOW ARE A CEILING, NOT A COUNT (#4899). `readWithFirstWaveTogether` makes `issue list --label ready|backlog|needs:chairman`
+ * from the one 500-row open list when that list came back COMPLETE (under 500 rows) and names the fields the label read asked for, so a healthy tick sends
+ * ONE `issue list` per tracker where it sent three or four. A full page falls back to the per-label reads, which is why they stay in this list and the
+ * number the test pins stays where it was: the ceiling is what a tick with 500 or more open rows pays. `src/work-gate.test.ts` counts the calls of a
+ * fixed fixture, in both shapes.
  */
 export const GH_READS = Object.freeze({
   // #3674: ONE `pr list` PER CODE REPOSITORY (readPrs, at `OPEN_PRS_FIRST_PAGE`, 1 point each), the primary's here and the others' in `perOtherCodeRepositoryOpenList`.
