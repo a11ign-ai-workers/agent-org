@@ -15,7 +15,7 @@
 //   readFixRow      the open row that holds the fix for an event, and the org's newest word on it -> the `Being done` line of every incident and stall
 //   readEpisodeStart when the chairman was told of the open episode, from the ledger     -> the `Lasted` line of every cleared incident and stall
 //
-// A LEAF: node's own modules only (and `lib/tick-completion.ts` and `../ledger.ts`, which are the same). Everything that reaches outside the process is a dependency a test replaces (`github.api`, `systemctl`,
+// A LEAF: node's own modules only (and `lib/tick-completion.ts` and `../ledger.ts`, which are the same; `hand-fix-ledger.ts` imports `ORG_LOGINS` from here). Everything that reaches outside the process is a dependency a test replaces (`github.api`, `systemctl`,
 // `readSeats`), and the files it keeps are under a directory the caller names, so a test gives it a temporary one.
 //
 // **THE GATE'S LAST COMPLETED TICK IS A RECORD THE TICK WRITES (#3040), NOT THE UNIT'S TIMESTAMP.** `InactiveEnterTimestamp` answers "did the unit run" and a tick
@@ -261,10 +261,18 @@ export async function readWaitingRows({ github, repo }: Repo): Promise<{ number:
 }
 
 /**
- * The org's own GitHub accounts, whose comments on a fix row say what is being done. Restated from `hand-fix-ledger.ts`'s `ORG_LOGINS` because this file is a
- * leaf and that one imports the tool; a login added there must be added here.
+ * THE ORG'S OWN GITHUB LOGINS, whose comments on a fix row say what is being done and whose commits and pull requests are not a hand fix. **The one list**:
+ * `hand-fix-ledger.ts` imports it from here (this file is the leaf and that one imports the tool, so it cannot go the other way), so a login added here is
+ * read by both and a second copy cannot drift from it (agent-org#797).
+ *
+ * Two kinds. The ACCOUNTS are people-shaped logins the org's sessions act as. The APPS are the three GitHub Apps (`a11ign-scheduler`, a11ign#4906;
+ * `a11ign-workers`, agent-org#788; `a11ign-managers`, a11ign#4911), and an App is spelled three ways by three readers of the same author: `<slug>[bot]` in
+ * REST (a comment's `user.login`, a commit's author), `<slug>` for a GraphQL `Bot` node and `app/<slug>` in `gh pr list --json author`. Left out, an App's
+ * write reads as a person: a hand fix in the ledger, and "not the org's word" on a fix row.
  */
-export const ORG_LOGINS = Object.freeze(["a11ign-ai-workers", "a11ign-ai-leads", "a11ign-bot"]);
+export const ORG_ACCOUNT_LOGINS = Object.freeze(["a11ign-ai-workers", "a11ign-ai-leads", "a11ign-bot"]);
+export const ORG_APP_SLUGS = Object.freeze(["a11ign-scheduler", "a11ign-workers", "a11ign-managers"]);
+export const ORG_LOGINS = Object.freeze([...ORG_ACCOUNT_LOGINS, ...ORG_APP_SLUGS.flatMap((slug) => [`${slug}[bot]`, slug, `app/${slug}`])]);
 const INCIDENT_LABEL = "incident";
 const COMMENTS_PER_PAGE = 100;
 
