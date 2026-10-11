@@ -87,3 +87,39 @@ export function incidentSummary(incidents: IdleClaimIncident[] | null | undefine
   if (incidents === null || incidents === undefined) return null;
   return { count: incidents.length, first: incidents.slice(0, FIRST_REFS).map(({ ref }) => ref) };
 }
+
+const HOUR_MS = 3_600_000;
+
+/**
+ * One claimed row of one declared tracker, as the daily retro reads it (#4957): who holds it, since when, and what the holder has declared. `claimedAt` is the newest claim
+ * record's own time; `null` is a record nobody could date, which is CANNOT TELL and not a claim that began today.
+ */
+export type ClaimedRow = { repo: string, row: number, session: string, claimedAt: number | null };
+
+/** A holder's last `worker:state` declaration (`at` in ms) and when the holder's last turn began, if the wake ledger says (`turnStartedAt`, `lastDeliveredTo`'s). */
+export type HolderState = { declaredAt: number | null, turnStartedAt: number | null };
+
+/**
+ * WORKER-HOURS IDLE ON A CLAIMED ROW WITH NO DECLARATION, over `[since, now]` (#4957, the chairman's headline metric). For every claimed row of every declared tracker:
+ * a holder with an open pull request (`sessionsWithPr`, by its `session:` label) reads 0, and so does one whose declaration is FRESH, made after the claim and after
+ * the turn began (the freshness rule of `declarationReading`, without its "does the wait still hold" half: a lapsed wait is the gate's nudge, not this number's). Any other holder
+ * was idle from the latest of the window's start, the claim, its last declaration and its last turn's start, until `now`. THE START IS THE LATE SIDE, so the figure is a FLOOR:
+ * an idle run that ended before `now` and was followed by work is not counted past that work's start, and a holder whose turn began recently is credited from it.
+ * A row whose claim could not be dated is not counted and is named in `undated`, never read as 0 hours or as a claim that began at the window's start.
+ */
+export function idleClaimedHours({ claims, sessionsWithPr, holders, since, now }: {
+  claims: ClaimedRow[], sessionsWithPr: ReadonlySet<string>, holders: ReadonlyMap<string, HolderState>, since: number, now: number,
+}): { hours: number, claims: number, idleClaims: number, undated: string[] } {
+  let ms = 0;
+  let idleClaims = 0;
+  const undated: string[] = [];
+  for (const { repo, row, session, claimedAt } of claims) {
+    if (claimedAt === null) { undated.push(`${repo}#${row}`); continue; }
+    if (sessionsWithPr.has(session)) continue;
+    const { declaredAt = null, turnStartedAt = null } = holders.get(session) ?? {};
+    if (declaredAt !== null && declaredAt >= Math.max(claimedAt, turnStartedAt ?? 0)) continue;
+    const from = Math.max(since, claimedAt, declaredAt ?? 0, turnStartedAt ?? 0);
+    if (now > from) { ms += now - from; idleClaims++; }
+  }
+  return { hours: Math.round((ms / HOUR_MS) * 10) / 10, claims: claims.length, idleClaims, undated };
+}
