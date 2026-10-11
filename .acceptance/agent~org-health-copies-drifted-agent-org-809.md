@@ -2,6 +2,8 @@ org-health's `copies-drifted` no longer reads UNKNOWN for the two copies whose o
 
 Closes a11ign/agent-org#809
 
+Class: detector-pages-managers — any declared copy whose original moves (or is deleted) makes the signal read UNKNOWN every tick; guard: `org-health-fleet-and-copies.test.ts` pins that a moved original is read where it is installed and that every missing one, or a comparison no test makes, still reads `unknown`.
+
 ## What changes, and why
 
 - **The two headers** (`src/lib/local-import-closure.ts`, `src/lib/worktree-resolution.ts`) name `@a11ign/toolchain/lib/<stem>` at 0.7.1 as their original, and `COMPARED IN` the test that compares them by names and behaviour (`bootstrap-copies-match-toolchain.test.ts`, agent-org#715). They stay copies: the tick runs before any install (agent-org#522).
@@ -12,9 +14,7 @@ Closes a11ign/agent-org#809
 
 Done-when 1: the row's command, with the import taken from this tree (`./src/org-health.ts`), exits 0 against `/home/agent/repos/a11y-witness` (7 pairs, `clear`; before the change `7 unknown`). `src/packaging/org-health-fleet-and-copies.test.ts` carries the control: a moved original that is not installed, not exported, not shipped, unparseable, with no named comparer, with a gone comparer and with a comparer that no longer probes the stem each read `unknown`, and a gone original beside a clear moved pair keeps the reading `unknown`. Done-when 2 is the tick journal an hour after release, the claimant's to quote.
 
-Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --input-type=module -e 'import { readDeclaredCopies, copyDriftReading } from "./src/org-health.ts"; const pairs = readDeclaredCopies({ root: "/home/agent/repos/a11y-witness" }); const reading = copyDriftReading({ pairs }); if (pairs.length < 7 || reading.status !== "clear") { console.error(pairs.length, reading.status, reading.detail); process.exit(1); }'`
-
-Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --test src/packaging/org-health-fleet-and-copies.test.ts src/packaging/bootstrap-copies-match-toolchain.test.ts`
+Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --input-type=module -e 'import { readDeclaredCopies, copyDriftReading } from "./src/org-health.ts"; const pairs = readDeclaredCopies({ root: "/home/agent/repos/a11y-witness" }); const reading = copyDriftReading({ pairs }); if (pairs.length < 7 || reading.status !== "clear") { console.error(pairs.length, reading.status, reading.detail); process.exit(1); }'` && `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --test src/packaging/org-health-fleet-and-copies.test.ts src/packaging/bootstrap-copies-match-toolchain.test.ts`
 
 Mutation: four mutants in `src/org-health.ts`, each killed by named tests of `org-health-fleet-and-copies.test.ts`: the comparison never required (the control test fails), a missing exported file read as present (the control fails), an installed original never recognised (the control, the moved-original test and the real-copies test fail), the comparing test not read for the stem (the control fails). Source restored with `cp` and `diff`ed identical.
 
