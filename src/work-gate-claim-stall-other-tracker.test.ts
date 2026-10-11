@@ -30,7 +30,7 @@ const claimed = (row: number, session: string, { minutesBefore = 20 } = {}) => (
 const rowOf = (number: number, session: string, { claim = true } = {}) => ({ number, title: `row ${number}`, body: "", blockedBy: { nodes: [] },
   labels: [...(claim ? ["in-progress"] : []), `session:${session}`, "started"].map((name) => ({ name })) });
 
-type Order = { session: string; cause: string; subject: string; causeKey: string; prompt: string; release?: { why: string; row: number } };
+type Order = { session: string; cause: string; subject: string; causeKey: string; prompt: string; release?: { why: string; row: number; tracker?: string } };
 const AGENT_ORG = { key: "agent-org", repo: "a11ign/agent-org" };
 
 /** A second tracker as the gate hands it to the pass. */
@@ -119,7 +119,7 @@ test("the second tracker's nudge memory is READ BACK: the nudge is not re-sent o
   assert.deepEqual(tickAt(M + 2, delivered, memory).filter((o) => o.release === undefined), [], "delivered under the NAMESPACED key, so it is not sent a second time");
 });
 
-test("a release the pass would make of a second tracker's row is NOT ordered, and the log says it waits on agent-org#834 (twin: the home row is released)", () => {
+test("a release of a second tracker's row IS ordered, carrying the tracker's key so the performer reads that tracker (agent-org#834; twin: the home row's carries none)", () => {
   const later = M + STALL_INTERVAL_MS / MIN + 1;
   const run = (w: World) => {
     const memory: Record<string, any> = {};
@@ -131,13 +131,14 @@ test("a release the pass would make of a second tracker's row is NOT ordered, an
     return { orders, log: log.join(""), memory };
   };
   const home = run(homeRow());
-  assert.deepEqual(home.orders.filter((o) => o.release !== undefined).map((o) => [o.release?.why, o.release?.row]), [["stalled", 476]], "the control: the home row is released");
+  const homeReleases = home.orders.filter((o) => o.release !== undefined);
+  assert.deepEqual(homeReleases.map((o) => [o.release?.why, o.release?.row, o.release?.tracker]), [["stalled", 476, undefined]], "the control: the home row's release names no tracker");
   const other = run(agentOrgRow());
-  assert.deepEqual(other.orders.filter((o) => o.release !== undefined), [], "the second tracker's is not");
-  assert.deepEqual(other.orders, [], "and nothing else is ordered for it either: the holder was nudged once and the claim stands");
-  assert.match(other.log, /agent-org#476 \(worker-agent-org-476\) would be RELEASED \(stalled\) and is NOT ordered/);
-  assert.match(other.log, /waits on agent-org#834/);
-  assert.equal(other.memory["agent-org#476"].session, "worker-agent-org-476", "its memory is kept, so the release is still read as the second reading when #834 lands");
+  const releases = other.orders.filter((o) => o.release !== undefined);
+  assert.deepEqual(releases.map((o) => [o.release?.why, o.release?.row, o.release?.tracker]), [["stalled", 476, "agent-org"]], "the second tracker's is ordered, and names it");
+  assert.equal(releases[0].subject, "row-agent-org#476", "under the namespaced subject, so it is never the home row's");
+  assert.equal(releases[0].session, "worker-agent-org-476");
+  assert.doesNotMatch(other.log, /NOT ordered/, "and the pass no longer says it withholds it");
 });
 
 test("an UNREADABLE second tracker yields no order and says why, and its memory is KEPT (twin: read, the same row is nudged; an empty list would forget it)", () => {

@@ -1028,8 +1028,11 @@ const minutes = (ms: number) => Math.round(ms / MINUTE_MS);
 
 /**
  * `interrupt` (#3535) is a closed row's per-row instance caught mid-turn: the performer stops it, with no prompt
+ *
+ * `tracker` (agent-org#834) is the declared key of the tracker the row is in, and ABSENT for the home tracker's: `row` is a number in THAT tracker's
+ * repository, so the performer reads its labels, posts its comment and declines it there. The tick that read the row fills it (`claim-stall-tick.ts`).
  */
-export type ReleaseRequest = { row: number, session: string, why: "stalled" | "blocked" | "merged" | "gone" | "closed" | "wait", branch: string | null, worktree: string | null, idleMinutes: number | null, nudgedAt: number | null, edges?: number[], waiting?: string, mergedPr?: number, mergedPrRepoKey?: string, mergedPrHead?: string, openPrs?: number[], openPrRepoKeys?: (string | undefined)[], answer?: string, interrupt?: boolean };
+export type ReleaseRequest = { row: number, tracker?: string, session: string, why: "stalled" | "blocked" | "merged" | "gone" | "closed" | "wait", branch: string | null, worktree: string | null, idleMinutes: number | null, nudgedAt: number | null, edges?: number[], waiting?: string, mergedPr?: number, mergedPrRepoKey?: string, mergedPrHead?: string, openPrs?: number[], openPrRepoKeys?: (string | undefined)[], answer?: string, interrupt?: boolean };
 export type StallOrder = { session: string, cause: string, subject: string, discriminator: string, prompt: string, causeKey: string, title?: string, release?: ReleaseRequest, resume?: boolean };
 
 /**
