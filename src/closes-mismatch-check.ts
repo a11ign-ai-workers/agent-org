@@ -532,8 +532,14 @@ function main() {
     // A refused or duplicate source has no text to read, and `sectionsTextOf`'s "" for the first would read as "declares nothing".
     return { text: source.kind === "file" || source.kind === "body" ? source.text : null, named: sourceLine(source) };
   });
-  for (const line of consumer?.lines ?? []) console.log(line);
-  if (consumer?.exit === 1) process.exit(1);
+  // A refusal is printed and exits now. A pass or a named skip is held and printed AFTER the verdict below, so the line this check has always led
+  // with (`WARNING`, `ok`, `REFUSED`) is still first, and the note is not lost on any exit.
+  if (consumer?.exit === 1) {
+    for (const line of consumer.lines) console.log(line);
+    process.exit(1);
+  }
+  const heldNotes = consumer?.lines ?? [];
+  const printHeldNotes = () => { for (const line of heldNotes) console.log(line); };
   const resolved = lookupClosingIssues(prNumber, prRepo);
   const report = closesMismatchReport(declaration, resolved, body, prRepo);
   if (report.ok === null) {
@@ -548,6 +554,7 @@ function main() {
     // `update-branch` sweep's own re-push re-runs this); a real accidental closure sailing through
     // silently is not.
     console.log(`CLOSES MISMATCH: CANNOT ASK -- ${report.reason}`);
+    printHeldNotes();
     process.exit(2);
   }
   if (!report.ok) {
@@ -557,9 +564,11 @@ function main() {
     const siblings = fits ? recentClosesSiblings(lookupRecentClosesPrs(), prNumber) : null;
     const { exit, lines } = mismatchVerdict(report, underTest, siblings);
     for (const line of lines) console.log(line);
+    printHeldNotes();
     process.exit(exit);
   }
   console.log("CLOSES MISMATCH: ok -- declared and resolved agree");
+  printHeldNotes();
   process.exit(0);
 }
 

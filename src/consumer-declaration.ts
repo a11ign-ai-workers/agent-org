@@ -9,7 +9,7 @@
 //
 // for example, from line start (a mention inside prose or backticks is not a line and is not read):
 //
-//     Consumer-declaration: a11ign/a11ign:.agent-org/project.json routing.question=choice
+//     Consumer-declaration: acme/consumer:.agent-org/project.json routing.question=choice
 //
 // `<key>` is a dotted path into the JSON file at `<path>` on `<owner/repo>`'s default branch; `<value>` is the rest of the line, trimmed. The one
 // other form, `Consumer-declaration: none -- <reason>`, states that there is none and is not a declaration (a `none` without a reason is malformed).
