@@ -17,11 +17,12 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { chmodSync, mkdirSync, mkdtempSync, readFileSync, writeFileSync } from "node:fs";
-import { tmpdir } from "node:os";
+import { chmodSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { parse } from "yaml";
+import { sandboxGitEnv } from "@a11ign/toolchain/lib/git-sandbox";
+import { tmpDirForFile } from "../lib/tmp-fixture.ts";
 
 interface Step { id?: string; name?: string; if?: string; uses?: string; run?: string; with?: Record<string, unknown> }
 interface Job { permissions?: Record<string, string> | string; env?: Record<string, string>; needs?: string[] | string; steps?: Step[]; uses?: string; with?: Record<string, unknown> }
@@ -158,14 +159,14 @@ test("each structural property is seen to FAIL on a copy with exactly that thing
 
 // ---- behaviour: the job's own scripts, run by bash in fixture repositories ----
 
-const SCRATCH = mkdtempSync(join(tmpdir(), "release-dry-run-"));
+const SCRATCH = tmpDirForFile("release-dry-run-");
 const REAL_PNPM = spawnSync("bash", ["-c", "command -v pnpm"], { encoding: "utf8" }).stdout.trim();
 let counter = 0;
 const fresh = (label: string): string => { const dir = join(SCRATCH, `${label}-${counter++}`); mkdirSync(dir, { recursive: true }); return dir; };
 
 const GIT_ENV = { GIT_CONFIG_GLOBAL: "/dev/null", GIT_CONFIG_NOSYSTEM: "1", GIT_AUTHOR_NAME: "t", GIT_AUTHOR_EMAIL: "t@example.invalid", GIT_COMMITTER_NAME: "t", GIT_COMMITTER_EMAIL: "t@example.invalid" };
 const git = (cwd: string, ...args: string[]) => {
-  const r = spawnSync("git", args, { cwd, encoding: "utf8", env: { ...process.env, ...GIT_ENV } });
+  const r = spawnSync("git", args, { cwd, encoding: "utf8", env: sandboxGitEnv(GIT_ENV) });
   assert.equal(r.status, 0, `git ${args.join(" ")}: ${r.stderr}`);
 };
 
@@ -231,7 +232,7 @@ function runStep(step: Step, cwd: string, options: { fake?: string[] } = {}) {
     cwd,
     encoding: "utf8",
     timeout: 120_000,
-    env: { ...process.env, ...GIT_ENV, ...jobOf(CI).env, PATH: `${dir}:${process.env.PATH}`, CI: "true", GITHUB_WORKSPACE: cwd, RUNNER_TEMP: runner, GITHUB_OUTPUT: outputFile, SHIM_LOG: log },
+    env: { ...sandboxGitEnv(GIT_ENV), ...jobOf(CI).env, PATH: `${dir}:${process.env.PATH}`, CI: "true", GITHUB_WORKSPACE: cwd, RUNNER_TEMP: runner, GITHUB_OUTPUT: outputFile, SHIM_LOG: log },
   });
   return {
     status: result.status,
