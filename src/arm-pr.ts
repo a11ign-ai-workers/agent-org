@@ -406,6 +406,21 @@ export function familyNumber(name: string, families: readonly SpareFamily[] = SP
 }
 
 /**
+ * Pure: the tracker key a KEYED-LOOKING address names when the project declares no such tracker, or `null` (agent-org#757). `worker-capture-2407` is shaped as a member of the
+ * family and is none ({@link familyMember} refuses a key declared nowhere), so a reader that asks "which row does this pane hold" cannot answer, and this is how it SAYS so
+ * rather than reading the pane as no one's. A bare-number address, a name outside the family and a declared key answer `null`.
+ * @param {string} name @param {readonly SpareFamily[]} [families]
+ * @returns {string | null}
+ */
+export function undeclaredFamilyKey(name: string, families: readonly SpareFamily[] = SPARE_FAMILIES, keys: () => readonly string[] = declaredTrackerKeys): string | null {
+  for (const { prefix } of families) {
+    const found = name.startsWith(prefix) ? /^([a-z0-9-]+)-([1-9]\d*)$/.exec(name.slice(prefix.length)) : null;
+    if (found !== null && !/-\d+$/.test(found[1]) && !keys().includes(found[1])) return found[1];
+  }
+  return null;
+}
+
+/**
  * Pure: is this name a session that exists -- a listed address, or a member of a spare family? THE ONE QUESTION
  * every reader of a `session:<name>` label asks (the arm live check, the unknown-label check, `laneReason`,
  * `pr-open`'s owner label), so that they cannot disagree about whether `worker-9` exists.
