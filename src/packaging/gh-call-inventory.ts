@@ -1,9 +1,14 @@
 // #4505 PHASE 0 (agent-org#485): THE INVENTORY OF EVERY GITHUB-SPECIFIC CALL THE GATE AND ITS NEIGHBOURS MAKE, GENERATED SO IT CANNOT GO STALE.
 //
 // A ticket port (D1b) is cut against a list, and a hand-written list is wrong the week after it is written. So `docs/gh-call-inventory.json` is
-// what this file prints, and `gh-call-inventory.test.ts` fails when the committed copy differs from a fresh scan. Rewrite it with
+// what this file prints, on demand, with
 //
 //     node --import tsx src/packaging/gh-call-inventory.ts
+//
+// THE FILE IS NOT COMMITTED (a11ign/a11ign#5126). It was, and every pull request that added or changed a `gh` call rewrote it, so two concurrent pull
+// requests always conflicted on it and waited on each other to rebase and regenerate (50 commits touched it in one day). A copy that is regenerated
+// from the tree is not a record, and a scan nobody commits cannot be stale: `gh-call-inventory.test.ts` holds the GENERATOR against the tree (an
+// independent reader must find no spawner the scan lacks), and `gh-call-ratchet.test.ts` holds the calls against `docs/gh-call-baseline.json`.
 //
 // WHAT A "CALL" IS HERE: a CALL SITE IN THE SOURCE, never a runtime call. A loop over rows is one site; a helper called from nine places is nine. The
 // numbers are for sizing the port, and they say nothing about how many requests a tick spends (`GH_READS` in `work-gate.ts` is that table).
@@ -281,12 +286,12 @@ export function buildInventory(root: string = REPO_ROOT): Inventory {
   };
 }
 
-/** The committed file's text for an inventory: two-space JSON and a final newline, so a diff reads. */
+/** The file's text for an inventory: two-space JSON and a final newline, so two runs over one tree are byte-identical and a diff of two trees reads. */
 export function render(inventory: Inventory): string {
   return `${JSON.stringify(inventory, null, 2)}\n`;
 }
 
-/** Rewrites the committed file from the tree this file sits in: a developer's action, in a checkout, so `AGENT_ORG_TOOL_REPO` is not read. */
+/** Writes the (ignored, uncommitted) file from the tree this file sits in: a developer's action, in a checkout, so `AGENT_ORG_TOOL_REPO` is not read. */
 function main(): void {
   const inventory = buildInventory(REPO_ROOT);
   writeFileSync(join(REPO_ROOT, INVENTORY_PATH), render(inventory));

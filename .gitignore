@@ -1,3 +1,7 @@
 # Installed dependencies. A release commit is staged with `git add -A`, so an installed
 # node_modules/ went into every tag from v0.155.5 (2,278 files), and `npm install` of such a tag fails (#931).
 node_modules/
+
+# The call inventory is GENERATED (`node src/packaging/gh-call-inventory.ts`) and never committed: every pull request that adds a `gh` call rewrote it, so concurrent
+# pull requests conflicted on it one after another (a11ign/a11ign#5126). `gh-call-inventory.test.ts` holds the generator against the tree instead.
+docs/gh-call-inventory.json
