@@ -35,6 +35,10 @@ function missingFromInventory(root: string, inventory: Inventory): string[] {
 const spawn = (callee: string, args: string[]): string =>
   `${callee}("${COMMAND}", [${args.map((arg) => JSON.stringify(arg)).join(", ")}]);\n`;
 
+const REMOVE_ATTEMPTS = 5;
+const REMOVE_RETRIES = 3;
+const REMOVE_PAUSE_MS = 50;
+
 /** A throwaway tree, `files` keyed by path under it, removed by the caller through the returned `done`. */
 function tree(files: Record<string, string>): { root: string; done: () => void } {
   const root = mkdtempSync(join(tmpdir(), "gh-call-inventory-"));
@@ -42,7 +46,19 @@ function tree(files: Record<string, string>): { root: string; done: () => void }
     mkdirSync(dirname(join(root, path)), { recursive: true });
     writeFileSync(join(root, path), text);
   }
-  return { root, done: () => rmSync(root, { recursive: true, force: true }) };
+  return { root, done: () => removeTree(root) };
+}
+
+/**
+ * Removes `root` and says so if it is still there. `rmSync` with `force` can leave a directory behind without throwing when something writes into it while it is
+ * being removed, and the suite's private-tmp teardown then reports the leak on a passing run (agent-org#1037's first CI). A few attempts, then an assertion.
+ */
+function removeTree(root: string): void {
+  for (let attempt = 0; attempt < REMOVE_ATTEMPTS && existsSync(root); attempt += 1) {
+    rmSync(root, { recursive: true, force: true, maxRetries: REMOVE_RETRIES, retryDelay: REMOVE_PAUSE_MS });
+    if (existsSync(root)) Atomics.wait(new Int32Array(new SharedArrayBuffer(Int32Array.BYTES_PER_ELEMENT)), 0, 0, REMOVE_PAUSE_MS);
+  }
+  assert.equal(existsSync(root), false, `${root} could not be removed`);
 }
 
 test("the inventory is generated and never committed: its path is ignored, no tracked file holds it, and two scans of one tree are byte-identical", () => {
@@ -58,10 +74,13 @@ test("the inventory is generated and never committed: its path is ignored, no tr
   assert.equal(JSON.parse(first).generatedBy, "src/packaging/gh-call-inventory.ts");
 });
 
-/** Runs `git` in a throwaway repository, with an identity and no signing, and returns whether it exited 0. */
+/**
+ * Runs `git` in a throwaway repository, with an identity and no signing, and returns whether it exited 0. Background maintenance is off: git starts a DETACHED
+ * `maintenance run --auto` after a commit, a process that can still be writing into the repository when the test removes it.
+ */
 function gitSucceeds(cwd: string, ...args: string[]): boolean {
   try {
-    execFileSync("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", ...args], { cwd, stdio: "ignore", env: sandboxGitEnv() });
+    execFileSync("git", ["-c", "user.name=test", "-c", "user.email=test@example.com", "-c", "commit.gpgsign=false", "-c", "maintenance.auto=false", "-c", "gc.auto=0", ...args], { cwd, stdio: "ignore", env: sandboxGitEnv() });
     return true;
   } catch {
     return false;
