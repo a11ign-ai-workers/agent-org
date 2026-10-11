@@ -37,7 +37,7 @@ Mutation: in both directions, with `repeating-lines.allowlist.json` restored byt
 
 The other `src/repeating-lines*` tests still pass (`repeating-lines-keyed-shelved`, 2 of 2; `repeating-lines-primary-update-echo`, 4 of 4). `tsc -p tsconfig.json` exits 0.
 
-Not run here: `src/packaging/repeating-lines.test.ts` fails in this worktree before any test runs, because `AGENT_ORG_HOST` is unset and no `.agent-org/` exists here (`ProjectDeclarationRefusal`, from `project-config.ts`'s import). That is the environment, not this change. Its fault-line assertions (`NOT RELEASED`, `UNDELIVERED`, `nowhere to go`, the `github-status` lines) are anchored on text this entry does not start with, but that is read from the pattern, not measured.
+`src/packaging/repeating-lines.test.ts` needs `AGENT_ORG_HOST` set (it fails with `ProjectDeclarationRefusal` without it, from `project-config.ts`'s import, and that is the environment, not this change). With `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json` it passes 25 of 25, including the fault-line assertions (`UNDELIVERED`, `nowhere to go`, the `github-status` lines and the version banner), so the entry does not swallow them.
 
 Done-when 2 (the journal count after the change is live) cannot be read until the change is deployed; it is not measured here.
 
