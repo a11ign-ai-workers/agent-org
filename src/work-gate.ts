@@ -698,7 +698,8 @@ export const GH_READS = Object.freeze({
   // `branches/main` as the discriminator for its 404 (#2106, #2022) -- and the discriminator's only job
   // was to explain the admin-only 404, which `branches/main` does not give a non-admin credential. Conditional on a settled-red check.
   // #3448: AND ON A GREEN DRAFT, which the ready-flip over a red verify stamp needs the required list for (`requiredWhenNeeded`).
-  conditionalOnRed: "api branches/main (requiredCheckNames)",
+  // #5020: TWO calls when the rulesets give nothing -- `rules/branches/main` first, `branches/main` only then.
+  conditionalOnRed: "api rules/branches/main, then branches/main only if that gave no list (requiredCheckNames)",
   // #2117: ONE MORE CORE READ ON THE SAME RED TICK -- `main`'s tip commit, so the `pr-checks-failing` prompt can
   // say whether `main` moved after the failing run started. `branches/main` already carries that commit, but
   // `requiredCheckNames` returns a bare list and four tests pin its shape; a second read costs one call on a tick
@@ -4027,14 +4028,101 @@ export function anyChecksRed(prs: any[]) {
  * only, and this gate runs as `a11ign-ai-workers` (`permissions.admin: false`), so it 404'd on every tick
  * for four days (#2106). `branches/main` needs only `pull` and carries the same list.
  */
-const BRANCH_ENDPOINT = "repos/{owner}/{repo}/branches/main";
+const BRANCH_ENDPOINT = "branches/main";
 
 /**
- * What the gate asks of `BRANCH_ENDPOINT`: the list, plus `protected` so the "no usable list" report quotes
- * whether `main` is protected at all (`false` is a trunk fact worth escalating) instead of leaving the
- * reader to guess. Small enough to quote whole.
+ * WHERE THE REQUIRED CHECKS ARE NOW (#5020). On 2026-10-11 classic branch protection was deleted on every repo and
+ * each `merge-queue-main` ruleset took over `required_status_checks`, so `BRANCH_ENDPOINT`'s `protection` object
+ * answers `{"enabled": false, "contexts": []}` -- a read that "works" and lists nothing. `rules/branches/main`
+ * lists every rule that applies to the branch whichever ruleset it comes from, and needs only `pull`.
+ * One page is enough: a branch carries a handful of rules, far under the page size.
  */
-const BRANCH_JQ = "{protected, contexts: .protection.required_status_checks.contexts}";
+const RULES_ENDPOINT = "rules/branches/main";
+
+/**
+ * The union of the contexts of every `required_status_checks` rule in a `rules/branches/main` answer, or `null`.
+ * Filtered HERE and not by a `--jq`, so the rule shapes a branch really carries (`pull_request`, `deletion`,
+ * `merge_queue`, ...) are exercised by tests rather than by a jq string nobody runs.
+ */
+function rulesetContexts(rules: unknown): unknown {
+  if (!Array.isArray(rules)) return null;
+  return rules
+    .filter((rule) => rule?.type === "required_status_checks")
+    .flatMap((rule) => rule?.parameters?.required_status_checks ?? [])
+    .map((check: any) => check?.context);
+}
+
+/** One `gh` read: what it answered, or the first line of why it was refused. Never both, never thrown. */
+type Attempt = { answer: string; refusal?: undefined } | { refusal: string; answer?: undefined };
+
+function attempt(run: (args: string[]) => string, args: string[]): Attempt {
+  try {
+    return { answer: run(args) };
+  } catch (error) {
+    // THE REFUSAL AND THE UNUSABLE ANSWER ARE DIFFERENT FACTS, so the call is separated from the parse.
+    // A refusal says nothing about whether `main` is protected, and #2022 forbids reading it as if it did.
+    return { refusal: String((error as any)?.message ?? error).split("\n")[0].trim() };
+  }
+}
+
+/** A non-empty list of names, or `null`: an empty required set is "could not read", never "nothing blocks". */
+function usableNames(value: unknown): string[] | null {
+  if (!Array.isArray(value) || value.length === 0 || !value.every((v) => typeof v === "string" && v)) return null;
+  return [...new Set<string>(value)];
+}
+
+/**
+ * The two facts of a `branches/main` answer this gate uses: whether `main` is protected at all (`false` is a trunk fact
+ * worth escalating) and the classic list. Quoted in the report instead of the whole body, which carries a commit.
+ */
+function classicProtection(branch: any): { protected: unknown; contexts: unknown } | null {
+  if (branch === null || typeof branch !== "object") return null;
+  return { protected: branch.protected, contexts: branch.protection?.required_status_checks?.contexts };
+}
+
+/** One source's contribution to the "CANNOT READ" report; `shown` replaces the raw answer where one is smaller. */
+function describeAttempt(endpoint: string, read: Attempt, shown?: unknown): string {
+  if (read.refusal !== undefined) return `\`gh api ${endpoint}\` was REFUSED (${read.refusal})`;
+  const answer = shown === undefined || shown === null ? read.answer : JSON.stringify(shown);
+  return `\`gh api ${endpoint}\` answered, but with no usable list of contexts: ${quoted(answer)}`;
+}
+
+/** A place the required checks may be listed, in the order they are asked. */
+type RequiredSource = { path: string; names: (parsed: any) => unknown; shown?: (parsed: any) => unknown };
+
+const REQUIRED_SOURCES: RequiredSource[] = [
+  { path: RULES_ENDPOINT, names: rulesetContexts },
+  { path: BRANCH_ENDPOINT, names: (branch) => classicProtection(branch)?.contexts, shown: classicProtection },
+];
+
+/** What `readRequiredContexts` found: the contexts, or `null` and the report of why neither source gave any. */
+export type RequiredContexts = { contexts: string[]; diagnosis?: undefined } | { contexts: null; diagnosis: string };
+
+/**
+ * THE ONE READER OF "WHICH CHECKS CAN BLOCK A MERGE ON `main`" (#5020), shared by this gate's
+ * `requiredCheckNames` and `queue-table.ts`'s `requiredContexts`, which had each carried its own copy of the
+ * classic-only read and so went blind together when classic protection was deleted.
+ *
+ * RULESETS FIRST, CLASSIC ONLY WHEN THE RULESET SOURCE GIVES NOTHING: a repository the rulesets do not cover
+ * (or a refused read of them) still answers from `branches/main`'s classic list. Neither -> `null`, which is
+ * still UNKNOWN and still fails open at every caller -- never `[]`, which would read as "nothing blocks".
+ *
+ * `repo` is `owner/name`, or gh's own `{owner}/{repo}` placeholder (the gate's default) which resolves from the
+ * working directory. Never throws: a refusal becomes part of `diagnosis`.
+ */
+export function readRequiredContexts(run: (args: string[]) => string, repo = "{owner}/{repo}"): RequiredContexts {
+  const reports: string[] = [];
+  for (const source of REQUIRED_SOURCES) {
+    const endpoint = `repos/${repo}/${source.path}`;
+    // ONE CALL SITE for both sources: they differ only in path and parse, and `gh-call-ratchet` counts sites.
+    const read = attempt(run, ["api", endpoint]);
+    const parsed = read.answer === undefined ? null : parsedOrNull(read.answer);
+    const names = usableNames(source.names(parsed));
+    if (names) return { contexts: names };
+    reports.push(describeAttempt(endpoint, read, source.shown?.(parsed)));
+  }
+  return { contexts: null, diagnosis: `${reports.join("; ")}.` };
+}
 
 /**
  * The checks that can actually BLOCK A MERGE, or `null` when that could not be read.
@@ -4045,6 +4133,9 @@ const BRANCH_JQ = "{protected, contexts: .protection.required_status_checks.cont
  *
  * -- and `gate` is an aggregator whose `needs` names the nine jobs that matter. EVERY OTHER JOB IS RED
  * WITHOUT BLOCKING ANYTHING, and the gate woke a session for all of them equally.
+ *
+ * SINCE 2026-10-11 THE LIST LIVES IN THE RULESETS (#5020), not in classic protection: see `readRequiredContexts`,
+ * which reads `rules/branches/main` first and `branches/main` only when that gives nothing.
  *
  * THE WASTED PROMPT THAT FOUND THIS. `sweep` (in `auto-arm.yml`, not in `gate`'s `needs`) went red on
  * #1750 at 14:34Z. The gate woke `worker-capture` with "#1750 at 7a9d8340 has FAILING checks and is
@@ -4069,20 +4160,9 @@ const BRANCH_JQ = "{protected, contexts: .protection.required_status_checks.cont
  * ONCE PER TICK, because `requiredWhenNeeded` is the only caller and calls this at most once.
  */
 export function requiredCheckNames(run: (args: string[]) => string = defaultRun, log: (line: string) => void = (line) => process.stderr.write(line)): string[] | null {
-  let answer;
-  try {
-    answer = run(["api", BRANCH_ENDPOINT, "--jq", BRANCH_JQ]);
-  } catch (error) {
-    // THE REFUSAL AND THE UNUSABLE ANSWER ARE DIFFERENT FACTS, so the call is separated from the parse.
-    // A refusal says nothing about whether `main` is protected, and #2022 forbids reading it as if it did.
-    const why = String((error as any)?.message ?? error).split("\n")[0].trim();
-    log(cannotReadRequiredChecks(`was REFUSED (${why}).`));
-    return null;
-  }
-  const contexts = parsedOrNull(answer)?.contexts;
-  if (Array.isArray(contexts) && contexts.length > 0) return contexts;
-  log(cannotReadRequiredChecks(`answered, but with no usable list of contexts: ${quoted(answer)}.`));
-  return null;
+  const read = readRequiredContexts(run);
+  if (read.contexts === null) log(cannotReadRequiredChecks(read.diagnosis));
+  return read.contexts;
 }
 
 /** How much of an unusable answer is worth echoing before it becomes the noise it is reporting. */
@@ -4115,7 +4195,7 @@ function parsedOrNull(text: string) {
  * read as an outage. Nothing is missed -- the SAVING is.
  */
 function cannotReadRequiredChecks(diagnosis: string) {
-  return `CANNOT READ the required checks: \`gh api ${BRANCH_ENDPOINT}\` ${diagnosis} `
+  return `CANNOT READ the required checks: ${diagnosis} `
     + "Falling back to EVERY check on the head (pre-#1750 behaviour): no red pull request is missed, "
     + "but the wasted prompts #1750 was filed to stop are still being sent.\n";
 }

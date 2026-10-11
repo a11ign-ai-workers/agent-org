@@ -945,14 +945,17 @@ test("section 6 reports a real branch census when collect() supplies one", () =>
  * rather than merely that the answer came out right -- a site that tried the admin path first and fell
  * back would pass the second and fail the first.
  */
-function withNonAdminGh<T>(body: object, fn: (requests: () => string[]) => T): T {
+function withNonAdminGh<T>(body: object, fn: (requests: () => string[]) => T, rules: unknown = []): T {
   const dir = mkdtempSync(join(tmpdir(), "a11y-2331-"));
   const log = join(dir, "requests.log");
   writeFileSync(join(dir, "body.json"), JSON.stringify(body));
+  // #5020: `rules/branches/main` is its own endpoint and answers `rules` -- no rule at all by default.
+  writeFileSync(join(dir, "rules.json"), JSON.stringify(rules));
   writeFileSync(join(dir, "gh"), `#!/bin/sh
 echo "$*" >> "${log}"
 case "$*" in
   *branches/main/protection*) echo "gh: Not Found (HTTP 404)" >&2; exit 1 ;;
+  *rules/branches/main*) cat "${dir}/rules.json" ;;
   *branches/main) cat "${dir}/body.json" ;;
   *) echo "unexpected gh call: $*" >&2; exit 2 ;;
 esac
@@ -986,6 +989,28 @@ test("requiredContexts reads the required checks with the ADMIN endpoint answeri
 test("requiredContexts: a protected branch showing no list is null (prints unknown), not a default -- #2331's control", () => {
   withNonAdminGh(PROTECTED_WITHOUT_LIST, () => {
     assert.equal(requiredContexts(), null);
+  });
+});
+
+/** #5020: classic protection deleted (`protection.enabled: false`, no contexts) and the rulesets carrying the list. */
+const CLASSIC_DELETED = { name: "main", protected: true, protection: { enabled: false, required_status_checks: { contexts: [] } } };
+const RULESET_REQUIRING_GATE = [
+  { type: "deletion", ruleset_id: 23681721 },
+  { type: "required_status_checks", ruleset_id: 23681721,
+    parameters: { required_status_checks: [{ context: "gate", integration_id: 15368 }] } },
+  { type: "merge_queue", ruleset_id: 23681721 },
+];
+
+test("requiredContexts reads the RULESETS when classic protection is gone -- #5020", () => {
+  withNonAdminGh(CLASSIC_DELETED, (requests) => {
+    assert.deepEqual(requiredContexts(), ["gate"]);
+    assert.ok(requests().some((r) => r.includes("rules/branches/main")), "the ruleset endpoint was asked");
+  }, RULESET_REQUIRING_GATE);
+});
+
+test("requiredContexts: no ruleset rule and no classic list is null (prints unknown) -- #5020's control", () => {
+  withNonAdminGh(CLASSIC_DELETED, () => {
+    assert.equal(requiredContexts(), null, "the classic `contexts: []` must not read as 'nothing is required'");
   });
 });
 
