@@ -1,0 +1,15 @@
+The router asks Jev once per row body: a start whose row body, title, labels and posted questions match a remembered provider answer reuses that answer and asks the provider zero times. `routeOnly` looks up `route-memory.jsonl` beside the decision log (`decisionLogPathFrom(ledgerPath)`, which `routesForStarts` passes through) by a sha256 key of the row id, title, body, labels and questions. A hit runs the first start's route and writes one line, `route reused`, to the model-routing log, which `provider-confidence` does not count (it counts request lines with `answers` only). A changed body, title, label or Region is another key and asks again. Only an answer the provider gave is remembered: a fallback, a refusal or a failing provider is not, so the next start asks again. A memory that cannot be read or written is said on the diagnostic and the start asks, which costs a call and never a route.
+
+Acceptance: `bash -c 'cd /home/agent/repos/agent-org-wt-4990 && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/engineer-route.test.ts'`
+
+Mutation: the memory never reused (`rememberedDecision` always `null`) failed `#4990: a second start of the same unchanged row asks the provider zero times ...` only (25 of 70 failing, 24 on the good code); the key made to ignore the body failed `#4990: a changed label or a changed Region asks again ...` only (25 of 70); the key made to ignore the labels failed the same test only (25 of 70). `src/engineer-route.ts` restored byte-identical after each (`cmp` against a copy of the good file).
+
+Measured: the two new `#4990` tests pass. `src/engineer-route.test.ts` as a whole reports `VERDICT fail: 24 of 70 tests failed`: the same 24 names fail on the committed test file without this change (baseline 24 of 68), and none of them is a `#4990` test. They are not caused by this change and are not fixed here: `provider ABSENT: the route, its profile and its log line are byte-for-byte ...`, `every way the provider does not decide a route ...`, the `#4875`, `#4764` and `#4902` tests, `a Haiku route is clamped ...`, `provider ABSENT: a large Region ...`. The related suites that call the real `routeEngineer` (`route-outcome`, `work-gate/route-outcome-pass`, `route-guard`, `provider-low-confidence`, `route-accuracy`, `wake-start-fresh`, `engineer-escalation`) report `VERDICT pass: 146 tests in 7 files`. `tsc --noEmit -p tsconfig.json` exits 0. agent-org has no `lint` script, so there is no lint run.
+
+Not here, and named: the switch is not re-read on a reused start (the first start's route stands for that row body); the memory never expires (a changed key is the only invalidation); a reused start adds an `asked: false` entry to `decisionsIn`; the memory is per row, because the row id is in the key.
+
+Closes a11ign/a11ign#4990
+
+platform: the memory is a file beside the decision log, read and appended by the same process that already reads that log; no new service and no new credential.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
