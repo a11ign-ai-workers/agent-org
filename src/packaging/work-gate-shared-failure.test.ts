@@ -118,9 +118,9 @@ function fakeGh({ jobs = {}, changed = {}, rows = [] }: { jobs?: Record<number, 
   };
   return { run, writes, store };
 }
-const tick = (orders: object[], prs: object[], g: ReturnType<typeof gh>) => sharedFailuresNow(orders, prs, { run: g.run, nowMs: NOW }) as { subject: string; prompt: string; session: string }[];
+const tick = (orders: object[], prs: object[], g: ReturnType<typeof fakeGh>) => sharedFailuresNow(orders, prs, { run: g.run, nowMs: NOW }) as { subject: string; prompt: string; session: string }[];
 const subjects = (orders: { subject: string }[]) => orders.map((o) => o.subject);
-const filed = (g: ReturnType<typeof gh>) => g.writes.filter((w) => w[0] === "issue" && w[1] === "create").length;
+const filed = (g: ReturnType<typeof fakeGh>) => g.writes.filter((w) => w[0] === "issue" && w[1] === "create").length;
 
 /** control#53 and control#58 exactly as the gate saw them: a `checks` job with its own failing test, and the `gate` roll-up. */
 const control = () => ({
@@ -187,7 +187,7 @@ test("#5098 SETUP: two PRs failing the same install step ARE grouped, whatever t
   assert.equal(filed(g), 1);
 });
 
-const rowFor = (g: ReturnType<typeof gh>) => g.store[0];
+const rowFor = (g: ReturnType<typeof fakeGh>) => g.store[0];
 
 test("#5098 CLOSING THE INCIDENT RELEASES THE HOLDS AT ONCE, and the signature is not filed again for 24h", () => {
   const first = fakeGh(SETUP);
