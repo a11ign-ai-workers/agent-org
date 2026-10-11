@@ -3,7 +3,12 @@
 //
 // THE ROUTE OF A ROW IS THE DECISION LOG'S, NOT A LABEL. `haiku-tier-report.ts` tells Haiku from "others" by the `tier:haiku` label a human puts on a row, which a provider-routed start never carries,
 // and it cannot tell Sonnet/medium from Sonnet/high at all. The route is on the outcome line `engineer-route.ts` writes (`route <route> window <w> via <via> (...)`), joined to the row by the decision's
-// `id` (`row-<n>`). A ROW ROUTED MORE THAN ONCE COUNTS UNDER ITS LAST ROUTE: that is the one whose worker built it. The starts reading counts the route LINES, which is what the row's open-check counts.
+// `id` (`row-<n>`, or `row-<key>-<n>` for another tracker's row, agent-org#756). A ROW ROUTED MORE THAN ONCE COUNTS UNDER ITS LAST ROUTE: that is the one whose worker built it. The starts reading counts
+// the route LINES, which is what the row's open-check counts.
+//
+// ANOTHER TRACKER'S ROW IS A START AND NOT YET A RESULT. `row-agent-org-724` is a start like any other and is counted in the starts by route, but `readClosedRows` reads the first tracker's closed rows
+// only, so it is never joined to a first-pass result, and above all never to the first tracker's row of the same NUMBER. Each tier's reading says how many such rows it left out, so a rate over the
+// first tracker's rows is not read as a rate over every start.
 //
 // ONLY THE PROVIDER'S ROUTES (`via jev`) ARE COMPARED. A fallback is the Region's file count, a refusal and an override are a rule and a human; none of them is a start the thresholds below decided, so
 // a Sonnet/medium that the fallback chose could not be repaired by raising a constant and would blur the one comparison this guard makes: the provider's lower tiers against the provider's Sonnet/high.
@@ -56,14 +61,16 @@ const PERCENT = 100;
 const DAY_LENGTH = 10;
 const MINUTE_LENGTH = 16;
 
-const ROW_ID = /^row-(\d+)$/;
+const ROW_ID = /^row-(?:(.+)-)?(\d+)$/;
 const ROUTE_LINE = /^route (\S+) window \S+(?: \(.*?\))? via (\S+)/;
 const isRoute = (value: string): value is Route => (ROUTES as readonly string[]).includes(value);
 const isLowerTier = (route: Route): route is LowerTier => route !== BASELINE;
 
 type Window = { now: number; windowMs: number };
-/** One routing the log holds: the row, when, and what its outcome line says (`via` as written, `route` as written). */
-export type RouteStart = { row: number; at: number; route: string; via: string };
+/** One routing the log holds: the row, when, and what its outcome line says (`via` as written, `route` as written). `tracker` is the key of another tracker's row, absent for the first tracker's. */
+export type RouteStart = { row: number; tracker?: string; at: number; route: string; via: string };
+/** A row's identity across trackers: `agent-org#7` and the first tracker's `#7` are two rows. */
+const rowKey = ({ row, tracker }: Pick<RouteStart, "row" | "tracker">): string => `${tracker ?? ""}#${row}`;
 
 /**
  * Every `model-routing` outcome line that names a route, for a row, in file order, at the outcome line's own time. A line that is not a route (`merged-first-pass`, `window too small`, a request
@@ -72,9 +79,10 @@ export type RouteStart = { row: number; at: number; route: string; via: string }
 export function routeStartsIn(lines: readonly unknown[]): RouteStart[] {
   return (lines as { use?: unknown; id?: unknown; outcome?: unknown; at?: unknown }[]).flatMap((line) => {
     if (line?.use !== "model-routing" || typeof line.id !== "string" || typeof line.outcome !== "string" || typeof line.at !== "number") return [];
-    const row = Number(ROW_ID.exec(line.id)?.[1]);
-    const route = Number.isInteger(row) ? ROUTE_LINE.exec(line.outcome) : null;
-    return route === null ? [] : [{ row, at: line.at, route: route[1], via: route[2] }];
+    const id = ROW_ID.exec(line.id);
+    const route = id === null ? null : ROUTE_LINE.exec(line.outcome);
+    if (id === null || route === null) return [];
+    return [{ row: Number(id[2]), ...(id[1] === undefined ? {} : { tracker: id[1] }), at: line.at, route: route[1], via: route[2] }];
   });
 }
 
@@ -86,6 +94,8 @@ export type RouteShares = {
   since: number; until: number;
   /** Route lines read in the window: `providerStarts` plus every `apart` count, so nothing read is left out of the sum. */
   starts: number; rows: number;
+  /** Of `starts`, the route lines of another tracker's rows (counted in every figure here; a subset, not a part of the sum). */
+  otherTracker: number;
   providerStarts: number; provider: Readonly<Record<Route, number>>;
   /** The share of provider starts each route took, or `null` when the provider decided none (a share of nothing is not zero). */
   shares: Readonly<Record<Route, number>> | null;
@@ -105,7 +115,8 @@ export function routeShares(lines: readonly unknown[], window: Window): RouteSha
   }
   const providerStarts = ROUTES.reduce((sum, route) => sum + provider[route], 0);
   const shares = providerStarts === 0 ? null : (Object.fromEntries(ROUTES.map((route) => [route, provider[route] / providerStarts])) as Record<Route, number>);
-  return { since: window.now - window.windowMs, until: window.now, starts: read.length, rows: new Set(read.map((start) => start.row)).size, providerStarts, provider, shares, apart };
+  return { since: window.now - window.windowMs, until: window.now, starts: read.length, rows: new Set(read.map(rowKey)).size,
+    otherTracker: read.filter((start) => start.tracker !== undefined).length, providerStarts, provider, shares, apart };
 }
 
 // --- first-pass merge by route ---
@@ -116,27 +127,30 @@ export type RowResult = { merged: boolean; rejections: number; unresolved?: bool
 
 /** The rows the provider routed in the window, each under its LAST route line (a row routed twice is one row); a row whose last line is not the provider's, or names no route this reading knows, is not one. */
 export function providerRoutedRows(lines: readonly unknown[], window: Window): (RouteStart & { route: Route })[] {
-  const last = new Map<number, RouteStart>();
-  for (const start of routeStartsIn(lines).filter((s) => inWindow(s, window))) last.set(start.row, start);
+  const last = new Map<string, RouteStart>();
+  for (const start of routeStartsIn(lines).filter((s) => inWindow(s, window))) last.set(rowKey(start), start);
   return [...last.values()].filter((start): start is RouteStart & { route: Route } => start.via === "jev" && isRoute(start.route));
 }
 
 export type TierReading = {
   route: Route; routed: number; merged: number; firstPass: number;
+  /** Routed rows of another tracker: not read, so in none of the counts here. */ otherTracker: number;
   /** Closed with no merged pull request. */ closedUnmerged: number;
   /** Closed, its pull request's repository unreadable: not an outcome. */ unresolved: number;
   /** Not closed, so not yet an outcome. */ open: number;
   readable: boolean;
 };
 
-/** FIRST-PASS MERGE BY ROUTE: each routed row's result joined by its number. A row with no entry in `results` has not closed. `minRows` is the report's floor for a readable rate. */
+/** FIRST-PASS MERGE BY ROUTE: each of the first tracker's routed rows joined to its result by number. A row with no entry in `results` has not closed. Another tracker's row is counted apart and
+ * never joined, so it cannot take the result of the first tracker's row of the same number. `minRows` is the report's floor for a readable rate. */
 export function firstPassByRoute(routed: readonly RouteStart[], results: ReadonlyMap<number, RowResult>, minRows: number): Record<Route, TierReading> {
   const reading = (route: Route): TierReading => {
-    const rows = routed.filter((start) => start.route === route);
+    const ofRoute = routed.filter((start) => start.route === route);
+    const rows = ofRoute.filter((start) => start.tracker === undefined);
     const outcomes = rows.flatMap((start) => (results.has(start.row) ? [results.get(start.row) as RowResult] : []));
     const unresolved = outcomes.filter((outcome) => outcome.unresolved === true).length;
     const merged = outcomes.filter((outcome) => outcome.merged && outcome.unresolved !== true);
-    return { route, routed: rows.length, merged: merged.length, firstPass: merged.filter((outcome) => outcome.rejections === 0).length, unresolved,
+    return { route, routed: rows.length, otherTracker: ofRoute.length - rows.length, merged: merged.length, firstPass: merged.filter((outcome) => outcome.rejections === 0).length, unresolved,
       closedUnmerged: outcomes.length - merged.length - unresolved, open: rows.length - outcomes.length, readable: merged.length >= minRows };
   };
   return Object.fromEntries(ROUTES.map((route) => [route, reading(route)])) as Record<Route, TierReading>;
@@ -182,14 +196,14 @@ function sharesText(reading: RouteShares): string[] {
   const { providerStarts, provider, shares, apart } = reading;
   const split = shares === null ? "the provider decided none" : ROUTES.map((route) => `${route} ${provider[route]} (${percent(shares[route])})`).join(", ");
   const other = Object.entries(apart).filter(([, n]) => n > 0).map(([how, n]) => `${how} ${n}`);
-  return [`Engineer starts by route, ${minute(reading.since)} to ${minute(reading.until)}: ${reading.starts} route lines on ${reading.rows} rows.`,
+  return [`Engineer starts by route, ${minute(reading.since)} to ${minute(reading.until)}: ${reading.starts} route lines on ${reading.rows} rows${reading.otherTracker === 0 ? "" : `; ${reading.otherTracker} of the lines are another tracker's rows`}.`,
     `  the provider's routes (via jev), ${providerStarts}: ${split}`,
     `  not the provider's: ${other.length === 0 ? "none" : other.join(", ")}`];
 }
 
 function tierText(tier: TierReading): string {
   const rate = tier.merged === 0 ? "none merged" : `${tier.firstPass} of ${tier.merged} merged first pass (${percent(tier.firstPass / tier.merged)})`;
-  return `  ${tier.route}: ${tier.routed} routed, ${rate}; ${tier.closedUnmerged} closed with no merged pull request, ${tier.unresolved} unresolved, ${tier.open} still open`;
+  return `  ${tier.route}: ${tier.routed} routed, ${rate}; ${tier.closedUnmerged} closed with no merged pull request, ${tier.unresolved} unresolved, ${tier.open} still open${tier.otherTracker === 0 ? "" : `; ${tier.otherTracker} of another tracker's rows not read`}`;
 }
 
 function verdictText(verdict: GuardVerdict): string {
@@ -280,9 +294,9 @@ function readLog(path: string): unknown[] {
 /** The rows' results from `gh` (the rows closed since the earliest routing) and the trace store (their pull requests' reviews and merges). A row `gh` did not return has not closed. */
 async function readResults(rows: readonly RouteStart[], storePath: string | undefined): Promise<Map<number, RowResult>> {
   const [{ readStore }, { defaultStore }, { readClosedRows, pullOutcome }] = await Promise.all([import("./trace/store.ts"), import("./trace/otel-receiver.ts"), import("./trace/haiku-tier-report.ts")]);
-  const wanted = new Set(rows.map((start) => start.row));
+  const wanted = new Set(rows.filter((start) => start.tracker === undefined).map((start) => start.row));
   if (wanted.size === 0) return new Map();
-  const closed = readClosedRows(Math.min(...rows.map((start) => start.at)), Date.now()).filter((row) => wanted.has(row.number));
+  const closed = readClosedRows(Math.min(...rows.filter((start) => start.tracker === undefined).map((start) => start.at)), Date.now()).filter((row) => wanted.has(row.number));
   const pulls = readStore(storePath ?? defaultStore()).filter((event) => event.source === "github" && (event.kind === "merged" || event.kind === "reviewed"));
   return new Map(closed.map((row) => [row.number, row.unresolved === true ? { merged: false, rejections: 0, unresolved: true } : pullOutcome(pulls, row.pr)] as const));
 }

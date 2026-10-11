@@ -73,6 +73,28 @@ test("a row routed twice is one row under its LAST route, and a row whose last l
   assert.deepEqual(routed.map((start) => [start.row, start.route]).sort(), [[1, "sonnet/medium"], [3, "sonnet/high"]]);
 });
 
+test("another tracker's row is a start of its own: counted in the starts, and never joined to the first tracker's row of the same number", () => {
+  const keyed = (row: number, route: string, via = "jev") => ({ use: "model-routing", id: `row-agent-org-${row}`, outcome: `route ${route} window 200k via ${via} (a reason)`, at: NOW - HOUR });
+  const lines = [provider(724, "sonnet/high"), keyed(724, "haiku/high"), keyed(725, "sonnet/medium"), keyed(726, "sonnet/high", "fallback")];
+  assert.deepEqual(routeStartsIn([keyed(724, "haiku/high")]), [{ row: 724, tracker: "agent-org", at: NOW - HOUR, route: "haiku/high", via: "jev" }]);
+  const reading = routeShares(lines, WINDOW);
+  assert.equal(reading.starts, 4, "the three keyed lines are starts");
+  assert.equal(reading.rows, 4, "agent-org#724 and the first tracker's #724 are two rows");
+  assert.equal(reading.otherTracker, 3);
+  assert.deepEqual(reading.provider, { "haiku/high": 1, "sonnet/medium": 1, "sonnet/high": 1 });
+  assert.equal(reading.apart.fallback, 1);
+  const routed = providerRoutedRows(lines, WINDOW);
+  assert.equal(routed.length, 3, "a keyed row is not the first tracker's row of the same number, so neither takes the other's last route");
+  // the first tracker's #724 merged at once; agent-org#724 is not that row and has no result of this reading
+  const tiers = firstPassByRoute(routed, new Map<number, RowResult>([[724, merged(0)]]), 1);
+  assert.deepEqual({ routed: tiers["sonnet/high"].routed, merged: tiers["sonnet/high"].merged, other: tiers["sonnet/high"].otherTracker }, { routed: 1, merged: 1, other: 0 });
+  assert.deepEqual({ routed: tiers["haiku/high"].routed, merged: tiers["haiku/high"].merged, other: tiers["haiku/high"].otherTracker, open: tiers["haiku/high"].open }, { routed: 0, merged: 0, other: 1, open: 0 });
+  assert.equal(tiers["sonnet/medium"].otherTracker, 1);
+  const text = formatRouteGuard({ shares: reading, tiers, verdicts: guardVerdicts(tiers, MIN_ROWS), minRows: MIN_ROWS });
+  assert.match(text, /4 route lines on 4 rows; 3 of the lines are another tracker's rows\./);
+  assert.match(text, /haiku\/high: 0 routed, none merged.*; 1 of another tracker's rows not read/);
+});
+
 // --- the guard ---
 const merged = (rejections = 0): RowResult => ({ merged: true, rejections });
 /** `n` rows of one route numbered from `from`, `firstPass` of them merged at once and the rest after a rejection. */
@@ -135,7 +157,7 @@ test("an open row, an unmerged close and an unresolved close are counted apart a
   const starts = [11, 12, 13, 14, 15].map((row) => ({ row, at: NOW, route: "sonnet/medium", via: "jev" }));
   const results = new Map<number, RowResult>([[11, merged(0)], [12, merged(2)], [13, { merged: false, rejections: 0 }], [14, { merged: false, rejections: 0, unresolved: true }]]);
   const tier = firstPassByRoute(starts, results, 2)["sonnet/medium"];
-  assert.deepEqual({ ...tier }, { route: "sonnet/medium", routed: 5, merged: 2, firstPass: 1, closedUnmerged: 1, unresolved: 1, open: 1, readable: true });
+  assert.deepEqual({ ...tier }, { route: "sonnet/medium", routed: 5, otherTracker: 0, merged: 2, firstPass: 1, closedUnmerged: 1, unresolved: 1, open: 1, readable: true });
 });
 
 test("two tiers in breach file two incidents, each naming its tier; a second day's reading files none, and the ledger holds one line each", () => {
