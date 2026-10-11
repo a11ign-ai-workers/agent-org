@@ -225,6 +225,10 @@
       "spawns": 0,
       "calls": 3
     },
+    "src/route-guard.ts": {
+      "spawns": 1,
+      "calls": 2
+    },
     "src/row-claim.ts": {
       "spawns": 18,
       "calls": 12
