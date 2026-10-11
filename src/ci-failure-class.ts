@@ -10,12 +10,13 @@
 // THE CALLER IS `wake.ts` (#4888), NOT THE GATE: `work-gate.ts` is synchronous end to end and a provider call is not, so the gate's order is classified at the one async seam the tick has,
 // beside `routesForStarts`, just before delivery. {@link readCiFailure} reads the facts there; they are CODE's reading of GitHub (REST, the core pool) and never the provider's.
 import { CLAIM_LABEL } from "./claim-labels.ts";
+import { REPO } from "./project-identity.ts"; // #2616: the project's repository comes from its declaration, never a literal
 import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5039
 import { decide, MAX_STATE_BYTES, type DecisionDeps, type Question } from "./decision-provider.ts";
 
-export const CI_FAILURE_CLASSES = Object.freeze(["own-defect", "flaky", "another-repository-changed", "infrastructure"] as const);
+export const CI_FAILURE_CLASSES = Object.freeze(["own-defect", "flaky", "another-repository-changed", "infrastructure", "waiting-on-pin-bump"] as const);
 export type CiFailureClass = (typeof CI_FAILURE_CLASSES)[number];
-export const CI_FAILURE_ROUTES = Object.freeze(["owner", "rerun-once", "cross-repo-incident", "rerun-after-reset"] as const);
+export const CI_FAILURE_ROUTES = Object.freeze(["owner", "rerun-once", "cross-repo-incident", "rerun-after-reset", "wait-for-pin-bump"] as const);
 export type CiFailureRoute = (typeof CI_FAILURE_ROUTES)[number];
 
 /** At most this many error lines are sent, so the state stays a few fields and never a log. */
@@ -39,6 +40,11 @@ export type CiFailureFacts = {
   /** The error text is a rate limit or a runner that was lost. */
   rateLimitOrRunnerLost: boolean;
   rerunAlready: boolean;
+  /**
+   * #5151: the only red check is a copy whose header cites a project commit this repository's `PROJECT_REF` has not reached, and an open bump pull request's pin reaches it. Absent is `false`,
+   * so a caller that does not read it is today's classifier.
+   */
+  waitsOnPinBump?: boolean;
 };
 export type CiFailure = CiFailureFacts & { errorLines: readonly string[] };
 export type CiFailureDecision = {
@@ -52,11 +58,15 @@ export type CiFailureDecision = {
   confidence?: number;
 };
 
+/** The class a copy carried ahead of the pin is in (#5151). The provider is offered it only when {@link CiFailureFacts.waitsOnPinBump} was READ true. */
+const PIN_WAIT = "waiting-on-pin-bump" satisfies CiFailureClass;
+
 const CRITERIA: Readonly<Record<CiFailureClass, string>> = Object.freeze({
   "own-defect": "the failure comes from this pull request's own change: the error names code or a test it touched and nothing else explains it.",
   flaky: "the test passes and fails without a change: a timing, ordering or race error, red on this pull request alone and not on main.",
   "another-repository-changed": "the test reads another repository or a pinned dependency, and that repository changed: the same test is red on main or on other pull requests.",
   infrastructure: "the runner, the network or a rate limit failed, whatever the code did.",
+  [PIN_WAIT]: "the only failure is a copy carried ahead of the pinned project, and the bump pull request that reaches it is open: nothing here is wrong, the pin has not moved yet.",
 });
 
 const ROUTES: Readonly<Record<CiFailureClass, CiFailureRoute>> = Object.freeze({
@@ -64,14 +74,17 @@ const ROUTES: Readonly<Record<CiFailureClass, CiFailureRoute>> = Object.freeze({
   flaky: "rerun-once",
   "another-repository-changed": "cross-repo-incident",
   infrastructure: "rerun-after-reset",
+  [PIN_WAIT]: "wait-for-pin-bump",
 });
 
 /**
  * THE RULE WITH NO PROVIDER. A rate-limit or runner-lost text is infrastructure FIRST, because a runner lost on `main` too is still not a repository that changed; the same test red on
- * `main` is another repository's change; everything else is the pull request's own defect, which is today's order unchanged.
+ * `main` is another repository's change; everything else is the pull request's own defect, which is today's order unchanged. A copy carried ahead of a pin that an open bump pull request
+ * will move is {@link PIN_WAIT} (#5151): it comes after the runner, which failed whatever the pin was, and before `main`: a drift that a bump will end is not another repository's incident to file.
  */
-export function fallbackClass(facts: Pick<CiFailureFacts, "redOnMain" | "rateLimitOrRunnerLost">): CiFailureClass {
+export function fallbackClass(facts: Pick<CiFailureFacts, "redOnMain" | "rateLimitOrRunnerLost" | "waitsOnPinBump">): CiFailureClass {
   if (facts.rateLimitOrRunnerLost) return "infrastructure";
+  if (facts.waitsOnPinBump === true) return PIN_WAIT;
   return facts.redOnMain ? "another-repository-changed" : "own-defect";
 }
 
@@ -100,9 +113,15 @@ const stateOf = (failure: CiFailure, errorLines: readonly string[]) => ({
   redOnOtherPrs: failure.redOnOtherPrs,
   readsOutsideRepository: failure.readsOutsideRepository,
   rateLimitOrRunnerLost: failure.rateLimitOrRunnerLost,
+  ...(failure.waitsOnPinBump === true ? { waitsOnPinBump: true } : {}),
 });
 
-const isClass = (value: unknown): value is CiFailureClass => typeof value === "string" && (CI_FAILURE_CLASSES as readonly string[]).includes(value);
+/** The classes the provider may pick: {@link PIN_WAIT} only when the fact that authorises it was read, so a provider cannot talk a holder into waiting for a bump that is not coming. */
+const criteriaFor = (failure: CiFailure): Readonly<Record<string, string>> =>
+  Object.fromEntries(Object.entries(CRITERIA).filter(([klass]) => klass !== PIN_WAIT || failure.waitsOnPinBump === true));
+
+const isClass = (value: unknown, failure: CiFailure): value is CiFailureClass =>
+  typeof value === "string" && Object.hasOwn(criteriaFor(failure), value);
 
 /**
  * CLASSIFY ONE RED CHECK AND NAME WHERE IT GOES. Never throws and always returns a class: the provider's when it answered at or over the floor, {@link fallbackClass} otherwise.
@@ -110,12 +129,12 @@ const isClass = (value: unknown): value is CiFailureClass => typeof value === "s
  */
 export async function classifyCiFailure(failure: CiFailure, deps: DecisionDeps): Promise<CiFailureDecision> {
   const fallback = fallbackClass(failure);
-  const question: Question = { type: "choice", instructions: INSTRUCTIONS, criteria: CRITERIA, fallback };
+  const question: Question = { type: "choice", instructions: INSTRUCTIONS, criteria: criteriaFor(failure), fallback };
   const state = stateOf(failure, trimErrorLines(failure.errorLines));
   const decision = await decide("ci-failure-class", state, { [QUESTION]: question }, deps);
   const answer = decision.answers[QUESTION];
   // The seam checks a choice against the criteria, so this is the belt to its braces: a value that is no class is the rule's.
-  const klass = isClass(answer.value) ? answer.value : fallback;
+  const klass = isClass(answer.value, failure) ? answer.value : fallback;
   return {
     klass,
     route: routeFor(klass, failure.rerunAlready),
@@ -168,9 +187,72 @@ function redOnOtherPrsNow(runs: readonly WorkflowRun[], { workflow, branch, now 
   return runs.some((run) => run.name === workflow && run.conclusion === "failure" && run.head_branch !== branch && run.head_branch !== "main" && recent(run, now));
 }
 
+// ---- #5151: A COPY CARRIED AHEAD OF THE PIN WAITS FOR THE BUMP, IT IS NOT ITS HOLDER'S DEFECT
+// `ci.yml` pins the project (`PROJECT_REF`) and `copies-drifted` compares each `src/lib` copy with ITS ORIGINAL AT THAT PIN. A pull request that carries a copy to the project's newer commit (its
+// header says `at <sha>`) is right and red until the pin moves, and a worker stopped on it twice in a day (agent-org#878, #884, #1055). `project-ref-bump.yml` opens the pull request that moves
+// the pin; this reads the three things that make "wait" true and each of which can be false: the failure names the drift, the cited commit is one the pin lacks, and an OPEN bump pull request's
+// pin has it. A flag-off bump workflow opens none, so no holder is told to wait for a bump that is not coming.
+
+/** The branch `project-ref-bump.yml` opens its one pull request from; `project-ref-bump-workflow.test.ts` fails if the two names drift. */
+export const PIN_BUMP_BRANCH = "bot/project-ref-bump";
+/** The repository `PROJECT_REF` names, as `ci.yml`'s own checkout does: the project's own, read from its declaration (#2616). */
+export const PROJECT_REPOSITORY = REPO;
+const CI_WORKFLOW = ".github/workflows/ci.yml";
+/** The line `ci-pins-the-project.test.ts` holds to a full commit sha. */
+const PIN_LINE = /^ {2}PROJECT_REF: ([0-9a-f]{40})\s*$/m;
+/** A copy's header: `// COPIED FROM \`<original>\` at <sha>`, the project commit the copy was last carried to. */
+const COPIED_AT = /^\/\/ COPIED FROM `[^`]+` at ([0-9a-f]{7,40})\b/m;
+/** `org-health`'s discriminator, `copies-drifted@<copy>,<copy>`, which a test asserting a tick prints whole. The log is read raw: no line of it need match {@link ERROR_LINE}. */
+const DRIFTED_COPIES = /\bcopies-drifted@([\w@./-]+(?:,[\w@./-]+)*)/g;
+/** More copies than this are not read one by one: a failure that wide is not a bump's to excuse. */
+const MAX_COPIES_READ = 5;
+const ROLL_UP_CHECK = /(^|[\s/])gate$/i;
+
+const pinIn = (workflow: string): string | null => PIN_LINE.exec(workflow)?.[1] ?? null;
+/** A file of `repo` at `ref`, through the one `["api", path]` reader of this file: the contents API's `content` is base64 (the ratchet in `gh-call-ratchet.test.ts` holds the count of call shapes). */
+const rawFile = (gh: Gh, { repo, path, ref }: { repo: string; path: string; ref: string }): string =>
+  Buffer.from(String(json(gh, `repos/${repo}/contents/${path}?ref=${ref}`)?.content ?? ""), "base64").toString("utf8");
+/** Does `head` contain `base`: `compare` reads `ahead` or `identical` (the project is public, so the same token reads it). `per_page=1` keeps the commits list to the one. */
+const reaches = (gh: Gh, { base, head }: { base: string; head: string }): boolean =>
+  ["ahead", "identical"].includes(String(json(gh, `repos/${PROJECT_REPOSITORY}/compare/${base}...${head}?per_page=1`)?.status ?? ""));
+
+/** The pin of the open bump pull request, or `null` when none is open (the workflow is off, or has nothing newer). */
+function openBumpPin(gh: Gh, repo: string): string | null {
+  const open = json(gh, `repos/${repo}/pulls?state=open&head=${repo.split("/")[0]}:${PIN_BUMP_BRANCH}`);
+  const sha = open?.[0]?.head?.sha;
+  return typeof sha === "string" ? pinIn(rawFile(gh, { repo, path: CI_WORKFLOW, ref: sha })) : null;
+}
+
+/**
+ * IS THIS RED PULL REQUEST ONLY WAITING FOR THE PIN TO MOVE. Every named copy cites a project commit the head's pin lacks and the open bump's pin has; anything else, including a read that
+ * cannot be made, is `false` and the order is today's. The bump is read LAST so a log with no drift costs no request.
+ */
+export function readPinWait({ repo, sha, log }: { repo: string; sha: string; log: string }, gh: Gh): boolean {
+  const copies = [...new Set([...log.matchAll(DRIFTED_COPIES)].flatMap((named) => named[1].split(",")))];
+  if (copies.length === 0 || copies.length > MAX_COPIES_READ) return false;
+  const pin = pinIn(rawFile(gh, { repo, path: CI_WORKFLOW, ref: sha }));
+  const target = pin === null ? null : openBumpPin(gh, repo);
+  if (pin === null || target === null) return false;
+  return copies.every((path) => {
+    const cited = COPIED_AT.exec(rawFile(gh, { repo, path, ref: sha }))?.[1];
+    return cited !== undefined && !reaches(gh, { base: cited, head: pin }) && reaches(gh, { base: cited, head: target });
+  });
+}
+
+/** {@link readPinWait} for a caller that cannot afford its failure: a refused read says so once and reads `false`, so the class is the one the facts alone give. */
+function pinWaitOrFalse(read: { repo: string; sha: string; log: string }, gh: Gh): boolean {
+  try {
+    return readPinWait(read, gh);
+  } catch (error) {
+    process.stderr.write(`ci-failure-class: could not read the pin of ${read.repo}@${read.sha.slice(0, 8)} (${String((error as Error).message).split("\n")[0]}); not treated as waiting on a bump.\n`);
+    return false;
+  }
+}
+
 /**
  * THE FACTS OF ONE RED PULL REQUEST, or `null` when they could not be read or there is nothing red at the head the order names (the head moved, or the red check is not an Actions job).
- * The first failing check is the one classified: a pull request with several red checks is told about the first, and the order's own text still lists them all.
+ * The first failing check that is not the roll-up `gate` is the one classified (the roll-up's log names no cause, #5151): a pull request with several red checks is told about the first,
+ * and the order's own text still lists them all. `waitsOnPinBump` is read only when that check is the ONLY red one besides the roll-up.
  * @param now an injected clock, so "at the same time" is testable
  */
 export function readCiFailure({ repo, number, head8 }: RedPullRequest, gh: Gh, now: number = Date.now()): CiFailure | null {
@@ -178,7 +260,9 @@ export function readCiFailure({ repo, number, head8 }: RedPullRequest, gh: Gh, n
   const sha = String(pull?.head?.sha ?? "");
   if (!sha.startsWith(head8)) return null;
   const checks: CheckRun[] = json(gh, `repos/${repo}/commits/${sha}/check-runs?per_page=100`)?.check_runs ?? [];
-  const red = checks.find((check) => RED_CONCLUSIONS.has(String(check.conclusion)));
+  const reds = checks.filter((check) => RED_CONCLUSIONS.has(String(check.conclusion)));
+  const causes = reds.filter((check) => !ROLL_UP_CHECK.test(String(check.name ?? "")));
+  const red = causes[0] ?? reds[0];
   const ids = RUN_AND_JOB.exec(String(red?.details_url ?? ""));
   if (red === undefined || ids === null) return null;
   const run: WorkflowRun = json(gh, `repos/${repo}/actions/runs/${ids[1]}`);
@@ -196,6 +280,8 @@ export function readCiFailure({ repo, number, head8 }: RedPullRequest, gh: Gh, n
     readsOutsideRepository: errorLines.some((line) => READS_OUTSIDE.test(line)),
     rateLimitOrRunnerLost: RATE_LIMIT_OR_RUNNER_LOST.test(log),
     rerunAlready: Number(run.run_attempt ?? 1) > 1,
+    // present only when true: a failure that is not waiting on a bump is the object it was before #5151, key for key
+    ...(causes.length === 1 && pinWaitOrFalse({ repo, sha, log }, gh) ? { waitsOnPinBump: true } : {}),
   };
 }
 
@@ -204,9 +290,16 @@ const ROUTE_WORDS: Readonly<Record<CiFailureRoute, string>> = Object.freeze({
   "rerun-once": "A flaky failure: rerun the failed job ONCE (`gh run rerun <run id> --failed`); red again, it is your defect.",
   "cross-repo-incident": "Another repository or a pinned dependency changed: this is not this pull request's defect, so do not fix it here; file or join the cross-repository incident for the cause.",
   "rerun-after-reset": "The runner or a rate limit failed, not the code: change nothing; rerun the failed job after the limit resets.",
+  "wait-for-pin-bump": "A copy of yours is ahead of the project this repository's CI is pinned to, and the bump pull request that moves the pin is open: do not fix it and do not stop; the branch is updated when the bump merges, and a red AFTER the bump is yours.",
 });
 
-/** What the order's text gains when the PROVIDER chose the class: the line, and what the route asks of its reader. A rule's class changes nothing, which is today's order. */
+/**
+ * Does the order gain {@link classNote}: always when the PROVIDER chose, and when a RULE chose only for the route that tells a holder to WAIT (#5151). Every other rule's class is the gate's own
+ * order already ("fix it"), so a note would repeat it; "do not fix this" is the one thing the gate's order cannot say, and a holder who reads the order alone stops and fixes a pin.
+ */
+export const notesTheOrder = (decision: CiFailureDecision): boolean => decision.via === "jev" || decision.route === "wait-for-pin-bump";
+
+/** What the order's text gains when {@link notesTheOrder}: the line, and what the route asks of its reader. */
 export function classNote(decision: CiFailureDecision): string {
   return `${classLine(decision)}. ${ROUTE_WORDS[decision.route]}`;
 }
