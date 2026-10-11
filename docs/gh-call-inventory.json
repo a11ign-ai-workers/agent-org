@@ -1,16 +1,16 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 95,
-    "spawns": 135,
-    "calls": 392,
+    "files": 96,
+    "spawns": 136,
+    "calls": 394,
     "shapes": {
-      "api rest": 137,
+      "api rest": 138,
       "issue list": 42,
       "api graphql": 38,
       "issue view": 34,
       "pr list": 29,
-      "issue comment": 26,
+      "issue comment": 27,
       "pr view": 17,
       "issue edit": 13,
       "label create": 11,
@@ -639,6 +639,15 @@
       "spawns": 0,
       "calls": {
         "api rest": 3
+      },
+      "labels": [],
+      "parsesCloses": false
+    },
+    "src/route-guard.ts": {
+      "spawns": 1,
+      "calls": {
+        "api rest": 1,
+        "issue comment": 1
       },
       "labels": [],
       "parsesCloses": false
