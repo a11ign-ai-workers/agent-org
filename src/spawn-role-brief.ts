@@ -5,9 +5,10 @@
  * `wake.ts`'s `ENGINEER_BRIEF_SENTENCE` and named `engineer.md` for every spawn. It lives here now, beside the one list of
  * briefs a spawned seat may be sent to, so a caller can ask for another and the default stays the engineer's.
  *
- * NOTHING ROUTES THROUGH THIS YET. No order carries a role, no lane is routed and `SPAWN_CAUSES` is untouched: `addressed`
- * takes an optional `briefRole` and no caller passes it. The cutover rows add the order field that carries the role, the
- * `spawnableRole` addressee and the one-run-at-a-time guard while a fleet or lab command is in the Acceptance.
+ * ONE LANE ROUTES THROUGH THIS, BEHIND A FLAG THAT IS OFF (#832): with `workers.orchestratorOneShot` on, a ready `lane:orchestrator`
+ * row's order carries `briefRole: "orchestrator"` (`orchestrator-one-shot.ts`) and `promptTarget` hands it to `addressed`. With it
+ * off no order carries a role and every caller gets the engineer's, as before. `SPAWN_CAUSES` is untouched: the one-shot cause is
+ * its sibling, and the one-run-at-a-time guard while a fleet or lab command is in the Acceptance is that module's.
  *
  * AN UNKNOWN ROLE IS REFUSED BY NAME, never defaulted to the engineer's: a seat briefed for the wrong role is told the wrong
  * resource rules, and the list is a rule rather than a path test (`"../engineer"` is not a role).
