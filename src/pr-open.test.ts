@@ -10,7 +10,7 @@ import assert from "node:assert/strict";
 import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "./lib/tmp-fixture.ts";
-import { EXIT_NOTHING_SENT, EXIT_QUEUED, readQueuedEntry, sendToGitHub } from "./pr-open.ts";
+import { armAfterCreate, EXIT_NOTHING_SENT, EXIT_QUEUED, readQueuedEntry, sendToGitHub } from "./pr-open.ts";
 import { QUEUED_EXIT } from "./gh-ledger.ts";
 
 const HELD = { dir: "/q", id: "1790000000-42", resetAt: Date.parse("2026-10-10T23:15:07Z") / 1000 };
@@ -118,4 +118,32 @@ test("#4898 THROUGH THE REAL `run`: a `gh` that exits 75 and leaves its entry fi
   assert.match(said.join(""), /QUEUED, NOT FAILED.*as 9-9 after/s);
   assert.equal(readFileSync(seen, "utf8").trim().split("\n").length, 1, "the create was made once and not repeated");
   assert.match(readFileSync(seen, "utf8"), /^pr create --draft --head agent\/x/);
+});
+
+// #4968: a PR opens READY and ARMED unless the author says --draft. These run the wrapper's own success path, with a `run` that records argv.
+const sendOk = (mode: string, rest: string[]) => {
+  const ran: string[][] = [];
+  const code = sendToGitHub(mode, rest, { run: (a) => { ran.push(a); }, git: () => "abc1234", err: () => {}, owner: () => null, labelExists: () => true });
+  return { code, ran };
+};
+
+test("#4968: a create without --draft sends no --draft and is armed straight after", () => {
+  const r = sendOk("create", ["--head", "agent/x", "--title", "t", "--body", "b"]);
+  assert.equal(r.code, 0);
+  assert.ok(!r.ran[0].includes("--draft"), "the wrapper never adds --draft");
+  assert.deepEqual(r.ran[1], ["pr", "merge", "--auto", "--merge", "agent/x"], "armed at creation, as a docs-and-tests PR always was");
+});
+
+test("#4968: an explicit --draft creates a draft that is NOT armed", () => {
+  const r = sendOk("create", ["--draft", "--head", "agent/x", "--title", "t", "--body", "b"]);
+  assert.ok(r.ran[0].includes("--draft"), "the explicit not-now is passed through");
+  assert.deepEqual(r.ran.map((a) => a[1]), ["create"], "no merge step follows a draft");
+  assert.deepEqual(armAfterCreate("create", ["--draft"]), []);
+});
+
+test("#4968: edit never arms, draft or not", () => {
+  const r = sendOk("edit", ["--body", "b"]);
+  assert.deepEqual(r.ran.map((a) => a[1]), ["edit"]);
+  assert.deepEqual(armAfterCreate("edit", ["--head", "agent/x"]), []);
+  assert.equal(armAfterCreate("create", ["--head", "agent/x"]).length, 1, "positive control: a plain create does arm");
 });

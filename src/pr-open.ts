@@ -1375,11 +1375,12 @@ export function editTreeRefusal(mode: string, rest: string[], { git = defaultGit
 
 /**
  * #909: A PR THIS WRAPPER OPENS READY IS ARMED AT CREATION, BY THE WRAPPER. Pure: the extra `gh` argv to run
- * after `gh pr create`, or none. `auto-arm.yml`'s `arm` job used to be the only thing that armed, firing on
- * every PR event (685 runs on the day measured); it still arms the DRAFTS, on `ready_for_review`, because
- * GitHub refuses auto-merge on a draft and a product PR opens as one (#912). A docs-and-tests PR opens ready,
- * and this is the moment its flag needs setting -- the wrapper already runs at exactly that moment. Merge
- * commits only, the org's rule. `--draft` anywhere in the args means "not now"; `edit` never arms.
+ * after `gh pr create`, or none. #4968: READY IS THE DEFAULT FOR EVERY PR, product or docs-and-tests. A product PR
+ * used to open as a draft (#912) and wait for someone to mark it ready, because `auto-arm.yml` ignores drafts and
+ * does not fire on a review: 0-8 minutes usually, 117 minutes at worst, and a worker turn each time. The merge
+ * queue's `require_last_push_approval` now makes an approval cover the latest push, so the draft no longer stands
+ * in for that rule. This wrapper never adds `--draft`; a create without it is armed here. Merge commits only, the
+ * org's rule. `--draft` anywhere in the args means "not now" and is never armed; `edit` never arms.
  * @param {string} mode
  * @param {string[]} rest the args handed to `gh pr <mode>`
  * @returns {string[][]}
