@@ -12,7 +12,7 @@
 //   4. FOLLOW-UPS WAIT FOR THE MERGE: `row-file` refuses a session holding a claimed sweep to file a row whose Region overlaps the sweep's ({@link sweepFilingReason}).
 //
 // THE STATE IS PURE ({@link sweepWindowState}); the reads go through an injected `run`, so a test reaches no network.
-import { declaresSweep } from "./blast-radius.ts";
+import { declaresSweep, openRestListing } from "./blast-radius.ts";
 import { claimRecordOf, type RowComment } from "./claim-stall.ts";
 import { FAILURE_LEDGER_FILE, recordFailures } from "./failure-ledger.ts";
 import { stateEntryPath } from "./host-config.ts";
@@ -82,9 +82,8 @@ function listClaimedRows({ run, repo }: Required<Pick<SweepReads, "run" | "repo"
 function prOpenTimes({ run, repo, repos }: Required<SweepReads>): Map<number, number> {
   const opened = new Map<number, number>();
   for (const { repo: codeRepo } of repos) {
-    const prs: { createdAt?: string; body?: string | null }[] = JSON.parse(run(["pr", "list", "--repo", codeRepo, "--state", "open", "--json", "number,createdAt,body"]));
-    for (const pr of prs) {
-      const at = Date.parse(String(pr.createdAt ?? ""));
+    for (const pr of openRestListing<{ created_at?: string; body?: string | null }>(run, codeRepo, "pulls")) {
+      const at = Date.parse(String(pr.created_at ?? ""));
       if (Number.isNaN(at)) continue;
       for (const row of declaredClosedRows(pr.body, { prRepo: codeRepo, trackerRepo: repo })) opened.set(row, Math.min(at, opened.get(row) ?? at));
     }

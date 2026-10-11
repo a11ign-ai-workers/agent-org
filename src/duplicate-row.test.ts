@@ -27,13 +27,13 @@ const JEV = { provider: "jev", keyPath: KEY_PATH, minConfidence: 0.9 };
 type Open = { number: number; title: string };
 type Says = Partial<Record<"sameChange" | "sameDefect" | "supersedes", [string, number]>>;
 
-/** A stub `gh`: `issue list` answers the open rows, `issue view N` the body. `calls` records every call. */
+/** A stub `gh`: the REST issues listing answers the open rows, `issue view N` the body. `calls` records every call. */
 function stubGh(open: Open[], { outage = false } = {}) {
   const calls: string[][] = [];
   const run = (_cmd: string, args: string[]): string => {
     calls.push(args);
     if (outage) throw new Error("HTTP 502");
-    if (args[1] === "list") return JSON.stringify(open);
+    if (args[0] === "api" && args[1].includes("/issues?")) return JSON.stringify(open);
     return JSON.stringify({ body: REGION_BODY });
   };
   return { run, calls };
@@ -85,6 +85,14 @@ test("provider on, same change above the floor: REFUSED, both rows named, the wa
   assert.equal(net.requests.length, 1, "one pair, one request (the POSITIVE CONTROL for every 'asks nobody' case)");
   assert.deepEqual(Object.keys(net.requests[0].questions).sort(), ["sameChange", "sameDefect", "supersedes"]);
   assert.ok(gh.calls.length >= 2, "the board and the candidate's row were read");
+});
+
+// agent-org#1005: the open rows are read over REST, the core pool, never `gh issue list`, which spends the GraphQL pool the managers App shares.
+test("the open rows are read as `gh api repos/<repo>/issues`, never `gh issue list`", async () => {
+  const { input, gh } = rig({ says: {} });
+  await duplicateRowCheck(input);
+  assert.ok(gh.calls.some((args) => args[0] === "api" && args[1] === "repos/a11ign/a11ign/issues?state=open&per_page=100&page=1"), "the REST issues listing is read, paged from the first page");
+  assert.deepEqual(gh.calls.filter((args) => args[0] === "issue" && args[1] === "list"), [], "no `gh issue list`: it spends the GraphQL pool");
 });
 
 test("the negative control of that refusal: the same pair answered `no` files", async () => {

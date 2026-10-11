@@ -25,9 +25,6 @@ export const BLAST_MAX_OVERLAP = 5;
 /** The open rows that count as competitors: any of these states, as B4 will see them once one is claimed. */
 const COMPETING_STATES: readonly string[] = [READY_LABEL, CLAIM_LABEL, BACKLOG_LABEL];
 
-/** The most open rows one tracker read asks for; a full page is read as cut short, never as everything there is. */
-const OPEN_ROWS_LIMIT = 500;
-
 /** How many names a refusal lists before it says "and n more": the first rows are the message, a hundred are a wall. */
 const NAMED_OVERLAPS = 8;
 
@@ -49,7 +46,7 @@ export function declaresSweep(body: string): boolean {
   return false;
 }
 
-/** An open row, as `gh issue list --json number,labels,body` returns it. */
+/** An open row, as the REST issues listing returns it (`number`, `labels` as `{name}`, `body`). */
 export type OpenRow = { number: number; labels?: { name: string; }[]; body?: string | null; repo?: string; };
 /** An open pull request in the shape `lookupOpenPrFiles` returns, narrowed to what the count reads. */
 export type OpenPr = { number: number; files: string[]; changedFiles?: number; closes?: number[]; repo?: string; repoKey?: string; };
@@ -200,14 +197,25 @@ export function blastRadiusGate(body: string, reads: BlastReads): BlastVerdict {
   return blastRadiusVerdict(measureBlastRadius(body, reads), declaresSweep(body));
 }
 
-/** Parse `json` as an array, or `null` -- a read that came back as anything else is a failed read. */
-function jsonArray(text: string): unknown[] | null {
-  try {
-    const parsed = JSON.parse(text);
-    return Array.isArray(parsed) ? parsed : null;
-  } catch {
-    return null;
+/** GitHub's largest page: a page that comes back shorter than this is the last one. */
+const REST_PAGE_SIZE = 100;
+/** The most pages one REST listing reads: past it the listing throws, so a caller reads it as INCONCLUSIVE rather than as a list that stopped short. */
+const REST_MAX_PAGES = 100;
+
+/**
+ * THE OPEN ROWS OR PULL REQUESTS of `repo`, over REST (agent-org#1005): `gh issue list` and `gh pr list` are GraphQL, which the managers App's pool shares
+ * with every session on the account, while `gh api repos/...` is the core pool. An issues listing carries pull requests as well, so those entries are dropped.
+ * THROWS when a page is not a list or the listing runs past {@link REST_MAX_PAGES}.
+ */
+export function openRestListing<T extends object>(run: (args: string[]) => string, repo: string, kind: "issues" | "pulls"): T[] {
+  const rows: T[] = [];
+  for (let page = 1; page <= REST_MAX_PAGES; page++) {
+    const batch: unknown = JSON.parse(run(["api", `repos/${repo}/${kind}?state=open&per_page=${REST_PAGE_SIZE}&page=${page}`]));
+    if (!Array.isArray(batch)) throw new Error(`the open ${kind} of ${repo} did not come back as a list`);
+    rows.push(...(batch as T[]).filter((row) => kind === "pulls" || !("pull_request" in row)));
+    if (batch.length < REST_PAGE_SIZE) return rows;
   }
+  throw new Error(`the open ${kind} of ${repo} run past ${REST_MAX_PAGES} pages`);
 }
 
 /**
@@ -235,9 +243,8 @@ export function ghBlastReads(run: (cmd: string, args: string[]) => string,
       const all: OpenRow[] = [];
       for (const { repo } of declaration.tracker) {
         try {
-          const rows = jsonArray(gh(["issue", "list", "--repo", repo, "--state", "open", "--limit", String(OPEN_ROWS_LIMIT), "--json", "number,labels,body"]));
-          if (rows === null || rows.length >= OPEN_ROWS_LIMIT) return null; // a full page may be a truncated one
-          all.push(...(rows as OpenRow[]).map((row) => (repo === declaration.tracker[0].repo ? row : { ...row, repo })));
+          const rows = openRestListing<OpenRow>(gh, repo, "issues");
+          all.push(...rows.map((row) => (repo === declaration.tracker[0].repo ? row : { ...row, repo })));
         } catch {
           return null;
         }
