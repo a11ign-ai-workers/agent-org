@@ -1,0 +1,9 @@
+A pull request touching `package.json`, `pnpm-lock.yaml`, `.npmrc` or `.github/workflows/` runs a `release-dry-run` job in `ci.yml` (agent-org#885 class 3): the release's version step on a scratch clone, then the consumer's `pnpm install --frozen-lockfile --ignore-scripts` of the candidate tree. `gate` waits for it. The test runs the job's own scripts against fixture repositories.
+
+Acceptance: `bash -c 'node --test src/packaging/release-dry-run.test.ts'`
+
+Mutation: seven breaks of `ci.yml`, each restored byte-identical (`diff` against a copy taken first) and each failing its own tests: the touched pattern no longer matching `.npmrc` failed the `touched` table alone (1 of 10); `touched` always true failed the table alone (1 of 10); an unfrozen install failed the structure test and the version-step pass test (2 of 10); `pnpm exec changeset version` dropped failed the structure test, the pass test and the lockfile-omits-`@changesets/cli` test (3 of 10); `--ignore-scripts` dropped from the consumer's install failed the structure test and both lockfile consumer tests (3 of 10); the consumer always taking the npm path failed the same three; `gate` ignoring the job's result failed the structure test alone (1 of 10). The first run of the `--ignore-scripts` break hit the header comment's copy of the phrase and passed 10 of 10; it was redone on the code line.
+
+Measured: `node --test src/packaging/release-dry-run.test.ts` printed `pass 10 fail 0` at this head, on pnpm 10.34.5 and Node 24.21.0, with the fixtures installed offline. Not measured: the job on GitHub's runner (it first runs on this pull request: the change touches `.github/workflows/`, so `touched` is true here).
+
+Deviation: the row's Acceptance is `cd /home/agent/repos/agent-org && node --test ...`, the primary checkout, which has no copy of this change until it merges; the command above is the same test run from the worktree.

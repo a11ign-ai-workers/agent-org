@@ -227,6 +227,84 @@ jobs:
     with:
       releasable-paths: src/
 
+  # A PULL REQUEST THAT CHANGES HOW THIS TREE INSTALLS DRY-RUNS THE RELEASE'S VERSION STEP (agent-org#888; chairman, agent-org#885 class 3 and a11ign/a11ign#4988). agent-org#871 changed the install, passed
+  # this file's `suite`, and the first sign of the break was five failed releases on `main`: nothing on the pull request ran the path the release takes (`release-per-merge.yml`'s `version` job: with
+  # a lockfile, `pnpm install --frozen-lockfile`, the repository's OWN `changeset version`, then `pnpm install --lockfile-only`; without one, `pnpm dlx @changesets/cli@<changesets-version> version`).
+  # This job runs those commands, in a scratch clone of the candidate tree, and writes nothing: `contents: read`, no credential kept by the checkout, no push, no token.
+  #
+  # IT RUNS ON EVERY EVENT AND DOES ITS WORK ONLY WHEN THE CHANGE TOUCHES `package.json`, `pnpm-lock.yaml`, `.npmrc` OR `.github/workflows/`. GitHub filters `paths:` per WORKFLOW and not per job, and a
+  # workflow-wide filter would skip `gate` with it, so the job reads the paths itself and the steps after `touched` are conditional on it: an untouched change is a `success` here, never a skip, and `gate`
+  # keeps accepting `success` alone. The paths are judged against the first parent of the checked-out commit: the merge ref of a pull request, a merge-queue entry, or a push to `main`.
+  #
+  # THE SECOND STEP IS THE CONSUMER'S INSTALL (a11ign/a11ign#4988): agent-org must not publish a tag its consumer cannot install. a11ign's `agent-org-newest-tag` script (its `installToolDependencies`)
+  # clones the tag and, when it carries `pnpm-lock.yaml`, runs `npx pnpm@<TOOL_PNPM_VERSION> install --frozen-lockfile --ignore-scripts` (the pnpm this repository's `release.yml` pins), else
+  # `npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund`. The step is that, on a clone of the candidate commit. It cannot see a change in a11ign's script, and a change here that
+  # makes the clone uninstallable fails it.
+  #
+  # THE TOOLS ARE THE RELEASE'S, NOT THIS FILE'S: `PNPM_VERSION`, `CHANGESETS_VERSION` and the Node below repeat `release.yml`'s `pnpm-version`, `changesets-version` and `node-version`, and
+  # `src/packaging/release-dry-run.test.ts` fails when they differ, so a dry run is never a pass on a toolchain the release does not use. It versions EVERY changeset in the tree, where the release
+  # versions only those no tag has consumed: a superset, so a failure the release would meet is met here (the release's `plan` step needs the tags, which a depth-2 checkout does not have).
+  release-dry-run:
+    runs-on: ubuntu-latest
+    permissions:
+      contents: read
+    env:
+      PNPM_VERSION: 10.34.5
+      CHANGESETS_VERSION: 3.0.1
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          # Two commits: HEAD and its first parent, which is all `touched` compares. No credential is kept: nothing here pushes.
+          fetch-depth: 2
+          persist-credentials: false
+      - name: Does the change touch what the release installs from?
+        id: touched
+        run: |
+          set -euo pipefail
+          changed=$(git diff --name-only HEAD^1 HEAD)
+          echo "changed paths:"
+          echo "$changed"
+          if grep -q -E '^(package\.json|pnpm-lock\.yaml|\.npmrc)$|^\.github/workflows/' <<<"$changed"; then
+            echo "touched=true" >> "$GITHUB_OUTPUT"
+          else
+            echo "touched=false" >> "$GITHUB_OUTPUT"
+            echo "no install-affecting path changed: the release dry run is not needed"
+          fi
+      - uses: pnpm/action-setup@v6
+        if: steps.touched.outputs.touched == 'true'
+        with:
+          version: ${{ env.PNPM_VERSION }}
+      - uses: actions/setup-node@v7
+        if: steps.touched.outputs.touched == 'true'
+        with:
+          node-version: 22.22.1
+      - name: The release's version step, dry-run on a scratch clone -- install, changeset version, lockfile refresh
+        if: steps.touched.outputs.touched == 'true'
+        run: |
+          set -euo pipefail
+          scratch="$RUNNER_TEMP/release-dry-run"
+          git clone --quiet --depth=1 "file://$GITHUB_WORKSPACE" "$scratch"
+          cd "$scratch"
+          if [ -f pnpm-lock.yaml ]; then
+            pnpm install --frozen-lockfile
+            pnpm exec changeset version
+            pnpm install --lockfile-only
+          else
+            pnpm dlx "@changesets/cli@$CHANGESETS_VERSION" version
+          fi
+      - name: The consumer's install of the candidate tree -- what a11ign's agent-org-newest-tag runs on a tag
+        if: steps.touched.outputs.touched == 'true'
+        run: |
+          set -euo pipefail
+          consumer="$RUNNER_TEMP/consumer-install"
+          git clone --quiet --depth=1 "file://$GITHUB_WORKSPACE" "$consumer"
+          cd "$consumer"
+          if [ -f pnpm-lock.yaml ]; then
+            npx "pnpm@$PNPM_VERSION" install --frozen-lockfile --ignore-scripts
+          else
+            npm install --no-save --no-package-lock --ignore-scripts --no-audit --no-fund
+          fi
+
   # THE ONE CONTEXT `main` REQUIRES (a11ign/a11ign#3986), and the only way `typecheck` is required without an admin's act. `typecheck` is a job of its own so a type error does not wait
   # for the suite, but a job nobody requires is advisory: `rules/branches/main` listed `gate` alone and whether classic protection listed `typecheck` is admin-only to read, so the
   # repository-settings table read it CANNOT_TELL. Requiring it by a `needs:` on `gate` puts it where any token reads it, and keeps the name every other reader
@@ -235,18 +313,18 @@ jobs:
   # `if: always() && !cancelled()` IS THE POINT, not decoration: with the default `success()` a failing `typecheck` SKIPS `gate`, and a skipped required check counts as passing, so a type
   # error would merge. The same form as a11ign/a11ign's own `gate`. Unlike that one, `skipped` is accepted in ONE place: `changeset` on a `push`, where it carries an `if:` that is
   # false by design (a push has no pull request; a11ign/a11ign#4139). Everywhere else a skip means a job that did not run for a reason nobody wrote, so on `pull_request` and
-  # `merge_group` the only green is `success` from all three, and `suite` and `typecheck` must be `success` on a push too.
+  # `merge_group` the only green is `success` from all four, and `suite` and `typecheck` must be `success` on a push too.
   gate:
-    needs: [suite, typecheck, changeset]
+    needs: [suite, typecheck, changeset, release-dry-run]
     if: always() && !cancelled()
     runs-on: ubuntu-latest
     steps:
-      - name: The suite, the typecheck and the changeset check all succeeded
+      - name: The suite, the typecheck, the changeset check and the release dry run all succeeded
         env:
           EVENT: ${{ github.event_name }}
         run: |
           changeset="${{ needs.changeset.result }}"
           if [ "$EVENT" = "push" ] && [ "$changeset" = "skipped" ]; then changeset="success"; fi
-          for result in "${{ needs.suite.result }}" "${{ needs.typecheck.result }}" "$changeset"; do
+          for result in "${{ needs.suite.result }}" "${{ needs.typecheck.result }}" "$changeset" "${{ needs.release-dry-run.result }}"; do
             [ "$result" = "success" ] || { echo "::error::a job reported '$result', not success"; exit 1; }
           done
