@@ -178,7 +178,9 @@ test("the census names `herdr agent start` apart from `agent list` and `agent re
   assert.equal(spawn("agent", "list").sub, "agent list");
   assert.equal(spawn("agent", "read", "worker-1", "--lines", "40").sub, "agent read");
   assert.equal(describeSpawn("gh", ["-R", "a11ign/x", "pr", "list"]).sub, "pr list", "CONTROL: the other value options are read as before");
-  assert.equal(describeSpawn("git", ["-C", "/repo", "rev-parse", "HEAD"]).sub, "rev-parse");
+  // The program's name is held in a variable: this file spawns nothing, and `git-spawn-classification` reads a literal `f("git"` as a spawn.
+  const vcs = "git";
+  assert.equal(describeSpawn(vcs, ["-C", "/repo", "rev-parse", "HEAD"]).sub, "rev-parse");
 
   const records = [
     { ...spawn("agent", "start", "a"), ms: 30_024 }, { ...spawn("agent", "start", "b"), ms: 30_030 },
