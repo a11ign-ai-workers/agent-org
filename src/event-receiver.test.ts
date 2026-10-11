@@ -151,7 +151,7 @@ test("the ledger keeps the newest ids up to its bound and is read again at start
 test("parseArgs takes the three flags in both spellings and has no way to name an address", () => {
   const ok = parseArgs(["--port", "8080", "--secret-file=/a/secret", "--queue", "/a/queue"]);
   assert.deepEqual(ok, { port: 8080, secretFile: "/a/secret", queue: "/a/queue" });
-  for (const bad of [["--host", "0.0.0.0"], ["--host=0.0.0.0"], ["--address=10.0.0.1"], ["--bind", "::"]]) {
+  for (const bad of [["--host", "0.0.0.0"], ["--host=0.0.0.0"], ["--address=0.0.0.0"], ["--bind", "::"]]) {
     assert.throws(() => parseArgs([...bad, "--port=1", "--secret-file=/a", "--queue=/b"]), /unknown argument/);
   }
   assert.throws(() => parseArgs(["--port=1", "--secret-file=rel", "--queue=/b"]), /absolute/);
