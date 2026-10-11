@@ -1054,6 +1054,27 @@ function salvageTreeName(worktreePath: string): string {
   return name === "" ? "tree" : name;
 }
 
+/**
+ * #4620: THE REF COMPONENT THAT NAMES ONE TREE. A directory name is shared (`a/tree`, `b/tree`, the `tree` and `project` under
+ * every session's scratchpad), and one run's epoch is shared by every tree it salvages, so the name alone gave two trees one ref.
+ * Eight hex digits of the absolute path tell them apart; the name stays first so a reader of `refs/salvage/` still sees which tree.
+ */
+function salvageTreeKey(worktreePath: string): string {
+  return `${salvageTreeName(worktreePath)}-${createHash("sha256").update(worktreePath).digest("hex").slice(0, 8)}`;
+}
+
+/**
+ * #4620: WHAT A FAILED GIT COMMAND SAYS, FOR THE LINE THAT NAMES IT. `execFileSync` puts git's own words in `stderr` and only the
+ * command line in `message`, so the message alone said "Command failed: git ... stash create" and not the cause. The first 200
+ * characters, on one line, so a reader of the report can name the cause without the journal.
+ */
+function failureDetail(cause: unknown): string {
+  const stderr = (cause as { stderr?: unknown }).stderr;
+  const said = typeof stderr === "string" ? stderr : Buffer.isBuffer(stderr) ? stderr.toString("utf8") : "";
+  const words = said.trim() !== "" ? said : cause instanceof Error ? cause.message : String(cause);
+  return words.replace(/\s+/g, " ").trim().slice(0, 200);
+}
+
 /** Creates `ref` at `sha` (refusing to move one that exists) and reads it back; THROWS unless it reads back as `sha`. */
 function pinRef(repoRoot: string, ref: string, sha: string, run: typeof defaultRun): string {
   run("git", ["check-ref-format", ref], { cwd: repoRoot });
@@ -1065,9 +1086,9 @@ function pinRef(repoRoot: string, ref: string, sha: string, run: typeof defaultR
 
 /**
  * #4620: THE SALVAGE. Pins what the tree holds that no branch does, READS EACH REF BACK, and only then reports the refs the caller
- * may remove the tree on. A DETACHED head is pinned first (`<name>-head-<epoch>`); tracked edits are `git stash create`d (tracked
- * only: no `-u`, so an untracked pile is never swept in) and pinned as `<name>-<epoch>`. Nothing here moves the working tree, the
- * index or any existing ref.
+ * may remove the tree on. A DETACHED head is pinned first (`<name>-<hash>-head-<epoch>`); tracked edits are `git stash create`d (tracked
+ * only: no `-u`, so an untracked pile is never swept in) and pinned as `<name>-<hash>-<epoch>`, where `<hash>` is `salvageTreeKey`'s
+ * digits of the path. Nothing here moves the working tree, the index or any existing ref.
  *
  * IDEMPOTENT, because the prune is hourly and git has guards of its own: a tree salvaged, then refused by `git worktree remove`
  * (a lock, a submodule) is looked at again an hour later, and writing a second ref for work already pinned would leave 24 a day.
@@ -1082,7 +1103,7 @@ function pinRef(repoRoot: string, ref: string, sha: string, run: typeof defaultR
  */
 export function salvageTracked(worktreePath: string, repoRoot: string, recovery: Recovery, { run, now }: { run: typeof defaultRun; now: number; }): { refs: string[]; edits: string; } | { reason: string; } {
   const epoch = Math.floor(now / 1000);
-  const name = salvageTreeName(worktreePath);
+  const name = salvageTreeKey(worktreePath);
   const mine = new RegExp(`^${SALVAGE_REF_PREFIX}${name.replace(/[.]/g, "\\.")}-(head-)?\\d+$`);
   try {
     const listed = run("git", ["for-each-ref", "--format=%(refname) %(objectname) %(tree) %(parent)", `${SALVAGE_REF_PREFIX}${name}-*`], { cwd: repoRoot })
@@ -1102,7 +1123,7 @@ export function salvageTracked(worktreePath: string, repoRoot: string, recovery:
     refs.push(same !== undefined ? same[0] : pinRef(repoRoot, `${SALVAGE_REF_PREFIX}${name}-${epoch}`, created, run));
     return { refs, edits: same !== undefined ? readCommit(repoRoot, same[0], run) : created };
   } catch (cause) {
-    return { reason: `its work could not be pinned under ${SALVAGE_REF_PREFIX} and read back (${(cause as Error).message.split("\n")[0]})` };
+    return { reason: `its work could not be pinned under ${SALVAGE_REF_PREFIX} and read back (${failureDetail(cause)})` };
   }
 }
 
