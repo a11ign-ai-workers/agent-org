@@ -26,8 +26,8 @@ const perFile = new Set<string>();
 /** `rmSync`'s own retries (it retries EBUSY, ENOTEMPTY and EPERM only): a late writer in the tree, such as a `git` the test spawned, is waited out rather than ending the removal. */
 const RETRIES = { maxRetries: 5, retryDelay: 100 };
 
+/** What removes one directory; a test passes its own to make a removal fail. */
 type Remove = (dir: string) => void;
-const removeWithRetries: Remove = (dir) => rmSync(dir, { recursive: true, force: true, ...RETRIES });
 
 /**
  * (#987) EVERY DIRECTORY IS TRIED, AND A FAILURE IS THE FILE'S OWN RED. Measured in the merge-queue run 38150393779: a file passed all its cases and its
@@ -36,11 +36,12 @@ const removeWithRetries: Remove = (dir) => rmSync(dir, { recursive: true, force:
  * directory is attempted whatever the one before did, a directory that could not be removed stays in `made` for the exit fallback below, and the failures
  * are thrown together, naming each path, so the leak is this file's failure and not the queue's.
  */
-export function removeAll(made: Set<string>, remove: Remove = removeWithRetries): void {
+export function removeAll(made: Set<string>, remove?: Remove): void {
   const failures: string[] = [];
   for (const dir of made) {
     try {
-      remove(dir);
+      if (remove) remove(dir);
+      else rmSync(dir, { recursive: true, force: true, ...RETRIES });
       made.delete(dir);
     } catch (error) {
       failures.push(`${dir}: ${(error as NodeJS.ErrnoException).code ?? String(error)}`);
