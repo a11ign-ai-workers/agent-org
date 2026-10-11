@@ -103,7 +103,7 @@ const claimRecord = (minutesAgo: number, session = "worker-4389") => ({
   body: `<!-- row-claim: claim record -->\n**Claim record** -- claimed by \`${session}\`.`, createdAt: new Date(Date.now() - minutesAgo * MIN).toISOString(), author: { login: "a11ign-ai-workers" },
 });
 const sweepPr = (minutesAgo: number, files = ["src/a.ts"]) => ({
-  number: 529, changedFiles: files.length, headRefName: "agent/rename-4389", body: `Closes ${TRACKER}#${SWEEP}`, createdAt: new Date(Date.now() - minutesAgo * MIN).toISOString(),
+  number: 529, changedFiles: files.length, headRefName: "agent/rename-4389", body: `Closes ${TRACKER}#${SWEEP}`, created_at: new Date(Date.now() - minutesAgo * MIN).toISOString(),
   files: files.map((path) => ({ path })), labels: [],
 });
 
@@ -119,6 +119,7 @@ function ghFor({ sweeps, comments, prs = [], asker = ["agent-org:src/b.ts"] }: {
       return JSON.stringify({ number: ASKER, title: "A row", body: plainBody(...asker), labels: [], blockedBy: { nodes: [] } });
     }
     if (readsRowsByLabel(args) !== null) return connectionOf(sweeps);
+    if (args[0] === "api" && args[1]?.includes("/pulls?")) return JSON.stringify(prs);
     if (args[0] === "pr" && args[1] === "list") return JSON.stringify(prs);
     return "[]";
   };
@@ -247,6 +248,8 @@ const FILING_BODY = (region: string) => `${plainBody(region)}\n## Acceptance\n\n
 function filingRun(prMinutesAgo: number, body: string) {
   return (_cmd: string, args: string[]) => {
     if (readsRowsByLabel(args) !== null) return connectionOf([sweepRow]);
+    if (args[0] === "api" && args[1]?.includes("/pulls?")) return JSON.stringify([sweepPr(prMinutesAgo)]);
+    if (args[0] === "api" && args[1]?.includes("/issues?")) return "[]";
     if (args[0] === "api") return "src/a.ts\nsrc/follow-up.ts";
     if (args[0] === "issue" && args[1] === "view" && args.includes("comments")) return JSON.stringify({ comments: [claimRecord(200)] });
     if (args[0] === "pr" && args[1] === "list") return JSON.stringify([sweepPr(prMinutesAgo)]);
@@ -290,4 +293,15 @@ test("(4) WIRING: `row-file` refuses the holder of a claimed sweep a follow-up i
 
 test("(4) a read that fails refuses the filing as INCONCLUSIVE, never as clear", () => {
   assert.equal(readSweepWindows({ run: () => { throw new Error("HTTP 502"); }, repo: TRACKER, repos: [AGENT_ORG] }), null);
+});
+
+// agent-org#1005: the open pull requests are read over REST, the core pool, never `gh pr list`, which spends the GraphQL pool the managers App shares.
+test("(5) the open pull requests are read as `gh api repos/<code>/pulls`, never `gh pr list` -- the pull request's opening time still starts the box", () => {
+  const pr = sweepPr(30);
+  const { run } = ghFor({ sweeps: [sweepRow], comments: [claimRecord(90)], prs: [pr] });
+  const argvs: string[][] = [];
+  const sweeps = readSweepWindows({ run: (args) => { argvs.push(args); return run(INJECTED_GH, args); }, repo: TRACKER, repos: [AGENT_ORG] });
+  assert.deepEqual(argvs.filter((args) => args[0] === "pr" && args[1] === "list" && args.includes(AGENT_ORG.repo)), [], "no `gh pr list` read of the code repository");
+  assert.ok(argvs.some((args) => args[0] === "api" && args[1] === `repos/${AGENT_ORG.repo}/pulls?state=open&per_page=100&page=1`), "the REST pulls listing is read, paged from the first page");
+  assert.equal(sweeps?.[0]?.prOpenedAt, Math.max(Date.parse(pr.created_at), sweeps?.[0]?.claimedAt ?? 0), "the field the box counts from is still `created_at`, read from the REST listing");
 });

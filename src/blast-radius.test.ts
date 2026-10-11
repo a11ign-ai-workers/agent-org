@@ -179,6 +179,24 @@ test("THROUGH ghBlastReads: a pull request listing 1 of 2 files whose pagination
   assert.equal(measureBlastRadius(regionOf("agent-org:src/missing.ts"), { ...gateReads, treeFiles: () => ["src/missing.ts"] }).overlapsComplete, false);
 });
 
+// agent-org#1005: the open rows are read over REST, the core pool, never `gh issue list`, which spends the GraphQL pool; that listing carries pull requests too, and they are not rows.
+test("THROUGH ghBlastReads: the open rows are read as `gh api repos/<tracker>/issues`, never `gh issue list`, and a pull request in that listing is not a row", () => {
+  const argvs: string[][] = [];
+  const run = (_cmd: string, args: string[]) => {
+    argvs.push(args);
+    if (args[0] === "api" && args[1].includes("/issues?")) return JSON.stringify([
+      { number: 1, labels: [{ name: "ready" }], body: regionOf("src/a.ts") },
+      { number: 2, labels: [], body: "", pull_request: { url: "https://api.github.com/repos/a11ign/a11ign/pulls/2" } },
+    ]);
+    return "[]";
+  };
+  const declaration = { tracker: [{ key: "", repo: "a11ign/a11ign" }], code: [{ key: "", repo: "a11ign/agent-org" }] };
+  const rows = ghBlastReads(run, declaration).openRows();
+  assert.deepEqual(rows?.map((open) => open.number), [1], "the pull request entry is dropped and the row is kept");
+  assert.deepEqual(argvs.filter((args) => args[0] === "issue" && args[1] === "list"), [], "no `gh issue list`: it spends the GraphQL pool");
+  assert.ok(argvs.some((args) => args[0] === "api" && args[1] === "repos/a11ign/a11ign/issues?state=open&per_page=100&page=1"), "the REST issues listing is read, paged from the first page");
+});
+
 test("blastRadiusVerdict is pure over the reading: at each threshold files, one over refuses", () => {
   assert.equal(blastRadiusVerdict({ files: 20, filesComplete: true, overlaps: Array(5).fill("#1"), overlapsComplete: true }, false).refusal, null);
   assert.notEqual(blastRadiusVerdict({ files: 21, filesComplete: true, overlaps: [], overlapsComplete: true }, false).refusal, null);
@@ -192,6 +210,7 @@ const FILING_BODY = (extra = "") => `## Region\n\n\`\`\`\nagent-org:src/\n\`\`\`
 function filingRun(treeSize: number, body: string) {
   return (_cmd: string, args: string[]) => {
     if (readsRowsByLabel(args) !== null) return connectionOf([]); // #5039: the claimed rows' by-label read -- none held
+    if (args[0] === "api" && args[1]?.includes("/issues?")) return "[]";
     if (args[0] === "api") return treeOf(treeSize).join("\n");
     if (args[0] === "issue" && args[1] === "list") return "[]";
     if (args[0] === "pr" && args[1] === "list") return "[]";
