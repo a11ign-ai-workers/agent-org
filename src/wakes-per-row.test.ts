@@ -456,7 +456,7 @@ test("agent-org#804: merged rows of BOTH trackers with one instance each are mea
     parseTranscript(worker3390Transcript(), "w3390.jsonl"),
     parseTranscript(worker3390Transcript().replaceAll("worker-3390", "worker-agent-org-804"), "w804.jsonl"),
   ];
-  const reading = run({ pulls, trackers: TRACKERS, instances, transcripts, claimedAt: new Map([[3390, at("2026-10-04T10:35:57Z")], ["agent-org#804", at("2026-10-04T10:35:57Z")]]) });
+  const reading = run({ pulls, trackers: TRACKERS, instances, transcripts, claimedAt: new Map<number | string, number>([[3390, at("2026-10-04T10:35:57Z")], ["agent-org#804", at("2026-10-04T10:35:57Z")]]) });
   const withInstance = reading.unmeasured.filter((entry) => !(entry.key === "agent-org" && entry.row === 900));
   assert.deepEqual(withInstance, [], "no row that has an instance reads UNMEASURED");
   assert.deepEqual(reading.unmeasured.map((entry) => [entry.key, entry.row, entry.reason]), [["agent-org", 900, "no claimant recorded for the row"]], "positive control: a row with no instance is still reported");
