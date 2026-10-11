@@ -694,6 +694,47 @@ export function rosterFrom(argv: string[], path?: string | URL): string[] {
 export const MAX_SPAWNS_PER_TICK = 1;
 
 /**
+ * agent-org#1025: THE SPAWNS OF ONE TICK SHARE A START BUDGET. `defaultRun` waits up to 30 s on each `herdr agent start`, and a chairman row
+ * ({@link startsFresh}) or a reviewer is not held by {@link MAX_SPAWNS_PER_TICK}, so a tick that starts three waits three timeouts in turn: the
+ * 402 s tick of the row read three `agent start` calls at 30,024 to 30,031 ms, within 7 ms of `timeout: 30_000`, which is the timeout and not a start.
+ *
+ * A start that would BEGIN with the budget already spent is deferred to the next tick (its order is refused, which writes nothing to the ledger, so a
+ * derived cause is derived again and an authored one stays queued); one that begins inside it runs to its own 30 s. So a tick waits at most this plus one
+ * timeout on starts, and a start that is merely slow is never refused. SIXTY SECONDS IS A THIRD OF THE TICK'S 180 S LIMIT, not a measured optimum: the
+ * ordinary start the controls in `wake-start-budget.test.ts` use is fast, and the two overruns are the only readings of a start near its timeout.
+ */
+export const START_BUDGET_MS = 60_000;
+
+/** Is this `herdr` argument list the one call that starts an agent (`--session org agent start <name> ...`)? Every other `agent` verb is cheap. */
+const isAgentStart = (args: readonly string[]): boolean => args.includes("agent") && args[args.indexOf("agent") + 1] === "start";
+
+/**
+ * One tick's start budget ({@link START_BUDGET_MS}): `timed` is `run` with each `agent start` call's wall added up, and `hold` is why no further start may
+ * begin (`null` while the budget lasts). A start counts even when it THREW -- the timeout is exactly the cost this exists for.
+ */
+function startBudgetOf(clock: () => number, budgetMs: number = START_BUDGET_MS) {
+  let waitedMs = 0;
+  return {
+    timed: (run: (args: string[]) => string) => (args: string[]): string => {
+      if (!isAgentStart(args)) return run(args);
+      const began = clock();
+      try {
+        return run(args);
+      } finally {
+        waitedMs += Math.max(0, clock() - began);
+      }
+    },
+    hold: (): string | null => {
+      if (waitedMs < budgetMs) return null;
+      return `${START_BUDGET_DEFERRED} (${Math.round(waitedMs / 1000)} s of the ${budgetMs / 1000} s budget spent on agent starts): started on the next tick`;
+    },
+  };
+}
+
+/** The words of a start-budget refusal, which {@link splitRefusals} reads back: one string, so the producer and the classifier cannot drift. */
+const START_BUDGET_DEFERRED = "deferred: this tick's agent starts have used their start budget";
+
+/**
  * Is this order one the pilot may start a process for at all?
  *
  * ASKED SEPARATELY FROM `spawnableRole`, AND THE REASON IS THE REFUSAL TEXT RATHER THAN THE LOGIC. Every
@@ -1938,7 +1979,7 @@ function codexTrustNote(session: string, err: unknown, read: () => string | null
 }
 
 /** `codexConfig` reads the reviewer's codex config, a seam so a test can hold either answer */
-export type ReviewerDeps = {run: (args: string[]) => string, reviewerEnv?: Record<string, string>, checkout?: CheckoutDeps, registry?: () => Record<string, {spawnedAt: number}>, registerReviewer?: (session: string) => void, memory?: () => string | null, codexConfig?: () => string | null};
+export type ReviewerDeps = {run: (args: string[]) => string, reviewerEnv?: Record<string, string>, checkout?: CheckoutDeps, registry?: () => Record<string, {spawnedAt: number}>, registerReviewer?: (session: string) => void, memory?: () => string | null, codexConfig?: () => string | null, startHold?: () => string | null};
 
 /**
  * WHY NO REVIEW CHECKOUT CAN BE MADE FOR THIS INSTANCE, or `null` when one can (#2618, lifted for a declared key by #2969). A tree is
@@ -1979,6 +2020,9 @@ function reviewerTarget(order: { session: string; cause?: string; causeKey?: str
     // choosing victims can take `herdr.service` and every agent with it, so the two are not the same size.
     const held = deps.memory?.() ?? null;
     if (held !== null) return { refusal: `${routed.refusal}; no spawn: ${held}` };
+    // THE START BUDGET IS ASKED BEFORE THE CHECKOUT TOO (agent-org#1025): a deferred start must not cost a fetch and a worktree it will not use.
+    const spent = deps.startHold?.() ?? null;
+    if (spent !== null) return { refusal: `${routed.refusal}; ${spent}` };
   }
   // THE REF, NOT `orderPullRequest`: that answers `null` for another repository's pull request, and `Number(null)` is 0 (#2969).
   const pr = Number(orderPullRequestRef(order)?.number);
@@ -4033,6 +4077,18 @@ export const MERGE_QUEUE_WAIT_LIMIT_MS = 60 * 60 * 1000;
 const MERGE_QUEUE_WAIT_REFUSAL = new RegExp(String.raw`^(\S+): .*; no spawn: (#\d+ waits for [^;]*${MERGE_QUEUE_WAIT_PHRASE}[^;]*)$`);
 
 /**
+ * agent-org#1025: `<causeKey>: <whatever routed it>; deferred: this tick's agent starts have used their start budget (...)`. A WAIT, never a fault: the order was not
+ * dropped and nothing was started for it, so the next tick offers it again. It has CAPACITY's half-hour limit, so a start that is slow on every tick for
+ * thirty minutes is still reported as "nowhere to go". No `;` inside the capture.
+ */
+const START_BUDGET_REFUSAL = new RegExp(String.raw`^(\S+): .*; (${START_BUDGET_DEFERRED}[^;]*)$`);
+
+/** How many of a tick's refusals are start-budget deferrals ({@link START_BUDGET_REFUSAL}): the number the tick's log names. */
+export function startBudgetDeferrals(refused: readonly string[]): number {
+  return refused.filter((line) => START_BUDGET_REFUSAL.test(line)).length;
+}
+
+/**
  * Which of a tick's refusals are a seat WAITING ITS TURN and which are an order that has no way to arrive (#3029).
  *
  * ONE SUMMARY LINE FOR BOTH IS WHAT KEPT `N order(s) had nowhere to go` IN THE JOURNAL FOR 30 TICKS: `ceo` was `working` on a 24-minute turn
@@ -4052,9 +4108,11 @@ export function splitRefusals(refused: string[]): { busy: { key: string; reason:
     const seat = BUSY_SEAT_REFUSAL.exec(line);
     const capacity = CAPACITY_REFUSAL.exec(line);
     const queued = MERGE_QUEUE_WAIT_REFUSAL.exec(line);
+    const startsSpent = START_BUDGET_REFUSAL.exec(line);
     if (seat) busy.push({ key: seat[1], reason: seat[2], line, limitMs: BUSY_SEAT_DEFERRAL_MS, limitFor: "a seat mid-turn" });
     else if (capacity) busy.push({ key: capacity[1], reason: capacity[2], line, limitMs: CAPACITY_WAIT_LIMIT_MS, limitFor: "a free engineer seat" });
     else if (queued) busy.push({ key: queued[1], reason: queued[2], line, limitMs: MERGE_QUEUE_WAIT_LIMIT_MS, limitFor: "a pull request in the merge queue" });
+    else if (startsSpent) busy.push({ key: startsSpent[1], reason: startsSpent[2], line, limitMs: CAPACITY_WAIT_LIMIT_MS, limitFor: "the start budget" });
     else faults.push(line);
   }
   return { busy, faults };
@@ -5242,6 +5300,10 @@ function targetFor(order: {
   }
   const overloaded = fresh ? null : hostLoadRefusal(deps.hostLoad?.());
   if (overloaded !== null) return { refusal: `${routed.refusal}; ${overloaded}` };
+  // agent-org#1025: THE START BUDGET HOLDS A CHAIRMAN ROW TOO, since the starts it exists for are exactly the ones `startsFresh` lets past the pace limits.
+  // It is asked BEFORE the claim, so a deferred start does not claim a row (a `node` startup of 9 to 14 s) only to release it.
+  const startsSpent = deps.startHold?.() ?? null;
+  if (startsSpent !== null) return { refusal: `${routed.refusal}; ${startsSpent}` };
   // #832: A ONE-SHOT ORCHESTRATOR RUN'S CLAIM IS HELD, AND ITS RECORD OF A SPAWN WRITTEN, INSIDE THE CLAIMER (`standInClaimer`): the spawn's own order of checks is unchanged, and an order
   // with no guard or no claimer handed in is never spawned, so the hardware rule does not depend on a caller remembering it.
   const claimer = isOneShotOrder(order) ? standInClaimer(deps.claimer, deps.oneShot, { rowOf: rowRefOfOrder, live }) : deps.claimer;
@@ -5637,6 +5699,9 @@ export function deliver(orders: readonly { session: string; causeKey: string; pr
   const outaged: string[] = [];
   const live = agents.filter((a) => !gone.has(a.label)).map((a) => ({ ...a }));
   let spawned = 0;
+  // agent-org#1025: ONLY `agent start` IS TIMED, and only the spawn paths below use this `run`; the context and prompt calls keep the caller's.
+  const starts = startBudgetOf(now);
+  const spawnRun = starts.timed(run);
   for (const gateOrder of orders) {
     // A REPEAT ORDER TO A LIVE WORKER'S CLAIM IS NUMBERED BEFORE IT IS ROUTED (#4070), and the cap's order is the one that is routed, so everything below reads `order`.
     const continuation = continuationOf(gateOrder, live, roster, claimOrders);
@@ -5649,7 +5714,7 @@ export function deliver(orders: readonly { session: string; causeKey: string; pr
       recordCapped({ stuck, outaged }, order, already);
       continue;
     }
-    const target = targetFor(order, live, roster, { run, spawned, ineligibleReason, env, registerSpawn, drained,
+    const target = targetFor(order, live, roster, { run: spawnRun, spawned, ineligibleReason, env, registerSpawn, drained, startHold: starts.hold,
       claimable, claimer, memory, hostLoad, claimRefused, oneShot, reviewerEnv, registerReviewer, checkout, registry, codexConfig, relane, goneSeats: gone });
     if ("refusal" in target) {
       const left = endedSeatLine(order, gone);
@@ -8328,6 +8393,9 @@ export function finishTick({ handed, sent, gateRefused, stuck, outaged, ledgerPa
   // #3029: A SEAT MID-TURN IS DEFERRED, NOT UNDELIVERED. Only what has no way to arrive makes the tick exit ATTENTION, and the summary counts only that.
   const report = refusalReport(refused, (keys) => deferralAges(`${dirname(ledgerPath)}/wake-deferred`, keys, Date.now(), { ledgerPath }));
   for (const line of report.deferred) process.stderr.write(`DEFERRED ${line}\n`);
+  // agent-org#1025: HOW MANY STARTS THE BUDGET PUSHED TO THE NEXT TICK, so a slow tick says why it started fewer than it was offered.
+  const startsDeferred = startBudgetDeferrals(refused);
+  if (startsDeferred > 0) process.stderr.write(`START BUDGET: ${startsDeferred} start(s) deferred to the next tick, the ${START_BUDGET_MS / 1000} s budget for \`herdr agent start\` being spent.\n`);
   for (const line of report.undelivered) process.stderr.write(`UNDELIVERED ${line}\n`);
   if (report.summary !== null) {
     process.stderr.write(report.summary);
