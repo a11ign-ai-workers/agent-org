@@ -66,6 +66,7 @@ import { engineerBriefSentence, briefRoleSentence } from "./spawn-role-brief.ts"
 // re-export of `waiting-condition.ts`'s own field, so it is not re-imported here.
 import { SESSION_PREFIX, READY_LABEL, OUT_OF_RELEASE_LABEL } from "./project-vocabulary.ts";
 import { PARKED_LABEL } from "./wait-condition.ts"; // #4727: the state a filed stuck-cause row is born in
+import { readRowsByLabel, readUnlessRefused } from "./ticket-port/rows-by-label.ts"; // #5074: the tick's row lists are connections, never a search
 import { inBuildReason, isInBuild, unansweredRefusal, lookupHeldRows, lookupOtherHeldIssues }
   from "./row-claim/own-pr-health-rule.ts";
 import { parseWorktreeList, isPrimaryWorktree, isWorkingTreeClean, mergeStatus, detachedMergeStatus }
@@ -4425,7 +4426,7 @@ function boardFiledRow({ url, number }: { url: string; number: number; }, board:
  */
 function fileRepositoryRow({ ref, repo, key, board }: { ref: string; repo: string; key: string; board: Board | null; }, run: (args: string[]) => string): number | null {
   const { title, body } = stuckRowWording({ ref, repo, key });
-  const open = JSON.parse(run(["issue", "list", "--state", "open", "--label", ESCALATION_LABEL, "--limit", "100", "--json", "number,title"]));
+  const open = readRowsByLabel({ label: ESCALATION_LABEL, state: "OPEN", select: "number title", run });
   const existing = open.find((row: { title: string; }) => row.title === title);
   if (existing !== undefined) return existing.number;
   const made = run(["issue", "create", "--title", title, "--body", body, ...FILED_STUCK_ROW_LABELS.flatMap((label) => ["--label", label])]);
@@ -4454,8 +4455,9 @@ function fileRepositoryRow({ ref, repo, key, board }: { ref: string; repo: strin
 function closeAnsweredRow({ title, key }: { title: string; key: string; }, { run, log }: { run: (args: string[]) => string; log: (line: string) => void; }): number[] {
   const closed: number[] = [];
   try {
-    const parked: { number: number; title: string; labels: { name: string; }[]; }[] = JSON.parse(
-      run(["issue", "list", "--state", "open", "--label", PARKED_LABEL, "--limit", "100", "--json", "number,title,labels"]));
+    const parked: { number: number; title: string; labels: { name: string; }[]; }[] = readRowsByLabel(
+      { label: PARKED_LABEL, state: "OPEN", select: "number title labels(first:50){nodes{name}}", run })
+      .map((row) => ({ number: row.number, title: row.title, labels: row.labels.nodes }));
     const filed = parked.filter((row) => row.title === title);
     if (filed.some((row) => row.labels.some((label) => label.name.startsWith(ANSWER_PREFIX)))) return closed;
     for (const row of filed) {
@@ -4467,6 +4469,26 @@ function closeAnsweredRow({ title, key }: { title: string; key: string; }, { run
     log(`COULD NOT CLOSE ANSWERED ROW (${key}): ${String(err?.message ?? err).split("\n")[0].slice(0, 90)}\n`);
   }
   return closed;
+}
+
+/** #5074: how many of the NEWEST closed parked rows, and newest open rows, {@link rowsTitled} reads (two connection pages each). */
+const TITLED_READ_NEWEST = 200;
+
+/**
+ * Every row of `title`, open or closed, WITHOUT a search (#5074: `--state all --search` was sent as a GitHub SEARCH, whose allowance the installation spent).
+ * A filed stuck-cause row is born {@link PARKED_LABEL} and is closed still carrying it ({@link closeAnsweredRow}), so the closed rows are the newest
+ * closed parked ones; an OPEN row of the title is any open parked one, or one of the newest open rows (it may have left `parked`). A title older than
+ * both windows is not seen, which for the closed side means "not asked again" and for the open side a duplicate: the price of no search, said here.
+ * A read that fails THROWS, so the caller reports it and never takes it for "no row".
+ */
+function rowsTitled(title: string, run: (args: string[]) => string): { number: number; title: string; state: string; closedAt: string | null; }[] {
+  const closed = readRowsByLabel({ label: PARKED_LABEL, state: "CLOSED", select: "number title closedAt", newest: TITLED_READ_NEWEST, run });
+  const parked = readRowsByLabel({ label: PARKED_LABEL, state: "OPEN", select: "number title", run });
+  const newest: { number: number; title: string; }[] = JSON.parse(readUnlessRefused({ what: `the ${TITLED_READ_NEWEST} newest open rows`, run,
+    read: () => run(["issue", "list", "--state", "open", "--limit", String(TITLED_READ_NEWEST), "--json", "number,title"]) }));
+  const open = new Map([...parked, ...newest].map((row) => [row.number, row]));
+  return [...closed.map((row) => ({ ...row, state: "CLOSED" })), ...[...open.values()].map((row) => ({ ...row, state: "OPEN", closedAt: null }))]
+    .filter((row) => row.title === title);
 }
 
 /**
@@ -4486,9 +4508,7 @@ function closeAnsweredRow({ title, key }: { title: string; key: string; }, { run
 function reaskFiledRow({ title, key, place }: { title: string; key: string; place: (run: (args: string[]) => string) => number | null; },
   { run, log, ask }: { run: (args: string[]) => string; log: (line: string) => void; ask: Asker; }): number | null {
   try {
-    const found: { number: number; title: string; state: string; closedAt: string | null; }[] = JSON.parse(run(
-      ["issue", "list", "--state", "all", "--search", `"${title.replace(/"/g, " ")}" in:title`, "--limit", "100", "--json", "number,title,state,closedAt"]));
-    const titled = found.filter((row) => row.title === title);
+    const titled = rowsTitled(title, run);
     if (titled.length !== 1 || titled[0].state !== "CLOSED") return null;
     const [closed] = titled;
     const elapsed = ask.now() - Date.parse(String(closed.closedAt));
