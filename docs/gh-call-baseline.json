@@ -373,6 +373,10 @@
       "spawns": 1,
       "calls": 4
     },
+    "src/worker-stop-hook.ts": {
+      "spawns": 1,
+      "calls": 1
+    },
     "src/workflow-run-liveness.ts": {
       "spawns": 0,
       "calls": 1

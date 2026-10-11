@@ -1,5 +1,14 @@
 {
   "autoMemoryEnabled": false,
+  "hooks": {
+    "Stop": [
+      {
+        "hooks": [
+          { "type": "command", "command": "agent-org worker:stop-hook" }
+        ]
+      }
+    ]
+  },
   "enabledPlugins": {
     "claude-code-setup@claude-plugins-official": false,
     "claude-md-management@claude-plugins-official": false,
