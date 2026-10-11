@@ -1,4 +1,4 @@
-Closes #5094.
+Closes a11ign/a11ign#5094
 
 ## What
 - `ROLE_LOGIN` in `src/work-gate.ts` has no `ceo` entry any more (it is `{}`), so `pipelineCodeownerReviewMissing` names nothing: the #1959 cause is retired (a11ign#5044 step 2). The cause name stays declared, so the cause-list pins in `project-roles.test.ts` and the trace fixtures are unchanged.
@@ -21,7 +21,9 @@ The check in `src/owned-path-signoff.ts` refuses a change to an owned path whose
 ## Acceptance
 
 ```bash
-bash -c 'cd ~/repos/agent-org && npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/work-gate.test.ts src/packaging/owned-path-signoff.test.ts src/work-gate-codeowner-review-repos.test.ts src/work-gate-codeowner-app-review.test.ts'
+bash -c 'npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/owned-path-signoff.test.ts src/work-gate-codeowner-review-repos.test.ts src/work-gate-codeowner-app-review.test.ts'
 ```
+
+The `#1959 retired` pins in `src/packaging/work-gate.test.ts` are NOT in this command: that file needs `history` (through `host-units.ts`), which the acceptance job does not have. They run in a full checkout, where the mutation above was measured.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
