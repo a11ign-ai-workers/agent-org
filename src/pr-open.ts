@@ -44,12 +44,12 @@
 //      that existed.
 //  75  (#4898) GitHub refused the call for a RATE LIMIT and `host/gh` HELD it: it is not sent and not failed. The gate makes it
 //      after the reset, then arms the PR and labels it. Do NOT retry pr-open (that is a second copy) and do not ask a human.
-import { execFileSync, execSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { readFileSync, realpathSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { acceptanceSourceOf, closesReferences, extractAcceptanceSection, extractClosesDeclaration, extractMutationSection, runCiBodyReports }
+import { acceptanceSourceOf, closesReferences, extractAcceptanceSection, extractClosesDeclaration, extractMutationSection, runAcceptanceCommand, runCiBodyReports }
   from "./acceptance-commands.ts";
 import { ACCEPTANCE_DIR, acceptanceFileForBranch, isAcceptancePath, sectionsTextOf, writeAcceptanceFile } from "./acceptance-file.ts";
 import { declaredRegionFiles, regionCovers, regionCoversIn, splitRegionEntry } from "./region-paths.ts";
@@ -75,21 +75,15 @@ export const EXIT_LANDED_THEN_FAILED = 3;
 export const EXIT_QUEUED = QUEUED_EXIT;
 
 /**
- * Runs a command FOR REAL, exactly as `acceptance-commands.ts`'s own (unexported) `runForReal` does --
- * this is the injectable execution seam `acceptanceReport` was built to take, not a second parser: nothing
- * here interprets the body or classifies a command, it only runs the ones the real parser already decided
- * are runnable.
+ * Runs a command FOR REAL, through the SAME `runAcceptanceCommand` CI's `main` calls (#859: in the worktree this process was started in, a
+ * leading `cd` into the primary checkout run there instead) -- this is the injectable execution seam `acceptanceReport` was built to take, not
+ * a second parser: nothing here interprets the body or classifies a command, it only runs the ones the real parser already decided are runnable.
+ * #1578: with `acceptanceEnv`'s `PATH`.
  * @param {string} command
  * @returns {number}
  */
 function runForReal(command: string): number {
-  try {
-    execSync(command, { stdio: "inherit", shell: "/bin/bash", env: acceptanceEnv(process.env) });
-    return 0;
-  } catch (error) {
-    const status = (error as { status?: number }).status;
-    return typeof status === "number" ? status : 1;
-  }
+  return runAcceptanceCommand(command, { env: acceptanceEnv(process.env) });
 }
 
 /**
