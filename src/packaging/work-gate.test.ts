@@ -5235,76 +5235,32 @@ test("#2084: an EMPTY decision is NOT an approval -- the #1968 state has its own
   assert.equal(new Set(Object.values(REVIEW_STATE)).size, 6, "and the six are genuinely distinct");
 });
 
-// --- #1959: a pull request CODEOWNERS assigns to `ceo`'s pipeline lane, with no review from `ceo` --------
+// --- #1959: RETIRED (a11ign#5044 step 2). A pipeline pull request asks ceo for no code-owner review any more --------
 
 const pipelinePr = (n: number, files: string[], extra: Record<string, unknown> = {}) =>
   ({ number: n, files: files.map((path) => ({ path })), changedFiles: files.length,
     author: { login: "a11ign-ai-workers" }, reviews: [], ...extra });
 
-test("#1959 (a): fires for an open PR touching a pipeline path with no code-owner approval", () => {
+// `ROLE_LOGIN` no longer names `ceo`, so the pipeline lane's owner has no login and the cause names nothing. The
+// emptiness below has a positive control: restore `ceo: "a11ign-ai-leads"` in `ROLE_LOGIN` and these turn red
+// (the mutation check recorded on the row). The owned-path check's own positive control is `owned-path-signoff.test.ts`.
+test("#1959 retired: an open PR touching a pipeline path with no code-owner review is NOT named", () => {
   const pr = pipelinePr(10, [".github/workflows/release.yml"]);
-  assert.deepEqual(pipelineCodeownerReviewMissing([pr], comparablePrFiles([pr])).map((m) => m.number), [10]);
-});
-
-test("#1959 (b): does NOT fire for a PR touching ONLY the generated consumer-gate.yml", () => {
-  const pr = pipelinePr(11, [".github/workflows/consumer-gate.yml"]);
   assert.deepEqual(pipelineCodeownerReviewMissing([pr], comparablePrFiles([pr])), [],
-    "CODEOWNERS carves this file out of the pipeline lane by its own last-matching-pattern rule");
+    "the pipeline lane's owner has no login the gate can read: an App cannot be a code owner (a11ign#4981)");
 });
 
-test("#1959: a PR touching BOTH the carve-out and an owned path still fires, on the owned path", () => {
-  const pr = pipelinePr(12, [".github/workflows/consumer-gate.yml", ".github/workflows/ci.yml"]);
-  assert.deepEqual(pipelineCodeownerReviewMissing([pr], comparablePrFiles([pr])).map((m) => m.number), [12]);
-});
-
-test("#1959 (c): does NOT fire once the code owner has approved", () => {
-  const pr = pipelinePr(13, [".github/workflows/release.yml"],
-    { reviews: [{ state: "APPROVED", author: { login: "a11ign-ai-leads" } }] });
-  assert.deepEqual(pipelineCodeownerReviewMissing([pr], comparablePrFiles([pr])), [],
-    "the owner has already reviewed; the gap this row names is closed for this PR");
-});
-
-test("#1959: an APPROVED review from anyone ELSE does not satisfy CODEOWNERS", () => {
-  const pr = pipelinePr(14, [".github/workflows/release.yml"],
-    { reviews: [{ state: "APPROVED", author: { login: "a11ign-bot" } }] });
-  assert.deepEqual(pipelineCodeownerReviewMissing([pr], comparablePrFiles([pr])).map((m) => m.number), [14],
-    "GitHub's own rule: only an approval BY a code owner satisfies the requirement");
-});
-
-test("#1959 (d): does NOT fire for a PR the code owner authored -- GitHub never requests it", () => {
-  const pr = pipelinePr(15, [".github/workflows/release.yml"], { author: { login: "a11ign-ai-leads" } });
-  assert.deepEqual(pipelineCodeownerReviewMissing([pr], comparablePrFiles([pr])), [],
-    "GitHub will not request a review from a pull request's own author, and #2022's bypass allowance "
-    + "covers exactly this case");
-});
-
-test("#1959: a PR touching no pipeline path at all is not this cause's subject", () => {
-  const pr = pipelinePr(16, ["packages/lab/src/packaging/work-gate.test.ts"]);
-  assert.deepEqual(pipelineCodeownerReviewMissing([pr], comparablePrFiles([pr])), []);
-});
-
-test("#1959: a truncated file list (gh's 100-file cap) is dropped, never read short", () => {
-  // `comparablePrFiles` already refuses a PR whose `files.length` does not match `changedFiles` -- the
-  // same truncation guard B4 relies on -- so this cause inherits "silent about what it cannot see" rather
-  // than a false negative built on a partial read.
-  const pr = { number: 17, files: [{ path: "packages/lab/src/packaging/work-gate.test.ts" }],
-    changedFiles: 101, author: { login: "a11ign-ai-workers" }, reviews: [] };
-  assert.deepEqual(comparablePrFiles([pr]), [], "the truncation guard drops it before this cause ever reads it");
-  assert.deepEqual(pipelineCodeownerReviewMissing([pr], comparablePrFiles([pr])), []);
-});
-
-test("#1959: decide() wakes ceo with ONE order naming every PR still missing the review", () => {
+test("#1959 retired: decide() orders ceo for NO pull request, a drain included", () => {
   const a = pipelinePr(20, [".github/workflows/release.yml"]);
   const b = pipelinePr(21, [".github/workflows/auto-arm.yml"], { labels: [{ name: "session:worker-21" }] });
-  const orders = decide({ prs: [a, b], readyRows: [], prFiles: comparablePrFiles([a, b]) })
-    .filter((o) => o.cause === "pr-codeowner-review-missing");
-  assert.equal(orders.length, 1, "one set order, not one per pull request");
-  assert.equal(orders[0].session, "ceo");
-  assert.match(orders[0].prompt, /#20/);
-  assert.match(orders[0].prompt, /#21 \(worker-21\)/, "a labelled PR names whose branch it is, for context only");
+  for (const drain of [false, true]) {
+    const orders = decide({ prs: [a, b], readyRows: [], prFiles: comparablePrFiles([a, b]), drain })
+      .filter((o) => o.cause === "pr-codeowner-review-missing");
+    assert.deepEqual(orders, [], `drain=${drain}`);
+  }
 });
 
-test("#1959: it is FINISH (never withheld by a drain) and an ACTION cause (not in JUDGMENT_CAUSES)", () => {
+test("#1959: the declaration is still FINISH (never withheld by a drain) and an ACTION cause (not in JUDGMENT_CAUSES)", () => {
   assert.ok(CAUSES.includes("pr-codeowner-review-missing"),
     "it must be in CAUSES or worker-profile refuses it at run time");
   assert.ok(!START_CAUSES.includes("pr-codeowner-review-missing"),
@@ -5312,10 +5268,6 @@ test("#1959: it is FINISH (never withheld by a drain) and an ACTION cause (not i
     + "#1756's flip lands would cost most");
   assert.ok(!JUDGMENT_CAUSES.includes("pr-codeowner-review-missing"),
     "ACTION: the causeKey already carries the waiting set, so a review that clears one PR mints a new key");
-  const a = pipelinePr(22, [".github/workflows/release.yml"]);
-  const orders = decide({ prs: [a], readyRows: [], prFiles: comparablePrFiles([a]), drain: true })
-    .filter((o) => o.cause === "pr-codeowner-review-missing");
-  assert.equal(orders.length, 1, "a drain stops the org taking on work, not finishing a review already owed");
 });
 
 /**
