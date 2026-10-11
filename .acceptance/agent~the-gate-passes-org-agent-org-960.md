@@ -6,7 +6,7 @@ Mutation: five, each run by hand with the file copied aside and diffed byte-iden
 
 Measured: acceptance command `VERDICT pass: 19 tests in 3 files`; `npx tsc --noEmit -p tsconfig.json` exits 0; the whole `npx rstest run` gives `5 of 9821 tests failed in 550 files`, and those same 5 (`live-tree-independence`, `release-tag-on-merge`, `work-gate-other-scopes-concurrent`, `worker-stop-hook`) fail identically on the base commit `617dbb36` in a clean detached worktree, so they are not this change's. There is no `lint` or `verify` script in this repository's `package.json`.
 
-Closes: #960
+Closes: a11ign/agent-org#960
 
 Outside-Region: src/packaging/work-gate.test.ts — the six pins of `GH_READS.unconditional.length` move 13 to 14, which is what the row's Sweep line requires land in this one pull request.
 
