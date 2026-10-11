@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  compareReadings, dailyMeans, isWake, matchLedger, measure, parseArgs, parseLedger, parseTranscript, readMergedPulls, renderReading, reviewerTarget, rowsClosedBy, workerRowFor,
+  compareReadings, dailyMeans, isWake, keyInstanceRows, matchLedger, measure, parseArgs, parseLedger, parseTranscript, readMergedPulls, renderReading, reviewerTarget, rowsClosedBy, workerRowFor,
 } from "./wakes-per-row.ts";
 import * as everyTracker from "./wakes-per-row.ts"; // the readers #4080 adds, by namespace so a run without them fails each test and not the file's import
 
@@ -383,7 +383,7 @@ const TRACKERS = [{ key: "", repo: ROW_REPO }, { key: "agent-org", repo: "a11ign
 const PR_ORG_ROW = { repo: "a11ign/agent-org", number: 135, createdAt: "2026-10-04T11:06:00Z", mergedAt: "2026-10-04T11:19:39Z", body: "Closes a11ign/agent-org#3390\n" };
 /** Today's report below its DEFINITIONS, recorded from the unfixed code (the definitions are prose that moves for its own reasons). */
 const ONE_TRACKER_SNAPSHOT = `window by merge time: 2026-10-04T00:00:00.000Z .. 2026-10-04T13:00:00.000Z
-merged rows: 1 (measured 1, UNMEASURED 0)
+merged rows: 1 (measured 1 of 1, UNMEASURED 0 = 0%)
 wakes attributed: 3; wakes per merged row: mean 3.00, median 3.00
 wakes after the row's last pull request opened: 2; after it merged: 1; stale at typing: 2
 bytes per wake: 109.00; compactions seen: 1
@@ -437,4 +437,43 @@ test("#4080: with ONE declared tracker the reading is exactly the one it was: no
   const text = everyTracker.renderReading(one);
   assert.equal(text.slice(text.indexOf("window by merge time")), ONE_TRACKER_SNAPSHOT);
   assert.equal(everyTracker.readClaims([{ row: 3390 }], [TRACKERS[0]], () => 99).unreadClaims.length, 0);
+});
+
+// ---- agent-org#804: an agent-org worker's bare recorded row is read in ITS tracker ----------------------------------------------------------------
+test("agent-org#804: merged rows of BOTH trackers with one instance each are measured, and a row with no instance is still UNMEASURED", () => {
+  const pull = (repo: string, number: number, closes: string) => ({ repo, number, createdAt: "2026-10-04T11:06:00Z", mergedAt: "2026-10-04T11:19:39Z", body: `Closes ${closes}\n` });
+  const pulls = [
+    pull("a11ign/a11ign", 1, "a11ign/a11ign#3390"),
+    pull("a11ign/agent-org", 2, "a11ign/agent-org#804"),
+    pull("a11ign/agent-org", 3, "a11ign/agent-org#900"),
+  ];
+  // The org's own records: a bare number in both trackers; the session name says which tracker the worker is in.
+  const instances = [
+    INSTANCE_3390,
+    { session: "worker-agent-org-804", rows: [804], spawnedAt: at("2026-10-04T10:37:49.168Z"), endedAt: null },
+  ];
+  const transcripts = [
+    parseTranscript(worker3390Transcript(), "w3390.jsonl"),
+    parseTranscript(worker3390Transcript().replaceAll("worker-3390", "worker-agent-org-804"), "w804.jsonl"),
+  ];
+  const reading = run({ pulls, trackers: TRACKERS, instances, transcripts, claimedAt: new Map([[3390, at("2026-10-04T10:35:57Z")], ["agent-org#804", at("2026-10-04T10:35:57Z")]]) });
+  const withInstance = reading.unmeasured.filter((entry) => !(entry.key === "agent-org" && entry.row === 900));
+  assert.deepEqual(withInstance, [], "no row that has an instance reads UNMEASURED");
+  assert.deepEqual(reading.unmeasured.map((entry) => [entry.key, entry.row, entry.reason]), [["agent-org", 900, "no claimant recorded for the row"]], "positive control: a row with no instance is still reported");
+  assert.equal(reading.measuredRows, 2);
+  assert.equal(reading.partial, true, "one of three rows is over 10%");
+  const text = renderReading(reading);
+  assert.match(text, /merged rows: 3 \(measured 2 of 3, UNMEASURED 1 = 33%\)/);
+  assert.match(text, /mean [0-9.]+ PARTIAL \(measured 2 of 3 rows/);
+});
+
+test("agent-org#804: keyInstanceRows keys only a declared key's worker, and never an already keyed ref", () => {
+  const instance = (session: string, rows: (number | string)[]) => ({ session, rows, spawnedAt: null, endedAt: null });
+  const keyed = keyInstanceRows([instance("worker-agent-org-804", [804]), instance("worker-3390", [3390]), instance("worker-other-7", [7]), instance("worker-agent-org-5", ["agent-org#5"])], TRACKERS);
+  assert.deepEqual(keyed.map((entry) => entry.rows), [["agent-org#804"], [3390], [7], ["agent-org#5"]]);
+});
+
+test("agent-org#804: a reading with every row measured prints no PARTIAL", () => {
+  const text = renderReading(run());
+  assert.doesNotMatch(text, /PARTIAL/);
 });
