@@ -5,7 +5,7 @@
 // IT NEVER SPAWNS ANYTHING ITSELF. `run` is handed in -- the gate's `defaultRun`, with its timeout, its identity and its call census -- so a read
 // made here is counted and bounded exactly as the read it replaced was, and a test hands a stub. Only modules `work-gate.ts` already imports
 // are imported here, so the gate keeps its documented property of running before any `pnpm install` or build.
-import type { ApiBudget, ChangeRef, Decision, EventFilter, ItemEvent, ItemRef, ItemRelations, OpenItemSummary, OpenItemsReader, PortEvent,
+import type { ApiBudget, BlockerWriter, ChangeRef, Decision, EventFilter, ItemEvent, ItemRef, ItemRelations, OpenItemSummary, OpenItemsReader, PortEvent,
   StateChange, TicketFlag, TicketItem, TicketPort, TicketState } from "./port.ts";
 import { poolFromRateLimitField } from "../api-pool.ts";
 import { CLAIM_LABEL, READY_LABEL } from "../claim-labels.ts";
@@ -117,7 +117,7 @@ export type GithubAdapterOptions = {
   moveStatus?: (id: number, statusName: string) => void;
 };
 
-export type GithubTicketAdapter = TicketPort & OpenItemsReader & { publish(event: PortEvent): void };
+export type GithubTicketAdapter = TicketPort & OpenItemsReader & BlockerWriter & { publish(event: PortEvent): void };
 
 /**
  * The adapter. `TicketPort` is the four operations ADR 0046 rules; `OpenItemsReader` is the bulk read `port.ts` explains and keeps apart.
@@ -275,6 +275,15 @@ export function githubTicketAdapter(options: GithubAdapterOptions): GithubTicket
       }
       if (status !== null) moveStatus(target.id, status);
       return true;
+    },
+
+    addBlocker(target, blocker) {
+      // THE EDGE NAMES THE BLOCKER BY ITS DATABASE ID, not its number, so the blocker is read first. Each side is addressed by its own scope,
+      // because a native edge may cross repositories (agent-org#921).
+      if (target.tracker !== TRACKER || blocker.tracker !== TRACKER) throw new Error(`addBlocker: only ${TRACKER} items can be linked, got ${target.tracker} and ${blocker.tracker}`);
+      const databaseId = run(["api", `repos/${blocker.scope}/issues/${blocker.id}`, "--jq", ".id"]).trim();
+      if (!/^\d+$/.test(databaseId)) throw new Error(`addBlocker: could not read the database id of ${blocker.scope}#${blocker.id}, so no edge was written`);
+      run(["api", "--method", "POST", `repos/${target.scope}/issues/${target.id}/dependencies/blocked_by`, "-F", `issue_id=${databaseId}`]);
     },
 
     subscribe(filter, handler) {
