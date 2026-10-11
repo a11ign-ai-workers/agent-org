@@ -45,8 +45,10 @@ export type HostProject = { id: string, checkout: string };
  * `triage` is the one key that `parseHostConfig` ALWAYS sets (a hand-built `HostConfig` in a test may leave it out, hence the `?`), `{ provider: "none" }` when the declaration has none, because "no triage" is a value the
  * wake path reads and not a question it asks of the shape (a later row routes on it; this one routes nothing).
  */
-export type HostConfig = { schema: number, home: string, binDir: string, primary: string, projects: HostProject[], gh: GhDirectories, tool?: string, toolVersion?: string, stateDir?: string, clones?: Readonly<Record<string, string>>, triage?: Readonly<TriageDeclaration>, github?: Readonly<GithubDeclaration> };
+export type HostConfig = { schema: number, home: string, binDir: string, primary: string, projects: HostProject[], gh: GhDirectories, tool?: string, toolVersion?: string, stateDir?: string, clones?: Readonly<Record<string, string>>, triage?: Readonly<TriageDeclaration>, events: Readonly<EventsDeclaration>, github?: Readonly<GithubDeclaration> };
 export type TriageDeclaration = { provider: "none" } | { provider: "jev", keyPath: string, minConfidence: number };
+export type EventsReceiver = { port: number, secretPath: string, tunnel: "cloudflare" | "tailscale" };
+export type EventsDeclaration = { source: "poll", reconcileMinutes?: number } | { source: "webhook", receiver: Readonly<EventsReceiver>, reconcileMinutes: number };
 export type UnitsDeclaration = { prefix: string, boardReportWorkflow: string, own: string[] };
 
 /** How a role authenticates (#4900). `user-accounts` is today's behaviour and the default; `github-apps` names the app (`app-token.ts`'s `AppIdentity`). */
@@ -203,6 +205,7 @@ export function parseHostConfig(text: string, source: string = HOST_DECLARATION_
     ...(stateDir === undefined ? {} : { stateDir }),
     ...(clones === undefined ? {} : { clones }),
     triage: readTriage(host, source),
+    events: readEvents(host, source),
     github: readGithub(host, source),
   });
 }
@@ -323,6 +326,61 @@ function readMinConfidence(triage: Record<string, unknown>, source: string): num
     throw new HostConfigRefusal("triage.minConfidence", `it must be a number from 0 to 1, not ${JSON.stringify(value)}`, source);
   }
   return value;
+}
+
+const POLL: Readonly<EventsDeclaration> = Object.freeze({ source: "poll" });
+/** The reconcile interval a `webhook` host gets when it names none: the one stated default. A `poll` host has no default and reads none. */
+export const DEFAULT_RECONCILE_MINUTES = 20;
+
+/**
+ * HOW THE GATE LEARNS OF CHANGES (#977, a11ign/a11ign#5043): `poll`, the default and today's behaviour, or `webhook`, which names the local receiver
+ * GitHub's deliveries reach. ABSENT is `{ source: "poll" }`, and so is a block that names no `source`. Nothing reads this yet: it is the declaration
+ * the later rows read. Refused by field name: a `source` that is neither, a `webhook` with no `receiver` (and a `poll` with one, which would be ignored),
+ * a receiver whose `port` is not 1024-65535, whose `secretPath` is not an absolute path (the path only; the reader never opens it), or whose `tunnel`
+ * is not `cloudflare` or `tailscale`, and a `reconcileMinutes` that is not a positive integer. No port, path or tunnel is ever defaulted.
+ * @param {Record<string, unknown>} host @param {string} source @returns {Readonly<EventsDeclaration>}
+ */
+function readEvents(host: Record<string, unknown>, source: string): Readonly<EventsDeclaration> {
+  if (!Object.hasOwn(host, "events")) return POLL;
+  const events = requiredObject(host.events, "events", source);
+  const kind = Object.hasOwn(events, "source") ? requiredString(events, "source", "events.", source) : "poll";
+  if (kind !== "poll" && kind !== "webhook") {
+    throw new HostConfigRefusal("events.source", `it must be "poll" or "webhook", not ${JSON.stringify(kind)}`, source);
+  }
+  const reconcileMinutes = readReconcileMinutes(events, source);
+  if (kind === "poll") {
+    if (Object.hasOwn(events, "receiver")) throw new HostConfigRefusal("events.receiver", "it names a receiver, and `source` is `poll`, so it would be ignored", source);
+    if (reconcileMinutes === undefined) return POLL;
+    return Object.freeze({ source: "poll", reconcileMinutes });
+  }
+  if (!Object.hasOwn(events, "receiver")) throw new HostConfigRefusal("events.receiver", "it is missing; a `webhook` source needs the receiver its deliveries reach", source);
+  const receiver = readReceiver(requiredObject(events.receiver, "events.receiver", source), source);
+  return Object.freeze({ source: "webhook", receiver, reconcileMinutes: reconcileMinutes ?? DEFAULT_RECONCILE_MINUTES });
+}
+
+/** @param {Record<string, unknown>} events @param {string} source @returns {number | undefined} */
+function readReconcileMinutes(events: Record<string, unknown>, source: string): number | undefined {
+  if (!Object.hasOwn(events, "reconcileMinutes")) return undefined;
+  const value = events.reconcileMinutes;
+  if (typeof value !== "number" || !Number.isInteger(value) || value < 1) {
+    throw new HostConfigRefusal("events.reconcileMinutes", `it must be a positive whole number of minutes, not ${JSON.stringify(value)}`, source);
+  }
+  return value;
+}
+
+/** @param {Record<string, unknown>} receiver @param {string} source @returns {Readonly<EventsReceiver>} */
+function readReceiver(receiver: Record<string, unknown>, source: string): Readonly<EventsReceiver> {
+  const port = receiver.port;
+  if (typeof port !== "number" || !Number.isInteger(port) || port < 1024 || port > 65535) {
+    const why = Object.hasOwn(receiver, "port") ? `it must be an integer from 1024 to 65535, not ${JSON.stringify(port)}` : "it is missing";
+    throw new HostConfigRefusal("events.receiver.port", why, source);
+  }
+  const secretPath = requiredPath(receiver, "secretPath", "events.receiver.", source);
+  const tunnel = requiredString(receiver, "tunnel", "events.receiver.", source);
+  if (tunnel !== "cloudflare" && tunnel !== "tailscale") {
+    throw new HostConfigRefusal("events.receiver.tunnel", `it must be "cloudflare" or "tailscale", not ${JSON.stringify(tunnel)}`, source);
+  }
+  return Object.freeze({ port, secretPath, tunnel });
 }
 
 /**
