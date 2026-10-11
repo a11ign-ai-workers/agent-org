@@ -44,7 +44,7 @@ type World = {
 const world = (actors: World["actors"], items: World["items"] = {}): World => ({ actors, items, reads: [], writes: [] });
 const OPEN_BLOCKING = { state: "open" as const, labels: ["incident"], body: "Incident: incident:claim-refusal-storm\n" };
 
-function gh(w: World) {
+function stubbedGh(w: World) {
   return (args: string[]): string => {
     if (args[0] === "issue") { w.writes.push(args); return ""; }
     w.reads.push(args);
@@ -72,7 +72,7 @@ function withDir<T>(body: (dir: string) => T): T {
 }
 
 function tick(rows: Row[], { dir, w, emergency = ON, minutes = 0 }: { dir: string; w: World; emergency?: EmergencyPriorityOption; minutes?: number }) {
-  const hierarchy = offerHierarchyNow(rows, rows, { run: gh(w), stateDir: dir, now: T0 + minutes * 60_000, emergency });
+  const hierarchy = offerHierarchyNow(rows, rows, { run: stubbedGh(w), stateDir: dir, now: T0 + minutes * 60_000, emergency });
   const orders = decide({ prs: [], readyRows: rows, engineerStarts: [], projectDeclaration: DECLARATION, shareLog: () => {}, offerHierarchy: hierarchy } as Parameters<typeof decide>[0]);
   return {
     hierarchy,
