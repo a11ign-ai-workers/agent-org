@@ -33,8 +33,11 @@ const SECRET_DIR_MODE = 0o700;
 const HTTP_OK = 200;
 const HTTP_CREATED = 201;
 
-/** The three callers of `gh` that may each hold their own GitHub App: the gate and scripts, the engineer sessions, the decision-holders. */
-export const GITHUB_ROLES = Object.freeze(["scheduler", "workers", "managers"] as const);
+/**
+ * The four callers of `gh` that may each hold their own GitHub App: the gate and scripts, the engineer sessions, the decision-holders and the
+ * reviewer instances (a11ign/a11ign#5044: the reviewer's approvals are authored by the machine USER `a11ign-bot` until this role is an App).
+ */
+export const GITHUB_ROLES = Object.freeze(["scheduler", "workers", "managers", "reviewer"] as const);
 export type GithubRole = typeof GITHUB_ROLES[number];
 /**
  * What mints a token: the app, the file its private key is in (a path, never the key) and, when it has several, the installation to use.

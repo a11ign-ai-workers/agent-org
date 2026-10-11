@@ -1057,8 +1057,9 @@ export const REVIEWER_GH_CONFIG_DIR = "/home/agent/reviewer/gh";
 /**
  * The environment a reviewer instance's workspace starts with: its own `gh` account; as `A11Y_REVIEWER_SESSION`, the
  * name `pr-review-verdict` writes into the attribution status (#2127) -- without it the review posts UNATTRIBUTED --
- * and as `npm_config_cache`, a cache the instance can WRITE (#2498). An `override` wins, key by key, as in
- * {@link spawnEnvironment}.
+ * as `npm_config_cache`, a cache the instance can WRITE (#2498), and as `AGENT_ORG_GH_ROLE=reviewer`, which is how the `gh` wrapper
+ * learns to use the reviewer's GitHub App when `host.json` declares one (a11ign/a11ign#5044; with none declared it changes nothing, as the
+ * reviewer's config names no role by itself, #817). An `override` wins, key by key, as in {@link spawnEnvironment}.
  *
  * THE CACHE LIVES IN THE INSTANCE'S OWN TREE, NOT UNDER `HOME` AND NOT UNDER `/tmp`. Measured 2026-09-25 with `codex sandbox`
  * under the reviewer's own policy (`workspace-write`, `writable_roots = ["/tmp"]`): the checkout and `/tmp` are writable and
@@ -1069,8 +1070,8 @@ export const REVIEWER_GH_CONFIG_DIR = "/home/agent/reviewer/gh";
  */
 export function reviewerEnvironment(session: string, override: Record<string, string> = {}, tree: string = reviewCheckoutPath(session)): Record<string, string> {
   const repo = reviewedRepositoryOf(session);
-  return { GH_CONFIG_DIR: REVIEWER_GH_CONFIG_DIR, A11Y_REVIEWER_SESSION: session, npm_config_cache: `${tree}/node_modules/.cache/npm`,
-    ...(repo === null ? {} : { GH_REPO: repo }), ...override };
+  return { GH_CONFIG_DIR: REVIEWER_GH_CONFIG_DIR, AGENT_ORG_GH_ROLE: "reviewer", A11Y_REVIEWER_SESSION: session,
+    npm_config_cache: `${tree}/node_modules/.cache/npm`, ...(repo === null ? {} : { GH_REPO: repo }), ...override };
 }
 
 /**

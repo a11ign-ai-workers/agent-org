@@ -401,6 +401,9 @@ read_cache_store() { # the stdout copy, the generation read BEFORE the call ran
 #     `$LEADS_DIR/gh` (a call with `GH_CONFIG_DIR` unset was given one of the two above): any other explicit `GH_CONFIG_DIR`, the
 #     reviewer's `a11ign-bot` or a unit's own, has NO app role and goes out as that config's account, as rule 1 says. Without it the
 #     reviewer was handed the workers App's token, was the author of the PR it reviewed, and GitHub refused the approval.
+#     THE REVIEWER IS AN APP ROLE ONLY BY NAME (a11ign/a11ign#5044): `AGENT_ORG_GH_ROLE=reviewer`, which `reviewerEnvironment` (`wake.ts`) sets,
+#     is the one way in, and its config directory still names no role. Declared `github-apps`, the call goes out on the reviewer App's token;
+#     declared nothing (the default), `reviewer` is not in `@@appRoles@@` and the call is the config's account, exactly as before.
 #   - AN EXPLICIT `GH_TOKEN` OR `GITHUB_TOKEN` WINS, as an explicit `GH_CONFIG_DIR` does: a runner or a person who named a credential is not re-routed.
 #   - THE TOKEN is read from the cache file `agent-org`'s minter writes (`<expiry epoch> <token>`), in shell and with no process, while it has
 #     more than 5 minutes left; only a stale one starts `app-token.ts`, once an hour per role.
@@ -413,7 +416,7 @@ read_cache_store() { # the stdout copy, the generation read BEFORE the call ran
 #     charged to a name it did not spend.
 app_account=
 app_role() {
-  case "${AGENT_ORG_GH_ROLE:-}" in scheduler|workers|managers) printf %s "$AGENT_ORG_GH_ROLE"; return 0 ;; esac
+  case "${AGENT_ORG_GH_ROLE:-}" in scheduler|workers|managers|reviewer) printf %s "$AGENT_ORG_GH_ROLE"; return 0 ;; esac
   # A config of its own (the reviewer's `a11ign-bot`, a unit's) names no role: printing none sends the call out as that account.
   case "$GH_CONFIG_DIR" in "$WORKERS_DIR/gh"|"$LEADS_DIR/gh") ;; *) return 0 ;; esac
   if [ -z "${HERDR_WORKSPACE_ID:-}" ]; then printf scheduler

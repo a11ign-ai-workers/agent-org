@@ -215,12 +215,12 @@ const GITHUB_ID = /^[A-Za-z0-9._-]+$/;
  * HOW EACH ROLE AUTHENTICATES (#4900, the chairman's direction on the row): `github.identity` names, per role, `user-accounts` (the personal
  * account directories `gh` routes to today) or `github-apps` (an installation token minted from the app's key, one hour, its own rate-limit
  * pool). ABSENT is `user-accounts` for every role, and so is a role left out, so a host that says nothing behaves as it always has. Refused by
- * field name: a role that is not one of the three (a typo would leave a role on the shared account while looking migrated), a `github-apps`
+ * field name: a role that is not one of the four (a typo would leave a role on the shared account while looking migrated), a `github-apps`
  * role without `appId` and `keyPath`, and a `user-accounts` role that names an app (a half-flipped declaration, which would be ignored).
  * @param {Record<string, unknown>} host @param {string} source @returns {Readonly<GithubDeclaration>}
  */
 function readGithub(host: Record<string, unknown>, source: string): Readonly<GithubDeclaration> {
-  const roles: Record<GithubRole, Readonly<RoleIdentity>> = { scheduler: USER_ACCOUNTS, workers: USER_ACCOUNTS, managers: USER_ACCOUNTS };
+  const roles: Record<GithubRole, Readonly<RoleIdentity>> = { scheduler: USER_ACCOUNTS, workers: USER_ACCOUNTS, managers: USER_ACCOUNTS, reviewer: USER_ACCOUNTS };
   if (Object.hasOwn(host, "github")) {
     const github = requiredObject(host.github, "github", source);
     const identity = Object.hasOwn(github, "identity") ? requiredObject(github.identity, "github.identity", source) : {};
