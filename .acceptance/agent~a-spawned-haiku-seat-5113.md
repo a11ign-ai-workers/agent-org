@@ -51,6 +51,7 @@ Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json 
 Closes: a11ign/a11ign#5113
 
 Outside-Region: .changeset/a-spawned-haiku-seat-carries-the-brief.md — the entry a project that pins a tag reads.
+Outside-Region: src/remedies-say-pnpm.test.ts — one pinned exemption (`src/haiku-brief.ts: 1`): Anthropic's published verify paragraph says `e.g. npm install`, and the row requires the text verbatim, so the file is listed with its reason and count as that test asks (CI run 38161708363 named it).
 
 platform: checked whether GitHub, pnpm, systemd or git already carry a per-seat prompt addition or a flag file: none does, the tail is a string in the order the wake already builds, and the flag is one key in the host declaration the wake already reads.
 
