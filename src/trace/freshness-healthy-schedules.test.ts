@@ -8,10 +8,10 @@
 // its seed. The check is not made quieter here: `STALE_AFTER_MS` and the working rule are what `freshness.ts` says, and this file asserts `stale: false`, nothing softer.
 //
 // THE SHAPES: #704 (a session that finished and only rewrote `last-prompt` and `cost-state`: it is not working, so it must not be stale) and #709 (a cold start, the state
-// file deleted mid-schedule: the next ingest reads from byte 0 and the store must still report the work as fresh). Two shapes are excluded, each by name and at its tick only:
-// the #836 shape (a session that goes silent for ten minutes and speaks again falls in the hold-back, so the stored newest turn is older than the window while it works), in
-// `known836`; and the 6-to-10-minute gap shape (agent-org#842: two messages of one working session that far apart read STALE), in `knownHoldBackGap`. Both exclusions are the
-// known false alarms of `freshness.ts` and are NOT a quieter check: a stale reading in any other shape fails here.
+// file deleted mid-schedule: the next ingest reads from byte 0 and the store must still report the work as fresh). No shape is excluded. The #836 shape (a session that goes
+// silent for ten minutes and speaks again, its new messages inside the hold-back) and the 6-to-10-minute gap shape (agent-org#842: two messages of one working session that far
+// apart) were false alarms of `freshness.ts` until the hold-back fix (#836, merged as #856): with that fix every healthy schedule reads not stale, so each was excluded here and
+// the exclusions came out together. Any stale reading on a healthy schedule fails this file.
 //
 // THE POSITIVE CONTROL: the same schedules with ingest stopped for fifteen minutes while messages keep arriving must read STALE at the ten-minute mark. Without it, a check
 // that could never say STALE would pass every test here.
@@ -29,7 +29,6 @@ import { stateFileFor } from "./ingest-state.ts";
 import { freshnessLine, sessionsWorking, storeFreshness } from "./freshness.ts";
 import type { Freshness } from "./freshness.ts";
 import { ingestTranscripts } from "./trace.ts";
-import { QUIET_MS } from "./store.ts";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 
 const ROW_REPO = "a11ign/a11ign";
@@ -125,38 +124,6 @@ function schedule(seed: number): Schedule {
   return { seed, lines, finishedAt, coldAt, restarts, end };
 }
 
-/** The first assistant message after the stored newest turn: the message the five-minute hold-back is waiting on. */
-function nextMessageAfter(s: Schedule, storedAt: number): number | null {
-  return s.lines.find((line) => line.at > storedAt && line.text.includes('"type":"assistant"'))?.at ?? null;
-}
-
-/**
- * THE #836 SHAPE, which #836 owns: the session goes silent for at least ten minutes, then speaks again, and the new messages are inside the five-minute hold-back, so the
- * stored newest turn is the last message before the silence and is older than the window. Measured on the transcript (the silence between the stored turn and the next
- * message), not on the generator's quiet: a burst's first message can come a few minutes after the burst starts. Excluded by name, at that tick, and nowhere else.
- */
-function known836(s: Schedule, now: number, reading: Freshness): boolean {
-  if (!reading.stale || reading.ageMs === null) return false;
-  const storedAt = now - reading.ageMs;
-  // A turn from before the schedule (the old Codex rollout of #709) is not this session's silence, so it is never excluded here.
-  if (storedAt < START) return false;
-  const next = nextMessageAfter(s, storedAt);
-  return next !== null && next <= now && next - storedAt >= 10 * MINUTE;
-}
-
-/**
- * THE 6-TO-10-MINUTE GAP SHAPE, owned by the freshness.ts fix row, edged on #836 and #837 (agent-org#842): two messages of one working session six to ten minutes apart. The
- * newest message is inside the five-minute hold-back, the one before it is settled, and the stored newest turn is older than ten minutes while the session is working. This is a
- * real false alarm in freshness.ts, not a test problem, and the fix is not made in this file. Excluded by name, at that tick, and nowhere else. The POSITIVE CONTROL below
- * asserts the shape still reads STALE, so the day freshness.ts is fixed that control goes red and this exclusion has to come out with it.
- */
-function knownHoldBackGap(s: Schedule, now: number, reading: Freshness): boolean {
-  if (!reading.stale || reading.ageMs === null) return false;
-  const storedAt = now - reading.ageMs;
-  const next = nextMessageAfter(s, storedAt);
-  return next !== null && next <= now && now - next < QUIET_MS && next - storedAt > QUIET_MS && next - storedAt < 10 * MINUTE;
-}
-
 /**
  * THE #709 SHAPE's other half: an old Codex reviewer rollout. The ingest reads the Claude sessions first and the Codex rollouts after them, so when the store is rebuilt from
  * nothing its END holds these two-day-old turns. More than a mebibyte of them, because the reader looks at a one-mebibyte tail first.
@@ -214,7 +181,6 @@ for (const seed of SEEDS) {
       d.write(now);
       d.ingest(now);
       const reading = d.check(now);
-      if (known836(s, now, reading) || knownHoldBackGap(s, now, reading)) continue;
       assert.equal(reading.stale, false, `seed ${seed}, tick ${iso(now)}${s.coldAt === now ? " (cold start)" : ""}: ${freshnessLine(reading)}`);
     }
   });
@@ -233,30 +199,5 @@ test("POSITIVE CONTROL: with ingest stopped for fifteen minutes while messages k
     const reading = d.check(stop + 10 * MINUTE);
     assert.equal(reading.working, true, `seed ${seed}: messages kept arriving, so a session is working at the ten-minute mark`);
     assert.equal(reading.stale, true, `seed ${seed}: ingest was stopped for fifteen minutes, so the stored turn is older than the window: ${freshnessLine(reading)}`);
-  }
-});
-
-test("POSITIVE CONTROL (agent-org#842): two messages six to ten minutes apart, read ten and a half minutes after the first, still read STALE, so knownHoldBackGap is still needed; when freshness.ts is fixed this goes red and knownHoldBackGap comes out with it", () => {
-  for (const seed of SEEDS) {
-    const rand = prng(seed + 1000);
-    const gap = (6 + Math.floor(rand() * 5)) * MINUTE;
-    const s: Schedule = {
-      seed,
-      lines: [
-        { at: START, text: block(iso(START), `gap_${seed}_a`) },
-        { at: START + gap, text: block(iso(START + gap), `gap_${seed}_b`) },
-      ],
-      finishedAt: null,
-      coldAt: null,
-      restarts: [],
-      end: START + gap,
-    };
-    const d = driver(s);
-    const now = START + 10.5 * MINUTE;
-    d.write(now);
-    d.ingest(now);
-    const reading = d.check(now);
-    assert.equal(reading.working, true, `seed ${seed}: the second message is ${gap / MINUTE} minutes after the first, so the session is working at ${iso(now)}`);
-    assert.equal(reading.stale, true, `seed ${seed}: a ${gap / MINUTE}-minute gap read at ${iso(now)} is still STALE today: ${freshnessLine(reading)}`);
   }
 });
