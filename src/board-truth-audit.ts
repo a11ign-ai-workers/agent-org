@@ -41,6 +41,7 @@ import { notBeforeDate, notBeforeIso } from "./waiting-condition.ts";
 import { ANSWER_PREFIX, BACKLOG_LABEL, LANE_ANY_LABEL, LANE_PREFIX, NEEDS_CHAIRMAN_LABEL, SESSION_PREFIX } from "./project-vocabulary.ts";
 import { readAgents, listingIsComplete } from "./herdr-agents.ts";
 import { homeProjectDeclaration } from "./project-config.ts";
+import { declaredRegionFiles } from "./region-paths.ts";
 
 export const QUESTIONS = Object.freeze({
   EPIC_DONE: "epic-all-closed",
@@ -83,7 +84,12 @@ export type BoardRow = { number: number, title?: string, body?: string, state?: 
 /** `mergedAt` is absent when a read omitted it */
 export type MergedPr = { number: number, body?: string, mergedAt?: string | null };
 /** `others` (#4080) is what each KEYED tracker answered; absent with one declared tracker */
-export type BoardFacts = { now: number, openRows: BoardRow[], closedRows: BoardRow[] | null, mergedPrs: MergedPr[] | null, liveSessions: string[] | null, waitFacts: import("./wait-condition.ts").WaitFacts | null, others?: OtherTracker[], proseEvidence?: ProseEvidence | null, roadmaps?: RowRoadmaps | null };
+export type BoardFacts = { now: number, openRows: BoardRow[], closedRows: BoardRow[] | null, mergedPrs: MergedPr[] | null, liveSessions: string[] | null, waitFacts: import("./wait-condition.ts").WaitFacts | null, others?: OtherTracker[], proseEvidence?: ProseEvidence | null, roadmaps?: RowRoadmaps | null, epicChildren?: EpicChildren | null };
+/**
+ * The closed children of each open epic whose children are all closed (a11ign/agent-org#881), `byEpic` by the epic's number, each with its body. `rulings` is the login that posted each
+ * `Chairman-ruling:` URL a non-build child carries, `null` for a URL that is not a comment's own, so a ruling that cannot be verified does not count.
+ */
+export type EpicChildren = { byEpic: Record<number, BoardRow[]>, rulings: Record<string, string | null> };
 /**
  * One row's `Roadmap` value on one Project it is boarded to (a11ign/agent-org#517). `project` is `owner/number`, so two Projects' values are never mixed: the field is the Project's, and a row
  * boarded to two carries two. `value` is `null` for an item with the field unset.
@@ -122,12 +128,78 @@ function ownerOf(row: BoardRow) {
 /** @param {BoardRow} row @param {string} question @param {string} field @param {string} detail @param {string} [route] @returns {Finding} */
 const finding = (row: BoardRow, question: string, field: string, detail: string, route: string = PRODUCT_MANAGER): Finding => ({ question, number: row.number, field, detail, route });
 
+/** An `epic` with children, every one of them closed. @param {BoardRow} row @returns {boolean} */
+const epicAllClosed = (row: BoardRow): boolean => labelsOf(row).includes("epic") && (row.subIssuesSummary?.total ?? 0) > 0
+  && row.subIssuesSummary?.completed === row.subIssuesSummary?.total;
+
 /** @param {BoardFacts} facts @returns {Finding[]} */
 function epicsDone({ openRows }: BoardFacts): Finding[] {
-  return openRows.filter((row) => labelsOf(row).includes("epic") && (row.subIssuesSummary?.total ?? 0) > 0
-    && row.subIssuesSummary?.completed === row.subIssuesSummary?.total).map((row) => finding(row, QUESTIONS.EPIC_DONE, "state (open)",
+  return openRows.filter(epicAllClosed).map((row) => finding(row, QUESTIONS.EPIC_DONE, "state (open)",
     `an epic whose ${row.subIssuesSummary?.completed} of ${row.subIssuesSummary?.total} children are closed`));
 }
+
+/*
+ * a11ign/agent-org#881 (a11ign#4084 plan, item 5): an epic's outcome closed by being REDEFINED into a spike, a decision or a docs row, and nothing noticed. `epicsDone` reads only
+ * counts, so v3's outcome 1 closed through #4087, #4532 and #4533 while the milestone read 66 of 67 closed. This asks the narrow, machine-checkable half: a closed child that is not a
+ * build row, with no `Chairman-ruling:` line that a DanBeckDev comment answers. It is kept out of `QUESTIONS` (as `PROSE_QUESTIONS` is) so a caller that does not read the children
+ * is not asked it: `epicChildren` `undefined` on the facts is that caller, and `null` is a read that failed (UNREAD).
+ */
+export const CHILD_QUESTIONS = Object.freeze({
+  OUTCOME_CLOSED: "outcome-closed-by-non-build-row",
+});
+/** A title that makes a child a non-build row: the spike, decision and measurement kinds. */
+const NON_BUILD_TITLE = /^(SPIKE|Decision|Measure)\b/;
+const CHAIRMAN_LOGIN = "DanBeckDev";
+const CHAIRMAN_RULING_LINE = /^[ \t]*Chairman-ruling:[ \t]*(\S+)/gim;
+/** A comment's own URL, as the chairman's ruling line names it: `https://github.com/<owner>/<repo>/issues/<n>#issuecomment-<id>`. */
+const COMMENT_URL = /^https:\/\/github\.com\/([^/]+)\/([^/]+)\/(?:issues|pull)\/\d+#issuecomment-(\d+)$/;
+/** The children read per epic: GraphQL's page, and a count above it is a read that is refused rather than a short list. */
+const CHILDREN_ASKED = 100;
+
+/** The URLs on a row's `Chairman-ruling:` lines. @param {string | undefined} body @returns {string[]} */
+export function rulingUrlsOf(body: string | undefined): string[] {
+  return [...String(body ?? "").matchAll(CHAIRMAN_RULING_LINE)].map((m) => m[1]);
+}
+
+/**
+ * Why a closed child is not a build row, or `null` when it is one: its title says spike, decision or measure, or its Region is declared and every path in it is under `docs/`.
+ * The Region is read by the gate's own grammar (`declaredRegionFiles`), whose `<repo>:` prefix is removed first. Its root-level files are not declared here (`rootFiles` is empty,
+ * so the read needs no git), which reads a Region of docs and a root file as docs-only: the error is toward a finding the chairman can close with one ruling, never away from one.
+ * @param {BoardRow} child @returns {string | null} the kind, for the brief
+ */
+function nonBuildKindOf(child: BoardRow): string | null {
+  const title = NON_BUILD_TITLE.exec(child.title ?? "");
+  if (title) return title[1].toLowerCase() === "measure" ? "a measure" : `a ${title[1].toLowerCase()}`;
+  const paths = (declaredRegionFiles(child.body ?? "", { rootFiles: new Set() }) ?? []).map((path) => path.replace(/^[A-Za-z0-9._-]+:/, ""));
+  return paths.length > 0 && paths.every((path) => path.startsWith("docs/")) ? "a docs row" : null;
+}
+
+/** A child is ruled when one of its `Chairman-ruling:` URLs was posted by the chairman. @param {BoardRow} child @param {Record<string, string | null>} rulings */
+const rulingHolds = (child: BoardRow, rulings: Record<string, string | null>): boolean => rulingUrlsOf(child.body).some((url) => rulings[url] === CHAIRMAN_LOGIN);
+
+/** @param {BoardRow} epic @param {BoardRow} child @param {string} kind @returns {string} the brief's lines, one line for the table */
+const outcomeBrief = (epic: BoardRow, child: BoardRow, kind: string): string => `closed #${child.number} "${child.title}" is ${kind} with no chairman ruling on it, and epic #${epic.number}`
+  + ` has all of its children closed. BRIEF for the chairman: epic #${epic.number}'s outcome may have closed by being redefined into ${kind}, not by shipped work.`
+  + " What is happening: the children are all closed and none of the closed ones is a build. The ask: rule whether the outcome is met, and say so in a comment with a Chairman-ruling: line on"
+  + ` #${child.number}. Why only him: only the chairman rules that an outcome is met.`;
+
+/**
+ * THE OUTCOME QUESTION, over the facts `readEpicChildren` built: each open epic whose children are all closed, and each closed child of it that is not a build row and carries no ruling
+ * the chairman posted. An absent `epicChildren` is asked of nobody (`askAll` does not run it); a `null` one answers nothing, and its question is named unread.
+ * @param {BoardFacts} facts @returns {Finding[]}
+ */
+function outcomesClosedByNonBuild({ openRows, epicChildren }: BoardFacts): Finding[] {
+  if (!epicChildren) return [];
+  return openRows.flatMap((epic) => (epicChildren.byEpic[epic.number] ?? []).flatMap((child) => {
+    const kind = nonBuildKindOf(child);
+    return kind === null || rulingHolds(child, epicChildren.rulings) ? [] : [finding(epic, CHILD_QUESTIONS.OUTCOME_CLOSED, `\`Chairman-ruling:\` line on #${child.number}`, outcomeBrief(epic, child, kind))];
+  }));
+}
+
+/** The child question, asked only when the children were asked for (`epicChildren` not `undefined`, see `askAll`); its read is `null` when they could not be read. */
+const CHILD_READERS: [string, (f: BoardFacts) => Finding[], (f: BoardFacts) => boolean][] = [
+  [CHILD_QUESTIONS.OUTCOME_CLOSED, outcomesClosedByNonBuild, (f) => f.epicChildren !== null],
+];
 
 /**
  * THE ROWS A PULL REQUEST BODY CLOSES: `close-rows-for-merged-pr.ts`'s `declaredRowsFromBody`, COPIED because that module's graph reaches `wake.ts`, which imports
@@ -510,8 +582,9 @@ export function boardTruthAudit(facts: BoardFacts): { findings: Finding[]; unrea
 
 /** @param {BoardFacts} facts @returns {{ findings: Finding[], unread: string[], filing: number, merging: number }} one tracker's own answers */
 function askAll(facts: BoardFacts): { findings: Finding[]; unread: string[]; filing: number; merging: number; } {
-  const findings = READERS.flatMap(([, ask]) => ask(facts)).sort((a, b) => a.number - b.number || a.question.localeCompare(b.question));
-  return { findings, unread: READERS.filter(([, , read]) => !read(facts)).map(([question]) => question), filing: rowsBeingFiled(facts.openRows, facts).length,
+  const readers = facts.epicChildren === undefined ? READERS : [...READERS, ...CHILD_READERS];
+  const findings = readers.flatMap(([, ask]) => ask(facts)).sort((a, b) => a.number - b.number || a.question.localeCompare(b.question));
+  return { findings, unread: readers.filter(([, , read]) => !read(facts)).map(([question]) => question), filing: rowsBeingFiled(facts.openRows, facts).length,
     merging: mergedClosers(facts).merging.length };
 }
 
@@ -572,8 +645,9 @@ export function readBoardFacts(repo: string, { run = gh, agents = readAgents, no
   const listed = agents();
   const liveSessions = listed !== null && listingIsComplete(listed) ? listed.map((a) => a.label) : null;
   const roadmaps = readRoadmaps(repo, openRows, run);
+  const epicChildren = readEpicChildren(repo, openRows, run);
   const others = trackers.filter((tracker) => tracker.key !== "").map((tracker) => readOtherTracker(tracker, { run, now, liveSessions }));
-  return { now, openRows, closedRows, mergedPrs, liveSessions, waitFacts, roadmaps, ...(others.length > 0 && { others }) };
+  return { now, openRows, closedRows, mergedPrs, liveSessions, waitFacts, roadmaps, epicChildren, ...(others.length > 0 && { others }) };
 }
 
 /**
@@ -679,6 +753,48 @@ function readRoadmaps(repo: string, openRows: BoardRow[], run: (args: string[]) 
     return null;
   }
   return found;
+}
+
+/**
+ * THE CHILDREN OF EACH OPEN EPIC WHOSE CHILDREN ARE ALL CLOSED (a11ign/agent-org#881): ONE GraphQL request per such epic, its children's title, body and state, and one `gh api` read per
+ * `Chairman-ruling:` URL that a non-build child carries, for its author. Nothing is read for an epic that is not all closed, or for a build row's ruling lines (no question asks them).
+ * A refused read, or a child list cut short, THROWS inside and is `null` (UNREAD): an empty list would say the outcome agrees with its children, and a ruling that could not be read is not a
+ * ruling that is missing.
+ * @param {string} repo `owner/name` @param {BoardRow[]} openRows @param {(args: string[]) => string} run @returns {EpicChildren | null}
+ */
+function readEpicChildren(repo: string, openRows: BoardRow[], run: (args: string[]) => string): EpicChildren | null {
+  const [owner, name] = repo.split("/");
+  const byEpic: Record<number, BoardRow[]> = {};
+  const rulings: Record<string, string | null> = {};
+  try {
+    for (const epic of openRows.filter(epicAllClosed)) {
+      const query = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { issue(number: ${epic.number}) { subIssues(first: ${CHILDREN_ASKED}) { totalCount nodes { number title body state } } } } }`;
+      const subIssues = JSON.parse(run(["api", "graphql", "-f", `query=${query}`, "-f", `owner=${owner}`, "-f", `name=${name}`]))?.data?.repository?.issue?.subIssues;
+      if (!Array.isArray(subIssues?.nodes) || (subIssues.totalCount ?? subIssues.nodes.length) > subIssues.nodes.length) {
+        throw new Error(`epic children: #${epic.number} came back without all of its children`);
+      }
+      const closed: BoardRow[] = subIssues.nodes.filter((child: BoardRow) => child.state === "CLOSED");
+      byEpic[epic.number] = closed;
+      for (const child of closed.filter((c) => nonBuildKindOf(c) !== null)) {
+        for (const url of rulingUrlsOf(child.body)) rulings[url] ??= authorOfComment(url, run);
+      }
+    }
+  } catch {
+    return null;
+  }
+  return { byEpic, rulings };
+}
+
+/**
+ * THE LOGIN THAT POSTED THE COMMENT A `Chairman-ruling:` URL NAMES. A URL that is not a comment's own (`.../issues/<n>#issuecomment-<id>` or the pull-request form) is `null`: it cannot be
+ * verified, so it does not count. A failed `gh api` read THROWS, as the rest of `readEpicChildren` does.
+ * @param {string} url @param {(args: string[]) => string} run @returns {string | null}
+ */
+function authorOfComment(url: string, run: (args: string[]) => string): string | null {
+  const match = COMMENT_URL.exec(url);
+  if (match === null) return null;
+  const [, owner, name, id] = match;
+  return run(["api", `repos/${owner}/${name}/issues/comments/${id}`, "--jq", ".user.login"]).trim() || null;
 }
 
 /** The record the day's table is posted on (#4045). A row the org owns, not a pull request: it is `ceo`'s and the chairman's reading place. */

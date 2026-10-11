@@ -10,7 +10,7 @@ import { chmodSync, existsSync, mkdtempSync, readFileSync, rmSync, writeFileSync
 import { execFileSync } from "node:child_process";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { CLAIM_FRESH_MS, DUPLICATE_SIMILARITY, QUESTIONS, TABLE_ROW, boardTruthAudit, boardTruthTable, closesOf, postDaysTable, readBoardFacts, similarity, wordsOf } from "./board-truth-audit.ts";
+import { CHILD_QUESTIONS, CLAIM_FRESH_MS, DUPLICATE_SIMILARITY, QUESTIONS, TABLE_ROW, boardTruthAudit, boardTruthTable, closesOf, postDaysTable, readBoardFacts, similarity, wordsOf } from "./board-truth-audit.ts";
 import { declaredRowsFromBody } from "./close-rows-for-merged-pr.ts";
 import { boardTruthReading, orgHealthOrders, orgHealthReadings, SIGNALS } from "./org-health.ts";
 import { STALL_UNTOLD_RELEASE_MS } from "./claim-stall.ts";
@@ -630,4 +630,101 @@ test("#4201 (4) the question needs no fact, so it is never UNREAD", () => {
   const audit = boardTruthAudit(facts({ openRows: [row(4159, ["parked"], { body: CHAIRMAN_BODY })], mergedPrs: null, closedRows: null, liveSessions: null, waitFacts: null }));
   assert.equal(audit.findings.filter((f) => f.question === QUESTIONS.PARKED_ON_CHAIRMAN).length, 1);
   assert.ok(!audit.unread.includes(QUESTIONS.PARKED_ON_CHAIRMAN));
+});
+
+// --- #881: an epic closed by redefining its children into non-build rows --------------------------------------------------------
+
+const EPIC_881 = row(900, ["epic", "out-of-release", "lane:any"], { subIssuesSummary: { total: 3, completed: 3 } });
+const SPIKE_881 = row(901, [], { title: "SPIKE: does the outcome hold", state: "CLOSED", body: "" });
+const DOCS_881 = row(902, [], { title: "Write the outcome down", state: "CLOSED", body: "## Region\n\n```\nagent-org:docs/outcome.md\n```" });
+const BUILD_881 = row(903, [], { title: "Build the outcome", state: "CLOSED", body: "## Region\n\n```\nagent-org:src/outcome.ts\n```" });
+const COMMENT_881 = (id: number) => `https://github.com/a/b/issues/${id}#issuecomment-${id * 10}`;
+/** The facts the question is asked on: one open epic whose children are `children`, with `rulings` as the reader answered them. */
+const childFacts881 = (children: any[], rulings: Record<string, string | null> = {}, epic = EPIC_881) =>
+  facts({ openRows: [epic], epicChildren: { byEpic: { [epic.number]: children }, rulings } });
+const outcomesOf881 = (over: Partial<import("./board-truth-audit.ts").BoardFacts>) => boardTruthAudit(facts(over)).findings.filter((f) => f.question === CHILD_QUESTIONS.OUTCOME_CLOSED);
+
+test("#881 (1) POSITIVE CONTROL: a SPIKE child and a docs-Region child, each with no ruling line, yield one finding each, on the epic, with the brief for the chairman", () => {
+  const found = outcomesOf881(childFacts881([SPIKE_881, DOCS_881]));
+  assert.deepEqual(found.map((f) => [f.number, f.field]), [[900, "`Chairman-ruling:` line on #901"], [900, "`Chairman-ruling:` line on #902"]]);
+  assert.match(found[0].detail, /closed #901 "SPIKE: does the outcome hold" is a spike with no chairman ruling on it, and epic #900 has all of its children closed/);
+  assert.match(found[1].detail, /is a docs row with no chairman ruling/);
+  for (const f of found) {
+    assert.equal(f.route, "product-manager", "the audit does not post to the chairman itself");
+    assert.match(f.detail, /BRIEF for the chairman: epic #900's outcome may have closed by being redefined/);
+    assert.match(f.detail, /What is happening: .*The ask: .*Why only him: /);
+  }
+  assert.match(boardTruthTable(boardTruthAudit(childFacts881([SPIKE_881])), DAY), /\| #900 \| outcome-closed-by-non-build-row \| `Chairman-ruling:` line on #901 \|/);
+});
+
+test("#881 (2a) NEGATIVE CONTROL: a ruling line whose comment DanBeckDev posted reports none, for a spike", () => {
+  const ruled = [{ ...SPIKE_881, body: `Chairman-ruling: ${COMMENT_881(901)}` }];
+  assert.deepEqual(outcomesOf881(childFacts881(ruled, { [COMMENT_881(901)]: "DanBeckDev" })), []);
+});
+
+test("#881 (2b) NEGATIVE CONTROL: a ruling line whose comment DanBeckDev posted reports none, for a docs-Region child", () => {
+  const ruled = [{ ...DOCS_881, body: `Chairman-ruling: ${COMMENT_881(902)}\n\n${DOCS_881.body}` }];
+  assert.deepEqual(outcomesOf881(childFacts881(ruled, { [COMMENT_881(902)]: "DanBeckDev" })), []);
+});
+
+test("#881 (3) NEGATIVE CONTROL: an epic whose children are all build rows reports none", () => {
+  assert.deepEqual(outcomesOf881(childFacts881([BUILD_881])), []);
+  assert.deepEqual(outcomesOf881(childFacts881([BUILD_881, row(904, [], { title: "Build the rest", state: "CLOSED", body: "Region: agent-org:src/rest.ts" })])), []);
+});
+
+test("#881 (4) NEGATIVE CONTROL: a ruling URL not posted by DanBeckDev does not count, nor one that could not be verified", () => {
+  const ruled = [{ ...SPIKE_881, body: `Chairman-ruling: ${COMMENT_881(901)}` }];
+  assert.deepEqual(outcomesOf881(childFacts881(ruled, { [COMMENT_881(901)]: "someone-else" })).map((f) => f.number), [900], "another login's ruling is a finding");
+  assert.deepEqual(outcomesOf881(childFacts881(ruled, { [COMMENT_881(901)]: null })).map((f) => f.number), [900], "a comment that could not be read is a finding");
+  const issueUrl = [{ ...SPIKE_881, body: "Chairman-ruling: https://github.com/a/b/issues/901" }];
+  assert.deepEqual(outcomesOf881(childFacts881(issueUrl, { "https://github.com/a/b/issues/901": null })).map((f) => f.number), [900], "an issue URL is not a comment's own");
+});
+
+test("#881 (5) an epic not asked is not judged, and a failed read is UNREAD, never a clean reading", () => {
+  const notAsked = boardTruthAudit(facts({ openRows: [EPIC_881] }));
+  assert.deepEqual(notAsked.findings.filter((f) => f.question === CHILD_QUESTIONS.OUTCOME_CLOSED), []);
+  assert.ok(!notAsked.unread.includes(CHILD_QUESTIONS.OUTCOME_CLOSED), "not asked is not unread");
+  const failed = boardTruthAudit(facts({ openRows: [EPIC_881], epicChildren: null }));
+  assert.ok(failed.unread.includes(CHILD_QUESTIONS.OUTCOME_CLOSED));
+  assert.deepEqual(failed.findings.filter((f) => f.question === CHILD_QUESTIONS.OUTCOME_CLOSED), []);
+});
+
+/** A `gh` fake for the children read: the epic's children answer the one GraphQL query per epic, a comment answers its author, and anything else is the roadmap read. */
+const epicRun881 = (children: any[], authors: Record<string, string> = {}, asked: string[] = []) => (args: string[]) => {
+  asked.push(args.join(" "));
+  const query = String(args.find((a) => a.startsWith("query=")) ?? "");
+  if (/ issue\(number: \d+\) \{ subIssues/.test(query)) return JSON.stringify({ data: { repository: { issue: { subIssues: { totalCount: children.length, nodes: children } } } } });
+  const comment = /^repos\/a\/b\/issues\/comments\/(\d+)$/.exec(args[1] ?? "");
+  if (args[0] === "api" && comment) return `${authors[comment[1]] ?? ""}\n`;
+  if (args[0] === "issue" || args[0] === "pr") return "[]";
+  return roadmapRead(args);
+};
+const readEpics881 = (children: any[], authors: Record<string, string> = {}, asked: string[] = [], openRows: any[] = [EPIC_881]) =>
+  readBoardFacts("a/b", { run: epicRun881(children, authors, asked), agents: () => ORG_SEATS, now: NOW, trackers: [HOME_TRACKER], openRows, waitFacts: { items: {} } }).epicChildren;
+
+test("#881 (6) the reader: a ruling is verified by its comment's author, and a build row's ruling line is never read", () => {
+  const asked: string[] = [];
+  const buildRuled = { ...BUILD_881, body: `Chairman-ruling: ${COMMENT_881(903)}\n\n${BUILD_881.body}` };
+  const epicChildren = readEpics881([{ ...SPIKE_881, body: `Chairman-ruling: ${COMMENT_881(901)}` }, DOCS_881, buildRuled], { "9010": "DanBeckDev" }, asked);
+  assert.deepEqual(epicChildren?.byEpic[900].map((c) => c.number), [901, 902, 903]);
+  assert.deepEqual(epicChildren?.rulings, { [COMMENT_881(901)]: "DanBeckDev" });
+  assert.deepEqual(asked.filter((a) => a.includes("comments/")), ["api repos/a/b/issues/comments/9010 --jq .user.login"]);
+  assert.deepEqual(outcomesOf881(childFacts881(epicChildren?.byEpic[900] ?? [], epicChildren?.rulings ?? {})).map((f) => f.field), ["`Chairman-ruling:` line on #902"]);
+});
+
+test("#881 (7) the reader asks only an all-closed open epic, and a refused or cut-short read is null (UNREAD), never an empty list", () => {
+  const asked: string[] = [];
+  assert.deepEqual(readEpics881([], {}, asked, [row(905, ["epic"], { subIssuesSummary: { total: 3, completed: 2 } })]), { byEpic: {}, rulings: {} });
+  assert.ok(!asked.some((a) => a.includes("subIssues")), "an epic with an open child is not read");
+  const refused = (args: string[]) => { if (String(args.find((a) => a.startsWith("query="))).includes("subIssues")) throw new Error("HTTP 502"); return epicRun881([])(args); };
+  assert.equal(readBoardFacts("a/b", { run: refused, agents: () => ORG_SEATS, now: NOW, trackers: [HOME_TRACKER], openRows: [EPIC_881], waitFacts: { items: {} } }).epicChildren, null);
+  const cut = (args: string[]) => (String(args.find((a) => a.startsWith("query="))).includes("subIssues")
+    ? JSON.stringify({ data: { repository: { issue: { subIssues: { totalCount: 101, nodes: [SPIKE_881] } } } } }) : epicRun881([])(args));
+  assert.equal(readBoardFacts("a/b", { run: cut, agents: () => ORG_SEATS, now: NOW, trackers: [HOME_TRACKER], openRows: [EPIC_881], waitFacts: { items: {} } }).epicChildren, null);
+  const ruledSpike = { ...SPIKE_881, body: `Chairman-ruling: ${COMMENT_881(901)}` };
+  const noAuthor = (args: string[]) => {
+    if (args[0] === "api" && args[1]?.startsWith("repos/a/b/issues/comments/")) throw new Error("HTTP 404");
+    return epicRun881([ruledSpike])(args);
+  };
+  assert.equal(readBoardFacts("a/b", { run: noAuthor, agents: () => ORG_SEATS, now: NOW, trackers: [HOME_TRACKER], openRows: [EPIC_881], waitFacts: { items: {} } }).epicChildren, null, "a ruling that cannot be read is UNREAD too");
 });
