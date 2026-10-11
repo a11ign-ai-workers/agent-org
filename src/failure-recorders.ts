@@ -34,6 +34,29 @@ export function recordIgnoredChairmanLabels<T extends { number: number; actor: s
 }
 
 /**
+ * #5032: WHAT THE GATE RECORDS OF `priority:emergency`, under two keys the ledger reads as it reads any other (not seeded in `FAILURE_KINDS`, for the reason `chairman-label-not-chairman` is not).
+ * `emergency-priority-not-honoured` is a label with no setter or no open org-blocking incident behind it, ref `<repo>#<row>:<actor>:<why>`: one line per row, actor and reason however many ticks see it.
+ * `emergency-priority-used` is a label the gate HONOURED, ref `<repo>#<row>:<incident>`: one line per row and incident, which is what the daily retro counts uses by and what an announcer reads
+ * `fresh` from, so the chairman is told once per use. Never throws: a line that could not be written comes back `recorded: false`.
+ */
+export const EMERGENCY_PRIORITY_NOT_HONOURED_KIND = "emergency-priority-not-honoured";
+export const EMERGENCY_PRIORITY_USED_KIND = "emergency-priority-used";
+
+export function recordEmergencyPriority<I extends { number: number; actor: string | null; why: string }, H extends { number: number; incident: string }>(
+  { ignored, honoured, repo, stateDir, now }: { ignored: I[]; honoured: H[]; repo: string; stateDir: string; now: number },
+): { ignored: (I & { recorded: boolean })[]; honoured: (H & { fresh: boolean; recorded: boolean })[] } {
+  const logPath = `${stateDir}/${FAILURE_LEDGER_FILE}`;
+  const write = (classKey: string, ref: string) => recordFailures({ logPath, events: [{ classKey, ref }], now });
+  return {
+    ignored: ignored.map((entry) => ({ ...entry, recorded: write(EMERGENCY_PRIORITY_NOT_HONOURED_KIND, `${repo}#${entry.number}:${entry.actor ?? "unknown"}:${entry.why}`).refused === null })),
+    honoured: honoured.map((entry) => {
+      const { appended, refused } = write(EMERGENCY_PRIORITY_USED_KIND, `${repo}#${entry.number}:${entry.incident}`);
+      return { ...entry, fresh: appended > 0, recorded: refused === null };
+    }),
+  };
+}
+
+/**
  * THE EVENTS OF THIS TICK THAT NEVER BECOME A CLOSED ROW, appended to `failure-ledger` beside `wake-deferral-log` -- a red `main`, a pull request nobody could be named the owner of,
  * and (once a day) the hand fixes. A recorder reports a refusal and never throws, so the ledger can only ever be missing an event, never stop a tick.
  *
