@@ -1,22 +1,22 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 97,
+    "files": 98,
     "spawns": 137,
-    "calls": 398,
+    "calls": 410,
     "shapes": {
-      "api rest": 141,
-      "issue list": 42,
+      "api rest": 147,
+      "issue list": 43,
       "api graphql": 38,
       "issue view": 34,
-      "pr list": 30,
+      "pr list": 31,
       "issue comment": 27,
       "pr view": 17,
-      "issue edit": 13,
-      "label create": 11,
+      "issue edit": 15,
+      "label create": 12,
       "pr merge": 6,
       "project item-edit": 6,
-      "issue create": 4,
+      "issue create": 5,
       "pr comment": 4,
       "run list": 4,
       "run view": 4,
@@ -176,7 +176,7 @@
       "spawns": 1,
       "calls": {
         "api graphql": 1,
-        "api rest": 2,
+        "api rest": 3,
         "issue comment": 1,
         "issue list": 4,
         "pr list": 2
@@ -217,9 +217,15 @@
     "src/ci-failure-class.ts": {
       "spawns": 0,
       "calls": {
-        "api rest": 2
+        "api rest": 8,
+        "issue create": 1,
+        "issue edit": 2,
+        "issue list": 1,
+        "label create": 1
       },
-      "labels": [],
+      "labels": [
+        "$SHARED_FAILURE_LABEL"
+      ],
       "parsesCloses": false
     },
     "src/ci-health-liveness.ts": {
@@ -600,7 +606,7 @@
       "spawns": 2,
       "calls": {
         "api graphql": 2,
-        "api rest": 5,
+        "api rest": 4,
         "run list": 1
       },
       "labels": [],
@@ -862,6 +868,14 @@
         "$STATE_LABEL",
         "$STATE_OF_LABEL"
       ],
+      "parsesCloses": false
+    },
+    "src/ticket-port/open-pulls.ts": {
+      "spawns": 0,
+      "calls": {
+        "pr list": 1
+      },
+      "labels": [],
       "parsesCloses": false
     },
     "src/trace/freshness.ts": {
@@ -1194,6 +1208,7 @@
     "pr-checks-failing": {
       "group": "ACTION",
       "namedIn": [
+        "src/ci-failure-class.ts",
         "src/claim-stall.ts",
         "src/wake.ts",
         "src/work-gate.ts"

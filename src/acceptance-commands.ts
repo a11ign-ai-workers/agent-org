@@ -1657,6 +1657,8 @@ export function acceptancePathsReason(body: string, tool: string, deps: {
 } = {}): string | null {
   const primary = primaryCheckoutCdReason(body, tool, deps);
   if (primary) return primary;
+  const tsx = tsxAcceptanceReason(body, tool); // agent-org#870
+  if (tsx) return tsx;
   const unresolved = unresolvedAcceptancePaths(body, deps);
   if (unresolved.length === 0) return null;
   const halves = [
@@ -1734,6 +1736,42 @@ export function primaryCheckoutCdReason(body: string, tool: string, { primaryChe
     + "would pass or fail for the wrong tree, and CI has no such path. Run the command from the worktree root, the way every row that "
     + "works does. A `cd` into a repository this row is not built in is not refused here, and a command a human is meant to run takes "
     + "a `Hand-run: <who runs it and why>` line.";
+}
+
+// agent-org#870: A COMMAND THAT LOADS TYPESCRIPT THROUGH `tsx`. The spellings are `no-loader.test.ts`'s `NAMES_TSX` -- a flag (`--import tsx`,
+// `--import=tsx`, `--loader tsx`) or a runner (`pnpm exec tsx`, `tsx file.ts`) -- with TWO narrowings, both deliberate:
+//  - that pattern's bare arm is `(^|\s)tsx`, and so also names `git grep -qE tsx -- .github/workflows`, a good line (#524's own Acceptance). Here the
+//    bare runner must stand at a command's own position (the start, after `&&` `||` `;` `|` `(`, opening a `bash -c '...'` string, behind env
+//    assignments), the same position `CD_AT_COMMAND_POSITION` reads. `(?![\w.-])` keeps `tsx-codemod` and `tsx.test.ts` out and lets `tsx/esm` through.
+//  - its one-shot-runner arm (the registry's `x` runner) is NOT claimed. That runner fetches `tsx` itself, so it is not the `ERR_MODULE_NOT_FOUND` of
+//    #844, and it is the spelling of the placeholder Acceptance in the fixtures of many test files (`<runner> tsx --test x`), outside this row's Region.
+const TSX_FLAG_OR_EXEC = /(?:(?:--import|--loader)[= ]|\bexec\s+)['"]?tsx(?![\w.-])/;
+const TSX_AT_COMMAND_POSITION = /(?:^|&&|\|\||[;|(]|\b(?:ba|z)?sh\s+-\w*c\s+['"])\s*(?:\w+=\S*\s+)*tsx(?![\w.-])/;
+
+/** Whether `command` loads TypeScript through `tsx`, which is no dependency of this tool (#4389) and so cannot run on any host or in CI. */
+export function loadsTypeScriptThroughTsx(command: string): boolean {
+  return TSX_FLAG_OR_EXEC.test(command) || TSX_AT_COMMAND_POSITION.test(command);
+}
+
+/**
+ * agent-org#870: AN ACCEPTANCE THAT LOADS TYPESCRIPT THROUGH `tsx` IS REFUSED. 37 shipped `.acceptance/` files carry the spelling and each new one
+ * fails the first time a reviewer runs it (`ERR_MODULE_NOT_FOUND: Cannot find package 'tsx'`, #844 and no verdict posted), because `no-loader.test.ts`
+ * reads units and package scripts and never an Acceptance. Node strips the types itself, so the way out is the same line without the loader.
+ *
+ * A body that DECLARES `Hand-run:` keeps that declaration's meaning, as it does for `primaryCheckoutCdReason`: a human runs it, on a host they chose.
+ *
+ *  @param tool the CLI to name in the refusal
+ */
+export function tsxAcceptanceReason(body: string, tool: string): string | null {
+  const section = extractAcceptanceSection(body);
+  if (section.kind !== "commands" || handRunDeclaration(body) !== null) return null;
+  const hits = section.commands.filter(loadsTypeScriptThroughTsx);
+  if (hits.length === 0) return null;
+  return `${tool}: REFUSING -- the Acceptance loads TypeScript through \`tsx\`: ${hits.map((command) => `\`${command}\``).join(", ")}. `
+    + "`tsx` is not a dependency of this tool (#4389), so the line dies on `ERR_MODULE_NOT_FOUND: Cannot find package 'tsx'` "
+    + "on every host and in CI, and no verdict is posted. Node strips the types itself: drop the loader (`--import tsx`, `--import=tsx`, "
+    + "`--loader tsx`) and run `node --test <file>`, or run the script as `node <file>` in place of `tsx <file>` or `pnpm exec tsx <file>`. "
+    + "A command a human is meant to run takes a `Hand-run: <who runs it and why>` line.";
 }
 
 // #859 (a11ign#4957, cause 2): AN ACCEPTANCE RUNS IN THE CLAIMED WORKTREE. `execSync` was given no `cwd`, so a command ran wherever `pr:open`
@@ -3629,6 +3667,9 @@ export const CI_BODY_REPORTS: BodyReport[] = [
     // #4322: BEFORE the command runs, because running it is the harm on the host -- it would read the primary checkout.
     const primary = primaryCheckoutCdReason(text, "ACCEPTANCE");
     if (primary) return { ok: false, lines: [named, primary] };
+    // agent-org#870: for the same reason -- `pr:open` and CI run the line, and it cannot load `tsx`.
+    const tsx = tsxAcceptanceReason(text, "ACCEPTANCE");
+    if (tsx) return { ok: false, lines: [named, tsx] };
     const report = acceptanceReport(text, input.run);
     const declared = extractAcceptanceSection(text);
     const notes = declared.kind === "commands" ? wholeSuiteNote(declared.commands) : [];

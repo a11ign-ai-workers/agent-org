@@ -51,7 +51,7 @@
     },
     "src/board-truth-audit.ts": {
       "spawns": 1,
-      "calls": 10
+      "calls": 11
     },
     "src/branch-inventory-report.ts": {
       "spawns": 3,
@@ -63,7 +63,7 @@
     },
     "src/ci-failure-class.ts": {
       "spawns": 0,
-      "calls": 2
+      "calls": 13
     },
     "src/ci-health-liveness.ts": {
       "spawns": 1,
