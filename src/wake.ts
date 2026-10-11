@@ -63,6 +63,8 @@ import { stateEntryPath, hostConfigPath, readHostConfig, HOST_CONFIG_ENV } from 
 import { REPO } from "./project-identity.ts";
 import { roleBriefPath } from "./project-roles.ts";
 import { engineerBriefSentence, briefRoleSentence } from "./spawn-role-brief.ts"; // #828: the sentence that sends a spawned seat to a role brief
+// #832: a `lane:orchestrator` row as a one-shot seat's, behind `workers.orchestratorOneShot`; its cause is a sibling of `SPAWN_CAUSES`, never a member
+import { ONE_SHOT_SPAWN_CAUSES, createOrchestratorOneShot, isOneShotOrder, standInClaimer, withOrchestratorOneShot, type OrchestratorOneShot } from "./orchestrator-one-shot.ts";
 // #2619 (child 3d of #69): `session:`/`ready` -- `answer:` already arrives via `work-gate.ts`'s
 // re-export of `waiting-condition.ts`'s own field, so it is not re-imported here.
 import { SESSION_PREFIX, READY_LABEL, OUT_OF_RELEASE_LABEL } from "./project-vocabulary.ts";
@@ -572,9 +574,12 @@ export function spareForOtherRow(member: { key: string; number: number; }) {
 export function ownRowOnly(order: { session: string; causeKey: string; cause?: string; }, ineligibleReason?: (label: string) => string | null,
   families: readonly { prefix: string; from: number; }[] = SPARE_FAMILIES): ((label: string) => string | null) | undefined {
   const ref = isPilotOrder(order) ? rowRefOfOrder(order) : null;
-  if (ref === null) return ineligibleReason;
+  if (ref === null) return isOneShotOrder(order) ? () => "a one-shot orchestrator run names no row, so no seat is its own" : ineligibleReason;
   const own = spareLabelForRow({ row: ref.number, key: ref.key, families });
+  // #832: A ONE-SHOT ORCHESTRATOR RUN IS OFFERED TO ITS OWN ROW'S SEAT ONLY, never to an idle standing engineer: that seat would be briefed as an engineer and refused the lane.
+  const oneShot = isOneShotOrder(order);
   return (label) => {
+    if (oneShot && label !== own) return `a one-shot orchestrator run is for ${own ?? "its own row's seat"} only`;
     const member = label === own ? null : familyMember(label, families);
     return member === null ? ineligibleReason?.(label) ?? null : spareForOtherRow(member);
   };
@@ -701,7 +706,8 @@ export const MAX_SPAWNS_PER_TICK = 1;
  * refusals are reserved for orders it could genuinely have taken.
  */
 export function isPilotOrder(order: { session: string; cause?: string; }) {
-  return order.session === "engineers" && SPAWN_CAUSES.includes(String(order.cause));
+  // #832: A ONE-SHOT ORCHESTRATOR RUN IS A PILOT ORDER TOO (it is started, claimed and ended the way an engineer's is), and its cause is asked HERE and never added to `SPAWN_CAUSES`.
+  return order.session === "engineers" && (SPAWN_CAUSES.includes(String(order.cause)) || isOneShotOrder(order));
 }
 
 /**
@@ -781,11 +787,14 @@ export function spawnableRole(order: { session: string; causeKey: string; cause?
     return { refusal: `no spawn: the pilot covers the engineer pool, and this order is addressed to `
       + `"${order.session}"` };
   }
-  if (!SPAWN_CAUSES.includes(String(order.cause))) {
+  const oneShot = ONE_SHOT_SPAWN_CAUSES.includes(String(order.cause));
+  if (!SPAWN_CAUSES.includes(String(order.cause)) && !oneShot) {
     return { refusal: `no spawn: "${order.cause ?? "an order carrying no cause"}" is not a pilot cause `
       + `(${SPAWN_CAUSES.join(", ")})` };
   }
-  const listed = roster.find((label) => !agents.some((a) => a.label === label) && !drained.includes(label));
+  // #832: A ONE-SHOT ORCHESTRATOR RUN IS NEVER GIVEN A STANDING ROLE'S ADDRESS, only the spare named for its row: that is the address `endFinishedSpares` ends when the row
+  // closes, so "spawned for that row and ended when the row is" holds, and a standing `worker-*` seat is never briefed as the orchestrator.
+  const listed = oneShot ? undefined : roster.find((label) => !agents.some((a) => a.label === label) && !drained.includes(label));
   if (listed !== undefined) return { role: listed };
   const seen = roster.map((label) => `${label}=${agents.find((a) => a.label === label)?.status}`).join(", ");
   const ref = rowRefOfOrder(order);
@@ -1027,10 +1036,13 @@ function spawnWorker(order: { session: string; causeKey: string; cause?: string;
   const pane = openPane(run, role.role, env, claimed?.worktree);
   // `openPane` closes a workspace it opened and could not use, so only the claim is left to undo here.
   if ("refusal" in pane) return { refusal: unwound(pane.refusal) };
-  // `spawnableRole` has already refused anything whose cause is not in `SPAWN_CAUSES`, so by here the
+  // `spawnableRole` has already refused anything whose cause is not in `SPAWN_CAUSES` or the one-shot sibling, so by here the
   // cause is one of those strings -- narrowed for the type rather than re-checked.
   const tier = claimed === undefined ? null : claimer?.tier?.(claimed) ?? null;
-  const invocation = spawnInvocation({ ...order, cause: String(order.cause) }, role.role, pane.pane, {}, tier);
+  // #832: A ONE-SHOT RUN IS STARTED ON THE ENGINEER PILOT'S PROFILE (`ready-row-unclaimed`: sonnet/high, the row's `Tier: sonnet`). Its own cause is a spawn address and not a gate cause,
+  // so `cause-declaration.ts` (not this row's file) declares no profile for it, and a declaration there would also make the gate expect to emit it.
+  const profileCause = isOneShotOrder(order) ? SPAWN_CAUSES[0] : String(order.cause);
+  const invocation = spawnInvocation({ ...order, cause: profileCause }, role.role, pane.pane, {}, tier);
   if ("refusal" in invocation) return { refusal: unwound(invocation.refusal, pane.workspace) };
   try {
     run(invocation.args);
@@ -5197,7 +5209,7 @@ function targetFor(order: {
         relane?: { deferredSince: Map<string, number>; now: number; }; goneSeats?: ReadonlyMap<string, string>;
         env?: Record<string, string>; registerSpawn?: (role: string) => void; drained?: readonly string[];
         claimable?: (order: { causeKey: string; startFresh?: boolean; }) => string | null; claimer?: SpawnClaimer; hostLoad?: () => HostLoad;
-        claimRefused?: ClaimRefused;
+        claimRefused?: ClaimRefused; oneShot?: OrchestratorOneShot;
     } & ReviewerDeps): {
     label: string; profile?: { kind: string; model: string; effort: string; }; claimed?: ClaimedRow;
     workspace?: string; reviewer?: true; order?: { prompt: string; };
@@ -5230,8 +5242,12 @@ function targetFor(order: {
   }
   const overloaded = fresh ? null : hostLoadRefusal(deps.hostLoad?.());
   if (overloaded !== null) return { refusal: `${routed.refusal}; ${overloaded}` };
+  // #832: A ONE-SHOT ORCHESTRATOR RUN'S CLAIM IS HELD, AND ITS RECORD OF A SPAWN WRITTEN, INSIDE THE CLAIMER (`standInClaimer`): the spawn's own order of checks is unchanged, and an order
+  // with no guard or no claimer handed in is never spawned, so the hardware rule does not depend on a caller remembering it.
+  const claimer = isOneShotOrder(order) ? standInClaimer(deps.claimer, deps.oneShot, { rowOf: rowRefOfOrder, live }) : deps.claimer;
+  if (claimer !== undefined && "refusal" in claimer) return { refusal: `${routed.refusal}; no spawn: ${claimer.refusal}` };
   const spawn = spawnWorker(order, live, roster,
-    { run: deps.run, env: deps.env, drained: deps.drained, claimable: deps.claimable, claimer: deps.claimer,
+    { run: deps.run, env: deps.env, drained: deps.drained, claimable: deps.claimable, claimer,
       memory: deps.memory, claimRefused: deps.claimRefused });
   if ("refusal" in spawn) return { refusal: `${routed.refusal}; ${spawn.refusal}` };
   // REGISTERED BEFORE THE PROMPT, because a refused prompt leaves the process running (see `deliver`).
@@ -5430,7 +5446,7 @@ function recordCapped({ stuck, outaged }: { stuck: string[]; outaged: string[]; 
  * @param how `orderId` is the wake id the follow-up header names (#4068)
  * @returns why the order is UNDELIVERED, or `null` when it landed
  */
-function promptTarget(order: { causeKey: string; session: string; prompt: string; }, target: { label: string; profile?: object; claimed?: ClaimedRow; workspace?: string; order?: { prompt: string; }; }, { run, sleep = sleepSync, launch, context, claimer, env, orderId, blocking = () => readBlockingRecord(stateEntryPath("")) }: {
+function promptTarget(order: { causeKey: string; session: string; prompt: string; briefRole?: string; }, target: { label: string; profile?: object; claimed?: ClaimedRow; workspace?: string; order?: { prompt: string; }; }, { run, sleep = sleepSync, launch, context, claimer, env, orderId, blocking = () => readBlockingRecord(stateEntryPath("")) }: {
         run: (args: string[]) => string; sleep?: (ms: number) => void; launch?: LaunchFacts; context: string;
         claimer?: SpawnClaimer; env?: Record<string, string>; orderId?: string; blocking?: () => BlockingRecord | null;
     }): string | null {
@@ -5440,7 +5456,9 @@ function promptTarget(order: { causeKey: string; session: string; prompt: string
   try {
     run(["--session", "org", "agent", "prompt", target.label,
       addressed(carriedOrder(order, target), target.label,
-        { ...launch, spawned: target.claimed, followUp: isFollowUp(target, context), context, orderId, blocking: blocking(), model: (target.profile as { model?: string } | undefined)?.model })]);
+        { ...launch, spawned: target.claimed, followUp: isFollowUp(target, context), context, orderId, blocking: blocking(), model: (target.profile as { model?: string } | undefined)?.model,
+          // #832: the brief a ONE-SHOT order names; absent on every other order, and `addressed`'s default is then the engineer's, byte for byte.
+          briefRole: order.briefRole })]);
   } catch (err) {
     // A STARTED PROCESS IS LEFT RUNNING HERE, and the causeKey is NOT recorded. It is a healthy, idle
     // session under a roster label, so the next tick's `route` offers it this same order by the ordinary
@@ -5596,14 +5614,14 @@ function noteClaimOrders(claimOrders: ClaimOrders | undefined, { gateOrder, targ
  *   marked `outageNow`: several of THIS TICK's own reads were refused together, so several causes reaching the cap
  *   in the same run share ONE reason and must not each reach `escalateStuck` as if they were N unrelated stuck rows.
  */
-export function deliver(orders: { session: string; causeKey: string; prompt: string; cause?: string; title?: string; replaces?: { branch: string; }[]; resume?: boolean; outageNow?: boolean; startFresh?: boolean; }[], agents: { label: string; status: string; }[], roster: string[],
-  { run = defaultRun, record, counts, ineligibleReason, env, registerSpawn, drained, claimable, claimer, memory, hostLoad, claimRefused,
+export function deliver(orders: readonly { session: string; causeKey: string; prompt: string; cause?: string; title?: string; replaces?: { branch: string; }[]; resume?: boolean; outageNow?: boolean; startFresh?: boolean; briefRole?: string; }[], agents: { label: string; status: string; }[], roster: string[],
+  { run = defaultRun, record, counts, ineligibleReason, env, registerSpawn, drained, claimable, claimer, memory, hostLoad, claimRefused, oneShot,
     launch, reviewerEnv, registerReviewer, checkout, registry, unavailable, sleep, contextRoot, codexConfig, clock, relane, goneSeats, claimOrders,
     now = Date.now }: {
           run?: (args: string[]) => string; record?: (key: string, recipient?: string, noClear?: boolean, at?: number) => void;
           counts?: Map<string, number>; ineligibleReason?: (label: string) => string | null;
           env?: Record<string, string>; registerSpawn?: (role: string) => void; drained?: readonly string[];
-          claimable?: (order: { causeKey: string; startFresh?: boolean; }) => string | null; claimer?: SpawnClaimer; claimRefused?: ClaimRefused;
+          claimable?: (order: { causeKey: string; startFresh?: boolean; }) => string | null; claimer?: SpawnClaimer; claimRefused?: ClaimRefused; oneShot?: OrchestratorOneShot;
           memory?: () => string | null; hostLoad?: () => HostLoad; launch?: LaunchFacts; unavailable?: (label: string) => string | null;
           sleep?: (ms: number) => void; contextRoot?: string; clock?: OrderClock;
           relane?: { deferredSince: Map<string, number>; now: number; }; goneSeats?: ReadonlyMap<string, string>; now?: () => number;
@@ -5632,7 +5650,7 @@ export function deliver(orders: { session: string; causeKey: string; prompt: str
       continue;
     }
     const target = targetFor(order, live, roster, { run, spawned, ineligibleReason, env, registerSpawn, drained,
-      claimable, claimer, memory, hostLoad, claimRefused, reviewerEnv, registerReviewer, checkout, registry, codexConfig, relane, goneSeats: gone });
+      claimable, claimer, memory, hostLoad, claimRefused, oneShot, reviewerEnv, registerReviewer, checkout, registry, codexConfig, relane, goneSeats: gone });
     if ("refusal" in target) {
       const left = endedSeatLine(order, gone);
       if (left === null) refused.push(`${order.causeKey}: ${target.refusal}`); else settled.push(left);
@@ -8421,7 +8439,8 @@ async function main() {
   const drained = drainNow(spares.cycles);
   const host = hostOrEmpty();
   // #4888: `ci-failure-class` and `review-depth` are asked here, of the orders about to be delivered.
-  const ready = await withReviewDepth(await withCiFailureClass(todo, { host, ledgerPath }), { host, ledgerPath });
+  // #832: a ready `lane:orchestrator` row becomes a one-shot run's order HERE, after the ledger's reads, when `workers.orchestratorOneShot` is on; off, `ready` is the same array.
+  const ready = withOrchestratorOneShot(await withReviewDepth(await withCiFailureClass(todo, { host, ledgerPath }), { host, ledgerPath }));
   const routes = await routesForStarts(ready, { host, ledgerPath });
   // A SEAT THE FIRST DELIVERY FOUND ENDED IS ENDED FOR THE SECOND (#3568): one `agent_not_found` per label per tick, not one per order.
   const { sent, refused: gateRefused, stuck, outaged, settled } = deliver(ready, free, roster, { record, unavailable, clock, relane: relaneFacts(ledgerPath),
@@ -8429,6 +8448,7 @@ async function main() {
     claimOrders: claimOrdersIn(claimOrdersPath(ledgerPath)),
     counts: deliveryCounts(ledgerPath), ineligibleReason: poolEngineerReason(poolEligibility(spares, drained), unavailable),
     registerSpawn: (role) => registerSpawn(spares, role), drained, claimable: spawnClaimability(), claimRefused: sayClaimRefusal(),
+    oneShot: createOrchestratorOneShot({ readRow: readRowForTier }),
     memory: spawnMemoryGate(), hostLoad: readHostLoad, claimer: claimerFor(spares, ledgerPath, hostLayout, escalatedRoutes(claimOrdersText(ledgerPath), routes)), launch: hostLayout,
     registerReviewer: (session) => registerReviewer(reviewerPathsFrom(ledgerPath), session),
     registry: () => readReviewerRegistry(reviewerPathsFrom(ledgerPath).registry) });
