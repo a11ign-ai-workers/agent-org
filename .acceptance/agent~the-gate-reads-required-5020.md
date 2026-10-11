@@ -3,14 +3,14 @@ The gate and the queue table read the required checks from the rulesets (a11ign/
 Acceptance:
 
 ```bash
-git grep -q "#5020: a ruleset-only answer yields the gate" -- src/packaging/work-gate.test.ts
 git grep -q "#5020: neither source gives a list" -- src/packaging/work-gate.test.ts
-bash -c 'cd ~/repos/agent-org-wt-5020 && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/work-gate.test.ts src/packaging/queue-table.test.ts'
+git grep -q "requiredContexts reads the RULESETS when classic protection is gone" -- src/packaging/queue-table.test.ts
+bash -c 'cd ~/repos/agent-org-wt-5020 && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/queue-table.test.ts'
 ```
 
 Closes a11ign/a11ign#5020
 
-Measured: the rstest command printed `VERDICT pass: 518 tests in 2 files` at this head (plus the two gh-call tests, 533 in 4 files). Mutations, each run and restored byte-identical (`diff` empty): (1) the ruleset source never answers -- the ruleset-only, union and `requiredContexts` tests fail; (2) the classic fallback never answers -- the classic-only and the two #2331 read-through tests fail; (3) an empty list is accepted as usable -- the neither-source and fail-open controls fail (7 tests); (4) rules of every type are read, not only `required_status_checks` -- only the union test fails.
+Measured: the rstest command above (`queue-table.test.ts`, which drives the shared reader through a fake `gh` that routes by endpoint) is the one CI's job can run, because `work-gate.test.ts` calls `shippedUnits` and needs git history. Run locally with `work-gate.test.ts` beside it, at this head: `VERDICT pass: 533 tests in 4 files` (with the two gh-call tests). Mutations, each run and restored byte-identical (`diff` empty): (1) the ruleset source never answers -- the ruleset-only, union and `requiredContexts` tests fail; (2) the classic fallback never answers -- the classic-only and the two #2331 read-through tests fail; (3) an empty list is accepted as usable -- the neither-source and fail-open controls fail (7 tests); (4) rules of every type are read, not only `required_status_checks` -- only the union test fails.
 
 Outside-Region: `docs/gh-call-inventory.json`, regenerated with `node src/packaging/gh-call-inventory.ts` (`api rest` call sites 145 -> 144: `queue-table.ts` lost its private read, and `work-gate.ts` keeps one call site for both sources so `gh-call-baseline.json` is unchanged). `.changeset/the-gate-reads-required-checks-from-rulesets.md`.
 
