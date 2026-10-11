@@ -62,6 +62,7 @@ import { boardTruthTable } from "./board-truth-audit.ts";
 // The checkout the tool serves and the project's own words are read from where they are declared (`standalone-roots.test.ts`, `project-vocabulary.test.ts`).
 import { HOME_CHECKOUT } from "./project-config.ts";
 import { ANSWER_PREFIX, BACKLOG_LABEL } from "./project-vocabulary.ts";
+import { openIncidentsOf } from "./ticket-port/open-incidents.ts";
 // A LEAF too (it imports `newest-check-run.ts` and `pr-hold-state.ts`, which import nothing): the ONE decider of what counts as red.
 import { brokenChecks } from "./red-pr.ts";
 // A LEAF too: the closed grammar of what a declared wait is waiting FOR (#2996), and the two ages that bound how long one may stand unexplained.
@@ -152,6 +153,14 @@ const MAX_NAMED = 5;
 const AGREEMENT_READ_MS = 90_000;
 /** No capture on the fleet for this long, with work that needs it waiting, is the idle fleet the chairman found (#2937). */
 export const FLEET_IDLE_HOURS = 24;
+
+/**
+ * How long a fleet may stay on mixed Windows builds before `ceo` is woken (the chairman's ruling on a11ign/a11ign#4405: "a mixed fleet that stays mixed for more than 4 hours wakes ceo").
+ * THE LINE IS THE CONTRACT the control row files the incident with (`fleet-watch` files it on the first mismatch): an OPEN incident issue whose body carries this line on a line of its own
+ * IS the stopped line, and a CLOSED one is the fleet reading one build. The constant lives in the filing row; this one copies it, and the test pins the copy.
+ */
+export const FLEET_BUILD_MIXED_HOURS = 4;
+export const FLEET_BUILD_INCIDENT_LINE = "Incident: incident:fleet-build-mixed";
 /** Where the declared copies sit, relative to the TOOL's root: its own `lib/`, each file headed by what it was copied from (#3041: this was the monorepo's `packages/agent-org/src/lib`, which in the standalone tool is `src/lib`). */
 const COPIES_DIR = "src/lib";
 /** The tool's root, by its own location: `src/` is this file's directory, so the root is one up. Neither the project's layout nor a count of directories above it. */
@@ -211,6 +220,7 @@ export const SIGNALS = Object.freeze({
   IDLE_WITH_OPEN_ROWS: "idle-with-open-rows",
   SHELVED_CIRCLE: "row-shelved-against-the-pr-that-waits-on-it",
   RELEASE_FAILED: "release-run-failed",
+  FLEET_BUILD_MIXED: "fleet-build-mixed-over-4h",
   RELEASE_BEHIND_MAIN: "release-behind-main",
   BOARD_TRUTH: "board-disagrees-with-reality",
   CLASS_REPEAT: "class-repeat",
@@ -1318,6 +1328,50 @@ function tryJson(read: () => string): any {
   }
 }
 
+/** An open build incident, as `readFleetBuildIncidents` keeps it: its body was read for the line and is not kept. `createdAt` is ISO, as the API gives it. */
+export type FleetBuildIncident = { number: number; title: string; createdAt: string; };
+
+/**
+ * THE FACT FOR `fleetBuildMixedReading` (#4405): ONE REST CALL on the core pool for the OPEN issues labelled `incident` in `repo`, KEPT WHEN THEIR BODY CARRIES
+ * {@link FLEET_BUILD_INCIDENT_LINE} on a line of its own. A pull request is not an incident and is dropped. `null` is a refused or unparseable list, a stated unknown and never "no incident".
+ */
+export function readFleetBuildIncidents(run: (args: string[]) => string, repo: string): FleetBuildIncident[] | null {
+  const issues = openIncidentsOf(repo, run);
+  if (issues === null) return null;
+  return issues.filter((issue) => typeof issue.body === "string" && issue.body.split(/\r?\n/).some((line) => line.trim() === FLEET_BUILD_INCIDENT_LINE))
+    .map(({ number, title, createdAt }) => ({ number, title, createdAt }));
+}
+
+/** The box count the incident's title names (`Mixed Windows build across the fleet: <n> boxes behind <target>`), as the reading says it. */
+const boxesBehindOf = (title: string): string => {
+  const count = /(\d+) boxes? behind/.exec(title);
+  return count ? `${count[1]} boxes behind` : "box count not in its title";
+};
+
+/**
+ * SIGNAL 22 (#4405, the chairman's ruling): THE FLEET HAS STAYED ON MIXED WINDOWS BUILDS FOR `FLEET_BUILD_MIXED_HOURS`. An OPEN incident issue IS the stopped line: `fleet-watch` files it on the
+ * first mismatch, and it is closed only when the fleet reads one build, so an open one over the bound is a fleet that did not move forward. `incident` is {@link readFleetBuildIncidents}' answer,
+ * `null` for a refused read, which is unknown and NEVER clear. An incident with no creation time makes the answer unknown unless another trips, as the sibling readings do.
+ */
+export function fleetBuildMixedReading({ now, incident }: { now: number; incident: FleetBuildIncident[] | null; }): Reading {
+  const signal = SIGNALS.FLEET_BUILD_MIXED;
+  if (incident === null) return unknown(signal, "the open incident issues could not be read, so whether the fleet is on one Windows build is not known");
+  if (incident.length === 0) return clear(signal);
+  const dated = incident.map((issue) => ({ issue, openedAt: Date.parse(issue.createdAt) }));
+  const over = dated.filter(({ openedAt }) => Number.isFinite(openedAt) && now - openedAt >= FLEET_BUILD_MIXED_HOURS * MS_PER_HOUR).sort((a, b) => a.openedAt - b.openedAt);
+  if (over.length === 0) {
+    const undated = dated.filter(({ openedAt }) => !Number.isFinite(openedAt));
+    return undated.length === 0 ? clear(signal)
+      : unknown(signal, `${undated.length} open incident(s) carry no creation time, so how long the fleet has been mixed is not known`);
+  }
+  const oldest = over[0];
+  const named = over.slice(0, MAX_NAMED).map(({ issue, openedAt }) => `#${issue.number} (${boxesBehindOf(issue.title)}, open ${ageText(openedAt, now)})`);
+  const more = over.length > MAX_NAMED ? `, and ${over.length - MAX_NAMED} more` : "";
+  return { signal, status: "tripped", firstTrippedAt: oldest.openedAt + FLEET_BUILD_MIXED_HOURS * MS_PER_HOUR,
+    discriminator: `${signal}@${oldest.issue.number}`,
+    detail: `${over.length} build incident(s) have stood open over ${FLEET_BUILD_MIXED_HOURS} h with the fleet still on mixed Windows builds: ${named.join("; ")}${more}` };
+}
+
 /**
  * SIGNAL 21 (#4128, class fix for a11ign/a11ign#4084): A DORA REPOSITORY'S `main` HOLDS A SHIPPED-PATH COMMIT THAT NO RELEASE CARRIES, AND THE OLDEST IS OVER 24 HOURS OLD. Beside
  * `release-run-failed` (signal 18), which sees a release that ran and failed; this sees one that never started. ONE READING PER TRIPPED REPOSITORY, each with its own discriminator
@@ -1471,7 +1525,7 @@ export function orgHealthReadings(facts: {
         drift: { behind: number; ahead: number; dirty: string[]; } | null; primarySince: number | null;
         fleet?: FleetCaptures | null; waiting?: FleetWaiting | null; copies?: CopyPair[] | null; overdue?: { items: OverdueCandidate[] | null; unread?: string[]; };
         waits?: { stale: Parameters<typeof staleWaitReading>[0]["stale"]; bare: Parameters<typeof waitWithoutReasonReading>[0]["bare"]; manual: number; } | null;
-        pools?: PoolReading[] | null; toolAgreement?: { result: ToolAgreement; } | null; nodeStrips?: NodeStripFact | null; teamAccess?: TeamAccessFact; autoOff?: AutoOffFact; stateRows?: Parameters<typeof stateLabelReading>[0]["rows"]; idle?: import("./idle-with-open-rows.ts").IdleRows; shelvedCircle?: ShelvedCircle[] | null; releaseRuns?: ReleaseRuns | null; releaseBehind?: import("./release-behind-main.ts").RepoFact[] | null; boardTruth?: Parameters<typeof boardTruthReading>[0]["audit"];
+        pools?: PoolReading[] | null; toolAgreement?: { result: ToolAgreement; } | null; nodeStrips?: NodeStripFact | null; teamAccess?: TeamAccessFact; autoOff?: AutoOffFact; stateRows?: Parameters<typeof stateLabelReading>[0]["rows"]; idle?: import("./idle-with-open-rows.ts").IdleRows; shelvedCircle?: ShelvedCircle[] | null; releaseRuns?: ReleaseRuns | null; fleetBuildIncident?: FleetBuildIncident[] | null; releaseBehind?: import("./release-behind-main.ts").RepoFact[] | null; boardTruth?: Parameters<typeof boardTruthReading>[0]["audit"];
         classRepeat?: import("./class-repeat.ts").ClassRepeatFact | null; milestoneClock?: Omit<MilestoneClockFact, "endedAt"> | null;
     }): Reading[] {
   const readings = [noMergeReading(facts), redPrReading(facts), refusedRowReading(facts),
@@ -1493,6 +1547,7 @@ export function orgHealthReadings(facts: {
   if (facts.idle !== undefined) readings.push(idleWithOpenRowsSignal({ idle: facts.idle }));
   if (facts.shelvedCircle !== undefined) readings.push(shelvedCircleReading({ circles: facts.shelvedCircle }));
   if (facts.releaseRuns !== undefined) readings.push(releaseFailedReading({ releaseRuns: facts.releaseRuns }));
+  if (facts.fleetBuildIncident !== undefined) readings.push(fleetBuildMixedReading({ now: facts.now, incident: facts.fleetBuildIncident }));
   if (facts.releaseBehind !== undefined) readings.push(...releaseBehindReadings({ now: facts.now, behind: facts.releaseBehind }));
   if (facts.classRepeat !== undefined) readings.push(...classRepeatReadings({ now: facts.now, classRepeat: facts.classRepeat }));
   if (facts.milestoneClock !== undefined) readings.push(milestoneClockReading({ now: facts.now, fact: facts.milestoneClock === null ? null : { ...facts.milestoneClock, endedAt: facts.lastMergedAt } }));
@@ -1570,6 +1625,10 @@ const REMEDY = (Object.freeze({
     + "`gh run rerun <run id> --failed -R <the repository in the URL above>`. A cause FIXED ON `main` since (the run is at an older sha) needs a NEW run, which a rerun of the old one does not give: "
     + "`gh workflow run release.yml --ref main -R <repository>`. If the cause is not fixed yet, FILE THE FIX `" + READY_LABEL + "` WITH AN OWNER in this turn. "
     + "Do not wait for the next changeset: a run is only ever started by a merge that carries one, so waiting leaves it red for as long as nobody merges one. It clears the tick a later run succeeds.",
+  [SIGNALS.FLEET_BUILD_MIXED]: "An OPEN `incident` issue whose body carries `" + FLEET_BUILD_INCIDENT_LINE + "` has stood open for " + FLEET_BUILD_MIXED_HOURS + " hours or more, so the fleet has stayed on MIXED Windows builds that long and did not move forward. "
+    + "The incident is named above with its box count and its age. READ THE INCIDENT and the fleet's build status before choosing: `fleet-watch` files it on the first mismatch and closes it only when the fleet reads one build. "
+    + "Do not close the incident by hand to clear this; the signal clears when the incident is closed by the fleet, and a close the fleet did not earn only hides the mismatch. Offer the fix that moves the lagging boxes to the target build as a row, `" + READY_LABEL + "`, with an owner. "
+    + "It clears the tick no open incident is over the bound.",
   [SIGNALS.RELEASE_BEHIND_MAIN]: "A repository's `main` holds a commit on a releasable path that no release carries, and the oldest is over a day old: a consumer is on the old version. The release, the oldest commit "
     + "and its pull request are named above. FIND WHY IT WAS NOT RELEASED before choosing: the pull request carried no changeset (`changeset-required` is the gate that stops that, and this repository may not have adopted it), "
     + "a release run failed after the merge (`release-run-failed` would be tripped too), or the change should not ship and its pull request lacks a `no-release: <reason>` line. Then ADD THE CHANGESET in a pull request "
