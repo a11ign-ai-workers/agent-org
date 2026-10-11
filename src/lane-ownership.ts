@@ -30,7 +30,23 @@ export type Lane = {lane: string, owner: string, branchPrefixes: string[], paths
  * `docs/lane-ownership.json` names the ROLE and never the account, so the mapping lives here; `work-gate.ts` and
  * `codeowners-lane-sync.test.ts` each re-assert their own copy (#3254 files the work-gate one).
  */
-export const ROLE_LOGIN = Object.freeze({ ceo: "a11ign-ai-leads" });
+export const ROLE_LOGIN: Readonly<Record<string, readonly string[]>> = Object.freeze({
+  // The leads' user account, and the `managers` App the leads now act as (#816): `a11ign-managers[bot]` is what `gh api graphql
+  // viewer` and REST print, `a11ign-managers` what a GraphQL `Bot` author prints (`gh pr view --json author`, read by `arm-pr`
+  // and the sweep). One App serves `ceo`, `product-manager` and `orchestrator`, so the bot cannot tell them apart; that matches
+  // the ruling's own population, which shares `a11ign-ai-leads` today.
+  ceo: Object.freeze(["a11ign-ai-leads", "a11ign-managers[bot]", "a11ign-managers"]),
+});
+
+/**
+ * Every role `host.json` may declare as `github-apps` (`GITHUB_ROLES`), and whether its bot login owns a review-only lane's
+ * role through `ROLE_LOGIN`. A new App role must be listed here, so it cannot be one nobody decided about (#816).
+ */
+export const APP_ROLE_LANE_OWNER: Readonly<Record<string, string | null>> = Object.freeze({
+  scheduler: null,
+  workers: null,
+  managers: "ceo",
+});
 
 /**
  * The lanes, read from the file `ceo` owns.
@@ -99,7 +115,7 @@ export function reviewOnlyPathsIn(files: readonly string[], lanes: { lanes: Lane
  */
 export function ownsReviewOnlyLane(author: string | null | undefined, lanes: { lanes: Lane[]; } | null) {
   return Boolean(author) && Boolean(lanes?.lanes.some(
-    (lane) => lane.reviewOnly === true && (ROLE_LOGIN as Record<string, string>)[lane.owner] === author));
+    (lane) => lane.reviewOnly === true && ROLE_LOGIN[lane.owner]?.includes(author as string)));
 }
 
 /**
