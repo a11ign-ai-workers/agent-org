@@ -8,7 +8,9 @@
 
 **Before the change**, the done-when fails: all three seats are started. **After**, the file passes 4 of 4, and the 127 test files that import `wake.ts` pass 2636 of 2636. `pnpm run typecheck` exits 0.
 
-Acceptance: `bash -c 'cd ~/repos/agent-org && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --test src/packaging/wake-seat-start-budget.test.ts'`
+Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --test src/packaging/wake-seat-start-budget.test.ts`
+
+The row's own command cds into `~/repos/agent-org`, which has no `wake-seat-start-budget.test.ts` until this PR merges, so it cannot pass for this PR. The command here runs the same file from the repository root.
 
 Closes a11ign/agent-org#1052.
 
