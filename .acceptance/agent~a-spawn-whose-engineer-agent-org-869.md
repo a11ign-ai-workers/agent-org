@@ -22,6 +22,10 @@ Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json 
 
 Closes a11ign/agent-org#869
 
+Outside-Region: src/wake.ts — the row's Region lists it without the `agent-org:` key, so `pr:open` reads it as a path of the first declared repository (a11ign/a11ign) and this tree is a11ign/agent-org; the file IS in the row's Region
+Outside-Region: src/wake-spawn-brief-absent.test.ts — the row's Region lists it without the `agent-org:` key, so `pr:open` reads it as a path of the first declared repository (a11ign/a11ign) and this tree is a11ign/agent-org; the file IS in the row's Region
+Outside-Region: src/wake-spawn-worktree.test.ts — the row's Region lists it without the `agent-org:` key, so `pr:open` reads it as a path of the first declared repository (a11ign/a11ign) and this tree is a11ign/agent-org; the file IS in the row's Region
+Outside-Region: src/packaging/wake-drain.test.ts — the row's Region lists it without the `agent-org:` key, so `pr:open` reads it as a path of the first declared repository (a11ign/a11ign) and this tree is a11ign/agent-org; the file IS in the row's Region
 Outside-Region: .changeset/a-spawn-whose-engineer-brief-869.md — the entry a project that pins a tag reads.
 
 platform: n/a (the existing `exists` seam and `roleBriefPath` are reused, not retyped)
