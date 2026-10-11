@@ -46,6 +46,9 @@ const DECIMALS = 2;
 const GH_MAX_BUFFER = 64 * 1024 * 1024;
 const GH_TIMEOUT_MS = 120 * 1000;
 const SEARCH_PAGE = 100;
+/** a reading with more than this share of its merged rows UNMEASURED prints PARTIAL beside the mean */
+const PARTIAL_SHARE = 0.1;
+const PERCENT = 100;
 const CLAIM_MARKER = "<!-- row-claim: claim record -->";
 
 export type Wake = { at: number, bytes: number, session: string | null };
@@ -277,6 +280,22 @@ export function workerRowFor(wake: Wake, instances: Instance[], claimedAt: Map<R
   return started.length > 0 ? { row: started[0].row } : { reason: "before-any-claim" };
 }
 
+/**
+ * The org records a row of a keyed tracker's worker as the BARE number (`worker-agent-org-804` has `rows: [804]`), because the instance's name already says which
+ * tracker it works in. A bare number reads as the project's own tracker's row, so the join to `agent-org#804` found no claimant and 83 of 176 rows read UNMEASURED
+ * (agent-org#804). A `worker-<key>-<n>` instance of a declared key therefore has its bare numbers keyed; an already keyed ref is left as it is.
+ * @param {Instance[]} instances
+ * @param {TrackerRef[]} trackers
+ */
+export function keyInstanceRows(instances: Instance[], trackers: TrackerRef[]): Instance[] {
+  const keys = trackers.map((tracker) => tracker.key).filter((key) => key !== "");
+  return instances.map((instance) => {
+    const key = keys.find((candidate) => new RegExp(`^worker-${candidate}-[0-9]+$`).test(instance.session));
+    if (key === undefined) return instance;
+    return { ...instance, rows: instance.rows.map((row) => (typeof row === "number" ? rowName(key, row) : row)) };
+  });
+}
+
 export type MergedRow = { row: number, key?: string, repo: string, firstOpenedAt: number, lastOpenedAt: number, mergedAt: number, pulls: number[] };
 export type SessionWake = Wake & { cause: string, typedAt: number, session: string };
 /**
@@ -294,8 +313,9 @@ export function measure(input: {
         window: { from: number; to: number; }; pulls: PullRequest[]; transcripts: Transcript[]; ledger: LedgerEntry[]; instances: Instance[];
         claimedAt: Map<RowRef, number | null>; rowRepo: string; trackers?: TrackerRef[]; unreadClaims?: UnreadClaims[]; codexRollouts?: number;
     }) {
-  const { window, pulls, transcripts, ledger, instances, claimedAt, rowRepo } = input;
+  const { window, pulls, transcripts, ledger, claimedAt, rowRepo } = input;
   const trackers = input.trackers ?? [{ key: "", repo: rowRepo }];
+  const instances = keyInstanceRows(input.instances, trackers);
   const rows = mergedTrackerRows(pulls, window, trackers);
   const bySession = wakesBySession(transcripts, ledger);
   const claimants = new Map(rows.map((row) => [refOf(row), instances.filter((instance) => instance.rows.includes(refOf(row)))]));
@@ -431,6 +451,9 @@ function report(input: {
     rows: input.readings.sort((a, b) => a.row - b.row || (a.key ?? "").localeCompare(b.key ?? "")),
     mergedRows: input.readings.length,
     measuredRows: measured.length,
+    // The share of merged rows the mean is silent about: above PARTIAL_SHARE the mean is a mean of part of the population and must say so (agent-org#804).
+    unmeasuredShare: input.readings.length === 0 ? 0 : (input.readings.length - measured.length) / input.readings.length,
+    partial: input.readings.length > 0 && (input.readings.length - measured.length) / input.readings.length > PARTIAL_SHARE,
     unmeasured: input.readings.filter((reading) => !reading.measured).map((reading) => ({ row: reading.row, ...(reading.key ? { key: reading.key } : {}), reason: reading.unmeasured })),
     attributedWakes: totalWakes,
     wakesPerRow: { mean: mean(wakes), median: median(wakes) },
@@ -499,8 +522,8 @@ export function renderReading(reading: ReturnType<typeof measure>) {
   const lines = [
     "DEFINITIONS", ...DEFINITIONS.map((line) => `- ${line}`), "",
     `window by merge time: ${iso(reading.window.from)} .. ${iso(reading.window.to)}`,
-    `merged rows: ${reading.mergedRows} (measured ${reading.measuredRows}, UNMEASURED ${reading.unmeasured.length})`,
-    `wakes attributed: ${reading.attributedWakes}; wakes per merged row: mean ${fixed(reading.wakesPerRow.mean)}, median ${fixed(reading.wakesPerRow.median)}`,
+    `merged rows: ${reading.mergedRows} (measured ${reading.measuredRows} of ${reading.mergedRows}, UNMEASURED ${reading.unmeasured.length} = ${Math.round(reading.unmeasuredShare * PERCENT)}%)`,
+    `wakes attributed: ${reading.attributedWakes}; wakes per merged row: mean ${fixed(reading.wakesPerRow.mean)}${reading.partial ? ` PARTIAL (measured ${reading.measuredRows} of ${reading.mergedRows} rows: not the org's mean)` : ""}, median ${fixed(reading.wakesPerRow.median)}`,
     `wakes after the row's last pull request opened: ${reading.afterOpened}; after it merged: ${reading.afterMerged}; stale at typing: ${reading.stale}`,
     `bytes per wake: ${fixed(reading.bytesPerWake)}; compactions seen: ${reading.compactions}`,
     `daily mean wakes per row: ${reading.daily.map((day) => `${day.day}=${fixed(day.mean)} (n=${day.rows})`).join(", ") || "none"}`,
