@@ -1,0 +1,40 @@
+[Unit]
+# THE GITHUB EVENT RECEIVER -- agent-org#980, a11ign/a11ign#5043 (the gate on GitHub events). GitHub's webhook deliveries, received on LOOPBACK, their `X-Hub-Signature-256`
+# verified over the raw body, and appended to a local queue, one JSON line per accepted event. `src/event-receiver.ts` has the design.
+#
+# SHIPPED ONLY ON A HOST THAT ASKS FOR IT: this template is listed, installed and checked only when the host's declaration says `"events": { "source": "webhook", ... }`
+# (`HOST_OPTIONAL_UNITS`). On `poll`, the default, or with no `events` block, it is not in `shippedUnits`, `host:check` neither lists nor misses it, and an installed copy is an
+# orphan that `host:install` removes. THE REVERT IS ONE LINE, `"source": "poll"`, and `agent-org host:install`.
+#
+# A LONG-RUNNING SERVICE NO CLOCK STARTS, like `otel-receiver.service` (`LONG_RUNNING_TEMPLATES`): `enable --now` on the SERVICE is what runs it.
+# IT LISTENS ON 127.0.0.1:@@eventsPort@@ and nowhere else, with no flag to change the address.
+# THE TUNNEL (`events.receiver.tunnel`: Cloudflare or Tailscale) IS NOT STARTED HERE: it is the host's own step, and it must point at http://127.0.0.1:@@eventsPort@@ for a delivery to reach this process.
+#
+# THE SECRET IS A PATH, NEVER A VALUE: `--secret-file` names the file the host keeps it in, which the program reads at start. Nothing about the secret is in the repository or in this text.
+Description=a11ign: receive GitHub's webhook deliveries on loopback, verify their signature and append them to the event queue (agent-org#980)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@@checkout@@
+
+# SAME REASON EVERY OTHER SHIPPED SERVICE DECLARES THEM: a systemd unit gets no login shell's PATH and no HOME.
+Environment=PATH=@@binDir@@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=@@home@@
+
+# V8'S COMPILE CACHE GOES UNDER THE HOME, NOT /tmp -- #2458; `host-units.test.ts` pins it on every shipped service.
+Environment=NODE_COMPILE_CACHE=%h/.cache/node-compile-cache
+
+# THE WORKERS ACCOUNT, DECLARED THOUGH THIS PROGRAM MAKES NO `gh` CALL: a shipped service that names no account is a finding (#3643), because the first script it grows
+# a `gh` call in would act as a person.
+Environment=GH_CONFIG_DIR=@@workersDir@@/gh
+
+# PORT, SECRET FILE AND QUEUE COME FROM `host.events.receiver` AND THE HOST'S STATE DIRECTORY (`templateValues`); none is defaulted here.
+ExecStart=%h/.local/bin/node packages/agent-org/src/event-receiver.ts --port @@eventsPort@@ --secret-file @@eventsSecretFile@@ --queue @@eventsQueue@@
+
+# RESTART WHAT FAILED. A port already taken is a failure that mends when the other listener goes, and the program reads the ids it has seen from a ledger it scans again at each start.
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
