@@ -48,7 +48,7 @@ function drive({ region, head = LOCAL, rest = [], wired = true, git = gitFor() }
   const out: string[] = [];
   const err: string[] = [];
   let acceptance = 0;
-  const argv = ["create", "--draft", "--head", BRANCH, ...rest, "--body", body];
+  const argv = ["create", "--draft", "--head", BRANCH, ...rest, "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`];
   const code = main(argv, {
     run: (args: string[]) => { if (!args.includes("--add-label")) sent.push(args); },
     git,
@@ -87,7 +87,7 @@ test("agent-org#753 positive: a bare path of a row that STATES the other reposit
   const stated = `The repository is **\`${OTHER}\`**; paths are relative to its root.\n\n${row(["src/pr-open.ts"])}`;
   const sent: string[][] = [];
   const asked: string[] = [];
-  const code = main(["create", "--draft", "--head", BRANCH, "--body", body], {
+  const code = main(["create", "--draft", "--head", BRANCH, "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`], {
     run: (args: string[]) => { if (!args.includes("--add-label")) sent.push(args); },
     git: gitFor(), prHead: () => null, runAcceptance: () => 0, readFile: () => body, rowBody: () => stated,
     rootFiles: new Set<string>(), code: CODE, owner: () => "ceo", login: () => "a11ign-ai-workers",

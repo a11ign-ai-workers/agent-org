@@ -34,7 +34,7 @@ function openPr(body: any, deps = { rowLabels }) {
   const sent: any[] = [];
   const err: any[] = [];
   const out: any[] = [];
-  const code = prOpen(["create", "--draft", "--body", body], {
+  const code = prOpen(["create", "--draft", "--body", `${body}\nDraft-because: a test of the wrapper, not a review\n`], {
     run: (a) => { sent.push(a); }, git: gitAddingAcceptance, readFile: () => body, prHead: () => ({ ref: "x", oid: "x" }),
     runAcceptance: () => 0, runMutation: () => 0, owner: () => "ceo", out: (l) => { out.push(l); }, err: (l) => { err.push(l); },
     ...deps,

@@ -1,11 +1,11 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 99,
+    "files": 100,
     "spawns": 137,
-    "calls": 404,
+    "calls": 405,
     "shapes": {
-      "api rest": 145,
+      "api rest": 146,
       "api graphql": 39,
       "issue list": 38,
       "issue view": 34,
@@ -861,6 +861,14 @@
         "$STATE_LABEL",
         "$STATE_OF_LABEL"
       ],
+      "parsesCloses": false
+    },
+    "src/ticket-port/open-incidents.ts": {
+      "spawns": 0,
+      "calls": {
+        "api rest": 1
+      },
+      "labels": [],
       "parsesCloses": false
     },
     "src/ticket-port/open-pulls.ts": {

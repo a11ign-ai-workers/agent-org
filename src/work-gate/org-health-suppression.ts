@@ -51,6 +51,7 @@ export const ORG_HEALTH_CLASSES: Readonly<Record<string, { severity: "page"; } |
   "fleet-auto-off-refusing": PAGE,
   "release-run-failed": PAGE,
   "release-behind-main": PAGE,
+  "fleet-build-mixed-over-4h": PAGE,
   "api-pool-low": PAGE,
   "node-cannot-strip": PAGE,
   "github-incident": PAGE,

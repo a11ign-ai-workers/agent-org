@@ -88,7 +88,7 @@ function open(project: ReturnType<typeof fixture>, { draft, body = BODY, accepta
   const out: string[] = [];
   const err: string[] = [];
   const head = git(project.author, "rev-parse", "HEAD");
-  const code = main(["create", ...(draft ? ["--draft"] : []), "--head", "agent/x", "--body-file", "body.md", "--body", body], {
+  const code = main(["create", ...(draft ? ["--draft"] : []), "--head", "agent/x", "--body-file", "body.md", "--body", draft ? `${body}\nDraft-because: a test of the wrapper, not a review\n` : body], {
     run: (args) => { sent.push(args); },
     git: (args) => (args[0] === "diff" ? (args.includes("--diff-filter=A") ? ACCEPTANCE_FILE : `work.txt\0${ACCEPTANCE_FILE}`) : args.includes("--abbrev-ref") ? "agent/x" : head),
     readFile: () => body,
