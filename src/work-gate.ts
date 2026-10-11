@@ -74,11 +74,11 @@ import { sandboxGitEnv } from "./lib/git-env.ts";
 // graph of a script that runs 720 times a day, to use a function it calls only when already refusing.
 import { poolDiagnosis, refusalPoolLine, poolFromRateLimitField } from "./api-pool.ts";
 import { declaredGhAccount } from "./gh-identity.ts";
-import { stateEntryPath } from "./host-config.ts"; // #2799
+import { hostConfigPath, stateEntryPath } from "./host-config.ts"; // #2799; #5032: `hostConfigPath`, where the emergency-priority option is declared
 // #2848: THE REPEATING-LINE QUESTION, in its own leaf for the reason `disk-headroom.ts` is one: it reads the journal, not GitHub.
 import { REPEAT_TICKS, normaliseLine, repeatingLinesTick, type RepeatingGroup } from "./repeating-lines.ts";
 // #2936: THE ORG-HEALTH QUESTION, in its own leaf for the same reason: relative imports only, so the gate keeps the property its own header states.
-import { redSinceOf, readToolAgreement, readReleaseRuns, readFleetBuildIncidents } from "./org-health.ts";
+import { redSinceOf, readToolAgreement, readReleaseRuns, readFleetBuildIncidents, SIGNALS as ORG_HEALTH_SIGNALS } from "./org-health.ts";
 import { ghQueueTick } from "./gh-ledger.ts"; // #4898
 import { readNodeStrips } from "./node-strips-types.ts";
 import { liveClassRepeatIo, readClassRepeat } from "./class-repeat.ts";
@@ -123,7 +123,7 @@ import { isRowsByLabelRead, readRowsByLabel, readUnlessRefused, type LabelledRea
 // #2356: A RED `main` WAKES A FIXER. Imports only `node:*`, `parent-recheck-summary.ts` and the repo identity,
 // so the gate keeps the property its own header states -- it runs before any `pnpm install` or build.
 import { readTrunkRed, trunkOfCodeRepository, trunkRedOrders } from "./trunk-red.ts";
-import { recordIgnoredChairmanLabels, recordTickFailures as recordFailuresOf } from "./failure-recorders.ts";
+import { recordEmergencyPriority, recordIgnoredChairmanLabels, recordTickFailures as recordFailuresOf } from "./failure-recorders.ts";
 // #2163: FREE BYTES AND FREE INODES. Imports only `node:*`, so the gate keeps the property its own header states.
 import { diskHeadroom, MIN_FREE_FRACTION } from "./disk-headroom.ts";
 // #2470: A CLAIM THAT DOES NOT MOVE. A leaf, like every import above, so the gate keeps the property its own header states.
@@ -5117,7 +5117,7 @@ export function stampLookup(read: () => Map<string, string> | null = readWorktre
  * @param hierarchy ABSENT MEANS NOT ASKED: `priority` first, then the lowest row number, exactly as before this existed
  */
 function offerOrder(unclaimed: any[], hierarchy?: OfferHierarchy) {
-  const tier = (row: any) => (isChairmanRow(row, hierarchy?.chairmanRows) ? 0 : labelsOf(row).includes(PRIORITY_LABEL) ? 1 : 2);
+  const tier = (row: any) => (isChairmanRow(row, hierarchy?.emergencyRows) ? -1 : isChairmanRow(row, hierarchy?.chairmanRows) ? 0 : labelsOf(row).includes(PRIORITY_LABEL) ? 1 : 2);
   const rank = (row: any) => milestoneRank(row, hierarchy?.milestoneRanking);
   return [...unclaimed].sort((a, b) => tier(a) - tier(b) || rank(a) - rank(b) || Number(a.number) - Number(b.number));
 }
@@ -5131,6 +5131,9 @@ export type OfferHierarchy = {
   /** `recorded` (#730): the gate wrote this label's ledger line, or found it written. Absent is not recorded: the order then asks `ceo` to type it. */
   ignored?: { number: number; actor: string | null; recorded?: boolean; }[];
   milestoneRanking?: readonly string[];
+  /** #5032: the rows whose `priority:emergency` is HONOURED this tick -- ahead of the chairman's -- and the labels that were not. Absent is not asked. */
+  emergencyRows?: ReadonlySet<number>;
+  emergencyIgnored?: EmergencyIgnored[];
 };
 
 const chairmanRowsOf = (hierarchy?: OfferHierarchy) => hierarchy?.chairmanRows;
@@ -5179,16 +5182,188 @@ export function readChairmanPriority(rows: any[], run: (args: string[]) => strin
   return { chairmanRows, ignored, unread };
 }
 
-/** The login that added `priority:chairman` to the row LAST, or `null` when the history shows no such event. @param {number} number @param {(args: string[]) => string} run */
-function newestLabeller(number: number, run: (args: string[]) => string): string | null {
+/** The login that added `label` (`priority:chairman`, or #5032's `priority:emergency`) to the row LAST, or `null` when the history shows no such event. @param {number} number @param {(args: string[]) => string} run */
+function newestLabeller(number: number, run: (args: string[]) => string, label: string = CHAIRMAN_PRIORITY_LABEL): string | null {
   const out = run(["api", `repos/{owner}/{repo}/issues/${number}/events`, "--paginate", "--jq",
-    `.[] | select(.event == "labeled" and .label.name == "${CHAIRMAN_PRIORITY_LABEL}") | .actor.login`]);
+    `.[] | select(.event == "labeled" and .label.name == "${label}") | .actor.login`]);
   const newest = out.split("\n").map((line) => line.trim()).filter((line) => line !== "").at(-1) ?? null;
   return newest === "null" ? null : newest; // jq prints `null` for an event whose actor is gone: the newest labeller is then UNKNOWN, not an older one's
 }
 
+// --- #5032: `priority:emergency`, THE ONE PRIORITY AN AGENT MAY RAISE, AND ONLY WHILE THE ORG IS BLOCKED ----------------------------------------------
+//
+// THE CHAIRMAN'S RULING (2026-10-11): only the chairman sets priority, except in an emergency where everything is blocked (every claim refused, every PR red on shared CI, the gate blind).
+// `priority:chairman` stays the chairman's login's alone (#4524) and an agent's is still ignored and recorded (#730). This is a SEPARATE label, so that the two can never be confused in
+// the history: it is honoured only when ALL of these hold, each read from the tracker on every tick and none from the label itself --
+//   1. the option is ON (`emergencyPriority.enabled` in the host declaration; absent is OFF, and OFF reads nothing and says nothing);
+//   2. the newest `labeled` event for it names a login in `setters` (the managers App or the leads login: the identities `ceo` writes as);
+//   3. the row's body carries an `Incident: <ref>` line (`#889` or `a11ign/agent-org#889`) naming an item that is OPEN, labelled `incident`, and whose own `Incident: <key>` line
+//      is one of `incidentKeys` -- the org-blocking ones. An incident that is CLOSED expires the label (the gate removes it); one that is not org-blocking, or no link, is misuse.
+// A history or an incident that cannot be READ fails closed (not honoured, and the label is NOT removed): an outage must neither grant nor take away an emergency.
+//
+// KNOWN GAPS, said here and on the row: the setter test is by IDENTITY, so `product-manager` and `orchestrator`, which share the managers identity with `ceo`, pass it;
+// the announcement to the chairman's channel is NOT sent here: the gate writes one `emergency-priority-used` ledger line per use, and `messaging/sources/emergency-priority.ts`
+// tells the chairman from it; and `row-claim.ts` does not yet know this label, so B4 still holds an emergency row behind a holder of its files (the chairman row yields there, #4793).
+
+export const EMERGENCY_PRIORITY_LABEL = "priority:emergency";
+/** The label an incident item carries, as `messaging/sources/readers.ts` lists them (`readFixRow`). */
+const INCIDENT_ITEM_LABEL = "incident";
+
+/** The identities `ceo` writes as: the managers App (a GraphQL node, a REST event and a CLI listing each name it differently) and the leads login. */
+export const EMERGENCY_SETTER_LOGINS = Object.freeze(["a11ign-managers[bot]", "a11ign-managers", "app/a11ign-managers", "a11ign-ai-leads"]);
+/**
+ * The `Incident: <key>` keys that block the org, as the tracker carries them (measured 2026-10-11 against the open and closed `incident` items): `incident:trunk-red` (a red `main`, the shared CI
+ * failure), `incident:gate-crash` (the gate blind) and `incident:ci-permission` (CI cannot run), which `messaging/sources/incidents.ts` emits; and the two org-health signals the chairman named,
+ * a claim-refusal storm and a failed release, which are not `incident:` keys of their own and so are named `incident:<signal>` for the fix row that links them. Not here: `incident:fleet-down`
+ * (the lab, not the org's work), `incident:fleet-build-mixed`. `emergencyPriority.incidentKeys` in the host declaration replaces the list.
+ */
+export const ORG_BLOCKING_INCIDENT_KEYS = Object.freeze(["incident:trunk-red", "incident:gate-crash", "incident:ci-permission", `incident:${ORG_HEALTH_SIGNALS.CLAIM_REFUSAL_STORM}`, `incident:${ORG_HEALTH_SIGNALS.RELEASE_FAILED}`]);
+
+export type EmergencyPriorityOption = { enabled: boolean; setters: readonly string[]; incidentKeys: readonly string[]; };
+export const EMERGENCY_PRIORITY_OFF: Readonly<EmergencyPriorityOption> = Object.freeze({ enabled: false, setters: EMERGENCY_SETTER_LOGINS, incidentKeys: ORG_BLOCKING_INCIDENT_KEYS });
+
+const sayEmergency = (line: string) => process.stderr.write(`emergency-priority: ${line}\n`);
+
+/**
+ * The option from the host declaration's text. OFF unless `emergencyPriority.enabled` is exactly `true`: an absent block, a block that is not an object, and text that is not JSON all read
+ * as off (the last two are said, once a tick, because a typo that silently disables an emergency path is the wrong polarity to hide). `setters` and `incidentKeys` replace the defaults
+ * only as a non-empty list of strings; anything else is said and the defaults stand, which is the narrower of the two readings.
+ */
+export function parseEmergencyPriorityOption(text: string): EmergencyPriorityOption {
+  let block: any;
+  try {
+    block = JSON.parse(text)?.emergencyPriority;
+  } catch (err: any) {
+    sayEmergency(`the host declaration is not JSON (${String(err?.message ?? err).split("\n")[0]}); the option is OFF`);
+    return EMERGENCY_PRIORITY_OFF;
+  }
+  if (block === undefined) return EMERGENCY_PRIORITY_OFF;
+  if (typeof block !== "object" || block === null || Array.isArray(block)) {
+    sayEmergency("`emergencyPriority` is not an object; the option is OFF");
+    return EMERGENCY_PRIORITY_OFF;
+  }
+  if (block.enabled !== true) return EMERGENCY_PRIORITY_OFF;
+  const names = (key: "setters" | "incidentKeys", fallback: readonly string[]): readonly string[] => {
+    const value = block[key];
+    if (value === undefined) return fallback;
+    if (Array.isArray(value) && value.length > 0 && value.every((item) => typeof item === "string" && item !== "")) return Object.freeze([...value]);
+    sayEmergency(`\`emergencyPriority.${key}\` is not a non-empty list of strings; the default stands`);
+    return fallback;
+  };
+  return { enabled: true, setters: names("setters", EMERGENCY_SETTER_LOGINS), incidentKeys: names("incidentKeys", ORG_BLOCKING_INCIDENT_KEYS) };
+}
+
+/** The option from the host declaration file. An absent file is OFF quietly; one that cannot be read is OFF and said. @param {string} [path] */
+export function readEmergencyPriorityOption(path: string = hostConfigPath()): EmergencyPriorityOption {
+  try {
+    return parseEmergencyPriorityOption(readFileSync(path, "utf8"));
+  } catch (err: any) {
+    if (err?.code !== "ENOENT") sayEmergency(`the host declaration could not be read (${String(err?.message ?? err).split("\n")[0]}); the option is OFF`);
+    return EMERGENCY_PRIORITY_OFF;
+  }
+}
+
+export type EmergencyIgnored = { number: number; actor: string | null; why: "actor" | "no-incident-link" | "no-open-org-blocking-incident"; detail: string; recorded?: boolean; };
+export type EmergencyHonoured = { number: number; actor: string; incident: string; reason: string | null; fresh?: boolean; };
+type EmergencyVerdict = ({ kind: "honoured" } & EmergencyHonoured) | ({ kind: "ignored" } & EmergencyIgnored) | { kind: "expired"; number: number; incident: string; };
+
+/** The `Incident: <ref>` a row's body names: `#<n>` of this tracker or `<owner>/<repo>#<n>`, on a line of its own. `null` when none. */
+function incidentRefOf(body: string): string | null {
+  return /^Incident:[ \t]*((?:[\w.-]+\/[\w.-]+)?#\d+)[ \t]*$/m.exec(body)?.[1] ?? null;
+}
+
+/** The one-line reason `ceo` gives, `Emergency-reason: <line>` in the row's body. `null` when none (the label is still honoured: the reason is for the chairman's reading). */
+function emergencyReasonOf(body: string): string | null {
+  return /^Emergency-reason:[ \t]*(\S.*?)[ \t]*$/m.exec(body)?.[1] ?? null;
+}
+
+/** The item `ref` names, read from the tracker. THROWS when it cannot be read: closed and unreadable are different answers. @param {string} ref @param {(args: string[]) => string} run */
+function readIncidentItem(ref: string, run: (args: string[]) => string): { open: boolean; labels: string[]; body: string; } {
+  const [repo, number] = ref.split("#");
+  const out = run(["api", `repos/${repo === "" ? "{owner}/{repo}" : repo}/issues/${number}`, "--jq", "{state, body, labels: [.labels[].name]}"]);
+  const item = JSON.parse(out);
+  return { open: item?.state === "open", labels: Array.isArray(item?.labels) ? item.labels.map(String) : [], body: String(item?.body ?? "") };
+}
+
+/** Whether the item is an open `incident` whose `Incident: <key>` line names an org-blocking key. */
+function isOrgBlockingIncident(item: { labels: string[]; body: string; }, incidentKeys: readonly string[]): boolean {
+  if (!item.labels.includes(INCIDENT_ITEM_LABEL)) return false;
+  return [...item.body.matchAll(/^Incident:[ \t]*(incident:[\w-]+)[ \t]*$/gm)].some((match) => incidentKeys.includes(match[1]));
+}
+
+/** One labelled row's verdict, in the order the cheapest and most telling refusal comes first. THROWS when the history or the incident cannot be read. */
+function emergencyVerdict(row: any, option: EmergencyPriorityOption, run: (args: string[]) => string): EmergencyVerdict {
+  const number = Number(row.number);
+  const actor = newestLabeller(number, run, EMERGENCY_PRIORITY_LABEL);
+  if (actor === null || !option.setters.includes(actor)) {
+    return { kind: "ignored", number, actor, why: "actor", detail: actor === null ? "no event shows who added it" : `${actor} added it, and only ${option.setters.join(", ")} counts` };
+  }
+  const body = typeof row.body === "string" ? row.body : String(JSON.parse(run(["api", `repos/{owner}/{repo}/issues/${number}`, "--jq", "{body}"]))?.body ?? "");
+  const link = incidentRefOf(body);
+  if (link === null) return { kind: "ignored", number, actor, why: "no-incident-link", detail: "its body has no `Incident: <ref>` line naming the incident it fixes" };
+  const incident = link.startsWith("#") ? `${repoNow()}${link}` : link;
+  const item = readIncidentItem(link, run);
+  if (!item.open) return { kind: "expired", number, incident };
+  if (!isOrgBlockingIncident(item, option.incidentKeys)) {
+    return { kind: "ignored", number, actor, why: "no-open-org-blocking-incident", detail: `${incident} is open but is not an \`${INCIDENT_ITEM_LABEL}\` item whose \`Incident:\` key is one of ${option.incidentKeys.join(", ")}` };
+  }
+  return { kind: "honoured", number, actor, incident, reason: emergencyReasonOf(body) };
+}
+
+export type EmergencyReading = { emergencyRows: Set<number>; honoured: EmergencyHonoured[]; ignored: EmergencyIgnored[]; expired: { number: number; incident: string; }[]; unread: number[]; };
+
+/**
+ * WHICH ROWS' `priority:emergency` IS HONOURED THIS TICK. Reads only the rows that carry the label, and nothing at all when the option is off. Each is judged on its own and an
+ * unreadable one is `unread` (not honoured, not expired) and said, so one refused read costs that row one tick and no other row anything.
+ * @param {any[]} rows the Ready rows and the claimed ones @param {EmergencyPriorityOption} option @param {(args: string[]) => string} [run]
+ */
+export function readEmergencyPriority(rows: any[], option: EmergencyPriorityOption, run: (args: string[]) => string = defaultRun): EmergencyReading {
+  const reading: EmergencyReading = { emergencyRows: new Set(), honoured: [], ignored: [], expired: [], unread: [] };
+  if (!option.enabled) return reading;
+  for (const row of rows.filter((candidate) => labelsOf(candidate).includes(EMERGENCY_PRIORITY_LABEL))) {
+    try {
+      const verdict = emergencyVerdict(row, option, run);
+      if (verdict.kind === "honoured") { reading.emergencyRows.add(verdict.number); reading.honoured.push(verdict); }
+      else if (verdict.kind === "ignored") reading.ignored.push(verdict);
+      else reading.expired.push({ number: verdict.number, incident: verdict.incident });
+    } catch (err: any) {
+      reading.unread.push(Number(row.number));
+      sayEmergency(`could not read #${row.number} or its incident (${String(err?.message ?? err).split("\n")[0]}); its \`${EMERGENCY_PRIORITY_LABEL}\` is NOT honoured this tick, and NOT removed`);
+    }
+  }
+  for (const { number, detail } of reading.ignored) sayEmergency(`IGNORED the \`${EMERGENCY_PRIORITY_LABEL}\` on #${number}: ${detail}`);
+  return reading;
+}
+
+/** THE EXPIRY: an incident that closed takes the label off the row it was on. A refused write is said and retried next tick, the incident still being closed. */
+function removeExpiredEmergencyLabels(expired: EmergencyReading["expired"], run: (args: string[]) => string): void {
+  for (const { number, incident } of expired) {
+    try {
+      run(["issue", "edit", String(number), "--remove-label", EMERGENCY_PRIORITY_LABEL]);
+      sayEmergency(`${incident} is closed: removed \`${EMERGENCY_PRIORITY_LABEL}\` from #${number}`);
+    } catch (err: any) {
+      sayEmergency(`${incident} is closed but the label could not be removed from #${number} (${String(err?.message ?? err).split("\n")[0]}); it is not honoured meanwhile`);
+    }
+  }
+}
+
+/**
+ * `offerHierarchyNow`'s emergency half: the rows (Ready AND claimed, as the chairman's are, so a claimed holder's label expires too) read, the expired labels taken off, and the
+ * misuse and the uses written to the ledger HERE, where the tick builds them, and never in `readEmergencyPriority`.
+ */
+function emergencyHierarchyNow(rows: any[], openRows: any[], { emergency, run, stateDir, now }: { emergency: EmergencyPriorityOption; run?: (args: string[]) => string; stateDir: string; now: number; }): Pick<OfferHierarchy, "emergencyRows" | "emergencyIgnored"> {
+  if (!emergency.enabled) return {};
+  const seen = new Set(rows.map((row) => Number(row.number)));
+  const candidates = [...rows, ...openRows.filter((row) => !seen.has(Number(row.number)))];
+  const read = run ?? defaultRun;
+  const reading = readEmergencyPriority(candidates, emergency, read);
+  removeExpiredEmergencyLabels(reading.expired, read);
+  const recorded = recordEmergencyPriority({ ignored: reading.ignored, honoured: reading.honoured, repo: REPO, stateDir, now });
+  return { emergencyRows: reading.emergencyRows, emergencyIgnored: recorded.ignored };
+}
+
 /** #4524: a row the offer may not hold to the product-share floor -- the chairman's, or `priority`'s. @param {any} row @param {ReadonlySet<number> | undefined} chairmanRows */
-const exemptFromFloor = (row: any, chairmanRows: ReadonlySet<number> | undefined) => isChairmanRow(row, chairmanRows) || labelsOf(row).includes(PRIORITY_LABEL);
+const exemptFromFloor = (row: any, chairmanRows: ReadonlySet<number> | undefined, emergencyRows?: ReadonlySet<number>) => isChairmanRow(row, chairmanRows) || isChairmanRow(row, emergencyRows) || labelsOf(row).includes(PRIORITY_LABEL);
 
 /**
  * How a Ready row is CLAIMED, in words. The primary project's is exactly the sentence it always was.
@@ -5305,8 +5480,8 @@ function offeredByFloor(offerable: any[], { starts, declaration, shareLog = (lin
  * `NO PRODUCT ROW OFFERABLE` line asks `product-manager` to stock a shelf that, with a priority row on it, is not empty.
  * @param {any[]} offerable @param {Parameters<typeof offeredByFloor>[1] & { chairmanRows?: ReadonlySet<number> }} [read] `offeredByFloor`'s, and the verified chairman rows
  */
-export function offeredByShare(offerable: any[], read: NonNullable<Parameters<typeof offeredByFloor>[1]> & { chairmanRows?: ReadonlySet<number>; } = {}) {
-  const exempt = offerable.filter((row) => exemptFromFloor(row, read.chairmanRows));
+export function offeredByShare(offerable: any[], read: NonNullable<Parameters<typeof offeredByFloor>[1]> & { chairmanRows?: ReadonlySet<number>; emergencyRows?: ReadonlySet<number>; } = {}) {
+  const exempt = offerable.filter((row) => exemptFromFloor(row, read.chairmanRows, read.emergencyRows));
   if (exempt.length === 0) return offeredByFloor(offerable, read);
   const rest = offerable.filter((row) => !exempt.includes(row));
   return [...exempt, ...(rest.length === 0 ? [] : offeredByFloor(rest, read))];
@@ -5436,11 +5611,12 @@ function rowOrders(unclaimed: any[], replacing: Map<number, { branch: string; he
     // that lane. `lane:any` and no lane are the pool, which is what "engineers" means here.
     const owner = laneOwnerOf(row);
     const branches = replacing.get(Number(row.number));
+    const emergency = owner === null && isChairmanRow(row, hierarchy?.emergencyRows);
     const chairman = owner === null && isChairmanRow(row, chairmanRowsOf(hierarchy));
     orders.push({
       session: owner ?? "engineers",
       cause: "ready-row-unclaimed",
-      ...(chairman ? { startFresh: true } : {}),
+      ...(chairman || emergency ? { startFresh: true } : {}),
       ...(branches === undefined ? {} : { replaces: branches.map(({ branch, head }) => ({ branch, head })) }),
       subject: `row-${subjectRef(row.repoKey, row.number)}`,
       // The spawner names the branch and the instance's first message from it (#2405).
@@ -5448,7 +5624,7 @@ function rowOrders(unclaimed: any[], replacing: Map<number, { branch: string; he
       // THE ROW IS THE DISCRIMINATOR NOW, not the queue depth. Keyed on the count, every claim rewrote
       // every remaining order's key and re-woke someone for rows already being offered.
       discriminator: subjectRef(row.repoKey, row.number),
-      prompt: `${chairman ? CHAIRMAN_ROW_BANNER : ""}Ready row ${subjectMention(row)} is unclaimed${row.title ? `: ${row.title}` : ""}. ${branches === undefined ? claimSentence(row) : replacementSentence(row, branches)}\n`
+      prompt: `${emergency ? EMERGENCY_ROW_BANNER : chairman ? CHAIRMAN_ROW_BANNER : ""}Ready row ${subjectMention(row)} is unclaimed${row.title ? `: ${row.title}` : ""}. ${branches === undefined ? claimSentence(row) : replacementSentence(row, branches)}\n`
         // BOTH FLAGS OR NEITHER, and the primary refuses the work entirely: `row-claim` creates the
         // worktree from `--branch` AND `--worktree` together and refuses when given only one, and the
         // tooling will not run from the primary checkout at all. The first engineer woken by this
@@ -5473,6 +5649,9 @@ function rowOrders(unclaimed: any[], replacing: Map<number, { branch: string; he
 /** The first line of a chairman row's order: what it is, and that nothing the engineer is told elsewhere outranks it (#4524). */
 const CHAIRMAN_ROW_BANNER = `CHAIRMAN PRIORITY (the label was added by ${CHAIRMAN_LOGINS.join(", ")}): this row is to be picked up NEXT, ahead of every other row.\n`;
 
+/** The first line of an emergency row's order (#5032): what it is, who may have put it there, and that it outranks the chairman's own. */
+const EMERGENCY_ROW_BANNER = `EMERGENCY PRIORITY (\`${EMERGENCY_PRIORITY_LABEL}\`, set by ceo while an org-blocking incident is open): this row is to be picked up NEXT, ahead of every other row INCLUDING a \`${CHAIRMAN_PRIORITY_LABEL}\` one. The label removes itself when the incident closes.\n`;
+
 type HierarchyOrder = { session: string; cause: string; subject: string; discriminator: string; prompt: string; causeKey: string; };
 
 /**
@@ -5489,6 +5668,7 @@ export function hierarchyOrders(hierarchy: OfferHierarchy | undefined, { blocked
   return [
     ...blocked.filter((row) => hierarchy.chairmanRows?.has(row.number)).map(chairmanRefusedOrder),
     ...(hierarchy.ignored ?? []).map(ignoredLabelOrder),
+    ...(hierarchy.emergencyIgnored ?? []).map(emergencyIgnoredOrder),
     ...yielding.flatMap((entry) => entry.holders.flatMap((holder) => yieldOrder(entry.row, holder, { openRows, prs }))),
   ];
 }
@@ -5501,6 +5681,19 @@ function chairmanRefusedOrder({ number, reason }: { number: number; reason: stri
       + "The chairman asked for this row to be picked up next, so tell him now what is in the way and what would clear it, and do whatever in your lane clears it "
       + "(every other eligibility check still binds a chairman row: template sections, holds, a B4 overlap with another chairman row).",
     causeKey: `ceo/chairman-row-refused/${discriminator}` };
+}
+
+/** @param {EmergencyIgnored} ignored #5032: a `priority:emergency` the gate did NOT honour -- told to `ceo`, who is the only setter the label admits */
+function emergencyIgnoredOrder({ number, actor, why, detail, recorded }: EmergencyIgnored): HierarchyOrder {
+  const discriminator = `${number}-${actor ?? "unknown"}-${why}`;
+  return { session: "ceo", cause: "ready-row-unclaimable", subject: `row-${number}`, discriminator,
+    prompt: `\`${EMERGENCY_PRIORITY_LABEL}\` ON #${number} IS NOT HONOURED: ${detail}. `
+      + "The gate IGNORES it and offers the row as its other labels say. The label is for an org-blocking emergency only, set by `ceo`, on a row whose body names the open incident it fixes "
+      + "(an `Incident: <ref>` line) -- misuse of it is an incident, as a `priority:chairman` nobody but the chairman added is. "
+      + (recorded === true
+        ? "The gate has ALREADY RECORDED it (class `emergency-priority-not-honoured`, once for this row, actor and reason): do not type a ledger line. Take the label off if it should not stand."
+        : "It could not be written to the ledger: record it as an incident, and take the label off if it should not stand."),
+    causeKey: `ceo/emergency-priority-ignored/${discriminator}` };
 }
 
 /** @param {{ number: number, actor: string | null, recorded?: boolean }} ignored */
@@ -6649,7 +6842,7 @@ export function decide({ prs, readyRows, promotableRows = [], chairmanBlocked = 
   // causes above use: work that already EXISTS outranks work nobody has started.
   const { offerable, blocked, yielding } = partitionUnclaimed(readyRows, prFiles, { rowBranches, branchPrs, openRows, chairmanRows: chairmanRowsOf(offerHierarchy) });
   orders.push(...rowBranchOrders(readyRows, rowBranches, prs, branchPrs), ...incompleteRowOrders(readyRows)); // #2791, #3010, #3892
-  orders.push(...rowOrders(offeredByShare(offerable, { starts: engineerStarts, declaration: projectDeclaration, shareLog, shareMemory, chairmanRows: chairmanRowsOf(offerHierarchy) }), branchesToReplace(rowBranches, branchPrs), offerHierarchy), ...unclaimableRowOrders(offerable, claimRefusals)); // #2845: the offer, and its refusal
+  orders.push(...rowOrders(offeredByShare(offerable, { starts: engineerStarts, declaration: projectDeclaration, shareLog, shareMemory, chairmanRows: chairmanRowsOf(offerHierarchy), emergencyRows: offerHierarchy?.emergencyRows }), branchesToReplace(rowBranches, branchPrs), offerHierarchy), ...unclaimableRowOrders(offerable, claimRefusals)); // #2845: the offer, and its refusal
   orders.push(...hierarchyOrders(offerHierarchy, { blocked, yielding, openRows, prs })); // #4524: what the hierarchy says to the chairman's reader and to the holders it was offered over
 
   // #2139: AHEAD OF BOTH BACKLOG SURVEYS AND BEHIND EVERY OFFER, because it is neither. It names ONE row
@@ -8118,10 +8311,10 @@ export function readChairmanPriorityOfOffer(rows: any[], openRows: any[] = [], r
 }
 
 /** #4524: `main`'s one call for the hierarchy -- the verified chairman rows (a read per labelled row, none when no row is) and the project's declared ranking. @param {any[]} rows @param {any[]} openRows #4800: the claimed rows are read too */
-export function offerHierarchyNow(rows: any[], openRows: any[], { run, stateDir = REVIEWER_STATE_DIR, now = Date.now() }: { run?: (args: string[]) => string; stateDir?: string; now?: number; } = {}): OfferHierarchy {
+export function offerHierarchyNow(rows: any[], openRows: any[], { run, stateDir = REVIEWER_STATE_DIR, now = Date.now(), emergency = readEmergencyPriorityOption() }: { run?: (args: string[]) => string; stateDir?: string; now?: number; emergency?: EmergencyPriorityOption; } = {}): OfferHierarchy {
   const { chairmanRows, ignored } = readChairmanPriorityOfOffer(rows, openRows, run);
   // #730: a label the chairman did not add is a ledger incident, written HERE, where the tick builds `ignored`, and not in `readChairmanPriority`, which the claim reads too
-  return { chairmanRows, ignored: recordIgnoredChairmanLabels({ ignored, repo: REPO, stateDir, now }), milestoneRanking: homeProjectDeclaration().offerMilestones };
+  return { chairmanRows, ignored: recordIgnoredChairmanLabels({ ignored, repo: REPO, stateDir, now }), milestoneRanking: homeProjectDeclaration().offerMilestones, ...emergencyHierarchyNow(rows, openRows, { emergency, run, stateDir, now }) };
 }
 
 /**

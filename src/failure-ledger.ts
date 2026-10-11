@@ -40,6 +40,14 @@ export const MESSAGING_AUDIENCE_MISUSE_KIND = "messaging-audience-misuse";
  */
 export const CHAIRMAN_LABEL_NOT_CHAIRMAN_KIND = "chairman-label-not-chairman";
 
+/**
+ * #5032: what the gate records of `priority:emergency`. `emergency-priority-used` (ref `<repo>#<row>:<incident>`) is a label the gate HONOURED, one line per row and incident: the daily
+ * retro counts uses by it and `messaging/sources/emergency-priority.ts` tells the chairman from it. `emergency-priority-not-honoured` (ref `<repo>#<row>:<actor>:<why>`) is misuse.
+ * Neither is seeded in `FAILURE_KINDS`, for the reason the one above is not.
+ */
+export const EMERGENCY_PRIORITY_USED_KIND = "emergency-priority-used";
+export const EMERGENCY_PRIORITY_NOT_HONOURED_KIND = "emergency-priority-not-honoured";
+
 export type FailureEntry ={ classKey: string, at: number, ref: string };
 /** `at` is epoch ms; absent means the tick's own `now` (an event dated by its source, such as a hand fix, carries its own) */
 export type FailureEvent = { classKey: string, ref: string, at?: number };
