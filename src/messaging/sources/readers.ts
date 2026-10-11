@@ -394,14 +394,24 @@ export function readTicks({ stateDir, log = () => {}, limit = SAMPLE_LIMIT }: { 
   return records.slice(-limit).reverse() as import("./stall.ts").TickRecord[];
 }
 
+/** The failure ledger's text, or `null` when the file does not exist (nothing has been recorded). Any other failure to read it throws: that is not "nothing recorded". */
+function readFailureLedgerText(path: string): string | null {
+  try {
+    return readFileSync(path, "utf8");
+  } catch (error) {
+    if ((error as { code?: string })?.code === "ENOENT") return null;
+    throw error;
+  }
+}
+
 /**
  * The eight readers, bound to one repository, one state directory and one set of outside reads, plus `takeSample`, which the stall source runs first.
  * `completionPath` is where `work-tick.ts` records a completed tick
  */
-export function createReaders({ github, repo, stateDir, fleetStatePath, unit, now, systemctl, readSeats, log, completionPath, ledgerPath = join(stateDir, LEDGER_FILE) }: {
+export function createReaders({ github, repo, stateDir, fleetStatePath, unit, now, systemctl, readSeats, log, completionPath, ledgerPath = join(stateDir, LEDGER_FILE), failureLedgerPath }: {
         github: Github; repo: string; stateDir: string; fleetStatePath: string; unit: string | undefined; now: () => number;
         systemctl: (argv: string[]) => Promise<string>; readSeats: () => { label: string; status: string; }[] | null; log?: (line: string) => void;
-        completionPath: string; ledgerPath?: string;
+        completionPath: string; ledgerPath?: string; failureLedgerPath?: string;
     }) {
   return {
     readLastMerge: () => readLastMerge({ github, repo }),
@@ -413,5 +423,7 @@ export function createReaders({ github, repo, stateDir, fleetStatePath, unit, no
     readFixRow: (key: string) => readFixRow({ github, repo, key }),
     readEpisodeStart: (key: string) => readEpisodeStart({ ledgerPath, key }),
     takeSample: () => takeSample({ github, repo, stateDir, now, readSeats }),
+    // #5032: the gate's failure ledger, for the emergency-priority source. Absent when no path is given, so a caller that names none is never read for it.
+    ...(failureLedgerPath === undefined ? {} : { readFailureLedger: () => readFailureLedgerText(failureLedgerPath) }),
   };
 }

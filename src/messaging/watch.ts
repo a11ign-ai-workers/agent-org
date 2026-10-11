@@ -52,6 +52,7 @@ import type { Readers } from "./placeholders.ts";
 import { createTelegramProvider } from "./providers/telegram/send.ts";
 import { readSecretFile, SecretFileRefusal } from "./secret.ts";
 import { accountIsDeclared, defaultLedgerPath, readAnnouncementsChatId, readChairman, trackerRepo } from "./state.ts";
+import { observeEmergencyUses } from "./sources/emergency-priority.ts";
 import { observeIncidents } from "./sources/incidents.ts";
 import { createReaders } from "./sources/readers.ts";
 import { observeMilestones, readMilestonesFile, seenMilestoneKeys } from "./sources/milestones.ts";
@@ -62,6 +63,7 @@ import { observeSummary } from "./sources/summary.ts";
 import { parseRequestKey, readRequests } from "./sources/requests.ts";
 import { createWatchReaders, hostFiles } from "./watch-list.ts";
 import { walkPosition } from "./walk.ts";
+import { FAILURE_LEDGER_FILE } from "../failure-ledger.ts";
 import { readUnitsDeclaration, stateEntryPath } from "../host-config.ts";
 import { HOME_CHECKOUT } from "../project-config.ts";
 import { readAgents } from "../herdr-agents.ts";
@@ -282,11 +284,24 @@ export const WATCHED: Source = {
   },
 };
 
+/**
+ * THE CHAIRMAN IS TOLD WHEN `priority:emergency` IS HONOURED (a11ign/a11ign#5032). The gate decides and writes one ledger line per use; this reads the failure ledger through
+ * `readers.readFailureLedger`, and a caller whose readers name none reads nothing and sends nothing.
+ */
+export const EMERGENCY_PRIORITY: Source = {
+  name: "emergency-priority",
+  async observe({ github, now, readers }) {
+    const readLedger = readers.readFailureLedger;
+    if (typeof readLedger !== "function") return { events: [], notes: [] };
+    return observed(await observeEmergencyUses({ readLedger: () => readLedger(), readRow: ({ repo: where, number }) => github.api(`repos/${where}/issues/${number}`), now: () => now }));
+  },
+};
+
 /** The sources this program asks, in order. `summary` is not among them: it is added only for a configuration that declares one (`sourcesFor`). */
 export const DEFAULT_SOURCES = Object.freeze([REQUESTS]);
 
 /** The sources that read the host (systemd, herdr, files) as well as GitHub, asked only when the caller hands over the `readers` they need. */
-export const HOST_SOURCES = Object.freeze([STALLS, INCIDENTS]);
+export const HOST_SOURCES = Object.freeze([STALLS, INCIDENTS, EMERGENCY_PRIORITY]);
 
 /** The most one `gh api` call returns (GitHub's own cap), so a first read of a repository with a long history records all of it in one call. */
 const RELEASES_PER_PAGE = 100;
@@ -445,6 +460,7 @@ function hostReaders({ root, home, now, err, github }: { root: string; home: str
     // Where the tick writes its record: beside the wake ledger, which with no `--ledger` (as the unit runs) is `wake.ts`'s `ledgerPathFrom` default. NOT imported
     // from `wake.ts`: that module reads the project declaration at import, and a watcher that cannot import is the outage this row exists to see.
     completionPath: completionPath(stateEntryPath("wake-ledger")),
+    failureLedgerPath: stateEntryPath(FAILURE_LEDGER_FILE), // #5032: where the gate records an honoured `priority:emergency`
   });
 }
 

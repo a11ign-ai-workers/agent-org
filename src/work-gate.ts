@@ -78,7 +78,7 @@ import { hostConfigPath, stateEntryPath } from "./host-config.ts"; // #2799; #50
 // #2848: THE REPEATING-LINE QUESTION, in its own leaf for the reason `disk-headroom.ts` is one: it reads the journal, not GitHub.
 import { REPEAT_TICKS, normaliseLine, repeatingLinesTick, type RepeatingGroup } from "./repeating-lines.ts";
 // #2936: THE ORG-HEALTH QUESTION, in its own leaf for the same reason: relative imports only, so the gate keeps the property its own header states.
-import { redSinceOf, readToolAgreement, readReleaseRuns, readFleetBuildIncidents } from "./org-health.ts";
+import { redSinceOf, readToolAgreement, readReleaseRuns, readFleetBuildIncidents, SIGNALS as ORG_HEALTH_SIGNALS } from "./org-health.ts";
 import { ghQueueTick } from "./gh-ledger.ts"; // #4898
 import { readNodeStrips } from "./node-strips-types.ts";
 import { liveClassRepeatIo, readClassRepeat } from "./class-repeat.ts";
@@ -5202,8 +5202,8 @@ function newestLabeller(number: number, run: (args: string[]) => string, label: 
 // A history or an incident that cannot be READ fails closed (not honoured, and the label is NOT removed): an outage must neither grant nor take away an emergency.
 //
 // KNOWN GAPS, said here and on the row: the setter test is by IDENTITY, so `product-manager` and `orchestrator`, which share the managers identity with `ceo`, pass it;
-// the announcement to the chairman's channel is `fresh` on the ledger line and is sent by the messaging layer, not here; and `row-claim.ts` does not yet know this label, so B4
-// still holds an emergency row behind a holder of its files (the chairman row yields there, #4793).
+// the announcement to the chairman's channel is NOT sent here: the gate writes one `emergency-priority-used` ledger line per use, and `messaging/sources/emergency-priority.ts`
+// tells the chairman from it; and `row-claim.ts` does not yet know this label, so B4 still holds an emergency row behind a holder of its files (the chairman row yields there, #4793).
 
 export const EMERGENCY_PRIORITY_LABEL = "priority:emergency";
 /** The label an incident item carries, as `messaging/sources/readers.ts` lists them (`readFixRow`). */
@@ -5211,8 +5211,13 @@ const INCIDENT_ITEM_LABEL = "incident";
 
 /** The identities `ceo` writes as: the managers App (a GraphQL node, a REST event and a CLI listing each name it differently) and the leads login. */
 export const EMERGENCY_SETTER_LOGINS = Object.freeze(["a11ign-managers[bot]", "a11ign-managers", "app/a11ign-managers", "a11ign-ai-leads"]);
-/** The `Incident: <key>` keys that block the org: a red trunk, a dead gate, and the three detectors the chairman named (a claim-refusal storm, a failed release, a shared CI failure). */
-export const ORG_BLOCKING_INCIDENT_KEYS = Object.freeze(["incident:trunk-red", "incident:gate-crash", "incident:claim-refusal-storm", "incident:release-failed", "incident:shared-ci-failure"]);
+/**
+ * The `Incident: <key>` keys that block the org, as the tracker carries them (measured 2026-10-11 against the open and closed `incident` items): `incident:trunk-red` (a red `main`, the shared CI
+ * failure), `incident:gate-crash` (the gate blind) and `incident:ci-permission` (CI cannot run), which `messaging/sources/incidents.ts` emits; and the two org-health signals the chairman named,
+ * a claim-refusal storm and a failed release, which are not `incident:` keys of their own and so are named `incident:<signal>` for the fix row that links them. Not here: `incident:fleet-down`
+ * (the lab, not the org's work), `incident:fleet-build-mixed`. `emergencyPriority.incidentKeys` in the host declaration replaces the list.
+ */
+export const ORG_BLOCKING_INCIDENT_KEYS = Object.freeze(["incident:trunk-red", "incident:gate-crash", "incident:ci-permission", `incident:${ORG_HEALTH_SIGNALS.CLAIM_REFUSAL_STORM}`, `incident:${ORG_HEALTH_SIGNALS.RELEASE_FAILED}`]);
 
 export type EmergencyPriorityOption = { enabled: boolean; setters: readonly string[]; incidentKeys: readonly string[]; };
 export const EMERGENCY_PRIORITY_OFF: Readonly<EmergencyPriorityOption> = Object.freeze({ enabled: false, setters: EMERGENCY_SETTER_LOGINS, incidentKeys: ORG_BLOCKING_INCIDENT_KEYS });

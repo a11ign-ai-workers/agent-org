@@ -6,7 +6,7 @@
 // no file itself but the audit's cursor.
 import { homedir } from "node:os";
 
-import { CHAIRMAN_LABEL_NOT_CHAIRMAN_KIND, FAILURE_LEDGER_FILE, mainRedEpisodesPath, readMainRedReadings, recordFailures, type TrunkReading } from "./failure-ledger.ts";
+import { CHAIRMAN_LABEL_NOT_CHAIRMAN_KIND, EMERGENCY_PRIORITY_NOT_HONOURED_KIND, EMERGENCY_PRIORITY_USED_KIND, FAILURE_LEDGER_FILE, mainRedEpisodesPath, readMainRedReadings, recordFailures, type TrunkReading } from "./failure-ledger.ts";
 import { recordHandReroutes } from "./hand-fix-ledger.ts";
 import { auditMessaging } from "./messaging/audit.ts";
 import { defaultLedgerPath } from "./messaging/state.ts";
@@ -34,13 +34,11 @@ export function recordIgnoredChairmanLabels<T extends { number: number; actor: s
 }
 
 /**
- * #5032: WHAT THE GATE RECORDS OF `priority:emergency`, under two keys the ledger reads as it reads any other (not seeded in `FAILURE_KINDS`, for the reason `chairman-label-not-chairman` is not).
- * `emergency-priority-not-honoured` is a label with no setter or no open org-blocking incident behind it, ref `<repo>#<row>:<actor>:<why>`: one line per row, actor and reason however many ticks see it.
- * `emergency-priority-used` is a label the gate HONOURED, ref `<repo>#<row>:<incident>`: one line per row and incident, which is what the daily retro counts uses by and what an announcer reads
- * `fresh` from, so the chairman is told once per use. Never throws: a line that could not be written comes back `recorded: false`.
+ * #5032: WHAT THE GATE RECORDS OF `priority:emergency`, under the two keys `failure-ledger.ts` names. A label with no setter or no open org-blocking incident behind it is one
+ * `emergency-priority-not-honoured` line per row, actor and reason however many ticks see it. A label the gate HONOURED is one `emergency-priority-used` line per row and incident,
+ * which is what the daily retro counts and what `fresh` reads, so the chairman is told once per use. Never throws: a line that could not be written comes back `recorded: false`.
  */
-export const EMERGENCY_PRIORITY_NOT_HONOURED_KIND = "emergency-priority-not-honoured";
-export const EMERGENCY_PRIORITY_USED_KIND = "emergency-priority-used";
+export { EMERGENCY_PRIORITY_NOT_HONOURED_KIND, EMERGENCY_PRIORITY_USED_KIND };
 
 export function recordEmergencyPriority<I extends { number: number; actor: string | null; why: string }, H extends { number: number; incident: string }>(
   { ignored, honoured, repo, stateDir, now }: { ignored: I[]; honoured: H[]; repo: string; stateDir: string; now: number },
