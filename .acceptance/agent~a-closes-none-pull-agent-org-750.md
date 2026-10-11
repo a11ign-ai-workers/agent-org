@@ -15,7 +15,7 @@ A merged pull request whose none-valued `Closes` line has a reason that names it
 
 Not done: nothing runs a close-out for a11ign/agent-org's own merges (the host's `trunk.yml` and `nightly.yml` sweep a11ign/a11ign); that is the host's file and a token decision, filed as its own row, not in this diff.
 
-Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --import tsx --test src/close-rows-for-merged-pr-closes-none.test.ts src/verify-row.test.ts`
+Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --test src/close-rows-for-merged-pr-closes-none.test.ts src/verify-row.test.ts`
 
 Outside-Region: src/close-rows-sweep.ts — the path `trunk.yml` runs on every push; a #719 lesson is that a change to the dispatch path alone is filed for no normal merge.
 Outside-Region: docs/gh-call-inventory.json — the committed inventory of `gh` call shapes; the sweep's one new `api graphql` read is in it, regenerated with the generator.
