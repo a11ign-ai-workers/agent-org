@@ -19,7 +19,7 @@
  */
 import { test, after } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, lstatSync, mkdirSync, mkdtempSync, readdirSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -402,4 +402,55 @@ test("a consequence of declaring it: a claim's file-overlap lookup reads the ope
   const declared = scopesOf([homeProjectDeclaration()]).flatMap((scope) => (scope.code ? [scope.code.repo] : []));
   assert.deepEqual(asked.slice(0, 2), ["a11ign/a11ign", "a11ign/agent-org"], "the primary's first, then `agent-org`'s: one call each");
   assert.deepEqual(asked, declared, "and every declared code repository after them, once, in declaration order");
+});
+
+/**
+ * #808: a tree laid before the clone was pruned of its devDependencies holds links that no longer resolve, and pnpm `mkdir`s through one. The install
+ * here needs its parent to be a directory, as pnpm does, so a surviving dangling `@scope` link fails it exactly as the real one did.
+ */
+function pruneFixture() {
+  const root = mkdtempSync(join(tmpdir(), "keyed-dangling-"));
+  const clone = join(root, "clone");
+  const tree = join(root, "tree");
+  mkdirSync(join(clone, "node_modules", "yaml"), { recursive: true });
+  mkdirSync(join(tree, "node_modules"), { recursive: true });
+  writeFileSync(join(tree, "package.json"), JSON.stringify({ devDependencies: { "@scope/pkg": "1.0.0", yaml: "^2.9.0" } }));
+  // `yaml` still resolves (the clone is `--prod`); `@scope` and `tsx` were devDependencies the prune removed, so these two dangle.
+  symlinkSync(join(clone, "node_modules", "yaml"), join(tree, "node_modules", "yaml"));
+  symlinkSync(join(clone, "node_modules", "@scope"), join(tree, "node_modules", "@scope"));
+  symlinkSync(join(clone, "node_modules", "tsx"), join(tree, "node_modules", "tsx"));
+  // A real directory the tree owns, empty of anything a link would resolve to: it is not a link, so it is not touched.
+  mkdirSync(join(tree, "node_modules", "own"));
+  const install = ({ cwd }: { cwd: string }) => {
+    const scope = join(cwd, "node_modules", "@scope");
+    if (lstatSync(scope, { throwIfNoEntry: false })?.isSymbolicLink()) throw new Error(`ENOENT: no such file or directory, mkdir '${scope}'`);
+    mkdirSync(join(scope, "pkg"), { recursive: true });
+  };
+  return { root, clone, tree, install };
+}
+
+test("#808 (positive) a tree whose links dangle after a prune is installed into: the dangling links are cleared first", () => {
+  const { root, clone, tree, install } = pruneFixture();
+  try {
+    assert.equal(linkKeyedDependencies({ path: tree, repoRoot: clone, install }), null);
+    assert.ok(existsSync(join(tree, "node_modules", "@scope", "pkg")), "the install ran and laid what the clone lacks");
+    assert.ok(lstatSync(join(tree, "node_modules", "@scope")).isDirectory(), "into a directory of the tree's own, not through a link");
+    assert.equal(lstatSync(join(tree, "node_modules", "tsx"), { throwIfNoEntry: false }), undefined, "a dangling link the install did not need is gone too");
+    assert.ok(!existsSync(join(clone, "node_modules", "@scope")), "and the clone was never written");
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
+});
+
+test("#808 (control) only dangling links are removed: a link that resolves, and what is not a link, are kept", () => {
+  const { root, clone, tree, install } = pruneFixture();
+  try {
+    linkKeyedDependencies({ path: tree, repoRoot: clone, install });
+    const yaml = join(tree, "node_modules", "yaml");
+    assert.ok(lstatSync(yaml).isSymbolicLink() && existsSync(yaml), "a link that resolves is kept, still a link");
+    assert.ok(lstatSync(join(tree, "node_modules", "own")).isDirectory(), "a directory the tree owns is kept");
+    assert.deepEqual(readdirSync(join(tree, "node_modules")).sort(), ["@scope", "own", "yaml"]);
+  } finally {
+    rmSync(root, { recursive: true, force: true });
+  }
 });

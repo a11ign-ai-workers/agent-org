@@ -368,7 +368,7 @@ test("an escalated row's later start is the ordinary profile although its label 
   const record = line({ kind: ESCALATION_KIND, at: 1, row: ROW, session: SESSION, reason: "r" });
   const claimed = { row: ROW, branch: "b", worktree: "/w", launchDir: "/l" };
   const exec = () => ({ status: 0, output: "" });
-  const tierOf = (routes: ReadonlyMap<number, Routed>) => spawnClaimer({ exec, exists: () => true, switchPath, routes, readRow: () => ({ labels: ["tier:haiku", "ready"], body, title: "t" }) }).tier?.(claimed);
+  const tierOf = (routes: ReadonlyMap<number | string, Routed>) => spawnClaimer({ exec, exists: () => true, switchPath, routes, readRow: () => ({ labels: ["tier:haiku", "ready"], body, title: "t" }) }).tier?.(claimed);
 
   const unlayered = tierOf(new Map());
   assert.ok(unlayered !== null && unlayered !== undefined && isHaiku(unlayered.model), "NEGATIVE CONTROL: without the escalation line the label's Haiku profile is what the row gets");

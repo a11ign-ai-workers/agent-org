@@ -204,6 +204,79 @@ test("discovery: an unlistable directory is null, a file with no copy header is 
   assert.ok(pairs.every((pair) => pair.original === "a/orig.mjs" && pair.originalText === "x\n"));
 });
 
+// --- an original that moved into an installed package (agent-org#809) ---------------------------------------------------------
+
+const MOVED = "@a11ign/toolchain/lib/moved";
+const COMPARER = "src/packaging/bootstrap-copies-match-toolchain.test.ts";
+const movedHeader = (comparedIn: string | null) => `// COPIED FROM \`${MOVED}\` at 0.7.1 (agent-org#809): a test copy.\n${comparedIn === null ? "" : `// COMPARED IN \`${comparedIn}\` (agent-org#715): by names and behaviour.\n`}`
+  + "// CHANGED FROM THE ORIGINAL: NOTHING but this header.\n// ==== end of copy header ====\nexport const moved = 1;\n";
+const TOOLCHAIN_MANIFEST = JSON.stringify({ name: "@a11ign/toolchain", exports: { "./lib/moved": { types: "./dist/lib/moved.d.ts", default: "./dist/lib/moved.mjs" } } });
+/** One tool holding `moved.ts` under `header`, and a project whose `files` are given; a path in neither is unreadable. */
+const movedPairs = (header: string, project: Record<string, string>) => {
+  const files: Record<string, string> = { "/tool/src/lib/moved.ts": header, ...project };
+  return readDeclaredCopies({ root: "/r", toolRoot: "/tool", list: () => ["moved.ts"], read: (path) => { if (path in files) return files[path]; throw new Error(`ENOENT ${path}`); } }) as Pair[];
+};
+const INSTALLED_MOVED = { "/r/node_modules/@a11ign/toolchain/package.json": TOOLCHAIN_MANIFEST, "/r/node_modules/@a11ign/toolchain/dist/lib/moved.mjs": "export const moved = 1;\n" };
+const COMPARING_TEST = { [`/tool/${COMPARER}`]: 'const PROBE_TABLES = {\n  "moved": () => ({}),\n};\n' };
+
+test("moved original: a copy naming an installed package's module is read WHERE IT IS INSTALLED and, with its comparing test still probing it, is clear", () => {
+  const [pair] = movedPairs(movedHeader(COMPARER), { ...INSTALLED_MOVED, ...COMPARING_TEST });
+  assert.equal(pair.original, MOVED);
+  assert.equal(pair.originalText, "export const moved = 1;\n", "read through the package's own exports map, not by a path of the checkout");
+  assert.equal(pair.comparedIn, COMPARER);
+  assert.equal(copyDriftReading({ pairs: [pair] }).status, "clear");
+});
+
+test("control: a moved original that is truly gone, or a comparison that is not there, still reads UNKNOWN -- never clear", () => {
+  const cases: Array<[string, Record<string, string>, string]> = [
+    ["the package is not installed", { ...COMPARING_TEST }, COMPARER],
+    ["the package no longer exports the module", { ...INSTALLED_MOVED, "/r/node_modules/@a11ign/toolchain/package.json": JSON.stringify({ exports: {} }), ...COMPARING_TEST }, COMPARER],
+    ["the exported file is not shipped", { "/r/node_modules/@a11ign/toolchain/package.json": TOOLCHAIN_MANIFEST, ...COMPARING_TEST }, COMPARER],
+    ["the package.json cannot be parsed", { ...INSTALLED_MOVED, "/r/node_modules/@a11ign/toolchain/package.json": "{", ...COMPARING_TEST }, COMPARER],
+    ["the header names no comparing test", { ...INSTALLED_MOVED, ...COMPARING_TEST }, ""],
+    ["the named test is gone", { ...INSTALLED_MOVED }, COMPARER],
+    ["the named test no longer probes this stem", { ...INSTALLED_MOVED, [`/tool/${COMPARER}`]: 'const PROBE_TABLES = {\n  "other": () => ({}),\n};\n' }, COMPARER],
+  ];
+  for (const [name, project, comparedIn] of cases) {
+    const [pair] = movedPairs(movedHeader(comparedIn === "" ? null : comparedIn), project);
+    const reading = copyDriftReading({ pairs: [pair] });
+    assert.equal(reading.status, "unknown", `${name}: ${reading.detail}`);
+    assert.match(reading.detail, /src\/lib\/moved\.ts/, `${name}: the unread copy is named`);
+  }
+  // The control's other half: the SAME inputs with only the fault removed are clear, so each case above fails for its own fault.
+  assert.equal(copyDriftReading({ pairs: movedPairs(movedHeader(COMPARER), { ...INSTALLED_MOVED, ...COMPARING_TEST }) }).status, "clear");
+});
+
+test("control: one gone original makes the whole reading unknown beside a clear moved pair, and a drifted pair still trips", () => {
+  const moved = movedPairs(movedHeader(COMPARER), { ...INSTALLED_MOVED, ...COMPARING_TEST })[0];
+  const gone = pairOf({ original: "packages/guards/src/gone.ts", copy: "src/lib/gone.ts", originalText: null });
+  assert.equal(copyDriftReading({ pairs: [moved, gone] }).status, "unknown");
+  assert.equal(copyDriftReading({ pairs: [moved, gone, pairOf({ originalText: "one\nTWO\nthree\n" })] }).status, "tripped");
+});
+
+test("the two real copies a11ign#4718 moved name the toolchain's module, and are compared by the test their headers name", () => {
+  const stems = ["local-import-closure", "worktree-resolution"];
+  const toolchain = JSON.stringify({ exports: Object.fromEntries(stems.map((stem) => [`./lib/${stem}`, { default: `./dist/lib/${stem}.mjs` }])) });
+  const installed: Record<string, string> = { "/r/node_modules/@a11ign/toolchain/package.json": toolchain };
+  for (const stem of stems) installed[`/r/node_modules/@a11ign/toolchain/dist/lib/${stem}.mjs`] = "export {};\n";
+  const read = (path: string) => {
+    if (path in installed) return installed[path];
+    if (path.startsWith("/r/")) throw new Error(`ENOENT ${path}`);
+    return readFileSync(path, "utf8");
+  };
+  const real = (reader: (path: string) => string) => (readDeclaredCopies({ root: "/r", read: reader }) as Pair[]).filter((pair) => stems.some((stem) => pair.copy === `src/lib/${stem}.ts`));
+  const pairs = real(read);
+  assert.equal(pairs.length, 2, "both copies are still discovered");
+  for (const pair of pairs) {
+    assert.match(pair.original, /^@a11ign\/toolchain\/lib\//, `${pair.copy} names an original that exists`);
+    assert.notEqual(pair.originalText, null, `${pair.copy}: read where it is installed`);
+    assert.equal(pair.comparedIn, COMPARER, `${pair.copy}: its header names a test that still probes it`);
+  }
+  assert.equal(copyDriftReading({ pairs }).status, "clear");
+  const absent = real((path) => { if (path.startsWith("/r/")) throw new Error(`ENOENT ${path}`); return readFileSync(path, "utf8"); });
+  assert.equal(copyDriftReading({ pairs: absent }).status, "unknown", "with the toolchain not installed the same two copies are unknown, not clear");
+});
+
 // --- the cause: both ride `org-health` --------------------------------------------------------------------------------------
 
 test("both signals are OFFERED to ceo through the org-health cause, with the numbers in the prompt and the other tripped signals named", () => {

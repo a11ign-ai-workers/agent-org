@@ -31,6 +31,9 @@
 // `Outside-Region: <path> — <reason>`, em dash required. The wiring lives in the ENTRY block, like #1352's
 // `launchGate`: the row's body is read from GitHub, and the tests that call `main` directly must not reach it.
 //
+// A PULL REQUEST ON A CLAIMED ROW'S BRANCH CANNOT DECLARE `Closes: none` (agent-org#744): the same refusal CI's closes-mismatch check makes, read
+// from every declared tracker, told here before anything is sent. Wired in the entry block, like the Region's.
+//
 // EXIT CODES (#1479). A caller must be able to tell a refusal from a partial success, because they need
 // opposite next steps: retry the command, or never retry it.
 //   0  the body passed, `gh pr <mode>` ran, and a ready create was armed.
@@ -39,8 +42,12 @@
 //   3  `gh pr create` LANDED and the step after it failed, so the PR exists. Do not retry pr-open; run only
 //      the step the error line names. Before #1479 that throw escaped `main` and Node exited 1 for a PR
 //      that existed.
+//  75  (#4898) GitHub refused the call for a RATE LIMIT and `host/gh` HELD it: it is not sent and not failed. The gate makes it
+//      after the reset, then arms the PR and labels it. Do NOT retry pr-open (that is a second copy) and do not ask a human.
 import { execFileSync, execSync } from "node:child_process";
-import { readFileSync, realpathSync } from "node:fs";
+import { readFileSync, realpathSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { acceptanceSourceOf, closesReferences, extractAcceptanceSection, extractClosesDeclaration, extractMutationSection, runCiBodyReports }
   from "./acceptance-commands.ts";
@@ -58,11 +65,14 @@ import { isLiveSession } from "./arm-pr.ts";
 import { laneAuthorshipRefusal, loadLanes, reviewOnlyPathsIn } from "./lane-ownership.ts";
 import { declarationRefusal } from "./hand-fix-ledger.ts";
 import { VERIFY_STATE, readVerifyStamp, verifyRefusalLine } from "./verify-stamp.ts";
+import { QUEUED_EXIT, attachFollowUps } from "./gh-ledger.ts";
+import { claimedBranchReport, lookupClaimedRowsOfTrackers, trackerReposFor, type ClaimedRow, type ClaimedRows } from "./closes-mismatch-check.ts";
 
 // The header's EXIT CODES, named because 1 and 3 ask a caller for opposite next steps.
 export const EXIT_NOTHING_SENT = 1;
 export const EXIT_USAGE = 2;
 export const EXIT_LANDED_THEN_FAILED = 3;
+export const EXIT_QUEUED = QUEUED_EXIT;
 
 /**
  * Runs a command FOR REAL, exactly as `acceptance-commands.ts`'s own (unexported) `runForReal` does --
@@ -504,6 +514,52 @@ export function sendFailureLine({ mode, branch, head, message }: { mode: string;
 }
 
 /**
+ * (#4898) A RATE-LIMITED CREATE IS HELD, NOT FAILED, and the steps after it travel with it. The arm and the label name the branch (`--head`, or
+ * the tree's own), not a PR number, so they can be written down before the PR exists and made by the gate once the create has been.
+ * @param {string} mode @param {string[]} rest
+ * @param {{ owner: string | null, labelExists?: (name: string, repo?: string) => boolean }} deps
+ * @returns {string[][]} the label's own `gh` argv, preceded by the label's creation when the repository is known not to have it
+ */
+function labelStepsAfterCreate(mode: string, rest: string[], { owner, labelExists }: { owner: string | null; labelExists?: (name: string, repo?: string) => boolean; }): string[][] {
+  const steps: string[][] = [];
+  for (const args of labelAfterCreate(mode, rest, owner)) {
+    const name = args[args.length - 1];
+    const repo = flagAfter(args, "--repo"); // the same repository `ensureLabel` asks and creates in
+    if (labelExists !== undefined && !labelExists(name, ...(repo === null ? [] : [repo]))) {
+      steps.push(["label", "create", name, "--description", "The session that owns the pull request (pr:open)", ...(repo === null ? [] : ["--repo", repo])]);
+    }
+    steps.push(args);
+  }
+  return steps;
+}
+
+/** @returns {string | null} what went wrong attaching `steps` to the held call, or null when they are attached (or there was none to attach) */
+function attachSteps(steps: string[][], { entry, attach }: { entry: { dir: string; id: string; } | null; attach: typeof attachFollowUps; }): string | null {
+  if (steps.length === 0) return null;
+  if (entry === null) return "the entry the wrapper held could not be found, so the arm and the label were NOT attached";
+  try {
+    attach(entry, steps);
+    return null;
+  } catch (error) {
+    return `the arm and the label could not be attached (${messageOf(error)})`;
+  }
+}
+
+/**
+ * The line a held call ends the turn with. It says WHAT is true (nothing was sent, the gate makes it, and when), WHAT NOT TO DO (rerun it,
+ * ask a human), and, when the follow-ups could not travel with it, the one thing a person must still do.
+ * @param {{ mode: string, branch: string, head: string, entry: { id: string, resetAt: number } | null, attached: string | null }} at
+ */
+function heldLine({ mode, branch, head, entry, attached }: { mode: string; branch: string; head: string; entry: { id: string; resetAt: number; } | null; attached: string | null; }): string {
+  const where = branch.startsWith("detached at ") ? `Detached at \`${head}\`` : `Branch \`${branch}\` at \`${head}\``;
+  const when = entry === null ? "after the reset" : `as ${entry.id} after ${new Date(entry.resetAt * 1000).toISOString().slice(11, 19)}Z`;
+  const follows = mode === "create" ? " The arm and the session label are held with it and made right after." : "";
+  const unattached = attached === null ? "" : `\n  NOT ATTACHED: ${attached}; once the PR exists, arm and label it by hand.`;
+  return `pr-open: QUEUED, NOT FAILED -- GitHub is rate-limiting this account, so \`gh pr ${mode}\` was NOT sent; the gate holds it and makes it ${when}.${follows} `
+    + `${where}. Do NOT rerun pr-open (that is a second copy) and do not ask a human: the work is finished, and the turn may end.${unattached}\n`;
+}
+
+/**
  * #1479: THE WRITE LANDED AND THE STEP AFTER IT FAILED, said as a partial success. `gh pr create` had already
  * made the PR when the arm threw, and the throw escaped `main`, so Node exited 1: the code this script sets
  * when NOTHING was sent. A caller reading 1 retries the create against a PR that exists. So the line names
@@ -555,13 +611,14 @@ function branchName(fact: (args: string[], fallback: string) => string) {
  * @param {string} mode
  * @param {string[]} rest
  * @param {{ run?: (args: string[]) => void, git?: (args: string[]) => string,
- *           err?: (line: string) => void, owner?: () => string | null, labelExists?: (name: string) => boolean }} [deps]
+ *           err?: (line: string) => void, owner?: () => string | null, labelExists?: (name: string, repo?: string) => boolean }} [deps]
  * @returns {number} the header's exit code: 0, EXIT_NOTHING_SENT, or EXIT_LANDED_THEN_FAILED
  */
 export function sendToGitHub(mode: string, rest: string[],
-  { run = defaultGh, git = defaultGit, err = writeErr, owner = ownerOfTree, labelExists }: {
+  { run = defaultGh, git = defaultGit, err = writeErr, owner = ownerOfTree, labelExists, queued = readQueuedEntry, attach = attachFollowUps }: {
       run?: (args: string[]) => void; git?: (args: string[]) => string;
-      err?: (line: string) => void; owner?: () => string | null; labelExists?: (name: string) => boolean;
+      err?: (line: string) => void; owner?: () => string | null; labelExists?: (name: string, repo?: string) => boolean;
+      queued?: () => { dir: string; id: string; resetAt: number; } | null; attach?: typeof attachFollowUps;
   } = {}): number {
   // AN ERROR HANDLER THAT CAN ITSELF ERROR IS THE ONE PLACE A THROW COSTS THE MOST (worker-capture,
   // #1283). Both reads sat here unguarded, so a failing `git` -- a GIT_DIR pointing elsewhere, a stale
@@ -574,6 +631,12 @@ export function sendToGitHub(mode: string, rest: string[],
   try {
     run(["pr", mode, ...rest]);
   } catch (error) {
+    if ((error as { status?: number })?.status === EXIT_QUEUED) {
+      const steps = mode === "create" ? [...armAfterCreate(mode, rest), ...labelStepsAfterCreate(mode, rest, { owner: owner(), labelExists })] : [];
+      const entry = queued(); // read once: reading it consumes the file the wrapper left
+      err(heldLine({ mode, branch: branchName(fact), head: head(), entry, attached: attachSteps(steps, { entry, attach }) }));
+      return EXIT_QUEUED;
+    }
     err(`${sendFailureLine({ mode, branch: branchName(fact), head: head(), message: messageOf(error) })}\n`);
     return EXIT_NOTHING_SENT;
   }
@@ -608,15 +671,15 @@ export function sendToGitHub(mode: string, rest: string[],
  * @param {string} mode
  * @param {string[]} rest
  * @param {{ run: (args: string[]) => void, err: (line: string) => void, owner: string | null,
- *           labelExists?: (name: string) => boolean }} deps
+ *           labelExists?: (name: string, repo?: string) => boolean }} deps
  */
 function labelCreatedPr(mode: string, rest: string[], { run, err, owner, labelExists }: {
         run: (args: string[]) => void; err: (line: string) => void; owner: string | null;
-        labelExists?: (name: string) => boolean;
+        labelExists?: (name: string, repo?: string) => boolean;
     }) {
   for (const args of labelAfterCreate(mode, rest, owner)) {
     try {
-      ensureLabel(args[args.length - 1], { run, labelExists });
+      ensureLabel(args[args.length - 1], { run, labelExists, repo: flagAfter(args, "--repo") });
       run(args);
     } catch (error) {
       err(`pr-open: the PR was created but labelling it failed -- ${messageOf(error)}\n`
@@ -633,11 +696,11 @@ function labelCreatedPr(mode: string, rest: string[], { run, err, owner, labelEx
  * propagates to `labelCreatedPr`'s warning rather than being swallowed: the same outage as the missing label.
  * OFF when `labelExists` is not wired, like `rowBody`: the tests call `main` directly and must not reach `gh`.
  * @param {string} name
- * @param {{ run: (args: string[]) => void, labelExists?: (name: string) => boolean }} deps
+ * @param {{ run: (args: string[]) => void, labelExists?: (name: string, repo?: string) => boolean }} deps
  */
-function ensureLabel(name: string, { run, labelExists }: { run: (args: string[]) => void; labelExists?: (name: string) => boolean; }) {
-  if (labelExists === undefined || labelExists(name)) return;
-  run(["label", "create", name, "--description", "The session that owns the pull request (pr:open)"]);
+function ensureLabel(name: string, { run, labelExists, repo = null }: { run: (args: string[]) => void; labelExists?: (name: string, repo?: string) => boolean; repo?: string | null; }) {
+  if (labelExists === undefined || labelExists(name, ...(repo === null ? [] : [repo]))) return;
+  run(["label", "create", name, "--description", "The session that owns the pull request (pr:open)", ...(repo === null ? [] : ["--repo", repo])]);
 }
 
 /**
@@ -729,7 +792,23 @@ export const PR_OPEN_ENV = "A11Y_PR_OPEN";
  * child alone: the row's Acceptance command runs from `process.env`, which never carries it.
  * @param {string[]} args
  */
-export const defaultGh = (args: string[]) => { execFileSync("gh", args, { stdio: "inherit", env: { ...process.env, [PR_OPEN_ENV]: "1" } }); };
+export const defaultGh = (args: string[]) => {
+  rmSync(QUEUED_TO, { force: true });
+  execFileSync("gh", args, { stdio: "inherit", env: { ...process.env, [PR_OPEN_ENV]: "1", A11Y_GH_QUEUED_TO: QUEUED_TO } });
+};
+/** (#4898) WHERE `host/gh` LEAVES THE QUEUE ENTRY IT HELD: `<queue dir> TAB <id> TAB <reset epoch>`, written only for a call it queued. */
+const QUEUED_TO = join(tmpdir(), `pr-open-queued-${process.pid}`);
+/** @returns {{ dir: string, id: string, resetAt: number } | null} the entry the last `gh` call was held as, or null when none was (or an older wrapper left no file) */
+export function readQueuedEntry(path: string = QUEUED_TO): { dir: string; id: string; resetAt: number; } | null {
+  try {
+    const text = readFileSync(path, "utf8");
+    rmSync(path, { force: true }); // consumed: it is a per-process note, not a record, and the next call must not read this one's
+    const [dir, id, resetAt] = text.trim().split("\t");
+    return dir && id && Number.isFinite(Number(resetAt)) ? { dir, id, resetAt: Number(resetAt) } : null;
+  } catch {
+    return null; // no file is "not held", which the caller words; there is nothing to guess at
+  }
+}
 /**
  * PR N's head, over REST (`gh api`, the core pool) rather than `gh pr view --json` (GraphQL, the pool that runs out).
  * @param {string} repo
@@ -761,9 +840,9 @@ const defaultRowLabels = (number: number, repo: string): string[] => JSON.parse(
  * @param {string} name
  * @returns {boolean}
  */
-function defaultLabelExists(name: string): boolean {
+function defaultLabelExists(name: string, repo: string = "{owner}/{repo}"): boolean {
   try {
-    execFileSync("gh", ["api", `repos/{owner}/{repo}/labels/${encodeURIComponent(name)}`, "--silent"], { stdio: "pipe" });
+    execFileSync("gh", ["api", `repos/${repo}/labels/${encodeURIComponent(name)}`, "--silent"], { stdio: "pipe" });
     return true;
   } catch (error) {
     if (/HTTP 404|Not Found/i.test(`${(error as {stderr?: unknown}).stderr ?? ""}`)) return false;
@@ -840,6 +919,49 @@ function regionStep(body: string, rest: string[], { git, rowBody, rootFiles, cod
 }
 
 /**
+ * agent-org#744: A PULL REQUEST ON A CLAIMED ROW'S BRANCH CANNOT DECLARE `Closes: none`, AND THE AUTHOR IS TOLD HERE. `closes-mismatch-check.ts`
+ * refuses it in CI, after the pull request exists and after the worker has moved on; three rows (agent-org#475 and #560, a11ign#4874) stayed
+ * open with a worker holding the claim because the refusal was never reached for a pull request in another tracker. This is the same
+ * comparison (`claimedBranchReport`, the head ref against every declared tracker's `Claimed-branch:` records), run before anything is sent.
+ *
+ * ONLY A MATCH REFUSES. A tracker that cannot be read is printed as `UNCHECKED` and goes on: CI asks again, and a GitHub blip must not stop
+ * a pull request that finishes no row. A body that is not `Closes: none` is not asked (no read is made for it), and so is a pull request on
+ * a branch no claim names, which passes with `Closes: none -- <reason>` as before. OFF when no `claimedRows` is wired, which is every direct
+ * caller of `main` and none of the shipped CLI (the entry block wires it, as `regionStep`'s `rowBody` is).
+ * @param {string} body @param {string[]} rest
+ * @param {{ git?: (args: string[]) => string, code?: readonly { key: string, repo: string }[],
+ *           claimedRows?: (prRepo: string) => ClaimedRow[] | ClaimedRows | null, out: (line: string) => void, err: (line: string) => void }} io
+ * @returns {number | null} EXIT_NOTHING_SENT for a refusal, else null
+ */
+function claimedRowStep(body: string, rest: string[], { git = defaultGit, code, claimedRows, out, err }: {
+        git?: (args: string[]) => string; code?: readonly { key: string; repo: string; }[];
+        claimedRows?: (prRepo: string) => ClaimedRow[] | ClaimedRows | null; out: (line: string) => void; err: (line: string) => void;
+    }): number | null {
+  if (!claimedRows) return null;
+  const declaration = extractClosesDeclaration(body);
+  if (declaration.kind !== "none") return null;
+  let branch = flagAfter(rest, "--head");
+  if (branch === null) {
+    try {
+      branch = git(["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+    } catch (error) {
+      void error; // an unreadable branch is "could not tell", reported by the report below
+    }
+  }
+  const head = branch ? { branch, fork: false } : null;
+  const prRepo = flagAfter(rest, "--repo") ?? originRepoOf(git, code ?? homeProjectDeclaration().code) ?? REPO;
+  const report = claimedBranchReport(declaration, head, claimedRows(prRepo), prRepo);
+  if (report.ok === null) {
+    out(`pr-open: UNCHECKED -- the claimed-row comparison for \`Closes: none\` was skipped: ${report.reason}. CI asks again.\n`);
+    return null;
+  }
+  if (report.ok) return null;
+  err(`pr-open: REFUSED -- a claimed row's own pull request cannot declare \`Closes: none\`, because the merge is what closes the row:\n`
+    + `${report.reasons.map((reason) => `  ${reason}`).join("\n")}\nNothing was sent (agent-org#744).\n`);
+  return EXIT_NOTHING_SENT;
+}
+
+/**
  * #3215: A READY pull request is opened only on a green verify stamp for this head and this body; a DRAFT opens without one, because it is
  * where CI starts and work is shared, and refusing it would put the cost on the one step that cannot be re-run cheaply. `edit` opens nothing.
  * A project that declares no verify script is not refused, and the line says so by name (`verify-stamp.ts`). WIRED IN THE ENTRY BLOCK like
@@ -868,39 +990,46 @@ function verifyStampStep(mode: string, rest: string[], body: string, { verifySta
  *           prHead?: (repo: string, number: string) => { ref: string, oid: string } | null,
  *           runAcceptance?: (command: string) => number, runMutation?: (command: string) => number,
  *           owner?: () => string | null, rowBody?: (number: number, repo?: string) => string, rootFiles?: Set<string>,
- *           rowLabels?: (number: number, repo: string) => string[], labelExists?: (name: string) => boolean,
+ *           rowLabels?: (number: number, repo: string) => string[], labelExists?: (name: string, repo?: string) => boolean,
+ *           claimedRows?: (prRepo: string) => ClaimedRow[] | ClaimedRows | null,
  *           code?: readonly { key: string, repo: string }[], login?: () => string, lanes?: {lanes: import("./lane-ownership.ts").Lane[]} | null,
  *           verifyStamp?: (body: string) => import("./verify-stamp.ts").VerifyReading, write?: (path: string, text: string) => void,
- *           readFile?: (path: string) => string, out?: (line: string) => void, err?: (line: string) => void }} [deps]
+ *           readFile?: (path: string) => string, branchHead?: (repo: string, branch: string) => string | null,
+ *           out?: (line: string) => void, err?: (line: string) => void }} [deps]
  * @returns {number}
  */
 export function main(argv: string[] = process.argv.slice(2),
   { run, git, prHead, runAcceptance, runMutation = runForReal, owner, rowBody, rowLabels, labelExists, rootFiles, code, login, lanes,
-    verifyStamp, write, readFile, out = writeOut, err = writeErr }: {
+    claimedRows, verifyStamp, write, readFile, branchHead, out = writeOut, err = writeErr }: {
           run?: (args: string[]) => void; git?: (args: string[]) => string;
           prHead?: (repo: string, number: string) => { ref: string; oid: string; } | null;
           runAcceptance?: (command: string) => number; runMutation?: (command: string) => number;
           owner?: () => string | null; rowBody?: (number: number, repo?: string) => string; rootFiles?: Set<string>;
-          rowLabels?: (number: number, repo: string) => string[]; labelExists?: (name: string) => boolean;
+          rowLabels?: (number: number, repo: string) => string[]; labelExists?: (name: string, repo?: string) => boolean;
+          claimedRows?: (prRepo: string) => ClaimedRow[] | ClaimedRows | null;
           code?: readonly { key: string; repo: string; }[]; login?: () => string; lanes?: { lanes: import("./lane-ownership.ts").Lane[]; } | null;
           verifyStamp?: (body: string) => import("./verify-stamp.ts").VerifyReading; write?: (path: string, text: string) => void;
-          readFile?: (path: string) => string; out?: (line: string) => void; err?: (line: string) => void;
+          readFile?: (path: string) => string; branchHead?: (repo: string, branch: string) => string | null;
+          out?: (line: string) => void; err?: (line: string) => void;
       } = {}): number {
-  const [mode, ...rest] = argv;
+  const [mode, ...given] = argv;
   if (mode !== "create" && mode !== "edit") {
     err(usage());
     return EXIT_USAGE;
   }
-  const body = bodyFromArgs(rest);
+  const body = bodyFromArgs(given);
   if (body === null) {
     err(`pr-open ${mode}: --body or --body-file is required -- this wrapper checks the `
       + "body before gh sends it, and cannot check a body it was never given. Use `gh pr " + mode
       + "` directly, unguarded, for an interactive editor session.\n");
     return EXIT_USAGE;
   }
+  // agent-org#753: a row whose Region names another repository opens its pull request THERE, so the branch is asked of that repository.
+  const crossRepo = otherRepositoryOf(mode, given, body, { git, rowBody, rootFiles, code, branchHead });
+  const rest = crossRepo !== null && flagAfter(given, "--repo") === null ? [...given, "--repo", crossRepo] : given;
   // #1344: BEFORE checkBody, because checkBody RUNS the Acceptance -- in this working tree, whatever --head says.
   // #2939: and a `Hand-fix:` line the ledger could not read, which it would silently not count. Pure, like the heads.
-  const headRefused = headTreeRefusal(mode, rest, { git }) ?? editTreeRefusal(mode, rest, { git, prHead })
+  const headRefused = headTreeRefusal(mode, rest, { git, crossRepo, branchHead }) ?? editTreeRefusal(mode, rest, { git, prHead })
     ?? declarationRefusal(body) ?? authorshipRefusal(mode, rest, { git, login, lanes });
   if (headRefused) {
     err(`${headRefused}\n`);
@@ -911,6 +1040,9 @@ export function main(argv: string[] = process.argv.slice(2),
   // #2417: before checkBody for the same reason, and before anything is sent.
   const outsideRegion = regionStep(body, rest, { git, rowBody, rootFiles, code, out, err });
   if (outsideRegion !== null) return outsideRegion;
+  // agent-org#744: before checkBody too, for the same reason, and before anything is sent.
+  const keepsRowOpen = claimedRowStep(body, rest, { git, code, claimedRows, out, err });
+  if (keepsRowOpen !== null) return keepsRowOpen;
   const result = checkBody(body, { run: runAcceptance, diff: localDiffReading(rest, git), readFile,
     rowLabels: rowLabels && ((row) => rowLabels(row.number, row.repo ?? REPO)) }); // #4123: a bare `#N` is the tracker's, as in `rowsNamed`
   for (const line of result.lines) out(`${line}\n`);
@@ -971,7 +1103,9 @@ export function unstampableRefusal(mode: string, owner: string | null): string |
  * @param {{ git?: (args: string[]) => string }} [deps]
  * @returns {string | null} the refusal, or null when the tree under test is the head being sent
  */
-export function headTreeRefusal(mode: string, rest: string[], { git = defaultGit }: { git?: (args: string[]) => string; } = {}): string | null {
+export function headTreeRefusal(mode: string, rest: string[], { git = defaultGit, crossRepo = null, branchHead }: {
+        git?: (args: string[]) => string; crossRepo?: string | null; branchHead?: (repo: string, branch: string) => string | null;
+    } = {}): string | null {
   if (mode !== "create") return null;
   const head = flagAfter(rest, "--head");
   if (head === null) return null;
@@ -987,6 +1121,8 @@ export function headTreeRefusal(mode: string, rest: string[], { git = defaultGit
       + `\`${head}\`. ${nothingRan}`;
   }
   const local = read(["rev-parse", "HEAD"]);
+  // agent-org#753: the pull request opens in ANOTHER repository, whose branch this tree's `origin/<head>` is not a reading of.
+  if (crossRepo !== null && branchHead) return otherRepositoryHeadRefusal(head, crossRepo, local, branchHead);
   const remote = read(["rev-parse", `refs/remotes/origin/${head}`]);
   if (local === null || remote === null || local !== remote) {
     return `pr-open: REFUSED -- this tree is on \`${head}\` at \`${local ?? "(unreadable)"}\`, but \`origin/${head}\` `
@@ -995,6 +1131,111 @@ export function headTreeRefusal(mode: string, rest: string[], { git = defaultGit
   }
   return null;
 }
+
+/**
+ * agent-org#753: THE BRANCH OF THE REPOSITORY THE PULL REQUEST OPENS IN, READ FROM THAT REPOSITORY. `origin/<head>` is this tree's own remote, and
+ * for a row whose Region is another repository's (a11ign#4889: `agent-org:` paths, branch pushed to a11ign/agent-org) it is "unreadable --
+ * push the branch first" whatever was pushed, so the row stalled with finished work. A branch the repository does not hold, one it holds at
+ * another commit, and a read that fails each refuse and name the repository; none is read as a match. `null` is "this tree is that head".
+ * @param {string} head @param {string} repo @param {string | null} local the commit the Acceptance runs on
+ * @param {(repo: string, branch: string) => string | null} branchHead the commit `repo` holds `branch` at, or null when it holds none
+ * @returns {string | null}
+ */
+function otherRepositoryHeadRefusal(head: string, repo: string, local: string | null, branchHead: (repo: string, branch: string) => string | null): string | null {
+  const nothingRan = "Nothing ran and nothing was sent (agent-org#753).";
+  let held: string | null;
+  try {
+    held = branchHead(repo, head);
+  } catch (error) {
+    return `pr-open: REFUSED -- could not read branch \`${head}\` of ${repo} (${messageOf(error).split("\n")[0]}), where this pull request opens, so the tree under `
+      + `test cannot be compared with its head. Retry once GitHub answers. ${nothingRan}`;
+  }
+  if (held === null) {
+    return `pr-open: REFUSED -- ${repo} holds no branch \`${head}\`, and the pull request opens there (the row's Region names ${repo}). `
+      + `Push \`${head}\` to ${repo} first. ${nothingRan}`;
+  }
+  if (local === null || local !== held) {
+    return `pr-open: REFUSED -- this tree is on \`${head}\` at \`${local ?? "(unreadable)"}\`, but ${repo} holds \`${head}\` at \`${held}\`. `
+      + `The Acceptance would test a tree that is not the head GitHub opens; push or pull until they are the same commit. ${nothingRan}`;
+  }
+  return null;
+}
+
+/**
+ * agent-org#753: THE REPOSITORY A PULL REQUEST OPENS IN WHEN IT IS NOT THIS TREE'S, or null when it is (or when nothing can say). The one
+ * single repository the Regions of the rows the body closes name -- `agent-org:src/x.ts` is the declared repository keyed `agent-org`, a bare
+ * path is the row's stated repository or else the project's first -- or an explicit `--repo`, which outranks it. Compared with the repository
+ * this tree's `origin` is; `Closes: none`, a row that cannot be read or has no Region, and Regions spread over several repositories name none,
+ * and the tree's own `origin/<head>` is read as ever. OFF when no `branchHead` is wired, which is every direct caller of `main` (the entry block wires it).
+ * @param {string} mode @param {string[]} rest @param {string} body
+ * @param {{ git?: (args: string[]) => string, rowBody?: (number: number, repo?: string) => string, rootFiles?: Set<string>,
+ *   code?: readonly { key: string, repo: string }[], branchHead?: (repo: string, branch: string) => string | null }} deps
+ * @returns {string | null}
+ */
+export function otherRepositoryOf(mode: string, rest: string[], body: string, { git = defaultGit, rowBody, rootFiles, code, branchHead }: {
+        git?: (args: string[]) => string; rowBody?: (number: number, repo?: string) => string; rootFiles?: Set<string>;
+        code?: readonly { key: string; repo: string; }[]; branchHead?: (repo: string, branch: string) => string | null;
+    }): string | null {
+  if (mode !== "create" || !branchHead || flagAfter(rest, "--head") === null) return null;
+  const target = flagAfter(rest, "--repo") ?? (rowBody ? regionRepository(body, { rowBody, rootFiles, code }) : null);
+  if (target === null) return null;
+  let slug: string | undefined;
+  try {
+    slug = /github\.com[:/]([^/\s]+\/[^/\s]+?)(?:\.git)?\s*$/.exec(git(["remote", "get-url", "origin"]))?.[1];
+  } catch (error) {
+    void error; // an origin that cannot be read is no proof the tree is the target's, so GitHub is asked about the target
+  }
+  return slug !== undefined && slug.toLowerCase() === target.toLowerCase() ? null : target;
+}
+
+/**
+ * agent-org#753: the ONE repository the Regions of the rows a body closes are written against, or null. Pure over `rowBody`.
+ * @param {string} body
+ * @param {{ rowBody: (number: number, repo?: string) => string, rootFiles?: Set<string>, code?: readonly { key: string, repo: string }[] }} deps
+ * @returns {string | null}
+ */
+function regionRepository(body: string, { rowBody, rootFiles, code = homeProjectDeclaration().code }: {
+        rowBody: (number: number, repo?: string) => string; rootFiles?: Set<string>; code?: readonly { key: string; repo: string; }[];
+    }): string | null {
+  const closes = extractClosesDeclaration(body);
+  if (closes.kind !== "closes") return null;
+  const repositories = new Set<string>();
+  for (const reference of closesReferences(closes)) {
+    let text;
+    try {
+      text = reference.repo === null ? rowBody(reference.number) : rowBody(reference.number, reference.repo);
+    } catch (error) {
+      void error; // an unread row is `regionStep`'s refusal to make, in its own words
+      return null;
+    }
+    const declared = declaredRegionFiles(text, rootFiles ? { rootFiles } : undefined);
+    if (declared === null) return null;
+    for (const entry of declared) {
+      const { key } = splitRegionEntry(entry);
+      const repo = key === "" ? (statedRepository(text) ?? code[0]?.repo) : code.find((candidate) => candidate.key === key)?.repo;
+      if (repo === undefined) return null;
+      repositories.add(repo);
+    }
+  }
+  return repositories.size === 1 ? [...repositories][0] : null;
+}
+
+/**
+ * agent-org#753: the commit `repo` holds `branch` at, over REST like `defaultRowBody`; null when the repository answers 404 (it holds no such
+ * branch), a throw for any other failure -- which `otherRepositoryHeadRefusal` refuses on rather than read as absent.
+ * @param {string} repo @param {string} branch
+ * @returns {string | null}
+ */
+const defaultBranchHead = (repo: string, branch: string): string | null => {
+  try {
+    const path = branch.split("/").map(encodeURIComponent).join("/");
+    return execFileSync("gh", ["api", `repos/${repo}/branches/${path}`, "--jq", ".commit.sha"], { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }).trim() || null;
+  } catch (error) {
+    const said = `${(error as { stderr?: unknown }).stderr ?? ""}${messageOf(error)}`;
+    if (/HTTP 404|Not Found/i.test(said)) return null;
+    throw error;
+  }
+};
 
 /** The login `gh` will author the pull request as -- `gh pr create` runs under the same account and `GH_CONFIG_DIR`. */
 const defaultLogin = () => execFileSync("gh", ["api", "user", "--jq", ".login"], { encoding: "utf8" }).trim();
@@ -1110,7 +1351,7 @@ export function editTreeRefusal(mode: string, rest: string[], { git = defaultGit
 export function armAfterCreate(mode: string, rest: string[]): string[][] {
   if (mode !== "create" || rest.includes("--draft")) return [];
   const head = flagAfter(rest, "--head");
-  return [["pr", "merge", "--auto", "--merge", ...(head ? [head] : [])]];
+  return [["pr", "merge", "--auto", "--merge", ...(head ? [head] : []), ...repoFlagOf(rest)]];
 }
 
 /**
@@ -1150,7 +1391,18 @@ export function labelAfterCreate(mode: string, rest: string[], owner: string | n
   if (mode !== "create" || owner === null) return [];
   if (!isLiveSession(owner)) return [];
   const head = flagAfter(rest, "--head");
-  return [["pr", "edit", ...(head ? [head] : []), "--add-label", `${SESSION_PREFIX}${owner}`]];
+  return [["pr", "edit", ...(head ? [head] : []), ...repoFlagOf(rest), "--add-label", `${SESSION_PREFIX}${owner}`]];
+}
+
+/**
+ * agent-org#753: `--repo <repo>` when the call was made for one, else nothing -- the arm and the label of a pull request opened in another
+ * repository are aimed there too, because `gh pr merge <branch>` and `gh pr edit <branch>` otherwise look in the checkout's own.
+ * @param {string[]} rest
+ * @returns {string[]}
+ */
+function repoFlagOf(rest: string[]): string[] {
+  const repo = flagAfter(rest, "--repo");
+  return repo === null ? [] : ["--repo", repo];
 }
 
 /**
@@ -1173,6 +1425,7 @@ if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.arg
     process.exitCode = EXIT_NOTHING_SENT;
   } else {
     process.exitCode = main(undefined, { rowBody: defaultRowBody, verifyStamp: defaultVerifyStamp,
+      claimedRows: (prRepo) => lookupClaimedRowsOfTrackers(trackerReposFor(prRepo)), branchHead: defaultBranchHead,
       rowLabels: defaultRowLabels, labelExists: defaultLabelExists, write: writeAcceptanceFile });
   }
 }

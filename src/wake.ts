@@ -45,6 +45,8 @@ import type { BlockingRecord } from "./blocking-impact.ts";
 import { routeEngineer, type Routed } from "./engineer-route.ts";
 import { ESCALATION_KIND, ESCALATION_USE, claimFacts, escalationLogLine, escalationNote, haikuStarts, shouldEscalate, transcriptCounts } from "./engineer-escalation.ts";
 import { decisionLogPathFrom, decisionSwitchesPath } from "./decision-provider.ts";
+import { classifyCiFailure, classLine, classNote, readCiFailure, type Gh } from "./ci-failure-class.ts";
+import { depthEffort, depthLine, readDepthState, reviewDepth, type Depth } from "./review-depth.ts";
 import { profileFor, agentArgs, haikuTierProfile, type TierProfile, armOf, ARM, CALM_FINISH_PARAGRAPH, tripsArmOf, TRIPS_ARM, ROUND_TRIPS_PARAGRAPH } from "./worker-profile.ts";
 import { JUDGMENT_CAUSES, ANSWER_PREFIX, LAUNCH_PLACEHOLDER, REVIEWER_REGISTRY_FILE, readReviewerRegistry, scopesOf,
   readWithFirstWaveTogether, runBatch }
@@ -1327,6 +1329,21 @@ function startWithoutThem({ fs, path, repoRoot, unpublished }: { fs: LinkFs; pat
 }
 
 /**
+ * REMOVE THE LINKS OF A TREE'S `node_modules` THAT NO LONGER RESOLVE, and only those (#808). A tree laid before the clone was re-installed `--prod`
+ * (#714) holds a link per clone entry, and the devDependencies' now point at nothing; `pnpm install` then `mkdir`s THROUGH the dangling `@rstest`
+ * link and dies `ENOENT`, so the order was `UNDELIVERED` on every tick. `lstat` says link, `existsSync` (which follows it) says no. A link that
+ * resolves, and anything that is not a link, is left alone: the install would otherwise re-fetch everything the clone still serves. Only ever
+ * called with the TREE's `node_modules`, so what is removed is a link and never what it named.
+ */
+function clearDanglingLinks(fs: LinkFs, modules: string): void {
+  if (!fs.existsSync(modules)) return;
+  for (const entry of fs.readdirSync(modules)) {
+    const link = `${modules}/${entry}`;
+    if (fs.lstatSync(link, { throwIfNoEntry: false })?.isSymbolicLink() && !fs.existsSync(link)) fs.rmSync(link, { force: true });
+  }
+}
+
+/**
  * SUPPLY WHAT THE CLONE LACKS FROM THE TREE: install the tree's own declared packages into the TREE's `node_modules` and report `null`, or a
  * refusal naming the first line of why it could not, with the hand remedy ({@link supplyCommand}). The tree is private to one review and is
  * removed with it (`git worktree remove --force`), so nothing a reviewer shares is written and the clone is left as it was. Not a silent
@@ -1335,6 +1352,11 @@ function startWithoutThem({ fs, path, repoRoot, unpublished }: { fs: LinkFs; pat
 function installIntoTree({ fs, path, repoRoot, declared, missing, install }: { fs: LinkFs; path: string; repoRoot: string; declared: string[]; missing: string[]; install: TreeInstall; }): LinkResult {
   const lacks = `${repoRoot}/node_modules lacks ${namedList(missing)}, which ${path}/package.json declares; supply `
     + `${missing.length === 1 ? "it" : "them"} with ${supplyCommand({ fs, path, repoRoot })}`;
+  try {
+    clearDanglingLinks(fs, `${path}/node_modules`);
+  } catch (err) {
+    return `could not clear the dangling links in ${path}/node_modules before installing: ${firstLine(err)}`;
+  }
   try {
     install({ cwd: path, args: installArgs(fs, path) });
   } catch (err) {
@@ -1793,7 +1815,7 @@ export function repointedForReviewer(order: { session: string; prompt: string; }
  *
  * @param deps `cwd` is the verified checkout
  */
-function spawnReviewer(order: { session: string; cause?: string; causeKey?: string; }, agents: { label: string; status: string; }[], { run = defaultRun, env, cwd, registry, codexConfig }: {
+function spawnReviewer(order: { session: string; cause?: string; causeKey?: string; reviewDepth?: Depth; }, agents: { label: string; status: string; }[], { run = defaultRun, env, cwd, registry, codexConfig }: {
         run?: (args: string[]) => string; env?: Record<string, string>; cwd: string;
         registry?: Record<string, { spawnedAt: number; }>; codexConfig?: () => string | null;
     }): { label: string; workspace: string; profile: { kind: string; model: string; effort: string; }; } |
@@ -1802,7 +1824,9 @@ function spawnReviewer(order: { session: string; cause?: string; causeKey?: stri
   if ("refusal" in reviewer) return reviewer;
   const pane = openPane(run, reviewer.session, reviewerEnvironment(reviewer.session, env, cwd), cwd);
   if ("refusal" in pane) return pane;
-  const invocation = spawnInvocation({ ...order, cause: String(order.cause) }, reviewer.session, pane.pane);
+  // #4888: THE DEPTH SETS THE EFFORT the reviewer is started with; absent, the cause's own profile is what it was.
+  const effort = depthEffort(order.reviewDepth);
+  const invocation = spawnInvocation({ ...order, cause: String(order.cause) }, reviewer.session, pane.pane, effort === undefined ? {} : { effort });
   if ("refusal" in invocation) return { refusal: `${invocation.refusal}${closedNote(run, pane.workspace)}` };
   try {
     run(invocation.args);
@@ -1887,7 +1911,7 @@ export function noReviewCheckoutFor(session: string): string | null {
  * fetch costs no process and no order names a path that is not there; a `reviewer-<n>` that exists and is working
  * WAITS for the next tick, because a second workspace under its label would make `route` ambiguous.
  */
-function reviewerTarget(order: { session: string; cause?: string; causeKey?: string; prompt: string; }, live: { label: string; status: string; }[], deps: ReviewerDeps): {
+function reviewerTarget(order: { session: string; cause?: string; causeKey?: string; prompt: string; reviewDepth?: Depth; }, live: { label: string; status: string; }[], deps: ReviewerDeps): {
     label: string; profile?: { kind: string; model: string; effort: string; }; reviewer: true;
     order: { prompt: string; }; workspace?: string;
 } | { refusal: string; } {
@@ -6133,6 +6157,15 @@ function rowMention({ key, number }: RowRef): string {
 }
 
 /**
+ * THE KEY A ROUTE IS FILED UNDER (a11ign/agent-org#756): the bare number for the first tracker's row, `agent-org#7` for another's, so a keyed row never takes the route of the
+ * first tracker's row of the same number. The first tracker's stays a number, as every reader of the routes already has it.
+ */
+export type RouteKey = number | string;
+export function routeKeyOf({ key, number }: RowRef): RouteKey {
+  return key === "" ? number : `${key}#${number}`;
+}
+
+/**
  * The repository a tracker KEY names in the project's declaration, or `null` for a key it does not declare -- which the caller reads as
  * "cannot tell", never as the first tracker's repository (#4685). The row lives in the TRACKER, which is not always the code repository
  * ({@link codeRepositoryOf}), so the tracker list answers.
@@ -6451,7 +6484,7 @@ export function spawnClaimer({ exec = defaultExec, exists = existsSync, worktree
   primary = PRIMARY_CHECKOUT, cloneOf = keyedClone, settle = () => {}, kept = () => null, forget = () => {}, readRow = readRowForTier, switchPath, routes }: {
         exec?: Exec; exists?: (path: string) => boolean; worktreesDir?: string; primary?: string; cloneOf?: (key: string) => { clone: string; } | { refusal: string; };
         settle?: (role: string) => void; kept?: (row: number) => KeptClaim | null; forget?: (row: number) => void;
-        readRow?: (row: number) => RowForTier; switchPath?: string; routes?: ReadonlyMap<number, Routed>;
+        readRow?: (row: number, key?: string) => RowForTier; switchPath?: string; routes?: ReadonlyMap<RouteKey, Routed>;
     } = {}): SpawnClaimer {
   return {
     claim(order, role, env) {
@@ -6481,8 +6514,7 @@ export function spawnClaimer({ exec = defaultExec, exists = existsSync, worktree
       return { refusal: `the claim of ${rowMention(ref)} as ${role} did not hold (${why})${undone}` };
     },
     release: (claimed, role, env) => releaseClaim(claimed, role, env, exec),
-    // The tier label and the route are read from the FIRST tracker's row of that number: for a keyed row that is another row's, so it gets the ordinary profile.
-    tier: (claimed) => (claimed.key === undefined || claimed.key === "" ? tierOfRow(claimed.row, { readRow, switchPath, routes }) : null),
+    tier: (claimed) => tierOfRow({ key: claimed.key ?? "", number: claimed.row }, { readRow, switchPath, routes }),
   };
 }
 
@@ -6491,13 +6523,16 @@ export function spawnClaimer({ exec = defaultExec, exists = existsSync, worktree
  * tick asks BEFORE it delivers) decides; with none, the `tier:haiku` label alone does (a11ign/a11ign#4382). A row that CANNOT BE READ gets the ordinary profile and the log says so:
  * the trial never blocks a spawn, because the claim has already landed and a refused spawn here would release a row over a spend experiment.
  */
-function tierOfRow(row: number, { readRow, switchPath, routes }: { readRow: (row: number) => RowForTier; switchPath?: string; routes?: ReadonlyMap<number, Routed> }): TierProfile | null {
+function tierOfRow(ref: RowRef, { readRow, switchPath, routes }: { readRow: (row: number, key?: string) => RowForTier; switchPath?: string; routes?: ReadonlyMap<RouteKey, Routed> }): TierProfile | null {
   const log = (line: string) => { process.stderr.write(`${line}\n`); };
-  const routed = routes?.get(row);
+  const { number: row } = ref;
+  const routed = routes?.get(routeKeyOf(ref));
   if (routed !== undefined) {
-    log(`wake: #${row} routed ${routed.route} via ${routed.via} (${routed.why}).`);
+    log(`wake: ${rowMention(ref)} routed ${routed.route} via ${routed.via} (${routed.why}).`);
     return routed.profile;
   }
+  // The `tier:haiku` label is read from the FIRST tracker's row of that number: a keyed row with no route of its own is another row's there, so it gets the ordinary profile.
+  if (ref.key !== "") return null;
   try {
     return haikuTierProfile({ number: row, ...readRow(row) }, { switchPath, log });
   } catch (err) {
@@ -6509,8 +6544,10 @@ function tierOfRow(row: number, { readRow, switchPath, routes }: { readRow: (row
 type RowForTier = { labels: string[]; body: string; title?: string };
 
 /** The title, labels and body of a row, one `gh` read; THROWS when it fails, and {@link tierOfRow} says so. */
-function readRowForTier(row: number): RowForTier {
-  const read = JSON.parse(defaultGh(["issue", "view", String(row), "--repo", REPO, "--json", "labels,body,title"]));
+function readRowForTier(row: number, key = ""): RowForTier {
+  const repo = key === "" ? REPO : trackerRepositoryOf(key);
+  if (repo === null) throw new Error(`the project declares no tracker "${key}"`);
+  const read = JSON.parse(defaultGh(["issue", "view", String(row), "--repo", repo, "--json", "labels,body,title"]));
   return { labels: (read.labels as { name: string }[]).map((l) => l.name), body: String(read.body ?? ""), title: String(read.title ?? "") };
 }
 
@@ -6518,24 +6555,94 @@ function readRowForTier(row: number): RowForTier {
 export const ROUTE_AHEAD = 3;
 
 /**
- * #4629: THE ROUTE OF EACH ROW THE TICK MAY START, resolved BEFORE the (synchronous) delivery, keyed by row. A row that cannot be read or routed is simply absent, and then
- * {@link tierOfRow} does what it did before. Never throws: the route lowers cost and must not cost a start.
+ * #4629: THE ROUTE OF EACH ROW THE TICK MAY START, resolved BEFORE the (synchronous) delivery, keyed by {@link routeKeyOf}. Another tracker's row is routed too (a11ign/agent-org#756):
+ * it is read from THAT tracker, filed under its keyed ref and logged under `row-<key>-<n>`, so it neither takes nor gives the route of the first tracker's row of the same number.
+ * A row that cannot be read or routed is simply absent, and then {@link tierOfRow} does what it did before. Never throws: the route lowers cost and must not cost a start.
  */
 export async function routesForStarts(orders: readonly { causeKey: string }[], { host, ledgerPath, readRow = readRowForTier, route = routeEngineer, projectDir = PRIMARY_CHECKOUT, switchPath }: {
-  host: Parameters<typeof routeEngineer>[1]["host"]; ledgerPath: string; readRow?: (row: number) => RowForTier; route?: typeof routeEngineer; projectDir?: string; switchPath?: string;
-}): Promise<Map<number, Routed>> {
-  const rows = orders.map(rowOfOrder).filter((row): row is number => row !== null).slice(0, ROUTE_AHEAD);
+  host: Parameters<typeof routeEngineer>[1]["host"]; ledgerPath: string; readRow?: (row: number, key?: string) => RowForTier; route?: typeof routeEngineer; projectDir?: string; switchPath?: string;
+}): Promise<Map<RouteKey, Routed>> {
+  const refs = orders.map(rowRefOfOrder).filter((ref): ref is RowRef => ref !== null).slice(0, ROUTE_AHEAD);
   const deps = { host, switchesPath: decisionSwitchesPath(projectDir), logPath: decisionLogPathFrom(ledgerPath), haikuSwitchPath: switchPath };
-  const found = await Promise.all(rows.map(async (number) => {
+  const found = await Promise.all(refs.map(async (ref) => {
     try {
-      const { labels, body, title = "" } = readRow(number);
-      return [number, await route({ number, title, labels, body }, deps)] as const;
+      const { labels, body, title = "" } = readRow(ref.number, ref.key);
+      return [routeKeyOf(ref), await route({ number: ref.number, ...(ref.key === "" ? {} : { key: ref.key }), title, labels, body }, deps)] as const;
     } catch (err) {
-      process.stderr.write(`wake: could not route #${number} (${firstLine(err)}) -- the ordinary profile.\n`);
+      process.stderr.write(`wake: could not route ${rowMention(ref)} (${firstLine(err)}) -- the ordinary profile.\n`);
       return null;
     }
   }));
   return new Map(found.filter((entry) => entry !== null));
+}
+
+/**
+ * #4888: THE RED-CHECK ORDER AND THE REVIEWER'S ORDER ARE EACH PUT TO THE PROVIDER, here, at the one async seam the tick has. `work-gate.ts` is synchronous end to end, so the gate cannot
+ * await a provider; it writes the order, and the tick classifies it just before delivery, beside {@link routesForStarts}. Both are capped at {@link ENRICH_AHEAD} per tick, never throw, and
+ * leave an order as the gate wrote it whenever the facts could not be read or no provider answered.
+ */
+export const ENRICH_AHEAD = 3;
+/** The cause key of a settled-red order (`<session>/pr-checks-failing/pr-<ref>/<head8>`, `/conflicting` optional); a hung check, an ejection and a checkless head end otherwise. */
+const RED_CHECK_KEY = /\/pr-checks-failing\/pr-([a-z0-9][a-z0-9-]*#)?([1-9][0-9]*)\/([0-9a-f]{8})(?:\/conflicting)?$/;
+type Enrichable = { session: string; causeKey: string; prompt: string; cause?: string };
+type EnrichDeps = { host: Parameters<typeof routeEngineer>[1]["host"]; ledgerPath: string; projectDir?: string; gh?: Gh };
+
+const enrichDecisionDeps = ({ host, ledgerPath, projectDir = PRIMARY_CHECKOUT }: EnrichDeps, id: string) =>
+  ({ host, switchesPath: decisionSwitchesPath(projectDir), logPath: decisionLogPathFrom(ledgerPath), id });
+
+/** The pull request a settled-red order is about, or `null` for a key naming none or a repository the declaration does not list (never the primary's by default). */
+function redPullRequestOf(order: Enrichable): { repo: string; number: number; head8: string } | null {
+  const match = order.cause === "pr-checks-failing" ? RED_CHECK_KEY.exec(order.causeKey) : null;
+  const repo = match === null ? null : codeRepositoryOf((match[1] ?? "").replace(/#$/, ""));
+  return match === null || repo === null ? null : { repo, number: Number(match[2]), head8: match[3] };
+}
+
+/**
+ * `ci-failure-class` (#4632) for each settled-red order. The class and the route go in the journal line whoever chose; the ORDER's text gains them only when the PROVIDER chose, so with
+ * no provider the order is the gate's, byte for byte. `read` and `classify` are seams for a test.
+ */
+export async function withCiFailureClass<T extends Enrichable>(orders: readonly T[], deps: EnrichDeps & { read?: typeof readCiFailure; classify?: typeof classifyCiFailure; now?: number }): Promise<T[]> {
+  const { gh = defaultGh, read = readCiFailure, classify = classifyCiFailure, now = Date.now() } = deps;
+  const notes = new Map<string, string>();
+  await Promise.all(orders.filter((o) => redPullRequestOf(o) !== null).slice(0, ENRICH_AHEAD).map(async (order) => {
+    try {
+      const failure = read(redPullRequestOf(order)!, gh, now);
+      if (failure === null) return;
+      const decision = await classify(failure, enrichDecisionDeps(deps, order.causeKey));
+      process.stderr.write(`wake: ${order.causeKey} ${classLine(decision)}\n`);
+      if (decision.via === "jev") notes.set(order.causeKey, classNote(decision));
+    } catch (err) {
+      process.stderr.write(`wake: could not classify ${order.causeKey} (${firstLine(err)}) -- the order as the gate wrote it.\n`);
+    }
+  }));
+  return orders.map((o) => (notes.has(o.causeKey) ? { ...o, prompt: `${o.prompt}\n\n${notes.get(o.causeKey)}` } : o));
+}
+
+/**
+ * `review-depth` (#4635) for each reviewer order. A depth CODE chose (`full`: a workflow, an auth or security path, a gate-bearing Region) needs no provider and is applied whatever
+ * the host declares; one the provider chose is applied too; `normal` by fallback is the order as it was. The depth rides the order as `reviewDepth`, which sets the effort the instance is
+ * STARTED with ({@link spawnReviewer}), and its line rides the prompt, where the reviewer may raise it and never lower it.
+ */
+export async function withReviewDepth<T extends Enrichable>(orders: readonly T[], deps: EnrichDeps & { read?: typeof readDepthState; depth?: typeof reviewDepth }): Promise<(T & { reviewDepth?: Depth })[]> {
+  const { gh = defaultGh, read = readDepthState, depth = reviewDepth } = deps;
+  const applied = new Map<string, Depth>();
+  await Promise.all(orders.filter((o) => isReviewerOrder(o)).slice(0, ENRICH_AHEAD).map(async (order) => {
+    try {
+      const ref = orderPullRequestRef(order);
+      const repo = ref === null ? null : codeRepositoryOf(ref.key);
+      const state = ref === null || repo === null ? null : read({ repo, number: ref.number }, gh);
+      if (state === null) return;
+      const answer = await depth(state, enrichDecisionDeps(deps, order.causeKey));
+      process.stderr.write(`wake: ${order.session} review depth ${answer.depth} by ${answer.by} (${answer.reason}).\n`);
+      if (answer.by !== "none") applied.set(order.causeKey, answer.depth);
+    } catch (err) {
+      process.stderr.write(`wake: could not read the depth for ${order.session} (${firstLine(err)}) -- the order as the gate wrote it.\n`);
+    }
+  }));
+  return orders.map((o) => {
+    const chosen = applied.get(o.causeKey);
+    return chosen === undefined ? o : { ...o, prompt: `${o.prompt}\n\n${depthLine(chosen)}`, reviewDepth: chosen };
+  });
 }
 
 /**
@@ -6741,7 +6848,9 @@ const defaultGit = (cmd: string, args: string[], opts?: object) =>
  */
 export type TeardownDeps = { spares: string[], registry: Record<string, SpareInstance>, now: number, run: (args: string[]) => string, heldRows: (role: string) => number[] | null,
   /** `role` is who held the row: a keyed spare's row numbers are its OWN tracker's, so the number alone asks the wrong repository (#4685). */
-  rowState: (row: number, role: string) => string | null, worktrees: (role: string, rows: number[]) => SpareWorktree[], record: (cycle: SpareCycle) => void, warn: (line: string) => void, };
+  rowState: (row: number, role: string) => string | null, worktrees: (role: string, rows: number[]) => SpareWorktree[], record: (cycle: SpareCycle) => void, warn: (line: string) => void,
+  /** WHY the last `heldRows(role)` answered `null`, so the line that leaves the instance running names the cause and not only the session (agent-org#4893). Absent says nothing. */
+  unreadBecause?: (role: string) => string | null, };
 
 /**
  * END EVERY SPARE INSTANCE WHOSE ROW HAS CLOSED, and write one ledger line for each ending. The tick's
@@ -6772,7 +6881,8 @@ export function endFinishedSpares(agents: { label: string; status: string; }[], 
     if (agent === undefined) continue; // A partial read looks the same as absence, so this records nothing.
     const held = deps.heldRows(role);
     if (held === null) {
-      deps.warn(`teardown: could not read the rows "${role}" holds -- leaving it running.`);
+      const because = deps.unreadBecause?.(role);
+      deps.warn(`teardown: could not read the rows "${role}" holds -- leaving it running${because ? ` (${because})` : ""}.`);
       continue;
     }
     const before = registry[role] ?? { spawnedAt: deps.now, rows: [] };
@@ -6896,10 +7006,34 @@ function trackerOfSpare(role: string): string | null | undefined {
   return key === "" ? undefined : trackerRepositoryOf(key);
 }
 
-/** The rows `role` holds, read in ITS tracker: `null` when that cannot be asked, so the teardown leaves the instance running (#4685). */
-function heldRowsOfSpare(role: string): number[] | null {
+/**
+ * The rows `role` holds, read in ITS tracker: `null` when that cannot be asked, so the teardown leaves the instance running (#4685).
+ *
+ * A `null` IS GIVEN ITS CAUSE in `causes` (agent-org#4893): `lookupOtherHeldIssues` swallows the error by design, and the line that said "could not
+ * read the rows ... leaving it running" 15 times a tick named neither a cause nor which tracker. Measured 2026-10-10: every session failed alike, keyed
+ * and unkeyed, in the two windows the GraphQL pool was exhausted -- a read of a pool that was down, which no line said, so it read as a keyed-tracker bug.
+ * @param causes written to, keyed by role: the failed read's own stderr line, or why no read was attempted
+ * @param [deps] `read` is the reader and `gh` the runner it is handed: seams, so the tracker a keyed role is asked in is tested without GitHub
+ */
+export function heldRowsOfSpare(role: string, causes: Map<string, string>,
+  { read = lookupOtherHeldIssues, gh = defaultGh }: { read?: typeof lookupOtherHeldIssues; gh?: (args: string[]) => string; } = {}): number[] | null {
+  causes.delete(role);
   const repo = trackerOfSpare(role);
-  return repo === null ? null : lookupOtherHeldIssues(role, 0, repo === undefined ? {} : { repo });
+  if (repo === null) {
+    causes.set(role, "its tracker key is not one the project declares");
+    return null;
+  }
+  const run = (args: string[]) => {
+    try {
+      return gh(args);
+    } catch (err) {
+      causes.set(role, `${repo ?? "the first tracker"}: ${herdrReason(err)}`);
+      throw err;
+    }
+  };
+  const rows = read(role, 0, repo === undefined ? { run } : { repo, run });
+  if (rows === null && !causes.has(role)) causes.set(role, `${repo ?? "the first tracker"}: the answer was not a list of rows`);
+  return rows;
 }
 
 /** The repository root `role`'s worktrees are listed in: the tick's checkout, or the declared clone of its tracker's repository (#4685). THROWS when there is none, so no worktree reads as clean for want of a clone. */
@@ -6923,9 +7057,10 @@ export function tearDownSpares(agents: { label: string; status: string; }[], led
   try {
     const paths = sparePathsFrom(ledgerPath);
     mkdirSync(dirname(ledgerPath), { recursive: true });
+    const unread = new Map<string, string>();
     const { ended, registry } = endFinishedSpares(agents, {
       spares: spareInstances(agents), registry: readSpareRegistry(paths.registry), now: Date.now(), run: defaultRun,
-      heldRows: (role) => heldRowsOfSpare(role),
+      heldRows: (role) => heldRowsOfSpare(role, unread), unreadBecause: (role) => unread.get(role) ?? null,
       rowState: (row, role) => { const repo = trackerOfSpare(role); return repo === null ? null : rowStateOf(row, repo); },
       worktrees: (role, rows) => spareWorktrees({ role, rows, repoRoot: repoRootOfSpare(role) }),
       record: (cycle) => appendSpareCycle(paths.cycles, cycle),
@@ -7828,7 +7963,7 @@ function claimOrdersText(ledgerPath: string): string {
  * #4630: THE ROWS WHOSE LATER START MUST BE SONNET, from the record: every row with an `escalation` line. Layered over the tick's routes so that the gate's own respawn of an
  * escalated row (a restart that failed, or a worker that ended later) does not read the row's `tier:haiku` label and start Haiku again -- the label is KEPT, on purpose.
  */
-export function escalatedRoutes(recordText: string, routes: ReadonlyMap<number, Routed>): Map<number, Routed> {
+export function escalatedRoutes(recordText: string, routes: ReadonlyMap<RouteKey, Routed>): Map<RouteKey, Routed> {
   const layered = new Map(routes);
   for (const line of recordText.split("\n").filter(Boolean)) {
     try {
@@ -7860,7 +7995,7 @@ export function recentlyVoidedKeys(ledgerPath: string, since: number): Set<strin
 /**
  * The spawner's claim, wired to the host: a worktree a release KEPT for the row is adopted, not refused (#2470), and forgotten once claimed.
  */
-function claimerFor(spares: ReturnType<typeof sparePathsFrom>, ledgerPath: string, hostLayout: ReturnType<typeof layoutUnder>, routes: ReadonlyMap<number, Routed>) {
+function claimerFor(spares: ReturnType<typeof sparePathsFrom>, ledgerPath: string, hostLayout: ReturnType<typeof layoutUnder>, routes: ReadonlyMap<RouteKey, Routed>) {
   const keptPath = keptClaimsPath(ledgerPath);
   return spawnClaimer({ ...hostLayout, routes, settle: (role) => { settleAbsentInstance(spares, role); },
     kept: (row) => readKeptClaims(keptPath)[row] ?? null,
@@ -8112,9 +8247,12 @@ async function main() {
 
   const spares = sparePathsFrom(ledgerPath);
   const drained = drainNow(spares.cycles);
-  const routes = await routesForStarts(todo, { host: hostOrEmpty(), ledgerPath });
+  const host = hostOrEmpty();
+  // #4888: `ci-failure-class` and `review-depth` are asked here, of the orders about to be delivered.
+  const ready = await withReviewDepth(await withCiFailureClass(todo, { host, ledgerPath }), { host, ledgerPath });
+  const routes = await routesForStarts(ready, { host, ledgerPath });
   // A SEAT THE FIRST DELIVERY FOUND ENDED IS ENDED FOR THE SECOND (#3568): one `agent_not_found` per label per tick, not one per order.
-  const { sent, refused: gateRefused, stuck, outaged, settled } = deliver(todo, free, roster, { record, unavailable, clock, relane: relaneFacts(ledgerPath),
+  const { sent, refused: gateRefused, stuck, outaged, settled } = deliver(ready, free, roster, { record, unavailable, clock, relane: relaneFacts(ledgerPath),
     goneSeats: handed.goneSeats,
     claimOrders: claimOrdersIn(claimOrdersPath(ledgerPath)),
     counts: deliveryCounts(ledgerPath), ineligibleReason: poolEngineerReason(poolEligibility(spares, drained), unavailable),

@@ -32,7 +32,7 @@ export const DEFINITIONS = [
   "    EACH CAUSE'S REPEATS ARE SPLIT three ways, read from the store's GitHub record and never guessed: AFTER A CHANGE (between the previous delivery of the key and the repeat, a `claimed`, `released`, `labeled` or `unlabeled` event on the row or pull request the key names, or, for a key that carries a head sha, a `head_moved` to a different head: a row worked a second time), UNCHANGED (the store holds no such record: the order re-sent, the waste), UNEXPLAINED (the store holds no GitHub event at all for the subject, or the key names none: nothing is known, so it is in neither column). The three add up to the cause's repeats, and their dollars to its dollars.",
   "  re-review: a `reviewed` event on a pull request after an earlier one. Dollars: the turns of that pull request's reviewer session between its first review and the later one.",
   "  re-queue: an `added_to_merge_queue` after an earlier one on the same pull request. Dollars: the turns on the pull request's rows between its last unmerged exit from the queue and the re-entry.",
-  "  compaction: a compaction of a session. Dollars: the INPUT side (input, cacheRead, cacheWrite; not output) of the first turn the session took after it, which re-reads the window.",
+  "  compaction: a compaction of a session. Dollars: the INPUT side (input, cacheRead, cacheWrite; not output) of the first turn the session took after it, which re-reads the window, PLUS the summary call itself where the store holds its usage (the compaction event's `tokens`, from Claude Code's own `api_request` with `query_source: compact`; a separate API call from every turn, so no turn is counted twice). A compaction whose summary call has no usage record (every one of the 1,376 stored on 2026-10-10 when this was measured: the transcript holds none, and no process was exporting) is UNMEASURED: it is counted apart, is NOT in the dollars (which are then a FLOOR), and is never 0. Its spend is ESTIMATED, not measured: about $0.10 per call and about $16 a day, the chairman's figure (a11ign#4437, 2026-10-09), printed beside the line as an estimate and in no total.",
   "  preamble reload: a wake that is not its session's first. Dollars: the INPUT side of its first turn, the re-read of the window every wake pays; the turn's own output is the work and is not waste.",
   "  CI re-run: a check run of a name already run on the same pull request. Counted with its runner time; CI minutes are not tokens, so its dollars are `not derivable`.",
   "  deferred wait: how long a busy seat held an order before it was typed. The deferral log is not in the store (#3510), so it is `not held`, never 0.",
@@ -70,7 +70,7 @@ export type Tally = { dollars: number; priced: number; unpriced: number; turns: 
 export type Share = { count: number; dollars: number | typeof NOT_DERIVABLE; floor: boolean; tokens: number; unpriced: number; };
 export type Split = Record<"afterChange" | "unchanged" | "unexplained", Share>;
 export type RedeliveredCause = { cause: string; deferred: boolean; count: number; keys: number; medianGapMs: number | null; dollars: number | typeof NOT_DERIVABLE; floor: boolean; tokens: number; unpriced: number; split: Split; };
-export type RepeatClass = { id: string; label: string; count: number; dollars: number | typeof NOT_DERIVABLE | typeof NOT_HELD; floor: boolean; tokens: number; unpriced?: number; ms?: number; causes?: RedeliveredCause[]; split?: Split; };
+export type RepeatClass = { id: string; label: string; count: number; dollars: number | typeof NOT_DERIVABLE | typeof NOT_HELD; floor: boolean; tokens: number; unpriced?: number; unmeasured?: number; ms?: number; causes?: RedeliveredCause[]; split?: Split; };
 
 /** The Monday 00:00 UTC of the week holding `ms`. */
 export function weekStart(ms: number) {
@@ -458,10 +458,40 @@ function requeues({ events, keys, at, claimed, turnsOf }: Repeat) {
   return classOf({ id: "requeue", label: "re-queues", count }, priceOnce(between, claimed, "whole"));
 }
 
-function compactions({ events, turnsOf, at, claimed }: Repeat) {
+/** The per-call figure the chairman gave for a compaction's summary call (a11ign#4437, 2026-10-09). An ESTIMATE, printed as one: it is in no dollar figure. */
+export const COMPACTION_SUMMARY_ESTIMATE_USD = 0.1;
+
+/**
+ * The compactions' own summary calls (agent-org#478): priced from the usage the store holds for each, counted `unmeasured` where it holds none. A call is not a turn, so it never
+ * touches `claimed`; a measured one with no price is unpriced (a floor), never 0.
+ */
+function summaryCalls(made: TraceEvent[]) {
+  const priced = { dollars: 0, tokens: 0, floor: false, priced: 0, unpriced: 0 };
+  let unmeasured = 0;
+  for (const event of made) {
+    if (!event.tokens) {
+      unmeasured += 1;
+      continue;
+    }
+    const cost = costOf(event.model, event.tokens);
+    priced.tokens += allTokens(event.tokens);
+    if (cost === null) {
+      priced.floor = true;
+      priced.unpriced += 1;
+    } else {
+      priced.dollars += cost;
+      priced.priced += 1;
+    }
+  }
+  return { priced, unmeasured };
+}
+
+function compactions({ events, turnsOf, at, claimed }: Repeat): RepeatClass {
   const made = events.filter((event) => event.kind === "compaction" && inWeek(event, at));
   const after = made.flatMap((event) => (turnsOf.session.get(event.session) ?? []).filter((turn) => !turn.sidechain && turn.at > event.at).slice(0, 1));
-  return classOf({ id: "compaction", label: "compactions (re-read of the window after each)", count: made.length }, priceOnce(after, claimed, "input"));
+  const summaries = summaryCalls(made);
+  const money = classOf({ id: "compaction", label: "compactions (re-read of the window after each, and the summary call)", count: made.length }, sumPriced([priceOnce(after, claimed, "input"), summaries.priced]));
+  return { ...money, floor: money.floor || summaries.unmeasured > 0, unmeasured: summaries.unmeasured };
 }
 
 function preambles({ events, turnsOf, at, claimed }: Repeat) {
@@ -768,7 +798,8 @@ function classLine(entry: RepeatClass, githubUnread: number) {
   const unpriced = entry.unpriced ? ` (${entry.unpriced} turns unpriced)` : "";
   const money = typeof entry.dollars === "number" ? `${dollars(entry.dollars, entry.floor)}, ${count(entry.tokens)} tokens${unpriced}` : `dollars: ${entry.dollars}${unpriced}, ${count(entry.tokens)} tokens`;
   const fromGithub = githubUnread > 0 && GITHUB_CLASSES.has(entry.id) ? `  [FLOOR: GitHub unread for ${githubUnread} rows of this week]` : "";
-  return `    ${entry.label.padEnd(48)} ${String(entry.count).padStart(5)}  ${money}${entry.ms === undefined ? "" : `, ${hours(entry.ms)} of runner time`}${fromGithub}`;
+  const unmeasured = entry.unmeasured ? `; ${entry.unmeasured} summary calls UNMEASURED (no usage record, not in the dollars; ESTIMATED ~${dollars(entry.unmeasured * COMPACTION_SUMMARY_ESTIMATE_USD)} at $${COMPACTION_SUMMARY_ESTIMATE_USD} each, not a reading)` : "";
+  return `    ${entry.label.padEnd(48)} ${String(entry.count).padStart(5)}  ${money}${entry.ms === undefined ? "" : `, ${hours(entry.ms)} of runner time`}${unmeasured}${fromGithub}`;
 }
 
 const MINUTE_MS = 60 * 1000;

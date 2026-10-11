@@ -76,7 +76,7 @@ const sha256 = (text: string) => createHash("sha256").update(text).digest("hex")
 
 test("#2620: no home-directory literal remains in the tool's sources, its templates or its scripts", () => {
   const files = toolFiles();
-  assert.equal(files.length, 3 + 28, "POSITIVE CONTROL: thirty-one files are scanned (three sources, twenty-eight host entries -- the trace store's clock pair, a11ign/agent-org#498, the two the shadow window added, #2867, the two chairman-watch templates, #2901, the listener's, #2907, the agent-org launcher, #3532, the weekly report's pair and script, a11ign/a11ign#3627, the trace pages' pair, a11ign/a11ign#3515, the /tmp janitor's pair and tmpfiles rule, a11ign/a11ign#3849, the OTel receiver's service, a11ign/a11ign#4071, and the kernel reboot's pair, a11ign/a11ign#4053, included), so an emptiness below is not a scan of nothing, the `claude` seat wrapper, a11ign#4823");
+  assert.equal(files.length, 3 + 30, "POSITIVE CONTROL: thirty-three files are scanned (three sources, thirty host entries -- the trace store's clock pair, a11ign/agent-org#498, the two the shadow window added, #2867, the two chairman-watch templates, #2901, the listener's, #2907, the agent-org launcher, #3532, the weekly report's pair and script, a11ign/a11ign#3627, the trace pages' pair, a11ign/a11ign#3515, the /tmp janitor's pair and tmpfiles rule, a11ign/a11ign#3849, the OTel receiver's service, a11ign/a11ign#4071, and the kernel reboot's pair, a11ign/a11ign#4053, and the daily confidence reading's pair, a11ign/a11ign#4885, included), so an emptiness below is not a scan of nothing, the `claude` seat wrapper, a11ign#4823");
   const offenders = files.filter((file) => HOME_LITERAL.test(readFileSync(file, "utf8")));
   assert.deepEqual(offenders, [], "each of these names a host path the tool must read from host.json instead");
 });
@@ -95,6 +95,9 @@ test("#2620: a host.json's values are what `templateValues` hands the templates,
   assert.deepEqual(templateValues(host, units), {
     home: "/home/agent", binDir: "/home/agent/.local/bin", checkout: "/home/agent/repos/a11y-witness",
     workersDir: "/home/agent/workers", leadsDir: "/home/agent/leads", prefix: "a11ign-",
+    // #4900: the four values the wrapper's app block renders from; a host that declares no `github-apps` role has `appRoles` empty and the block does nothing.
+    appRoles: "", appDeclared: "case \"$1\" in\n    *) return 1 ;;\n  esac", appTokenDir: "/home/agent/.cache/a11ign/app-tokens",
+    appTokenScript: "/home/agent/repos/a11y-witness/packages/agent-org/src/app-token.ts",
   });
   assert.deepEqual(host.gh.leadsWorkspaces.map((w) => w.id), ["w6", "w2", "w5"], "the leads list is the file it replaced");
 });
@@ -125,7 +128,9 @@ const TODAYS_TEXT = {
 // a11ign/a11ign#4397 MOVED IT AGAIN, deliberately: `gh pr create` is refused unless `A11Y_PR_OPEN` is set (only `pr:open` sets it). Same staleness, same remedy.
 // a11ign/a11ign#4148 part 6 MOVED IT AGAIN, deliberately: `auth git-credential` and an `api` call naming GET no longer drop the read cache, and a write drops only its own repository's entries. Same staleness, same remedy.
 // agent-org#486 MOVED IT AGAIN, deliberately: `issue comment`, `pr comment` and `pr review` get a trailing `<!-- decided-by: <role> run: <id> -->` line. Same staleness, same remedy.
-const TODAYS_GH_WRAPPER = "a5c6b093f1aef6aa302b3e425ce37f4426c519b396d7f57947ce73164096f37a";
+// a11ign/a11ign#4900 MOVED IT AGAIN, deliberately: a role `host.json` declares as `github-apps` calls as that app (`GH_TOKEN` from `app-token.ts`'s cache); for the recorded host, which declares none, the block is inert. Same staleness, same remedy.
+// a11ign/a11ign#4898 MOVED IT AGAIN, deliberately: a WRITE that GitHub refuses for a rate limit is queued under `<GH_CONFIG_DIR>/refused-queue` and the wrapper exits 75 ("held, not failed"); the gate's `ghQueueTick` makes it after the reset. Same staleness, same remedy. The review of #779 moved it once more: a `gh api graphql` whose BODY is a mutation in `--input FILE` or `-F name=@FILE` is a write too.
+const TODAYS_GH_WRAPPER = "4320270dd59d18173e56057e276f566023ca7469aac53c11328b33fe1ad8799c";
 // #2896 MOVED THIS ONE, deliberately: the recorded host's header says `pnpm run host:install` / `pnpm run host:check` where it said `npm run`.
 const TODAYS_LEADS_LIST = "dbca070c4bb7934ff1e9cdc9505f9edee638d98fcff10963b18d5d3a743770a2";
 
@@ -144,6 +149,7 @@ test("#2620: NO UNIT IS RENAMED -- the tool's units carry the names they had, an
   // null`, so only the TOOL'S templates are named: what a11ign's own eight units are called (`.agent-org/units/`) is a11ign's to pin (#3233).
   assert.deepEqual(shippedUnits(SHIPPED_DIR, { projectUnitsDir: null, prefix: "a11ign-", declaredKeys: new Set(["causes", "units"]) }), [
     "a11ign-board-report.service", "a11ign-board-report.timer",
+    "a11ign-confidence-post.service", "a11ign-confidence-post.timer",
     "a11ign-kernel-reboot.service", "a11ign-kernel-reboot.timer",
     "a11ign-otel-receiver.service",
     "a11ign-shadow-window.service", "a11ign-shadow-window.timer",
@@ -158,7 +164,7 @@ test("#2620: NO UNIT IS RENAMED -- the tool's units carry the names they had, an
 
 // --- 3. the tool's own entries are classified ---------------------------------------------------------------------------------------
 
-test("#2620: the tool's 28 entries are classified -- the original 8, the trace store's clock pair (a11ign/agent-org#498), the shadow window's two (#2867), the chairman watcher's two (#2901), the listener's one (#2907), the agent-org launcher (#3532) the weekly report's three (a11ign/a11ign#3627) the trace pages' two (a11ign/a11ign#3515) the /tmp janitor's three (a11ign/a11ign#3849) the OTel receiver's one (a11ign/a11ign#4071) the kernel reboot's two (a11ign/a11ign#4053) and the `claude` seat wrapper (a11ign#4823) -- and the host-data entry is host.json's, not a file", () => {
+test("#2620: the tool's 30 entries are classified -- the original 8, the trace store's clock pair (a11ign/agent-org#498), the shadow window's two (#2867), the chairman watcher's two (#2901), the listener's one (#2907), the agent-org launcher (#3532) the weekly report's three (a11ign/a11ign#3627) the trace pages' two (a11ign/a11ign#3515) the /tmp janitor's three (a11ign/a11ign#3849) the OTel receiver's one (a11ign/a11ign#4071) the kernel reboot's two (a11ign/a11ign#4053) the daily confidence reading's two (a11ign/a11ign#4885) and the `claude` seat wrapper (a11ign#4823) -- and the host-data entry is host.json's, not a file", () => {
   // (#3233) The row also counted eight entries in the PROJECT's `.agent-org/units/` and asserted them equal to a11ign's `units.own`: that is a11ign's tree, and moved there.
   const inTool = readdirSync(SHIPPED_DIR).sort();
   const hostData = Object.keys(HOST_DATA_ENTRIES);
@@ -182,9 +188,11 @@ test("#2620: the tool's 28 entries are classified -- the original 8, the trace s
   assert.equal(otelReceiver.length, 1, "POSITIVE CONTROL: a11ign/a11ign#4071's service is one more, with no timer, so the 8 below is still the original eight");
   const kernelReboot = inTool.filter((name) => name.startsWith("kernel-reboot."));
   assert.equal(kernelReboot.length, 2, "POSITIVE CONTROL: a11ign/a11ign#4053's pair is two more, so the 8 below is still the original eight");
+  const confidencePost = inTool.filter((name) => name.startsWith("confidence-post."));
+  assert.equal(confidencePost.length, 2, "POSITIVE CONTROL: a11ign/a11ign#4885's pair is two more, so the 8 below is still the original eight");
   const seatWrapper = inTool.filter((name) => name === "claude");
   assert.equal(seatWrapper.length, 1, "POSITIVE CONTROL: a11ign#4823's wrapper is one more, copied to the first PATH directory and not binDir, so the 8 below is still the original eight");
-  assert.equal(inTool.length - shadowPair.length - chairmanPair.length - chairmanListener.length - agentOrgLauncher.length - traceWeekly.length - traceIngest.length - tracePublish.length - tmpJanitor.length - otelReceiver.length - kernelReboot.length - seatWrapper.length, 8, "POSITIVE CONTROL: eight entries stay in the tool's host directory");
+  assert.equal(inTool.length - shadowPair.length - chairmanPair.length - chairmanListener.length - agentOrgLauncher.length - traceWeekly.length - traceIngest.length - tracePublish.length - tmpJanitor.length - otelReceiver.length - kernelReboot.length - confidencePost.length - seatWrapper.length, 8, "POSITIVE CONTROL: eight entries stay in the tool's host directory");
   assert.equal(hostData.length, 1, "POSITIVE CONTROL: one is host data");
   assert.deepEqual(inTool, [...TOOL_ENTRIES].sort(), "the tool's directory holds exactly what the tool records");
   for (const name of hostData) assert.ok(!existsSync(join(SHIPPED_DIR, name)), `${name} is host.json's now, not a file`);
@@ -249,7 +257,7 @@ test("#2620: a fixture project's paths and prefix change the units, the wrapper 
   assert.match(work, /^Environment=HOME=\/srv\/ci$/m);
   assert.match(shippedUnitText("acme-work-tick.timer", ACME) ?? "", /^Requires=acme-work-tick\.service$/m);
   assert.deepEqual(shippedUnits(SHIPPED_DIR, { projectUnitsDir: null, prefix: "acme-", declaredKeys: new Set() }).filter((u) => u.endsWith(".service")),
-    ["acme-board-report.service", "acme-kernel-reboot.service", "acme-otel-receiver.service", "acme-shadow-window.service", "acme-tmp-prune.service", "acme-trace-ingest.service", "acme-trace-publish.service", "acme-trace-weekly.service", "acme-work-tick.service", "acme-worktree-prune.service"], "the prefix names the tool's units");
+    ["acme-board-report.service", "acme-confidence-post.service", "acme-kernel-reboot.service", "acme-otel-receiver.service", "acme-shadow-window.service", "acme-tmp-prune.service", "acme-trace-ingest.service", "acme-trace-publish.service", "acme-trace-weekly.service", "acme-work-tick.service", "acme-worktree-prune.service"], "the prefix names the tool's units");
   for (const text of [work, shippedScriptText("gh", ACME) ?? ""]) assert.doesNotMatch(text, /\/home\/agent/, "and none of a11ign's host survives");
   assert.match(shippedScriptText("gh", ACME) ?? "", /A11Y_GH_REAL:-\/srv\/ci\/bin\/gh-real/);
   const files = ownedIdentityFiles(ACME);

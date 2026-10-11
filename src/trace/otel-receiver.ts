@@ -54,6 +54,8 @@ export type OtelEvent = {
   wakeId: null; requestId: string; promptId: string | null; sessionId: string | null; model: string | null;
   usage: { input: number | null; output: number | null; cacheRead: number | null; cacheCreation: number | null };
   clientCostUsd: number | null; durationMs: number | null; effort: string | null;
+  /** The subsystem that issued the request (`repl_main_thread`, `compact`, a subagent's name): what tells a compaction's summary call, which no transcript turn holds, from a turn (agent-org#478). */
+  querySource: string | null;
 };
 
 /** An OTLP `AnyValue` as a JS value; `undefined` for a kind this reader does not use (arrays, maps). */
@@ -94,6 +96,7 @@ function eventOf(record: any, resource: Record<string, any>): { event: OtelEvent
     requestId, promptId: textOrNull(attributes["prompt.id"]), sessionId: textOrNull(attributes["session.id"]), model: textOrNull(attributes.model),
     usage: { input: numberOrNull(attributes.input_tokens), output: numberOrNull(attributes.output_tokens), cacheRead: numberOrNull(attributes.cache_read_tokens), cacheCreation: numberOrNull(attributes.cache_creation_tokens) },
     clientCostUsd: numberOrNull(attributes.cost_usd), durationMs: numberOrNull(attributes.duration_ms), effort: textOrNull(attributes.effort),
+    querySource: textOrNull(attributes.query_source),
   } };
 }
 

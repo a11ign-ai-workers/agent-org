@@ -1,11 +1,11 @@
 {
   "generatedBy": "src/packaging/gh-call-inventory.ts",
   "summary": {
-    "files": 92,
-    "spawns": 133,
-    "calls": 384,
+    "files": 95,
+    "spawns": 135,
+    "calls": 391,
     "shapes": {
-      "api rest": 131,
+      "api rest": 137,
       "issue list": 42,
       "api graphql": 37,
       "issue view": 34,
@@ -13,7 +13,7 @@
       "issue comment": 26,
       "pr view": 17,
       "issue edit": 13,
-      "label create": 10,
+      "label create": 11,
       "pr merge": 6,
       "project item-edit": 6,
       "issue create": 4,
@@ -214,6 +214,14 @@
       "labels": [],
       "parsesCloses": false
     },
+    "src/ci-failure-class.ts": {
+      "spawns": 0,
+      "calls": {
+        "api rest": 2
+      },
+      "labels": [],
+      "parsesCloses": false
+    },
     "src/ci-health-liveness.ts": {
       "spawns": 1,
       "calls": {
@@ -350,6 +358,12 @@
         "issue comment": 1,
         "issue list": 1
       },
+      "labels": [],
+      "parsesCloses": false
+    },
+    "src/gh-ledger.ts": {
+      "spawns": 1,
+      "calls": {},
       "labels": [],
       "parsesCloses": false
     },
@@ -542,10 +556,10 @@
       "parsesCloses": false
     },
     "src/pr-open.ts": {
-      "spawns": 6,
+      "spawns": 7,
       "calls": {
-        "api rest": 5,
-        "label create": 1,
+        "api rest": 6,
+        "label create": 2,
         "pr edit": 1,
         "pr merge": 1
       },
@@ -616,6 +630,14 @@
       "spawns": 0,
       "calls": {
         "api rest": 4
+      },
+      "labels": [],
+      "parsesCloses": false
+    },
+    "src/review-depth.ts": {
+      "spawns": 0,
+      "calls": {
+        "api rest": 3
       },
       "labels": [],
       "parsesCloses": false

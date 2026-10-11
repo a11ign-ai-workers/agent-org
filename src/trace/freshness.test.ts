@@ -163,6 +163,62 @@ test("the newest turn is read from the tail: newest by `at` and not by position,
   assert.equal(newestTurnAt(h.storePath), NOW - 5 * MINUTE, "an unparseable last line is not a turn");
 });
 
+const TWO_DAYS = 2 * 24 * 60 * MINUTE;
+const FIRST_WINDOW = 1024 * 1024;
+const oldTurns = (count: number, prefix = "old") => Array.from({ length: count }, (_, i) => turn(`${prefix}${i}`, NOW - TWO_DAYS + i)); // ~45 bytes a line
+
+test("COLD START (a11ign/agent-org#709): a turn one minute old on the FIRST line and more than a window of two-day-old turns last is NOT stale, and the one-minute-old turn is returned", () => {
+  const h = home();
+  h.touch(2 * MINUTE);
+  writeStore(h.storePath, [turn("fresh", NOW - MINUTE), ...oldTurns(30000)]);
+  assert.ok(statSync(h.storePath).size > 1.2 * FIRST_WINDOW, "the cold-start shape: the old turns alone fill more than the first window");
+  assert.equal(newestTurnAt(h.storePath, NOW), NOW - MINUTE);
+  const reading = storeFreshness({ storePath: h.storePath, now: NOW, working: h.working() });
+  assert.deepEqual([reading.newestTurnAt, reading.ageMs, reading.working, reading.stale], [NOW - MINUTE, MINUTE, true, false]);
+});
+
+test("COLD START: a recent turn early, a run of non-turn lines over several windows, and an OLD turn last (the first tail window holds only the old turn) is read to the recent turn", () => {
+  const h = home();
+  const gh = Array.from({ length: 70000 }, (_, i) => other(`g${i}`, NOW - TWO_DAYS + i));
+  writeStore(h.storePath, [turn("fresh", NOW - 3 * MINUTE), ...gh, turn("last-and-old", NOW - TWO_DAYS)]);
+  assert.ok(statSync(h.storePath).size > 3 * FIRST_WINDOW, "the recent turn is beyond the first three windows");
+  assert.equal(newestTurnAt(h.storePath, NOW), NOW - 3 * MINUTE);
+});
+
+test("COLD START: the window edge falls INSIDE the line that holds the recent turn, and a line spanning two chunks is read whole", () => {
+  const h = home();
+  const fresh = turn("fresh", NOW - MINUTE);
+  const tail = turn("old", NOW - TWO_DAYS).padEnd(FIRST_WINDOW - 10 - 1, " "); // 10 bytes of the recent line's end, with its newline, fall inside the first window
+  writeStore(h.storePath, [turn("before", NOW - TWO_DAYS - MINUTE), fresh, tail]);
+  const edge = statSync(h.storePath).size - FIRST_WINDOW;
+  const freshStarts = Buffer.byteLength(`${turn("before", NOW - TWO_DAYS - MINUTE)}\n`);
+  assert.ok(edge > freshStarts && edge < freshStarts + Buffer.byteLength(fresh), "the first window begins in the middle of the recent turn's line");
+  assert.equal(newestTurnAt(h.storePath, NOW), NOW - MINUTE);
+});
+
+test("POSITIVE CONTROL: a store whose every turn is two days old reads stale while a session works, and returns the newest of them wherever on the file it is", () => {
+  const h = home();
+  h.touch(2 * MINUTE);
+  writeStore(h.storePath, [turn("newest-of-old", NOW - TWO_DAYS + 60 * MINUTE), ...oldTurns(30000)]);
+  assert.ok(statSync(h.storePath).size > 1.2 * FIRST_WINDOW);
+  assert.equal(newestTurnAt(h.storePath, NOW), NOW - TWO_DAYS + 60 * MINUTE, "the whole file is read before an old reading is given as the answer");
+  const reading = storeFreshness({ storePath: h.storePath, now: NOW, working: h.working() });
+  assert.deepEqual([reading.ageMs, reading.stale], [TWO_DAYS - 60 * MINUTE, true]);
+  assert.equal(storeFreshness({ storePath: h.storePath, now: NOW, working: false }).stale, false, "old with nobody working is still not stale");
+});
+
+test("a store of more than a window with no `turn` at all still returns null, and is stale while a session works", () => {
+  const h = home();
+  h.touch(2 * MINUTE);
+  writeStore(h.storePath, Array.from({ length: 30000 }, (_, i) => other(`g${i}`, NOW - i)));
+  assert.ok(statSync(h.storePath).size > 1.2 * FIRST_WINDOW);
+  assert.equal(newestTurnAt(h.storePath, NOW), null);
+  const reading = storeFreshness({ storePath: h.storePath, now: NOW, working: h.working() });
+  assert.deepEqual([reading.newestTurnAt, reading.ageMs, reading.stale], [null, null, true]);
+  writeFileSync(h.storePath, "");
+  assert.equal(newestTurnAt(h.storePath, NOW), null, "an empty store holds no turn");
+});
+
 test("readStore streams in chunks: lines spanning chunk edges, multibyte text, the last copy of an id, and an unterminated last line read as the whole read does", () => {
   const h = home();
   const lines = [
@@ -296,13 +352,14 @@ function cliHome() {
   return { dir, transcript, storePath, run };
 }
 
-test("`--ingest` adds the turn, a second run adds nothing, it prints one report line, renders nothing and calls no GitHub", () => {
+test("`--ingest` adds the turn, a second run adds nothing, it prints one report line and the duplicate-id line, renders nothing and calls no GitHub", () => {
   const h = cliHome();
   const first = h.run("--ingest", "--since", "2026-10-01T00:00:00Z");
   assert.equal(first.status, 0, first.stderr);
   const lines = first.stdout.trim().split("\n");
-  assert.deepEqual(lines.filter((line) => !/^ {2}COLD START: /.test(line)).length, 1, `one report line (and, on a first run, the cold-start note) and no rendering: ${first.stdout}`);
+  assert.deepEqual(lines.filter((line) => !/^ {2}COLD START: /.test(line)).length, 2, `one report line, the duplicate-id line (and, on a first run, the cold-start note) and no rendering: ${first.stdout}`);
   assert.match(lines[0], /^ingest: 1 transcripts read, 0 unchanged, \d+ events added, 0 failed/);
+  assert.equal(lines.at(-1), "duplicate ids: 0 (0 extra lines)", "agent-org#476: the store's duplicate count is on the report, and zero is said");
   const turns = () => readStore(h.storePath).filter((event) => event.kind === "turn");
   assert.equal(turns().length, 1, "the transcript's turn is in the store");
   const stored = readFileSync(h.storePath, "utf8");
@@ -311,6 +368,19 @@ test("`--ingest` adds the turn, a second run adds nothing, it prints one report 
   assert.match(second.stdout, /^ingest: 0 transcripts read, 1 unchanged, 0 events added, 0 failed/);
   assert.equal(readFileSync(h.storePath, "utf8"), stored, "the store is byte-identical after the second run");
   assert.equal(existsSync(GH_CALLS), false, "no `gh` was called");
+});
+
+test("`--ingest` prints `duplicate ids: n` and exits 1 above zero, as it does for an unreadable source, and still adds what it read (agent-org#476)", () => {
+  const h = cliHome();
+  const since = ["--since", "2026-10-01T00:00:00Z"];
+  writeFileSync(h.storePath, `${JSON.stringify({ id: "old", kind: "wake" })}\n${JSON.stringify({ id: "old", kind: "wake", n: 2 })}\n`);
+  const run = h.run("--ingest", ...since);
+  assert.equal(run.status, 1, run.stderr);
+  assert.match(run.stdout, /^duplicate ids: 1 \(1 extra lines\)$/m);
+  assert.match(run.stdout, /^ingest: 1 transcripts read/, "the transcript was still read: the failure is the count, not a refusal to ingest");
+  assert.equal(readStore(h.storePath).filter((event) => event.kind === "turn").length, 1);
+  const control = cliHome().run("--ingest", ...since);
+  assert.equal(control.status, 0, `CONTROL: a store with each id once exits 0: ${control.stderr}`);
 });
 
 test("`--ingest` counts and exits on a failure of ANY source: an unreadable `gh` ledger or deferral log is `1 failed` and exit 1, and an absent one is not a failure", () => {

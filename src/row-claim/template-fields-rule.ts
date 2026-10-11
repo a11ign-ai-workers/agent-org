@@ -18,7 +18,8 @@
 // missing": a reader fixing the row needs to know WHICH of the three to add, not that something is wrong.
 import { REPO } from "../project-identity.ts";
 import { gh, lookup } from "../merge-guard/lookups.ts";
-import { hasTemplateField } from "../region-paths.ts";
+import { ROW_READ_FIELDS } from "./file-overlap-rule.ts";
+import { declaredRegionFiles, hasTemplateField, regionCoversIn, splitRegionEntry } from "../region-paths.ts";
 import { extractAcceptanceSection, runsTheWholeSuite } from "../acceptance-commands.ts";
 
 /** The three fields the issue template requires, in the order they appear in the form. */
@@ -83,6 +84,89 @@ export function wholeSuiteAcceptanceReason(body: string, tool: string): string |
     + "costs a rewrite by somebody with less context than you have now.";
 }
 
+/** The one config that carries agent-org's `node:test` shim: `package.json`'s `test` passes it, and no other file names it. */
+const AGENT_ORG_RSTEST_CONFIG = "scripts/rstest/rstest.config.ts";
+/** The repository key a Region entry carries for agent-org (`agent-org:src/x.ts`), and the last segment of its checkout's path. */
+const AGENT_ORG_KEY = "agent-org";
+/** `rstest run`, whichever launcher precedes it (`pnpm exec`, the package runner, a bare `rstest`). */
+const RSTEST_RUN = /\brstest\s+run\b/g;
+/** A `cd <dir>`, the dir bare or quoted; what a command's working directory is, for as far as a string can say. */
+const CD_TARGET = /\bcd\s+("[^"]+"|'[^']+'|[^\s;&|'"]+)/g;
+/** A config flag as rstest reads it, `--config x`, `--config=x` or `-c x`, in the part of one command line after `rstest run`. */
+const CONFIG_FLAG = /(?:^|\s)(?:--config|-c)(?:[=\s]|$)/;
+
+/**
+ * IS THIS COMMAND RUN FROM AGENT-ORG'S CHECKOUT? `true`, `false`, or `null` for "the string does not say".
+ * A `cd` before the `rstest run` decides, and only by the directory's own name: `~/repos/agent-org`, `/home/agent/repos/agent-org`
+ * and `$HOME/repos/agent-org` are the same repository and `~/repos/lab` is not. A worktree (`cd ../wt-775`) names neither, so it is
+ * `false`: the rule stays silent rather than guess, which is how every refusal in this file fails.
+ * @param {string} command @param {number} at where `rstest run` starts in it
+ */
+function cdIsAgentOrg(command: string, at: number): boolean | null {
+  const targets = [...command.slice(0, at).matchAll(CD_TARGET)];
+  const last = targets.at(-1)?.[1];
+  if (last === undefined) return null;
+  const dir = last.replace(/^["']|["']$/g, "").replace(/\/+$/, "");
+  return dir.split("/").at(-1) === AGENT_ORG_KEY;
+}
+
+/**
+ * #775: DOES THE ROW'S OWN REGION PUT A COMMAND THAT HAS NO `cd` IN AGENT-ORG? The `agent-org:` key is the row saying so, and it is
+ * read two ways: a test file the command names that an `agent-org:` entry covers, or a Region every entry of which is `agent-org:`.
+ * A Region of both repositories whose command names no file is not read: either could be where it runs.
+ * @param {string} command @param {string[]} region the Region's entries, keys kept
+ */
+function regionIsAgentOrg(command: string, region: string[]): boolean {
+  const files = command.split(/[\s'"]+/).filter((token) => /\.test\.m?ts$/.test(token));
+  if (files.some((file) => region.some((entry) => regionCoversIn(entry, AGENT_ORG_KEY, file)))) return true;
+  return region.length > 0 && region.every((entry) => splitRegionEntry(entry).key === AGENT_ORG_KEY);
+}
+
+/**
+ * A ROW WHOSE ACCEPTANCE RUNS `rstest run` AGAINST AGENT-ORG WITHOUT A CONFIG CAN NEVER PASS -- #775. The `node:test` shim lives only in
+ * `scripts/rstest/rstest.config.ts` and a bare `rstest run <file>` prints "No test suites found" for every test file there. Three rows
+ * carried it inside an hour (a11ign#4900, #4902, #4904); two workers hit it and reported it on the pull request, because the row text is
+ * merge-blocking and its claim hash covers it, so the worker who finds the defect cannot correct it and the literal command stays
+ * unrunnable. The sibling of `wholeSuiteAcceptanceReason`, asked at the same place and for the same reason: the filer still has the context.
+ *
+ * WHICH REPOSITORY IS READ FROM THE STRING, in this order: a `cd` before the `rstest run` (by the directory's name), otherwise the
+ * Region's `agent-org:` key (see `regionIsAgentOrg`). `rstest run` in another repository's directory is that repository's, whose own
+ * config this does not know. The test is "no config flag at all", not "not this file": a `--config` naming a file that is not there is
+ * `acceptancePathsReason`'s refusal, and a second reader of the same token is the drift #1943 was.
+ *
+ * ROW-FILE ONLY. Nothing at claim reads it, so a row already open with this Acceptance is not shelved; `row-file --promote=` asks
+ * `fileRefusalReason`, so a backlog row that carries it is refused its promotion, as it is for the whole suite.
+ *
+ * @param {string} body @param {string} tool the CLI to name in the refusal
+ * @returns {string | null}
+ */
+export function bareRstestRunReason(body: string, tool: string): string | null {
+  const section = extractAcceptanceSection(body);
+  if (section.kind !== "commands") return null;
+  const region = declaredRegionFiles(body, { rootFiles: new Set() }) ?? [];
+  const corrected: { command: string; fixed: string; }[] = [];
+  for (const command of section.commands) {
+    for (const run of command.matchAll(RSTEST_RUN)) {
+      const at = run.index ?? 0;
+      const rest = command.slice(at + run[0].length).split(/&&|\|\||[;|]/)[0];
+      if (CONFIG_FLAG.test(rest)) continue;
+      const inAgentOrg = cdIsAgentOrg(command, at) ?? regionIsAgentOrg(command, region);
+      if (!inAgentOrg) continue;
+      const fixed = `${command.slice(0, at + run[0].length)} --config ${AGENT_ORG_RSTEST_CONFIG}${command.slice(at + run[0].length)}`;
+      corrected.push({ command, fixed });
+      break;
+    }
+  }
+  if (corrected.length === 0) return null;
+  return `${tool}: REFUSING -- the Acceptance section runs \`rstest run\` against agent-org without \`--config ${AGENT_ORG_RSTEST_CONFIG}\`: `
+    + corrected.map(({ command }) => `\`${command}\``).join(", ")
+    + `. The \`node:test\` shim lives only in that config (\`package.json\`'s \`test\` passes it), so the bare form prints "No test suites found" `
+    + "for every test file there and the row can never pass; a worker cannot amend a row under its own claim, so the literal command would "
+    + "stay unrunnable. Write the corrected command instead: "
+    + corrected.map(({ fixed }) => `\`${fixed}\``).join(", ")
+    + ". (Nothing was filed.)";
+}
+
 /**
  * The refusal reason for `sessionEligibilityReason`, or `null` when the row is complete. Named fields,
  * not a count -- see this file's own header.
@@ -108,13 +192,15 @@ export function templateFieldsReason(body: string, issueNumber: number): string 
  * row has nothing". Collapsing the two via `parsed.body ?? ""` would read the second as the first and
  * refuse every claim.
  * #2617: `repo` is the TRACKER the row lives in, as the project's declaration names it (default the first).
+ * #732: it asks {@link ROW_READ_FIELDS} (`body,labels`), the SAME argv as `lookupMyRegionFiles`, so the claim's batched read serves both
+ * from one `gh issue view`; the labels are ignored here, and an answer with no `body` still throws.
  * @param {number} issueNumber
  * @param {{ run?: (args: string[]) => string, repo?: string }} [deps]
  * @returns {string | null}
  */
 export function lookupIssueBody(issueNumber: number, { run = gh, repo = REPO }: { run?: (args: string[]) => string; repo?: string; } = {}): string | null {
   return lookup(() => {
-    const raw = run(["issue", "view", String(issueNumber), "--repo", repo, "--json", "body"]);
+    const raw = run(["issue", "view", String(issueNumber), "--repo", repo, "--json", ROW_READ_FIELDS]);
     /** @type {{ body?: string }} */
     const parsed: { body?: string; } = JSON.parse(raw);
     if (!("body" in parsed)) throw new Error("response carried no body field");

@@ -48,7 +48,31 @@ export type DoraRelease = { kind: "npm", package: string } | { kind: "tag" };
  * nothing else. It is NOT a second `releasablePaths`: the releasable-change decision (`dora.ts`, `release-behind-main.ts`) and the 60% product share never read it. ABSENT stays absent.
  */
 export type DoraRepository = { repo: string, release: DoraRelease, releasablePaths: string[], adopterFacing?: boolean, adopterDocs?: string[] };
-export type ProjectDeclaration = { schema: number, tracker: Tracker[], code: CodeRepository[], leakPatterns: LeakPattern[], dora: DoraRepository[], offerMilestones: string[], repo: string, boardOwner: string, boardNumber: number };
+/**
+ * #4904: THE ENGINEER ROUTES, cheapest first, as `<model>/<effort>`. The ROUTER (`engineer-route.ts`) owns what each one starts; this list is what a declaration may NAME, so a typo is
+ * refused at load rather than found as a route nothing can build. It lives here because the reader is a leaf and the router imports it, never the other way.
+ */
+export const ROUTES = Object.freeze(["haiku/high", "sonnet/medium", "sonnet/high"] as const);
+export type RouteName = (typeof ROUTES)[number];
+/** The two routes the deterministic fallback (the Region's file count) can take. A declaration that leaves either out has a fallback that cannot be taken, and is refused. */
+export const FALLBACK_ROUTES: readonly RouteName[] = Object.freeze(["sonnet/medium", "sonnet/high"]);
+/** What the router tells the provider about one route (TypeSafe's Choice option: `what`, `not_for`, signals and examples). Strings only: the router adds the structure. */
+export type RouteGuidance = { what: string, signals: string[], notFor: string, examples: string[] };
+/** `choice` asks the provider ONE question whose options are the routes; `traits` asks the four questions and composes them (today's rule). */
+export type RoutingQuestion = "choice" | "traits";
+export type RoutingDeclaration = {
+  question: RoutingQuestion,
+  routes: RouteName[],
+  /** Guidance this project WRITES for a route; a route with none uses the router's own. */
+  guidance: Partial<Record<RouteName, RouteGuidance>>,
+  /** A pick CHEAPER than the fallback stands at this probability or more... */
+  cheaperMinP: number,
+  /** ...and one DEARER than the fallback needs this one. A cheap pick is the cheaper one to be wrong about, because a wrong Haiku start moves up one rung (#4630). */
+  dearerMinP: number,
+};
+/** What an ABSENT `routing` block reads as (#4904): every route, the four questions composed by hand thresholds, and the chairman's two acceptance thresholds for when `choice` is set. */
+export const ABSENT_ROUTING: Readonly<RoutingDeclaration> = Object.freeze({ question: "traits", routes: [...ROUTES], guidance: {}, cheaperMinP: 0.5, dearerMinP: 0.7 });
+export type ProjectDeclaration = { schema: number, tracker: Tracker[], code: CodeRepository[], leakPatterns: LeakPattern[], dora: DoraRepository[], offerMilestones: string[], routing: RoutingDeclaration, repo: string, boardOwner: string, boardNumber: number };
 
 /** A refusal that carries the field it is about, so a caller (and a test) can tell WHICH rule fired and not merely that one did. */
 export class ProjectDeclarationRefusal extends Error {
@@ -270,6 +294,78 @@ function readOfferMilestones(declaration: Record<string, unknown>, source: strin
   return list;
 }
 
+const ROUTING_KEYS = ["question", "routes", "guidance", "cheaperMinP", "dearerMinP"];
+const isRoute = (value: unknown): value is RouteName => typeof value === "string" && (ROUTES as readonly string[]).includes(value);
+/** A list of non-empty strings with at least one entry, or the refusal naming `field`. */
+function nonEmptyStrings(value: unknown, field: string, source: string): string[] {
+  if (!Array.isArray(value) || value.length === 0 || value.some((entry) => typeof entry !== "string" || entry === "")) {
+    throw new ProjectDeclarationRefusal(field, "it must be a non-empty list of non-empty strings", source);
+  }
+  return value;
+}
+
+/** The routes a declaration configures, in cost order. Each must be one the router can start, none twice, and both routes the fallback can take must be there. */
+function readRoutes(block: Record<string, unknown>, source: string): RouteName[] {
+  if (!Object.hasOwn(block, "routes")) return [...ROUTES];
+  const list = block.routes;
+  if (!Array.isArray(list)) throw new ProjectDeclarationRefusal("routing.routes", `it must be a list, not ${describe(list)}`, source);
+  list.forEach((entry, index) => {
+    if (!isRoute(entry)) throw new ProjectDeclarationRefusal(`routing.routes[${index}]`, `${JSON.stringify(entry)} is not a route this router can start (${ROUTES.join(", ")})`, source);
+    if (list.indexOf(entry) !== index) throw new ProjectDeclarationRefusal(`routing.routes[${index}]`, `\`${entry}\` is listed twice`, source);
+  });
+  const missing = FALLBACK_ROUTES.find((route) => !list.includes(route));
+  if (missing !== undefined) throw new ProjectDeclarationRefusal("routing.routes", `\`${missing}\` is not configured, and it is a route the fallback takes, so the fallback would be unreachable`, source);
+  return ROUTES.filter((route) => list.includes(route));
+}
+
+function readRouteGuidance(entry: unknown, at: string, source: string): RouteGuidance {
+  if (!isObject(entry)) throw new ProjectDeclarationRefusal(at, `it must be an object, not ${describe(entry)}`, source);
+  const text = (name: "what" | "notFor"): string => {
+    const value = requiredString(entry, name, `${at}.`, source);
+    if (value === "") throw new ProjectDeclarationRefusal(`${at}.${name}`, "it is empty", source);
+    return value;
+  };
+  const list = (name: "signals" | "examples"): string[] => nonEmptyStrings(requiredField(entry, name, `${at}.`, source), `${at}.${name}`, source);
+  return { what: text("what"), signals: list("signals"), notFor: text("notFor"), examples: list("examples") };
+}
+
+/** The guidance a project writes, only for a route it configured: guidance for another is a typo or a route it removed, and is refused rather than ignored. */
+function readGuidance(block: Record<string, unknown>, routes: readonly RouteName[], source: string): Partial<Record<RouteName, RouteGuidance>> {
+  if (!Object.hasOwn(block, "guidance")) return {};
+  const guidance = block.guidance;
+  if (!isObject(guidance)) throw new ProjectDeclarationRefusal("routing.guidance", `it must be an object, not ${describe(guidance)}`, source);
+  return Object.fromEntries(Object.entries(guidance).map(([name, entry]) => {
+    const at = `routing.guidance.${name}`;
+    if (!isRoute(name) || !routes.includes(name)) throw new ProjectDeclarationRefusal(at, `\`${name}\` is not a configured route`, source);
+    return [name, readRouteGuidance(entry, at, source)];
+  }));
+}
+
+function readThreshold(block: Record<string, unknown>, name: "cheaperMinP" | "dearerMinP", source: string): number {
+  if (!Object.hasOwn(block, name)) return ABSENT_ROUTING[name];
+  const value = block[name];
+  if (typeof value !== "number" || !(value > 0 && value <= 1)) throw new ProjectDeclarationRefusal(`routing.${name}`, `it must be a probability above 0 and at most 1, not ${JSON.stringify(value)}`, source);
+  return value;
+}
+
+/**
+ * #4904: HOW A NEW ENGINEER IS ROUTED, the optional `routing` block. ABSENT reads as {@link ABSENT_ROUTING}: today's three routes and today's four questions, so a project that never
+ * names it routes exactly as before. This is NOT the defaulting `PROJECT_DECLARATION` refuses: it adds no value of any project's identity, it names the router's own behaviour, and
+ * the route never reaches a repository or a board. A PRESENT block is held to the rule of every other field: an unknown key (a mistyped threshold would otherwise be ignored in silence),
+ * a route the router cannot start, a fallback it cannot take and a threshold that is not a probability are each REFUSED naming the field.
+ */
+function readRouting(declaration: Record<string, unknown>, source: string): RoutingDeclaration {
+  if (!Object.hasOwn(declaration, "routing")) return { ...ABSENT_ROUTING, routes: [...ABSENT_ROUTING.routes], guidance: {} };
+  const block = declaration.routing;
+  if (!isObject(block)) throw new ProjectDeclarationRefusal("routing", `it must be an object, not ${describe(block)}`, source);
+  const unknown = Object.keys(block).find((key) => !key.startsWith("_") && !ROUTING_KEYS.includes(key));
+  if (unknown !== undefined) throw new ProjectDeclarationRefusal(`routing.${unknown}`, `it is not a key of the routing block (${ROUTING_KEYS.join(", ")})`, source);
+  const question = block.question ?? ABSENT_ROUTING.question;
+  if (question !== "choice" && question !== "traits") throw new ProjectDeclarationRefusal("routing.question", `${JSON.stringify(question)} is not \`choice\` or \`traits\``, source);
+  const routes = readRoutes(block, source);
+  return { question, routes, guidance: readGuidance(block, routes, source), cheaperMinP: readThreshold(block, "cheaperMinP", source), dearerMinP: readThreshold(block, "dearerMinP", source) };
+}
+
 /**
  * Parse one declaration's text. PURE: no file is read, so a test drives every refusal with a string.
  * The FIRST tracker and the FIRST code repository are the project's own (decision 2: the empty key belongs to the primary
@@ -298,6 +394,7 @@ export function parseProjectDeclaration(text: string, source: string = PROJECT_D
     leakPatterns: readLeakPatterns(parsed, source),
     dora: readDora(parsed, source),
     offerMilestones: readOfferMilestones(parsed, source),
+    routing: readRouting(parsed, source),
     repo: code[0].repo,
     boardOwner: tracker[0].board.owner,
     boardNumber: tracker[0].board.number,
