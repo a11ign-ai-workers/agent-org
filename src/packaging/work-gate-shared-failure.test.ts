@@ -93,7 +93,7 @@ const order = (repoKey: string, number: number, session: string) =>
   ({ cause: "pr-checks-failing", subject: `pr-${repoKey}#${number}`, session, discriminator: "red", prompt: "A CHECK IS RED." });
 
 /** A `gh` fake: jobs by id, changed files by PR, incident rows by state; every write is recorded. */
-function gh({ jobs = {}, changed = {}, rows = [] }: { jobs?: Record<number, Job>; changed?: Record<number, string[]>; rows?: FakeRow[] } = {}) {
+function fakeGh({ jobs = {}, changed = {}, rows = [] }: { jobs?: Record<number, Job>; changed?: Record<number, string[]>; rows?: FakeRow[] } = {}) {
   const writes: string[][] = [];
   const store = rows.map((row) => ({ ...row }));
   const run = (args: string[]): string => {
@@ -132,7 +132,7 @@ const control = () => ({
 
 test("#5098 THE REAL LOGS: control#53 and control#58 fail different tests of their own, so neither is held and no incident is filed", () => {
   const { jobs, prs, orders } = control();
-  const g = gh({ jobs, changed: { 53: ["packages/control/src/fleet-watch.test.ts"], 58: ["packages/control/src/fleet-converge.ts"] } });
+  const g = fakeGh({ jobs, changed: { 53: ["packages/control/src/fleet-watch.test.ts"], 58: ["packages/control/src/fleet-converge.ts"] } });
   assert.deepEqual(subjects(tick(orders, prs, g)), ["pr-control#53", "pr-control#58"]);
   assert.equal(filed(g), 0, "no incident row");
   assert.deepEqual(g.writes, [], "nothing is written");
@@ -141,12 +141,12 @@ test("#5098 THE REAL LOGS: control#53 and control#58 fail different tests of the
 test("#5098 THE ROLL-UP: PRs whose only common line is the `gate` job's are not grouped, even when its log is the only one read", () => {
   const { jobs, orders } = control();
   const prs = [pr("control", 53, [failing("a11ign/control", "gate", 3)]), pr("control", 58, [failing("a11ign/control", "gate", 4)])];
-  const g = gh({ jobs });
+  const g = fakeGh({ jobs });
   assert.deepEqual(subjects(tick(orders, prs, g)), ["pr-control#53", "pr-control#58"]);
   assert.equal(filed(g), 0);
   // the roll-up under another name is still no cause: it is recognised by the step it fails and the line its script prints
   const renamed = [pr("control", 53, [failing("a11ign/control", "ci-ok", 3)]), pr("control", 58, [failing("a11ign/control", "ci-ok", 4)])];
-  assert.deepEqual(subjects(tick(orders, renamed, gh({ jobs }))), ["pr-control#53", "pr-control#58"]);
+  assert.deepEqual(subjects(tick(orders, renamed, fakeGh({ jobs }))), ["pr-control#53", "pr-control#58"]);
 });
 
 test("#5098 A WARNING IS NOT THE FAILURE: two PRs whose logs share only a package manager's `WARN` line are not grouped", () => {
@@ -154,7 +154,7 @@ test("#5098 A WARNING IS NOT THE FAILURE: two PRs whose logs share only a packag
   const exit = "2026-10-11T13:13:31.0013304Z ##[error]Process completed with exit code 1.";
   const jobs = { 1: checksJob(RSTEST, warn, exit), 2: checksJob(RSTEST, warn, exit) };
   const prs = [pr("control", 53, [failing("a11ign/control", "checks", 1)]), pr("control", 58, [failing("a11ign/control", "checks", 2)])];
-  const g = gh({ jobs });
+  const g = fakeGh({ jobs });
   assert.deepEqual(subjects(tick(control().orders, prs, g)), ["pr-control#53", "pr-control#58"]);
   assert.equal(filed(g), 0);
 });
@@ -165,15 +165,15 @@ const bothRed = [pr("control", 61, [failing("a11ign/control", "checks", 1)]), pr
 const bothOrders = [order("control", 61, "worker-61"), order("control", 62, "worker-62")];
 
 test("#5098 OUTSIDE THE DIFF: two PRs failing the SAME test in a file neither changes ARE grouped, and a failure in a file a PR changes never is", () => {
-  const outside = gh({ ...SAME_FILES, changed: { 61: ["docs/a.md"], 62: ["docs/b.md"] } });
+  const outside = fakeGh({ ...SAME_FILES, changed: { 61: ["docs/a.md"], 62: ["docs/b.md"] } });
   assert.deepEqual(tick(bothOrders, bothRed, outside), [], "the shared failure wakes nobody");
   assert.equal(filed(outside), 1, "and is ONE incident");
   // one PR changes the file's source (`shared.ts` is what `shared.test.ts` covers): it is its own failure, and a group of one is no group
-  const touched = gh({ ...SAME_FILES, changed: { 61: ["packages/control/src/shared.ts"], 62: ["docs/b.md"] } });
+  const touched = fakeGh({ ...SAME_FILES, changed: { 61: ["packages/control/src/shared.ts"], 62: ["docs/b.md"] } });
   assert.deepEqual(subjects(tick(bothOrders, bothRed, touched)), ["pr-control#61", "pr-control#62"]);
   assert.equal(filed(touched), 0);
   // the diff cannot be read: the failure is not SHOWN to be outside it
-  const unread = gh(SAME_FILES);
+  const unread = fakeGh(SAME_FILES);
   unread.run = ((run) => (args: string[]) => (/\/files/.test(args.join(" ")) ? (() => { throw new Error("403"); })() : run(args)))(unread.run);
   assert.deepEqual(subjects(tick(bothOrders, bothRed, unread)), ["pr-control#61", "pr-control#62"]);
 });
@@ -182,7 +182,7 @@ const INSTALL = "2026-10-11T09:42:11.123Z ##[error]npm ERR! 404 Not Found - GET 
 const SETUP = { jobs: { 1: checksJob("Install agent-org", INSTALL), 2: checksJob("Install agent-org", INSTALL) } };
 
 test("#5098 SETUP: two PRs failing the same install step ARE grouped, whatever they change", () => {
-  const g = gh({ ...SETUP, changed: { 61: ["package.json"], 62: ["pnpm-lock.yaml"] } });
+  const g = fakeGh({ ...SETUP, changed: { 61: ["package.json"], 62: ["pnpm-lock.yaml"] } });
   assert.deepEqual(tick(bothOrders, bothRed, g), []);
   assert.equal(filed(g), 1);
 });
@@ -190,46 +190,46 @@ test("#5098 SETUP: two PRs failing the same install step ARE grouped, whatever t
 const rowFor = (g: ReturnType<typeof gh>) => g.store[0];
 
 test("#5098 CLOSING THE INCIDENT RELEASES THE HOLDS AT ONCE, and the signature is not filed again for 24h", () => {
-  const first = gh(SETUP);
+  const first = fakeGh(SETUP);
   assert.deepEqual(tick(bothOrders, bothRed, first), []);
   const body = String(rowFor(first).body);
   // the row is closed (not boarded): the very next tick delivers both orders, and files nothing
-  const closed = gh({ ...SETUP, rows: [{ number: 900, state: "CLOSED", createdAt: at(40 * MINUTE), closedAt: at(1 * MINUTE), body, labels: ["ci-shared-failure"] }] });
+  const closed = fakeGh({ ...SETUP, rows: [{ number: 900, state: "CLOSED", createdAt: at(40 * MINUTE), closedAt: at(1 * MINUTE), body, labels: ["ci-shared-failure"] }] });
   const out = tick(bothOrders, bothRed, closed);
   assert.deepEqual(subjects(out), ["pr-control#61", "pr-control#62"]);
   assert.match(out[0].prompt, /HOLD RELEASED \(#900: its incident row was closed\)/);
   assert.match(out[0].prompt, /Install agent-org/);
   assert.equal(filed(closed), 0, "and no second row is filed for the same signature");
   // a day later it may be filed again
-  const stale = gh({ ...SETUP, rows: [{ number: 900, state: "CLOSED", createdAt: at(40 * 60 * MINUTE), closedAt: at(25 * 60 * MINUTE), body, labels: ["ci-shared-failure"] }] });
+  const stale = fakeGh({ ...SETUP, rows: [{ number: 900, state: "CLOSED", createdAt: at(40 * 60 * MINUTE), closedAt: at(25 * 60 * MINUTE), body, labels: ["ci-shared-failure"] }] });
   assert.deepEqual(tick(bothOrders, bothRed, stale), []);
   assert.equal(filed(stale), 1);
   // a PR the closed row never named joins with the same signature: that IS a new incident
   const third = [...bothRed, pr("control", 63, [failing("a11ign/control", "checks", 3)])];
-  const joined = gh({ jobs: { ...SETUP.jobs, 3: SETUP.jobs[1] }, rows: [{ number: 900, state: "CLOSED", createdAt: at(40 * MINUTE), closedAt: at(1 * MINUTE), body, labels: ["ci-shared-failure"] }] });
+  const joined = fakeGh({ jobs: { ...SETUP.jobs, 3: SETUP.jobs[1] }, rows: [{ number: 900, state: "CLOSED", createdAt: at(40 * MINUTE), closedAt: at(1 * MINUTE), body, labels: ["ci-shared-failure"] }] });
   assert.deepEqual(tick([...bothOrders, order("control", 63, "worker-63")], third, joined), []);
   assert.equal(filed(joined), 1);
 });
 
 test("#5098 A HOLD EXPIRES: past 15 minutes with no CLAIMED incident row the holder is woken with the failing job's own line", () => {
-  const first = gh(SETUP);
+  const first = fakeGh(SETUP);
   tick(bothOrders, bothRed, first);
   const body = String(rowFor(first).body);
   const row = (ageMin: number, labels: string[]): FakeRow => ({ number: 900, state: "OPEN", createdAt: at(ageMin * MINUTE), body, labels });
-  const young = gh({ ...SETUP, rows: [row(14, ["ci-shared-failure"])] });
+  const young = fakeGh({ ...SETUP, rows: [row(14, ["ci-shared-failure"])] });
   assert.deepEqual(tick(bothOrders, bothRed, young), [], "14 minutes: still held");
-  const old = gh({ ...SETUP, rows: [row(16, ["ci-shared-failure"])] });
+  const old = fakeGh({ ...SETUP, rows: [row(16, ["ci-shared-failure"])] });
   const out = tick(bothOrders, bothRed, old);
   assert.deepEqual(subjects(out), ["pr-control#61", "pr-control#62"], "16 minutes, unclaimed: both are woken");
   assert.match(out[0].prompt, /not claimed within 15 minutes/);
   assert.match(out[0].prompt, /npm ERR! # Not Found - GET https:\/\/registry\/agent-org-#\.#\.#\.tgz/);
-  const claimed = gh({ ...SETUP, rows: [row(16, ["ci-shared-failure", "in-progress", "session:worker-9"])] });
+  const claimed = fakeGh({ ...SETUP, rows: [row(16, ["ci-shared-failure", "in-progress", "session:worker-9"])] });
   assert.deepEqual(tick(bothOrders, bothRed, claimed), [], "16 minutes but CLAIMED: held");
   assert.equal(filed(claimed) + filed(old), 0, "an open row is joined, never refiled");
 });
 
 test("#5098 A HOLD WITH NO ROW BEHIND IT IS NOT A HOLD: when the incident row cannot be filed the orders go out", () => {
-  const g = gh(SETUP);
+  const g = fakeGh(SETUP);
   const refusing = (args: string[]) => (args[0] === "issue" && args[1] === "create" ? (() => { throw new Error("rate limited"); })() : g.run(args));
   const out = sharedFailuresNow(bothOrders, bothRed, { run: refusing, nowMs: NOW, }) as { subject: string }[];
   assert.deepEqual(subjects(out), ["pr-control#61", "pr-control#62"]);
