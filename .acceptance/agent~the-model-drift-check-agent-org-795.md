@@ -1,0 +1,38 @@
+The model-drift check (`sessionModelDrift`, `src/host-units.ts`) no longer calls an engineer the router started on Haiku a finding, for a keyed worker (`worker-agent-org-791`) or a plain `worker-<n>` with no `tier:haiku` label (`worker-4918`); a standing seat on Haiku (`orchestrator`) is still one (a11ign/agent-org#795).
+
+Closes a11ign/agent-org#795
+
+## What changes, and why
+
+- **The incident.** `worker-agent-org-791` was started on `claude-haiku-5-5` by the router (`routed haiku/high via jev`, no label on the row), and `host:check` read its last answer against the org's `claude-sonnet-5-5`: `SESSION ON AN UNDECLARED MODEL`, `cause:host-units-stale`, remedy `/model <alias>`, which would have undone the routing. `worker-4918` (the second finding of the 2026-10-11 wake, found by `orchestrator`) is the same by the other path: a plain `worker-<n>` reaches the row-label read, finds no `tier:haiku`, and is judged against Sonnet.
+- **How the check learns the model: it accepts the router's profile set for an engineer instance** (the row's second option) rather than reading the route back from the decision log. The router's routes are `haiku/high`, `sonnet/medium` and `sonnet/high`, so the models it can start a worker on are the org's declared model and `HAIKU_MODEL_ID` (the one constant `worker-profile.ts` and the router both use). A decision-log read would add a second reader of a rotating file, a host-state dependency the Acceptance would then share, and the repo's `owner/number` spelling of the ledger id for a keyed row, to catch only a manual `/model haiku` on a worker the router sent to Sonnet.
+- **An engineer instance is `worker-<n>` or `worker-<key>-<n>`** (`row-claim`'s `claimNames`) where `<key>` is a tracker the project declares (`homeProjectDeclaration`, read lazily and only for a keyed name; an unreadable declaration knows no key, which fails toward the finding), and never ends in `-<digits>`. Such a session is expected on the org's models OR Haiku.
+- **Unchanged, on purpose:** a `tier:haiku` first-tracker row's worker is still expected on Haiku alone (Sonnet there is the finding naming the row); a seat that declares a `model` in the roster is still expected on that alone; every other session, including `orchestrator`, `ceo` and `product-manager`, is judged against the org's models, so Haiku on a standing seat is still the resumed-session drift (#2783).
+- **A keyed worker reads no row labels.** `readRowLabels` reads the FIRST tracker's issue, so `worker-agent-org-791` would have read a11ign's #791; a test pins that it asks for nothing.
+- The finding for a worker names both the org's model and Haiku ("a worker may also be on `claude-haiku-5-5` when the router chose it at its start").
+
+## How you verified it
+
+Acceptance below runs from the repository root: the row's literal command imports `/home/agent/repos/agent-org/src/host-units.ts`, the primary checkout, which does not hold this change. It is the row's command with that one path made relative; it printed `{"keyedWorker":1,"plainWorker":1,"seat":1}` (exit 1) before the change and prints `{"keyedWorker":0,"plainWorker":0,"seat":1}` (exit 0) after, measured here with `AGENT_ORG_HOST` set to `/home/agent/repos/a11y-witness/.agent-org/host.json`.
+
+Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --input-type=module -e 'import { sessionModelDrift } from "./src/host-units.ts"; const run = (name) => sessionModelDrift({ sessions: [{ name, cwd: "/x", sessionId: "s" }], projectsDir: "/none", tail: () => JSON.stringify({ message: { model: "claude-haiku-5-5" } }), seatModels: () => ({}), rowLabels: () => ["in-progress"] }).length; const got = { keyedWorker: run("worker-agent-org-791"), plainWorker: run("worker-4918"), seat: run("orchestrator") }; console.log(JSON.stringify(got)); if (got.keyedWorker !== 0 || got.plainWorker !== 0 || got.seat !== 1) process.exit(1)'`
+
+Tests: `src/packaging/host-units.test.ts` (`npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/host-units.test.ts`) 171 of 171 (167 before). New: the three shapes plus the control through one helper (`orchestrator`, `ceo` and `product-manager` on Haiku stay findings); the keyed worker asks for no row and a plain one asks for its own; an undeclared key, a key ending in `-<digits>` and an unreadable declaration are findings; the default reading with nothing injected; a worker on `claude-sonnet-5` is still the finding and the text names Haiku. Two existing tests that asserted the OLD behaviour (Haiku on an unlabelled or unreadable worker row is a finding) are rewritten to the new one, and the tier tests' names moved from `worker-1`/`worker-2` to `worker-11`/`worker-12`.
+
+Suite: the whole `npx rstest run --config scripts/rstest/rstest.config.ts` ran 9128 tests, 34 failed, all in eight files that do not import `host-units.ts` (`auto-arm-token`, `live-tree-independence`, `milestone-clock`, `milestone-clock-exact-start`, `pr-template-acceptance`, `public-claim`, `row-file`, `row-file-refuses-duplicate-title`). Those eight files, run alone at a clean detached worktree of this branch's base and again in this tree, fail the same 27 of 280 in both (measured; the 34 in the full run is the same eight files under load). `tsc --noEmit -p tsconfig.json` is clean. This package has no lint script.
+
+Mutation: four mutants, each red on named tests and each restore byte-identical (`cp` to the scratchpad and `diff`): a worker never allowed Haiku (4 red: the three shapes, the default reading, the unlabelled-row test); every session allowed Haiku (5 red, including the `orchestrator` control and "a session that is not a worker is never looked up"); a keyed worker reading the first tracker's row (1 red); any key accepted (1 red).
+
+## Anything a reviewer should be sceptical of
+
+- **A decision-log read would be more precise** (a worker routed Sonnet and found on Haiku is a finding under it, and not under this). The row offers both; this takes the one that needs no host state. The loss is a manual `/model haiku` on a Sonnet-routed worker, which this finding was never for.
+- **The key is validated against the declaration, the pre-existing worker regex is not.** `worker-1` to `worker-3` (below the roster family's floor, `arm-pr.ts`'s `familyMember`) still match as before, because `host-units.ts` cannot import `arm-pr.ts` (it reads the roster at module load, which the test fixture project does not declare) and the old code already treated them as workers.
+- **Not folded in, outside this Region:** the remedy line `host:check` prints for every finding, `Remedy for all of them: pnpm run host:install`, is wrong for a session-model finding (the orchestrator's comment on the row). It is in `host-units.ts` but five tests across two files pin its text, one of them in `reviewer-door-install.test.ts`, which is not this row's Region; it is its own row.
+
+Outside-Region: src/host-units.ts — the row's own Region entry; the row states no repository, so `pr-open` reads the bare path as the project's first code repository (a11ign/a11ign) and not as this tracker's (a11ign/agent-org), where the file is.
+Outside-Region: src/packaging/host-units.test.ts — the row's own Region entry, for the same reason.
+Outside-Region: .changeset/a-worker-the-router-started-on-haiku-is-not-model-drift.md — the entry a project that pins a tag reads.
+
+platform: n/a (no GitHub, pnpm, systemd or git feature; the check reads a herdr session list and a transcript tail it already read)
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
