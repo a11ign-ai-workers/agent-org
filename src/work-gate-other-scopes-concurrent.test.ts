@@ -88,7 +88,9 @@ test("the first reads of every other repository arrive in ONE batch, and the lan
   const batched = readOtherScopes(sequentialRun(through), fakeBatch(batches));
   assert.equal(batches.length, 1, "ONE batch");
   assert.deepEqual(through, [], "and nothing the rehearsal named reached the run on its own");
-  assert.equal(batches[0].length, seen.length, "every call the one-at-a-time read made went in it");
+  // #4899: a tracker's label lists are made from its open list, so they are not asked (none, where the declaration names no other tracker)
+  const folded = seen.filter((call) => call.args[0] === "issue" && call.args.includes("--label"));
+  assert.equal(batches[0].length, seen.length - folded.length, "every call the one-at-a-time read made went in it, but the label lists its open list answers");
   assert.deepEqual(batches[0].filter((call) => call.args[0] === "pr").map((call) => call.repo).sort(), OTHER_CODE.map((scope) => scope.code!.repo).sort(),
     "an open list per other code repository, each aimed at its own");
   assert.deepEqual(batched, sequential);

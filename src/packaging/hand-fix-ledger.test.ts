@@ -17,6 +17,7 @@ import {
   judgeChange, ledgerLine, readLedger, trendOf, HAND_FIX_FORMAT,
 } from "../hand-fix-ledger.ts";
 import { main as prOpen, EXIT_NOTHING_SENT } from "../pr-open.ts";
+import { ORG_LOGINS as READERS_ORG_LOGINS, ORG_ACCOUNT_LOGINS, ORG_APP_SLUGS } from "../messaging/sources/readers.ts";
 
 const EM = "—";
 
@@ -67,7 +68,33 @@ test("#2939 a commit by a non-org identity is counted; an org one is not -- incl
   for (const login of ORG_LOGINS) {
     assert.equal(judgeChange(change({ author: login, actors: [login] })).verdict, "clean", `${login} is the org`);
   }
-  assert.deepEqual([...ORG_LOGINS], ["a11ign-ai-workers", "a11ign-ai-leads", "a11ign-bot"], "the row's three, pinned");
+  assert.deepEqual([...ORG_ACCOUNT_LOGINS], ["a11ign-ai-workers", "a11ign-ai-leads", "a11ign-bot"], "the row's three accounts, pinned");
+  assert.deepEqual([...ORG_APP_SLUGS], ["a11ign-scheduler", "a11ign-workers", "a11ign-managers"], "the three Apps, pinned");
+});
+
+// --- the three GitHub Apps are the org's in every spelling, and the two readers of the org's logins read ONE list (agent-org#797) -------
+
+test("agent-org#797 an App is the org in all three spellings -- `<slug>[bot]` (REST), `<slug>` (GraphQL Bot), `app/<slug>` (gh pr list)", () => {
+  for (const slug of ["a11ign-scheduler", "a11ign-workers", "a11ign-managers"]) {
+    for (const login of [`${slug}[bot]`, slug, `app/${slug}`]) {
+      assert.equal(classifyLogin(login), "org", login);
+      assert.equal(judgeChange(change({ author: login, actors: [login, `${slug}[bot]`] })).verdict, "clean", `${login} is not a hand fix`);
+    }
+  }
+  assert.equal(buildLedger([change({ author: "app/a11ign-workers", actors: ["a11ign-workers[bot]"] })]).count, 0);
+});
+
+test("agent-org#797 CONTROLS: a person is still human, and a lookalike of an App's name is still human", () => {
+  assert.equal(classifyLogin("a11ign-ai-leads"), "org", "the positive control the row names");
+  for (const login of ["DanBeckDev", "a11ign-workers-2", "a11ign-worker", "app/a11ign-workers[bot]", "xa11ign-scheduler[bot]", "a11ign-managers[bot]x"]) {
+    assert.equal(classifyLogin(login), "human", login);
+  }
+  assert.equal(judgeChange(change({ author: "DanBeckDev", actors: ["a11ign-workers[bot]", "DanBeckDev"] })).verdict, "counted", "a person among an App's commits is counted");
+});
+
+test("agent-org#797 the ledger and the fix-row reader name the org by ONE list, not two copies that a comment asks to be kept equal", () => {
+  assert.equal(ORG_LOGINS, READERS_ORG_LOGINS, "the same array, imported and not restated");
+  for (const app of ["a11ign-scheduler[bot]", "a11ign-workers[bot]", "a11ign-managers[bot]"]) assert.ok(READERS_ORG_LOGINS.includes(app), app);
 });
 
 test("#2939 a bot is the org's: `a11ign-bot` is not a hand fix, and neither is the automation that merges and runs", () => {

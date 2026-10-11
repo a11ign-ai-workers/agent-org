@@ -312,6 +312,17 @@ describe("readFixRow", () => {
     assert.deepEqual(await readFixRow({ github, repo: REPO, key: KEY }), { number: 3500, comment: { author: "a11ign-ai-workers", at: Date.parse("2026-10-04T11:00:00Z"), text: "claimed, fixing" } });
   });
 
+  test("agent-org#797 a GitHub App's comment is the org's word: the REST `<slug>[bot]` login is read, a person's newer one still is not", async () => {
+    const github = fakeGithub([
+      [LISTING, [fixRowIssue(3500, KEY, { comments: 3 })]],
+      [/\/issues\/3500\/comments\?per_page=100&page=1$/, [
+        commentOf("a11ign-ai-leads", "2026-10-04T10:00:00Z", "promoted"), commentOf("a11ign-workers[bot]", "2026-10-04T11:00:00Z", "claimed by the App"),
+        commentOf("a-person", "2026-10-04T11:30:00Z", "any news?"),
+      ]],
+    ]);
+    assert.deepEqual(await readFixRow({ github, repo: REPO, key: KEY }), { number: 3500, comment: { author: "a11ign-workers[bot]", at: Date.parse("2026-10-04T11:00:00Z"), text: "claimed by the App" } });
+  });
+
   test("the comments are read from the LAST page the listing's count names, and a page with no org comment sends the walk back one", async () => {
     const github = fakeGithub([
       [LISTING, [fixRowIssue(3500, KEY, { comments: 101 })]],

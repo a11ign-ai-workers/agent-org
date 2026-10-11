@@ -40,6 +40,7 @@ export const DEFINITIONS = [
   "TURN: one API message of a Claude session (de-duplicated by message id), with its tokens, cost and wall-clock. It belongs to the wake that precedes it in its transcript.",
   "COMPACTION (`kind: compaction`, agent-org#478): one `isCompactSummary` record of a transcript. THE CALL THAT WROTE THE SUMMARY IS IN NO TURN and the transcript holds no usage for it (measured on 1,351 compactions: the summary is a `user` record with no `usage`, `compact_boundary` carries only `preTokens`, `postTokens` and `durationMs`, and no record between them has one). Its usage exists only in Claude Code's own OpenTelemetry, as an `api_request` with `query_source: \"compact\"`, which `otel-receiver.ts` stores (as `querySource`) for a process launched with the exporter's variables. When the ingest finds that request (the same session id, nearest the summary record, each used once) the event carries `tokens`, `model` and `costUsd` (priced like a turn, `null` for a model with no price, never 0); when it does not, the event carries `costUsd: null` and `unmeasured: \"no-usage-record\"`, which is NOT a free compaction. An event stored before the reader has neither and is read as unmeasured. The call is separate from the turn that follows (which re-reads the window and is priced as a turn), so adding it counts nothing twice.",
   "WAKE: a delivery that started a model turn (wakes-per-row's definition). `deliveryLagMs` is delivery minus the time `wake` typed the order, when the ledger line pairs (not the gate's deferral, which no record keeps).",
+  "WAKE OUTCOME (`outcome`, `runId` of a wake, agent-org#487, INFERRED from what the session issued between the order and its last turn, `wakeOutcomes`): `wrote` when the session issued a write verb (`gh issue|pr edit|comment|close|reopen|create|ready|merge|review`, from the ledger, or read off a turn's command text), or edited a file or ran `git commit|push` (a turn's `repoWrite`); else `escalated` when it ran `prompt:session` to another session (the two send logs name the sender); else `no-op`. A wake that did both is `wrote`. `null` when it cannot be told, never `no-op`: the ledger's hour is short in the store or uncounted (`countedHours`), the turns issued `gh` commands (`ghCommands`) and the ledger holds none of the session's calls in the window, the window holds a call whose verb the ledger does not keep (`gh api ...`), a turn was stored before `repoWrite` and `ghCommands` or names no transcript, or a send of an unnamed sender falls in it. ABSENT: not yet derived (a window still open). `runId` is the session id that ran the wake (the transcript's file name, the key `host/gh` writes on each ledger line); `null` when the first turn names none.",
   "WALL-CLOCK OF A TURN (inferred): from the record before its first block to its last block. That record is stamped after a tool call ends, so the call is NOT in it: it is the model's own time.",
   "TOOL TIME OF A TURN (`toolMs`, measured): when the message follows a tool call, from the last block of the message before it to the tool's result record; `null` when it follows no tool call, never 0. A turn that follows an order or a prompt has none, and so does the first turn of a read when nothing was carried to say when the call began.",
   "TOOL READ (`toolRead`, measured): on the turn that CARRIES a result, the growth of the window the result caused: this turn's `input + cacheRead + cacheWrite5m + cacheWrite1h`, less the previous message's, less the previous message's own `output` (which re-enters the window the same way). Present only when the previous message called `Read`, `Grep` or `Glob`; `tool` is that tool, or `mixed` when the message called more than one tool (any mix with a tool that is not one of the three is in it too), and `tokens` is `null` (never 0) when the window cannot be read that way: a prompt, an order or a compaction came between, the window shrank, or the previous message is not in the store. `null` on a turn stored by this reader means no such call preceded it; an ABSENT field is a turn stored before the reader, which says nothing.",
@@ -99,7 +100,7 @@ export type TraceEvent = {
   pr: number | null; repo: string | null; cause: string | null; causeKey: string | null; wakeId: string | null; model?: string; tokens?: Tokens;
   costUsd?: number | null; toolRead?: ToolRead | null; transcript?: string; wallClockMs?: number | null; toolMs?: number | null; deliveryLagMs?: number | null; bytes?: number; sidechain?: boolean; harness?: "codex";
   rows?: number[]; prs?: number[]; touchedRows?: number[]; touchedPrs?: number[]; actor?: string | null; seq?: number; claimant?: string; name?: string; state?: string | null; status?: string; headSha?: string; mergeSha?: string; startedAt?: number;
-  completedAt?: number | null; how?: "delivered" | "gone"; outcome?: "merged" | "unmerged"; account?: string; resource?: string; cost?: number | null; exit?: number; command?: string; workspace?: string;
+  completedAt?: number | null; how?: "delivered" | "gone"; outcome?: "merged" | "unmerged" | WakeOutcome | null; runId?: string | null; repoWrite?: boolean; ghCommands?: number; account?: string; resource?: string; cost?: number | null; exit?: number; command?: string; workspace?: string;
   script?: string; sessionId?: string; keyedBy?: "session" | "time" | null; unkeyed?: "script" | "no-turn";
   /** a turn's reasoning effort as Claude Code wrote it on the transcript record; ABSENT when the record carried none, which is not `low` (agent-org#469) */
   effort?: string;
@@ -108,6 +109,9 @@ export type TraceEvent = {
 };
 
 export const NO_USAGE_RECORD = "no-usage-record";
+
+/** What a wake did (agent-org#487). On a `wake` event `outcome` is one of these or `null`; on a queue exit it is `merged` | `unmerged`: the kinds do not overlap. */
+export type WakeOutcome = "wrote" | "no-op" | "escalated";
 
 export type ToolRead = { tool: "Read" | "Grep" | "Glob" | "mixed"; tokens: number | null };
 
@@ -353,7 +357,9 @@ export function eventsOfTranscript({ text, file, ledger, rowRepo, carry = null, 
  * The verbs of `gh issue` / `gh pr` that WRITE to the thing they name. A `view` is not here: a turn that only read a row was not what ruled on it, and a ruling's turn is
  * the one that edits or comments.
  */
-const GH_WRITES = /\bgh\s+(issue|pr)\s+(?:edit|comment|close|reopen|ready|merge|review)\s+(\d+)\b([^\n;&|]*)/g;
+/** `gh`'s own verbs (a regex source, so none of them is a string literal for the vocabulary ratchet to take for the project's words). */
+const GH_WRITE_VERBS = /edit|comment|close|reopen|ready|merge|review/.source.split("|");
+const GH_WRITES = new RegExp(`\\bgh\\s+(issue|pr)\\s+(?:${GH_WRITE_VERBS.join("|")})\\s+(\\d+)\\b([^\\n;&|]*)`, "g");
 
 /** Another repository's clone, named in a command: its `gh issue edit 187` is that repository's 187, not the primary's. */
 const OTHER_CLONE = /agent-org|screenreader-worker|documents/;
@@ -380,6 +386,44 @@ export function touchesOf(blocks: Rec[], rowRepo: string): { touchedRows?: numbe
   return { ...(rows.size > 0 ? { touchedRows: [...rows].sort((a, b) => a - b) } : {}), ...(prs.size > 0 ? { touchedPrs: [...prs].sort((a, b) => a - b) } : {}) };
 }
 
+/** The tools that write a file; a path under `/tmp/` is a scratch note (a comment body staged for `--body-file`), not the repository. */
+const FILE_TOOLS = new Set(["Edit", "MultiEdit", "Write", "NotebookEdit"]);
+const SCRATCH_PATH = /^\/tmp\//;
+const GIT_WRITES = /\bgit\s+(?:-C\s+\S+\s+)?(?:commit|push)\b/;
+
+/**
+ * Whether a turn WROTE TO THE REPOSITORY (agent-org#487): a file tool outside `/tmp/`, or a Bash `git commit` / `git push`, read off its tool calls. A `gh` write is `touchesOf`'s and the
+ * ledger's, not this. A lower bound: a script or a `sed -i` that writes a file is not seen. It is stored as `true` OR `false` on every turn the reader builds, so a turn stored before it
+ * (the field ABSENT) is told from one that wrote nothing, which `wakeOutcomes` needs to refuse `no-op`.
+ * @param blocks the records of one API message
+ */
+export function repoWriteOf(blocks: Rec[]): boolean {
+  return blocks.some(({ record }) => (Array.isArray(record?.message?.content) ? record.message.content : []).some((block: any) => {
+    if (block?.type !== "tool_use") return false;
+    if (FILE_TOOLS.has(block.name)) return !SCRATCH_PATH.test(String(block.input?.file_path ?? block.input?.notebook_path ?? ""));
+    return typeof block.input?.command === "string" && GIT_WRITES.test(block.input.command);
+  }));
+}
+
+/** A `gh` at the start of a simple command: after a line start, `;`, `&`, `|`, `(`, `$(` or a backtick, as `gh issue view` or `gh api`. */
+const GH_COMMAND = /(?:^|[;&|(]\s*|\n\s*|\$\(\s*|`)gh\s+[a-z]/g;
+
+/**
+ * How many `gh` commands a turn's Bash calls name (agent-org#487), counted off the command text. It is what `wakeOutcomes` sets against the ledger: a turn that issued `gh` commands and a
+ * window the ledger holds no call of that session in is a window the ledger did not record, which is no proof the session did nothing. Counts a `gh` named inside a quoted body too, which
+ * can only make a window `null`. ABSENT on a turn stored before the reader, never 0.
+ * @param blocks the records of one API message
+ */
+export function ghCommandsOf(blocks: Rec[]): number {
+  let count = 0;
+  for (const { record } of blocks) {
+    for (const block of Array.isArray(record?.message?.content) ? record.message.content : []) {
+      if (block?.type === "tool_use" && typeof block.input?.command === "string") count += block.input.command.match(GH_COMMAND)?.length ?? 0;
+    }
+  }
+  return count;
+}
+
 type Owner = (at: number) => { id: string | null; row: number | null; pr: number | null; repo: string | null; rows?: number[]; prs?: number[]; cause: string | null; causeKey: string | null };
 
 /** The several subjects a wake's key named, as event fields: present only when it named several, so an event with one subject is the shape it always was. */
@@ -396,12 +440,13 @@ function turnsOf({ records, groups, session, transcript, owner, priorAt, rowRepo
     const previous = before[first];
     const tokens = tokensOf(record.message.usage);
     const own = owner(endedAt);
+    const blocks = records.slice(first, last + 1).filter(({ record: block }) => block?.message?.id === messageId);
     return {
       id: `turn:${messageId}`, kind: "turn", source: "transcript", at: endedAt, session, transcript, row: own.row, pr: own.pr, repo: own.repo, ...listedBy(own), cause: own.cause,
       causeKey: own.causeKey, wakeId: own.id, model: record.message.model, tokens, costUsd: costOf(record.message.model, tokens), toolRead: reads.get(messageId) ?? null,
       wallClockMs: previous !== null && !Number.isNaN(endedAt) ? Math.max(0, endedAt - previous) : null, toolMs: toolMsBefore(records, first, assistantAt[first]),
       sidechain: record.isSidechain === true, ...effortOf(record),
-      ...touchesOf(records.slice(first, last + 1).filter(({ record: block }) => block?.message?.id === messageId), rowRepo),
+      ...touchesOf(blocks, rowRepo), repoWrite: repoWriteOf(blocks), ghCommands: ghCommandsOf(blocks),
     };
   });
 }
@@ -908,4 +953,161 @@ export function eventsForRow(events: TraceEvent[], { rows, prs }: { rows: number
     || [...(event.rows ?? []), ...(event.touchedRows ?? [])].some((row) => wantedRows.has(row)) || [...(event.prs ?? []), ...(event.touchedPrs ?? [])].some((pr) => wantedPulls.has(pr));
   return events.filter(about)
     .sort((a, b) => a.at - b.at || (a.seq ?? 0) - (b.seq ?? 0) || a.id.localeCompare(b.id));
+}
+
+// ---------------------------------------------------------------------------------------------------------------------------------------------------------------------------
+// WHAT A WAKE DID (agent-org#487, Move 0 of a11ign/a11ign#4505): `outcome` and `runId` on a wake event. INFERRED, and `null` wherever the store cannot tell, never `no-op`.
+//
+// THE WINDOW is the wake's own span: from the second of the order to its last turn (the turns the store gives it by `wakeId`), a little over for a stamp rounded to the second. Not the gap to the
+// next order: a seat is idle most of that gap, and an unattributed send from a person's shell would fall in it.
+//
+// THREE SOURCES, each named by what it can and cannot see. (1) The `gh` ledger's lines (`gh_call` events, keyed by the session id the wrapper writes, `host/gh`): it keeps `argv[1] argv[2]` and
+// the exit status, so `issue comment` is a write and `api graphql` is unknowable. (2) The turn's own command text (`touchedRows`, `touchedPrs`) and tool calls (`repoWrite`): a file edit or a
+// `git push` is in no ledger. (3) The two `prompt:session` logs (a delivery to an idle seat, a delivery queued for a busy one): `prompt:session` is no `gh` call. ~20% of their senders are
+// unknown (no herdr workspace), which can neither be `escalated` nor ruled out, so a window such an unnamed send falls in is `null`.
+//
+// A GAP IN THE LEDGER READS AS A QUIET SESSION, and it is the way this goes wrong. The ledger keeps 2 MiB and `.hourly` counts what a trim dropped; a trim that outran the ingest leaves the
+// store short (measured: 10-09T19 to 10-10T06 held 0 to 22% of the calls the rollup counted, by hour). Two screens, neither proof of a whole ledger: `countedHours` (an hour the count shows the store short of, or has no
+// count for) and the turn's own `gh` commands set against the ledger (a window whose text issued `gh` and whose ledger holds no call of the session). Measured against the transcripts'
+// command text on 2026-10-10: the first alone let 4 of 130 told `no-op`s through, every one of them a window of the second kind. A window outside the screens can show a write and can never
+// show its absence beyond them.
+const MS_PER_SECOND = 1000;
+const HOUR_CHARS = "2026-10-08T13".length;
+/** A message is stamped when it ENDS and a ledger line to the second, so a call of the last turn can sit a moment past it. */
+const WINDOW_SLACK_MS = 2 * MS_PER_SECOND;
+/** A window no later order has closed is final this long after its last turn. */
+export const OUTCOME_QUIET_MS = 15 * 60_000;
+
+const LEDGER_WRITES = new Set(["issue", "pr"].flatMap((noun) => [...GH_WRITE_VERBS, "create"].map((verb) => `${noun} ${verb}`)));
+/** Calls known to change nothing. `api ...` is NOT here: `gh api <path> -f x=y` is a write and the ledger keeps two words. `auth git-credential` is what `git fetch` and `git push` ask; the push is `repoWrite`'s. */
+const LEDGER_READS = new Set(["issue view", "issue list", "issue status", "pr view", "pr list", "pr status", "pr checks", "pr diff", "run view", "run list", "run watch", "repo view",
+  "search issues", "search prs", "label list", "release list", "release view", "auth status", "auth git-credential"]);
+
+export type Send = { from: string | null; at: number };
+
+const SENT_BY = /^Sent to you by `([^`]+)`/;
+const SENT_BY_UNKNOWN = /^Sent to you by a caller/;
+
+/**
+ * The `prompt:session` sends of the two logs (`prompt-session-direct`, `prompt-session-handoffs`): `from` the sender's session name, or `null` for a caller `prompt:session` could not name. A line of
+ * the gate's own (an interruption notice) is no send, and a send to the sender's own session is not an escalation.
+ * @param texts the contents of the log files
+ */
+export function sendsOfLogs(texts: string[]): Send[] {
+  const sends: Send[] = [];
+  for (const line of texts.flatMap((text) => text.split("\n"))) {
+    let record: any;
+    try {
+      record = JSON.parse(line);
+    } catch {
+      continue;
+    }
+    if (typeof record?.session !== "string") continue;
+    let from: string | null | undefined;
+    let at: unknown;
+    if ("sender" in record) {
+      from = typeof record.sender === "string" && record.sender !== "" ? record.sender : null;
+      at = record.sentAt;
+    } else if (typeof record.prompt === "string") {
+      from = SENT_BY.exec(record.prompt)?.[1] ?? (SENT_BY_UNKNOWN.test(record.prompt) ? null : undefined);
+      at = record.queuedAt;
+    }
+    if (from !== undefined && typeof at === "number" && from !== record.session) sends.push({ from, at });
+  }
+  return sends;
+}
+
+/** The UTC hour of a time, as the ledger's rollup writes it (`2026-10-08T13`). */
+export const hourOf = (ms: number) => new Date(ms).toISOString().slice(0, HOUR_CHARS);
+
+/**
+ * The hours the ledger's own count does NOT show the store short of, per ACCOUNT: for each account with a call in the hour, in the store or in the ledger, the ledger has a count for it (the
+ * lines still in the file plus `.hourly`, what a trim dropped) and the store holds at least that many. That can prove a shortfall and cannot prove completeness: an hour the store has an
+ * account's calls in and the ledger has no count for is short of proof (the file was trimmed before the rollup existed: a small ledger's three lines had vouched for an hour of 696 calls
+ * of two other accounts), and a gap INSIDE an hour whose count is met by a surplus elsewhere in it is not seen (measured, 2026-10-09T04: 3,997 stored against 2,315 counted, one ten-minute
+ * bucket holding 119 calls against some 900 in the others). `wakeOutcomes` sets the turn's own `gh` commands against the ledger for that.
+ * @param ledgerCalls calls per `<hour>\t<account>`, from the ledger files and their rollups
+ */
+export function countedHours({ ledgerCalls, events }: { ledgerCalls: Map<string, number>; events: TraceEvent[]; }): Set<string> {
+  const stored: Map<string, number> = new Map();
+  for (const event of events) if (event.kind === "gh_call") stored.set(`${hourOf(event.at)}\t${event.account}`, (stored.get(`${hourOf(event.at)}\t${event.account}`) ?? 0) + 1);
+  const hours = new Set([...ledgerCalls.keys(), ...stored.keys()].map((key) => key.split("\t")[0]));
+  const short = new Set([...stored].filter(([key, calls]) => calls > 0 && !ledgerCalls.has(key)).map(([key]) => key.split("\t")[0]));
+  for (const [key, calls] of ledgerCalls) if ((stored.get(key) ?? 0) < calls) short.add(key.split("\t")[0]);
+  return new Set([...hours].filter((hour) => !short.has(hour)));
+}
+
+const pushTo = (map: Map<string, TraceEvent[]>, key: string, event: TraceEvent) => {
+  const held = map.get(key);
+  if (held) held.push(event);
+  else map.set(key, [event]);
+};
+
+/**
+ * The wake events whose `outcome` or `runId` is to change, as corrected copies for `appendToStore`. A wake with a told outcome is left; one that is `null` is asked again (the ledger may be whole
+ * by now); one whose window is still open and has not written is left ABSENT, so each wake is rewritten once, when it settles. `wrote` is final at once: a later turn cannot undo it.
+ * @param sends see {@link sendsOfLogs}
+ * @param readable whether the ledger is whole for the whole of `[from, to]` (see {@link countedHours})
+ */
+export function wakeOutcomes({ events, sends, readable, now }: { events: TraceEvent[]; sends: Send[]; readable: (from: number, to: number) => boolean; now: number; }): TraceEvent[] {
+  const turnsOfWake: Map<string, TraceEvent[]> = new Map();
+  const callsOf: Map<string, TraceEvent[]> = new Map();
+  const wakesOf: Map<string, TraceEvent[]> = new Map();
+  for (const event of events) {
+    if (event.kind === "turn" && event.wakeId) pushTo(turnsOfWake, event.wakeId, event);
+    else if (event.kind === "gh_call" && event.sessionId) pushTo(callsOf, event.sessionId, event);
+    else if (event.kind === "wake") pushTo(wakesOf, event.session, event);
+  }
+  const corrected: TraceEvent[] = [];
+  for (const wakes of wakesOf.values()) {
+    wakes.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+    for (const [index, wake] of wakes.entries()) {
+      const turns = turnsOfWake.get(wake.id);
+      if (typeof wake.outcome === "string" || !turns?.length) continue;
+      turns.sort((a, b) => a.at - b.at || a.id.localeCompare(b.id));
+      const next = wakes[index + 1];
+      const lastTurnAt = turns[turns.length - 1].at;
+      const from = Math.floor(wake.at / MS_PER_SECOND) * MS_PER_SECOND;
+      const to = Math.min(lastTurnAt + WINDOW_SLACK_MS, next?.at ?? Number.POSITIVE_INFINITY);
+      const calls = [...new Set(turns.map((turn) => turn.transcript))].flatMap((id) => (id ? callsOf.get(id) ?? [] : [])).filter((call) => call.at >= from && call.at <= to);
+      const written = (call: TraceEvent) => LEDGER_WRITES.has(call.command ?? "") && call.exit === 0;
+      const wrote = calls.some(written) || turns.some((turn) => (turn.touchedRows?.length ?? 0) + (turn.touchedPrs?.length ?? 0) > 0 || turn.repoWrite === true);
+      if (!wrote && next === undefined && now - lastTurnAt < OUTCOME_QUIET_MS) continue;
+      let outcome: WakeOutcome | null = "wrote";
+      if (!wrote) {
+        const issued = turns.reduce((sum, turn) => sum + (turn.ghCommands ?? 0), 0);
+        const blind = !readable(from, to) || turns.some((turn) => turn.repoWrite === undefined || turn.ghCommands === undefined || !turn.transcript)
+          || (issued > 0 && calls.length === 0) || calls.some((call) => !LEDGER_READS.has(call.command ?? "") && !written(call));
+        const sent = sends.filter((send) => send.at >= from && send.at <= to);
+        if (blind) outcome = null;
+        else if (sent.some((send) => send.from === wake.session)) outcome = "escalated";
+        else outcome = sent.some((send) => send.from === null) ? null : "no-op";
+      }
+      const runId = turns[0].transcript ?? null;
+      if (wake.outcome !== outcome || wake.runId !== runId) corrected.push({ ...wake, outcome, runId });
+    }
+  }
+  return corrected;
+}
+
+export type OutcomeRow = { cause: string; wakes: number; wrote: number; noOp: number; escalated: number; null: number; unsettled: number };
+
+/** The split of the wakes in `[from, to)` by cause. An outcome that is `null` or ABSENT counts as `null`: both are "not told", which is the line a reader must not mistake for `no-op`; `unsettled` is the absent ones, a part of `null`. */
+export function outcomeSplit({ events, window }: { events: TraceEvent[]; window: { from: number; to: number; }; }): { window: { from: number; to: number; }; total: OutcomeRow; byCause: OutcomeRow[]; } {
+  const row = (cause: string): OutcomeRow => ({ cause, wakes: 0, wrote: 0, noOp: 0, escalated: 0, null: 0, unsettled: 0 });
+  const total = row("all causes");
+  const byCause: Map<string, OutcomeRow> = new Map();
+  for (const event of events) {
+    if (event.kind !== "wake" || event.at < window.from || event.at >= window.to) continue;
+    const cause = event.cause ?? "(no cause)";
+    const line = byCause.get(cause) ?? row(cause);
+    byCause.set(cause, line);
+    const field = event.outcome === "wrote" ? "wrote" : event.outcome === "no-op" ? "noOp" : event.outcome === "escalated" ? "escalated" : "null";
+    for (const into of [line, total]) {
+      into.wakes += 1;
+      into[field] += 1;
+      if (event.outcome === undefined) into.unsettled += 1;
+    }
+  }
+  return { window, total, byCause: [...byCause.values()].sort((a, b) => b.wakes - a.wakes || a.cause.localeCompare(b.cause)) };
 }

@@ -32,6 +32,7 @@ import { DEPENDENCY_BOT_LOGIN } from "./dependency-bot-login.ts";
 import { sandboxGitEnv } from "./lib/git-env.ts";
 import { HOME_CHECKOUT } from "./project-config.ts";
 import { REPO } from "./project-identity.ts";
+import { ORG_LOGINS } from "./messaging/sources/readers.ts";
 
 const DAY_MS = 86_400_000;
 export const WINDOW_DAYS = 14;
@@ -47,12 +48,12 @@ export const WINDOW_DAYS = 14;
 export const UNREAD_SHARE_BOUND = 0.1;
 
 /**
- * The org's own accounts (the three the row names), by login. NOT read off `gh-identity.ts`: that module answers
- * which account THE CURRENT PROCESS acts as and deliberately names none, and a ledger over history needs the names of
- * accounts that are not the current one. A renamed account reads as a human until this list moves, which RAISES the
- * count, so the failure is loud and not a silent zero.
+ * The org's own accounts and the three GitHub Apps, by login, in every spelling a reader of GitHub produces. NOT read off `gh-identity.ts`: that module
+ * answers which account THE CURRENT PROCESS acts as and deliberately names none, and a ledger over history needs the names of accounts that are not the
+ * current one. The list is `readers.ts`'s (the one list, agent-org#797): it is a leaf and this file is not, so it is imported and not restated. A renamed
+ * account reads as a human until that list moves, which RAISES the count, so the failure is loud and not a silent zero.
  */
-export const ORG_LOGINS = Object.freeze(["a11ign-ai-workers", "a11ign-ai-leads", "a11ign-bot"]);
+export { ORG_LOGINS };
 
 /**
  * Automation and agent commit identities that are not a person: the merge queue's committer, the Actions bot, and
