@@ -9,7 +9,8 @@ bash -c 'cd /home/agent/repos/wt-agent-org-955 && AGENT_ORG_HOST=/home/agent/rep
 
 Printed `VERDICT pass: 131 tests in 5 files`, exit 0. The row's third command says `cd ~/repos/agent-org`, which is a different checkout (detached at the last release) that does not hold this branch; it is run here in this branch's worktree, as a11ign/agent-org#620's was, with `AGENT_ORG_HOST` set the same way. Nothing else in the command moved.
 
-Mutation (each restored from a copy, `cmp` byte-identical, results MEASURED by running the five files):
+Mutation:
+- Each restored from a copy and `cmp` showed it byte-identical; the counts are what running the five files printed.
 - `reviewer` dropped from `GITHUB_ROLES` (`src/app-token.ts`): 6 red, `pipeline-lane-authorship.test.ts :: #816 (3): every App role is accounted for` and five of `reviewer-app-role.test.ts` (the declaration, the typo refusal, POSITIVE CONTROL, the config-alone case, the failed mint). NEGATIVE CONTROL stays green, which is right: with nothing declared the role is not read.
 - `app_role` in `host/gh` stops naming `reviewer`: 3 red, all in `reviewer-app-role.test.ts` (POSITIVE CONTROL, the config-alone case, the failed mint). NEGATIVE CONTROL green.
 - `app_role` names `reviewer` for ANY config of its own (the #817 fall-through, always firing): 1 red, `the reviewer config alone names no role`.
@@ -25,7 +26,7 @@ Judgement calls:
 Outside-Region: README.md — the roles table said three roles and `AGENT_ORG_GH_ROLE=scheduler|workers|managers`; it now says four and names `reviewer`.
 Outside-Region: src/packaging/host-project-paths.test.ts — `TODAYS_GH_WRAPPER` is the digest of `host/gh` as rendered; the row's own change to `host/gh` moves it, and main would be red otherwise.
 
-Measured, not inferred: `pnpm test` (the whole agent-org suite, 9810 tests in 550 files) printed 5 failures at this tree before the pin moved. Four are on pristine `origin/main` too (`git archive origin/main`, the same four files run: `live-tree-independence.test.ts` x2 needs `tsx` in `node_modules`, `release-tag-on-merge.test.ts` says there is now a `pnpm-lock.yaml`, `work-gate-other-scopes-concurrent.test.ts` counts 14 where 16 are expected); the fifth, `host-project-paths.test.ts`, is the digest above and passes after it moved. `pnpm run typecheck` exit 0. This repository has no `lint` or `verify` script.
+Read off the runs, not inferred: `pnpm test` (the whole agent-org suite, 9810 tests in 550 files) printed 5 failures at this tree before the pin moved. Four are on pristine `origin/main` too (`git archive origin/main`, the same four files run: `live-tree-independence.test.ts` x2 needs `tsx` in `node_modules`, `release-tag-on-merge.test.ts` says there is now a `pnpm-lock.yaml`, `work-gate-other-scopes-concurrent.test.ts` counts 14 where 16 are expected); the fifth, `host-project-paths.test.ts`, is the digest above and passes after it moved. `pnpm run typecheck` exit 0. This repository has no `lint` or `verify` script.
 
 What the reviewer App needs on the GitHub side (the chairman's brief; this PR does NOT create the App): Pull requests: Read and write, Contents: Read, Metadata: Read (implicit), installed on every repository the reviewer reviews (`a11ign/a11ign`, `a11ign/agent-org`). One App for the role; never a second App for the same role to get more rate limit (GitHub Terms, Section H). Its slug goes in `host.json`'s `github.identity.reviewer.slug` so the door's `gh api user` is answered `<slug>[bot]`.
 

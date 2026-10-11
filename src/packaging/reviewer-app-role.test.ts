@@ -1,3 +1,4 @@
+// no-token: gh -- the wrapper is RUN here against a stub `gh-real` (`A11Y_GH_REAL`) and a stub minter (`A11Y_APP_NODE`/`A11Y_APP_TOKEN_SCRIPT`); no `gh` starts and nothing reaches the network or any account's config.
 // a11ign/a11ign#5044 step 1 (agent-org#955): `reviewer` IS A FOURTH ROLE IN `github.identity`, AND NOTHING CHANGES UNTIL A HOST DECLARES IT.
 //
 // The reviewer's approvals are authored by the machine USER `a11ign-bot` because no code path let a role other than `scheduler`, `workers` and
