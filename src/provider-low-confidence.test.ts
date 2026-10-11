@@ -15,6 +15,7 @@ import {
 } from "./provider-low-confidence.ts";
 import { bodyFromArgv, fileRefusalReason } from "./row-file.ts";
 import { tmpDirForFile } from "./lib/tmp-fixture.ts";
+import { HOME_CHECKOUT } from "./project-config.ts";
 
 const HOUR = 3_600_000;
 const DAY = 24 * HOUR;
@@ -277,8 +278,16 @@ test("the command's --question exits 0 when settled, 1 when still low and 2 when
   assert.equal(check("model-routing/score").status, 1);
   assert.equal(check("model-routing/few").status, 2);
   assert.equal(check("model-routing/never-asked").status, 2);
-  const plan = cli(["--since=1d", `--log=${log}`]);
+  // THE HOST IS DECLARED HERE, with no `triage` block. Left to the machine's own, "no provider" held only while the project switched no use on: a11ign/a11ign added
+  // `.agent-org/decisions.json` with `model-routing` on, and against a host that declares `jev` the plan then reads the log and WOULD FILE.
+  const noProvider = join(dir, "no-provider-host.json");
+  writeFileSync(noProvider, JSON.stringify({
+    schema: 1, home: dir, binDir: join(dir, "bin"), primary: "a", projects: [{ id: "a", checkout: HOME_CHECKOUT }],
+    gh: { workers: join(dir, "w"), leads: join(dir, "l"), leadsHeader: [], leadsWorkspaces: [] },
+  }));
+  const plan = cli(["--since=1d", `--log=${log}`], { AGENT_ORG_HOST: noProvider });
   assert.equal(plan.status, 0);
   assert.match(plan.out, /No decision provider is declared, or no use is switched on: nothing is asked and nothing is filed\./);
+  assert.doesNotMatch(plan.out, /WOULD FILE/, "10 of 24 under the floor is over the bar, so only the missing provider keeps this plan from filing");
   assert.equal(cli(["--bogus"]).status !== 0, true, "an unknown flag is refused");
 });

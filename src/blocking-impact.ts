@@ -8,17 +8,26 @@
 // THE CORE IS PURE (`holdingsOf`, `advance`, `topBlocker`): the blocked list and the previous record in, the next record and the incidents out. `blockingImpactTick` is the only
 // part that touches a file, and every effect in it (record file, ledger, row comment) goes through a seam, so a test reaches no network and no host state.
 //
+// A CIRCULAR WAIT IS PUT TO SOMEONE, ONCE (agent-org#5009). `b4-cycle.ts` finds a row shelved by a pull request that closes a row waiting on it, and the tick used to PRINT that every tick and nothing more
+// (agent-org#878 stood red for 1h45m that way). The first tick that reads a cycle wakes the pull request's holder with the two ways out (narrow the pull request, or take the shelved row's change in);
+// the next tick that still reads it files the ledger incident, writes both rows and wakes `orchestrator`; a tick that no longer reads it counts it as broken, with how long it stood, for the daily pass
+// (`deadlockSummary`). The wait that makes the cycle is the rows' native `blockedBy` edge, which a worker's declared block writes once agent-org#921 ships.
+//
 // AN EPISODE IS A CONTINUOUS RUN OF TICKS in which the holder shelves at least `BLOCKING_MIN_ROWS`. It ends when the count drops below that, and it is also ended by a gap between ticks of
 // more than `MAX_TICK_GAP_MS` (a restart, an outage): minutes nobody observed are not counted as shelved, so an incident never rests on a guess.
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
-import { deadlockLine, deadlocksOf, type Deadlock, type Shelving } from "./b4-cycle.ts";
+import { advanceDeadlocks, deadlockKey, deadlockLine, deadlocksOf, pathText, type BrokenDeadlock, type Deadlock, type DeadlockEpisode, type DeadlockMove, type Shelving, type Sighting } from "./b4-cycle.ts";
 import { FAILURE_LEDGER_FILE, recordFailure } from "./failure-ledger.ts";
 
 export const BLOCKING_MIN_ROWS = 5;
 export const BLOCKING_MIN_MINUTES = 30;
 /** The failure-ledger class key (`FAILURE_KINDS` is the closed list of the first move; this is the third fix's own key, read by `class-repeat` as any ledger key is). */
 export const LOCK_GRIDLOCK_KIND = "lock-gridlock";
+/** The ledger class key of a cycle the gate escalated (agent-org#5009): a pull request waiting on a row B4 shelves because of that pull request. Not seeded in `FAILURE_KINDS`, for `LOCK_GRIDLOCK_KIND`'s reason. */
+export const B4_DEADLOCK_KIND = "b4-deadlock";
+/** Who a cycle goes to when its holder's wake did not break it, or when nobody is known to hold the pull request. */
+export const DEADLOCK_ESCALATION_SESSION = "orchestrator";
 /** The record's file name in the state directory. */
 export const BLOCKING_FILE = "blocking-impact.json";
 /** The tick runs every two minutes; a gap beyond this is a break in observation, not a long shelving. */
@@ -45,8 +54,14 @@ export type Holding = { rows: number[]; heldRows: number[]; heldIn?: string | nu
 export type Episode = { since: number; rows: number[]; heldRows: number[]; fired: boolean; heldIn?: string | null };
 /** `minutes` is the time since the previous tick that this sample stands for, so a sample's row-minutes are `rows * minutes`. */
 export type Sample = { at: number; holder: string; row: number | null; rows: number; minutes: number };
-/** `holdings` is the LAST tick's count for every holder, below the incident threshold too, so a wake can say what a claim blocks (#4605); absent in a record written before that. */
-export type BlockingRecord = { at: number; episodes: Record<string, Episode>; samples: Sample[]; holdings?: Record<string, Holding> };
+/**
+ * `holdings` is the LAST tick's count for every holder, below the incident threshold too, so a wake can say what a claim blocks (#4605); absent in a record written before that.
+ * `deadlocks` are the cycles the last tick read, and `brokenDeadlocks` the ones it stopped reading in the last 24 hours (agent-org#5009); both absent when there are none.
+ */
+export type BlockingRecord = {
+  at: number; episodes: Record<string, Episode>; samples: Sample[]; holdings?: Record<string, Holding>;
+  deadlocks?: Record<string, DeadlockEpisode>; brokenDeadlocks?: (BrokenDeadlock & { at: number })[];
+};
 export type Incident = { holder: string; since: number; minutes: number; rows: number[]; heldRows: number[]; heldIn?: string | null };
 export type TopBlocker = { holder: string; row: number | null; rows: number; minutes: number; rowMinutes: number };
 
@@ -126,6 +141,23 @@ export function deadlocksAmong(blocked: Shelved[], resolve: Resolver): (Deadlock
   }
   return [...byTracker].flatMap(([repo, shelvings]) => deadlocksOf(shelvings, (row) => waits.blockersOf(row, repo))
     .map((deadlock) => (repo === undefined ? deadlock : { ...deadlock, repo })));
+}
+
+/** The overlap B4 named in a pull-request reason: `overlaps #878 in a11ign/agent-org, which already touches: .github/workflows/ci.yml, package.json. B4: ...` gives `.github/workflows/ci.yml, package.json`. */
+const TOUCHED_FILES = /which already touches: (.+?)\. B4:/;
+
+/**
+ * THE CYCLES THIS TICK, EACH WITH WHO TO PUT IT TO: `deadlocksAmong`'s, plus the session holding the pull request that shelves (`null` when the resolver knows none) and the overlap B4 named, which is
+ * what the holder is told to narrow away.
+ * @param {Shelved[]} blocked @param {Resolver} resolve
+ */
+export function sightingsAmong(blocked: Shelved[], resolve: Resolver): Sighting[] {
+  return deadlocksAmong(blocked, resolve).map((deadlock) => {
+    const shelving = blocked.find((b) => b.number === deadlock.shelved && b.repo === deadlock.repo);
+    const ref = shelving === undefined ? null : refOfShelving(shelving);
+    const files = shelving === undefined ? undefined : TOUCHED_FILES.exec(shelving.reason)?.[1];
+    return { ...deadlock, holder: ref === null ? null : (resolve(ref)?.holder ?? null), ...(files === undefined ? {} : { files }) };
+  });
 }
 
 /**
@@ -240,6 +272,57 @@ export function wakeOrder(incident: Incident): BlockingOrder {
     discriminator, prompt: wakeText(incident), causeKey: `${incident.holder}/lock-gridlock/${discriminator}` };
 }
 
+/** What the holder of a cycle's pull request is woken with, once: the cycle in one sentence and the two ways out, the cheaper first by the chairman's word (agent-org#5009). */
+export function deadlockWakeText({ pr, shelved, path, files }: Sighting): string {
+  const overlap = files === undefined ? "" : ` (the overlap B4 read: ${files})`;
+  return `your pull request ${pr} is in a circular wait no tick will clear: it closes ${pathText(path)}, and B4 shelves #${shelved} behind ${pr} because ${pr} touches its files${overlap}, `
+    + `so ${pr} cannot merge before #${shelved} is done and #${shelved} cannot be offered before ${pr} is gone. Break it now, in whichever direction is cheaper: `
+    + `(1) narrow ${pr} to drop the overlapping file, so B4 stops shelving #${shelved}; or (2) if #${shelved}'s change is small and inside your Region, take it into ${pr} and close it there. `
+    + `If the cycle is still standing on the next tick, the gate files an incident naming #${shelved} and ${pr} and wakes ${DEADLOCK_ESCALATION_SESSION}.`;
+}
+
+/** What the escalation is woken with, and what the two rows are told: both rows named, the cycle, and whom it was put to before. */
+export function deadlockEscalationText({ pr, shelved, path }: Sighting, { woke, minutes }: { woke: string | null; minutes: number }): string {
+  const before = woke === null
+    ? `No session is known to hold ${pr}, so nobody was woken before this.`
+    : `${woke} was woken once with the instruction to narrow ${pr} or take #${shelved}'s change in, and the cycle was still standing on the next tick.`;
+  return `circular wait: ${pr} closes ${pathText(path)}, and B4 shelves #${shelved} behind ${pr}: neither can move, and it has stood for ${minutes} minutes (first read to now). ${before} `
+    + `Decide the direction: narrow ${pr} off the overlapping file, take #${shelved}'s change into ${pr}, or release one of the two claims.`;
+}
+
+/** The row write on each of the two rows an escalated cycle names. The marker keeps a second tick from reading it as new. */
+export function deadlockRowComment(deadlock: Sighting, { woke, minutes, since }: { woke: string | null; minutes: number; since: number }): string {
+  return `<!-- b4-deadlock: ${deadlockKey(deadlock)} since ${new Date(since).toISOString()} -->\n**${deadlockEscalationText(deadlock, { woke, minutes })}**`;
+}
+
+const minutesSince = (since: number, now: number): number => Math.max(0, Math.round((now - since) / MS_PER_MINUTE));
+
+/** Strip what a discriminator or cause key should not carry: a pull request's `#` and a repository's `/`. */
+const slug = (text: string): string => text.replace(/[^\w.-]+/g, "-");
+
+/** The order for one move: the holder's wake, or the escalation. Both reuse `ready-row-unclaimable`, as the gridlock wake does: a new cause is a change to the closed vocabulary. */
+export function deadlockOrder(move: DeadlockMove, now: number): BlockingOrder {
+  const { deadlock, since } = move;
+  const discriminator = `${slug(deadlockKey(deadlock))}-${since}`;
+  const subject = `row-${deadlock.shelved}`;
+  if (move.kind === "wake-holder") {
+    return { session: move.holder, cause: "ready-row-unclaimable", subject, discriminator, prompt: deadlockWakeText(deadlock), causeKey: `${move.holder}/b4-deadlock/${discriminator}` };
+  }
+  const minutes = minutesSince(since, now);
+  return { session: DEADLOCK_ESCALATION_SESSION, cause: "ready-row-unclaimable", subject, discriminator: `${discriminator}-escalated`,
+    prompt: deadlockEscalationText(deadlock, { woke: move.woke, minutes }), causeKey: `${DEADLOCK_ESCALATION_SESSION}/b4-deadlock/${discriminator}-escalated` };
+}
+
+/** What the daily pass counts: the cycles read in the window, and how long each stood. `minutes` of a standing one is its age at `now`. */
+export type DeadlockSummary = { found: number; standing: { key: string; minutes: number }[]; broken: { key: string; minutes: number; escalated: boolean }[] };
+
+/** THE DAILY PASS'S COUNT (agent-org#5009): cycles broken in the 24 hours to `now` with how long each stood, and the ones still standing. A record with neither is `found: 0`, which is a reading. */
+export function deadlockSummary(record: BlockingRecord, now: number): DeadlockSummary {
+  const standing = Object.entries(record.deadlocks ?? {}).map(([key, e]) => ({ key, minutes: minutesSince(e.since, now) }));
+  const broken = (record.brokenDeadlocks ?? []).filter((b) => b.at > now - DAY_MS && b.at <= now).map(({ key, minutes, escalated }) => ({ key, minutes, escalated }));
+  return { found: standing.length + broken.length, standing, broken };
+}
+
 /** @returns the record; throws for text that is not one (the caller tells an absent file, ENOENT, from a corrupt one) */
 export function parseRecord(text: string): BlockingRecord {
   const parsed = JSON.parse(text);
@@ -297,24 +380,62 @@ function raise(incident: Incident, { logPath, now, io }: { logPath: string; now:
 /**
  * THE ONE CALL THE GATE MAKES. Sums this tick's `blocked` per holder, advances the record in `stateDir`, and for each incident newly due records it, writes the held rows and
  * returns the holder's wake order. Never throws. A record that could not be WRITTEN raises the incident's ledger event and order (the wake and the ledger de-duplicate by key) but
- * writes no row comment, which would otherwise be repeated every tick.
+ * writes no row comment, which would otherwise be repeated every tick. A circular wait (agent-org#5009) is the other way: with no record there is no "second tick", so it makes no order at all and says so.
  * @param {{ blocked: Shelved[], resolve: (ref: Ref) => Held | null, stateDir: string, now: number } & BlockingIo} tick
  */
 export function blockingImpactTick({ blocked, resolve, stateDir, now, ...seams }: { blocked: Shelved[]; resolve: Resolver; stateDir: string; now: number } & BlockingIo): BlockingOrder[] {
   const io: Required<BlockingIo> = { read: readText, write: writeAtomic, comment: () => {}, record: recordFailure, log: logToStderr, ...seams };
   const path = `${stateDir}/${BLOCKING_FILE}`;
   try {
-    const deadlocks = deadlocksAmong(blocked, resolve);
-    const { holdings, unattributed } = holdingsOf(blocked, resolve, new Set(deadlocks.map((d) => rowKey(d.shelved, d.repo))));
-    const { record, incidents } = advance(previousRecord(path, io), { now, holdings });
-    for (const deadlock of deadlocks) io.log(deadlockLine(deadlock));
+    const sightings = sightingsAmong(blocked, resolve);
+    const { holdings, unattributed } = holdingsOf(blocked, resolve, new Set(sightings.map((d) => rowKey(d.shelved, d.repo))));
+    const previous = previousRecord(path, io);
+    const { record, incidents } = advance(previous, { now, holdings });
+    const cycles = advanceDeadlocks(previousDeadlocks(previous, now), sightings, now);
+    for (const deadlock of sightings) io.log(deadlockLine(deadlock));
     for (const line of holdingLines(holdings, { episodes: record.episodes, unattributed })) io.log(line);
-    const kept = persisted(path, record, io);
-    return incidents.map((incident) => raise(incident, { logPath: `${stateDir}/${FAILURE_LEDGER_FILE}`, now, io: kept ? io : { ...io, comment: () => {} } }));
+    const kept = persisted(path, withDeadlocks(record, cycles, { previous, now }), io);
+    const logPath = `${stateDir}/${FAILURE_LEDGER_FILE}`;
+    const orders = incidents.map((incident) => raise(incident, { logPath, now, io: kept ? io : { ...io, comment: () => {} } }));
+    if (kept) return [...orders, ...cycles.moves.map((move) => raiseDeadlock(move, { logPath, now, io }))];
+    if (cycles.moves.length > 0) io.log("blocking-impact: no circular-wait order was made this tick: the record was not kept, so the same cycle would be put to its holder afresh on every tick");
+    return orders;
   } catch (cause) {
     io.log(`blocking-impact: this tick's count was not made (${firstLine(cause)})`);
     return [];
   }
+}
+
+/** The cycles the last tick read, or none when the tick before this one is older than a gap in observation: minutes nobody observed are not counted as a cycle standing. */
+function previousDeadlocks(previous: BlockingRecord | null, now: number): Record<string, DeadlockEpisode> {
+  const continuous = previous !== null && now >= previous.at && now - previous.at <= MAX_TICK_GAP_MS;
+  return continuous ? previous.deadlocks ?? {} : {};
+}
+
+/** The record with this tick's cycles and the broken ones of the last 24 hours added; each key is absent when there is nothing under it, so a record with no cycle is the record it always was. */
+function withDeadlocks(record: BlockingRecord, cycles: { episodes: Record<string, DeadlockEpisode>; broken: BrokenDeadlock[] }, { previous, now }: { previous: BlockingRecord | null; now: number }): BlockingRecord {
+  const broken = [...(previous?.brokenDeadlocks ?? []).filter((b) => b.at > now - DAY_MS), ...cycles.broken.map((b) => ({ ...b, at: now }))];
+  return { ...record, ...(Object.keys(cycles.episodes).length === 0 ? {} : { deadlocks: cycles.episodes }), ...(broken.length === 0 ? {} : { brokenDeadlocks: broken }) };
+}
+
+/**
+ * Act on one cycle's move and return its order. A wake is only the order; an escalation is the ledger event, the row write on each of the two rows it names (the closed row and the shelved one,
+ * in the tracker the shelved row is in), and the order. Each effect reports its own refusal and none stops the others.
+ */
+function raiseDeadlock(move: DeadlockMove, { logPath, now, io }: { logPath: string; now: number; io: Required<BlockingIo> }): BlockingOrder {
+  if (move.kind === "escalate") {
+    const { deadlock, since, woke } = move;
+    io.record({ logPath, classKey: B4_DEADLOCK_KIND, ref: `${deadlockKey(deadlock)}@${new Date(since).toISOString()}`, now, report: io.log });
+    const body = deadlockRowComment(deadlock, { woke, since, minutes: minutesSince(since, now) });
+    for (const row of [deadlock.path[0], deadlock.shelved]) {
+      try {
+        io.comment(row, body, deadlock.repo);
+      } catch (cause) {
+        io.log(`blocking-impact: the row write on #${row} was refused (${firstLine(cause)})`);
+      }
+    }
+  }
+  return deadlockOrder(move, now);
 }
 
 /** @returns whether the record was kept; a refusal is reported */

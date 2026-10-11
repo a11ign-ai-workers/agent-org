@@ -107,7 +107,7 @@ import { PROJECT_OWNER, PROJECT_NUMBER } from "./board-snapshot.ts";
 import { launchGate } from "./board-snapshot-scope.ts";
 import { REPO } from "./project-identity.ts";
 import { DEFECT_LABEL } from "./defect-class-line.ts"; // #4123
-import { declaredRegionFiles, declaresNoCommit, directoryReservations, extractLabeledSection, extractRegionSection, slashlessDirectoryEntries, splitRegionEntry, unrecognisedRegionPaths } from "./region-paths.ts";
+import { declaredRegionFiles, declaresNoCommit, directoryReservations, extractLabeledSection, regionPathTokens, slashlessDirectoryEntries, splitRegionEntry, unrecognisedRegionPaths } from "./region-paths.ts";
 import { HOME_CHECKOUT, homeProjectDeclaration } from "./project-config.ts";
 import { cloneOfKey } from "./claim-stall.ts"; // #855: a keyed Region entry is checked against its own clone
 import { sandboxGitEnv } from "./lib/git-env.ts";
@@ -365,11 +365,11 @@ export function bareKeyedRegionReason(body: string, { code = homeProjectDeclarat
  * keyed to (`""`, the project's first repository, is `HOME_CHECKOUT`; `key:` is that key's clone, from `host.json`)? A single new file
  * at the root (`src/new-file.test.ts` is not that -- its `src/` exists) is not a directory, so it is never read here.
  *
- * WHY THIS READS THE KEYED TOKENS ITSELF: `unrecognisedRegionPaths` only sees a path that a whitespace, backtick, quote or paren
- * precedes, so `nvda-worker:packages/...` is invisible to it and to `declaredRegionFiles`. Measured 2026-10-11 with a declared key:
- * both came back empty. The section is still read by `extractRegionSection` and each token split by `splitRegionEntry`; only the
- * token shape is read here, because `region-paths.ts` is outside this row's Region. The owner of that file should move the keyed
- * shape there (see the row's report).
+ * THE TOKENS ARE READ BY `regionPathTokens` in `region-paths.ts`, the one reader of a keyed token: `unrecognisedRegionPaths` and
+ * `declaredRegionFiles` cannot see `nvda-worker:packages/...` (measured 2026-10-11 with a declared key: both came back empty).
+ *
+ * PROMOTION ASKS THE SAME QUESTION (#877): `promoteRefusalReason` calls this with `act: "promote"`, so a backlog row promoted to Ready
+ * is not let past what `--ready` filing refuses.
  *
  * A KEYED ENTRY whose repository has NO CLONE DECLARED on this host is not read (`host.json`'s `clones` is absent until a host moves to the
  * installed form, #2623, and refusing there would stop every keyed row filing as it does today). A key the project does not declare is not
@@ -380,12 +380,10 @@ export function bareKeyedRegionReason(body: string, { code = homeProjectDeclarat
  * @returns {string | null}
  */
 export function absentRegionTopDirReason(body: string, { code = homeProjectDeclaration().code, trackerRepo = homeProjectDeclaration().repo,
-  checkoutOf = checkoutOfKey, hasTopLevel = repoHasTopLevelDir, present = existsSync }: { code?: readonly { key: string; repo: string; }[]; trackerRepo?: string;
+  checkoutOf = checkoutOfKey, hasTopLevel = repoHasTopLevelDir, present = existsSync, act = "file --ready" }: { code?: readonly { key: string; repo: string; }[]; trackerRepo?: string;
   checkoutOf?: (key: string) => string | null; hasTopLevel?: (checkout: string, top: string) => boolean | null;
-  present?: (checkout: string) => boolean; } = {}): string | null {
-  const section = extractRegionSection(body);
-  if (section === null) return null;
-  for (const [, token] of section.matchAll(REGION_PATH_TOKEN)) {
+  present?: (checkout: string) => boolean; act?: string; } = {}): string | null {
+  for (const token of regionPathTokens(body)) {
     const { key, path } = splitRegionEntry(token);
     const top = path.split("/")[0];
     const repo = code.find((entry) => entry.key === key);
@@ -395,7 +393,7 @@ export function absentRegionTopDirReason(body: string, { code = homeProjectDecla
     if (checkout === null || !present(checkout)) continue;
     const has = hasTopLevel(checkout, top);
     if (has === null) {
-      return `REFUSING to file --ready -- could not read origin/main of ${repo.repo} to see whether it has \`${top}/\`, so \`${token}\` `
+      return `REFUSING to ${act} -- could not read origin/main of ${repo.repo} to see whether it has \`${top}/\`, so \`${token}\` `
         + "cannot be checked (#855). Fetch origin, then file again.";
     }
     if (has) continue;
@@ -406,14 +404,11 @@ export function absentRegionTopDirReason(body: string, { code = homeProjectDecla
     const where = holders.length === 0
       ? `No declared repository has \`${top}/\`, so the path is wrong, not in another repository.`
       : `${holders.join(", ")} ${holders.length === 1 ? "has" : "have"} \`${top}/\`: file the row there, or key the path to that repository.`;
-    return `REFUSING to file --ready -- the \`## Region\` names \`${token}\`, but ${repo.repo} (the repository this entry builds in) has no `
+    return `REFUSING to ${act} -- the \`## Region\` names \`${token}\`, but ${repo.repo} (the repository this entry builds in) has no `
       + `top-level \`${top}/\`. The tracker is ${trackerRepo}. ${where} (#855).`;
   }
   return null;
 }
-
-/** A Region path token, keyed or bare: the shape `unrecognisedRegionPaths` reads, plus the `key:` prefix it cannot see (#855). */
-const REGION_PATH_TOKEN = /(?:^|[\s`"'(])((?:[a-z0-9][a-z0-9-]*:)?[A-Za-z0-9_.-]+(?:\/[A-Za-z0-9_.-]+)+)/g;
 
 /** Where a repository's clone is: the project's first repository is `HOME_CHECKOUT`; a keyed one is `host.json`'s `clones.<key>`, or `null`. */
 function checkoutOfKey(key: string): string | null {
@@ -2391,11 +2386,16 @@ export function promoteArgvRefusal(argv: string[]): string | null {
  * @param {string | null} body @param {number} issueNumber
  * @returns {string | null}
  */
-export function promoteRefusalReason(body: string | null, issueNumber: number): string | null {
+export function promoteRefusalReason(body: string | null, issueNumber: number,
+  absentDeps: Parameters<typeof absentRegionTopDirReason>[1] = {}): string | null {
   const fields = templateFieldsReason(body ?? "", issueNumber);
   if (fields) return `row-file: REFUSING to promote -- ${fields}`;
   const filing = fileRefusalReason(body);
-  if (!filing) return null;
+  if (!filing) {
+    // #877: the `--ready` filing refusal for a Region directory the repository lacks (#855), which a backlog row promoted here never met.
+    const absent = absentRegionTopDirReason(body ?? "", { ...absentDeps, act: "promote" });
+    return absent === null ? null : `row-file: ${absent}\n  Asked of #${issueNumber}'s EXISTING body at promotion time. Nothing was changed.`;
+  }
   return `${filing}\n  Asked of #${issueNumber}'s EXISTING body at promotion time, in the filing rule's own `
     + "wording: a body that could not be FILED as it stands must not be made Ready either, because Ready "
     + "is where a claimant meets it. Nothing was changed.";

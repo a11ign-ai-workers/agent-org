@@ -147,16 +147,19 @@ test("issues: write is NOT added for this -- #333 already measured that granting
 // token-free (the acceptance job has none), and the live read spawns `gh`, so it is a separate file.
 
 /** Every `secrets.X` a workflow reads, so a step that reads a DIFFERENT secret is visible by name. */
-function secretsRead(workflow: string): string[] {
-  const text = readFileSync(join(WORKFLOWS, workflow), "utf8");
+function secretsIn(text: string): string[] {
   return [...text.matchAll(/secrets\.([A-Z0-9_]+)/g)].map((m) => m[1]);
 }
 
-test("#2358/#4198: nightly.yml reads `secrets.A11IGN_BOT_TOKEN` and no other credential, once; auto-arm.yml reads "
-  + "no secret at all", () => {
+function secretsRead(workflow: string): string[] {
+  return secretsIn(readFileSync(join(WORKFLOWS, workflow), "utf8"));
+}
+
+test("#2358/#4198/#4486: neither nightly.yml nor auto-arm.yml reads a stored secret at all", () => {
   // auto-arm.yml was 3 until #3046 deleted its `update-branch` job (#3070), 2 until #4198 replaced both with an
-  // Octo STS mint, and nightly.yml was 2 until #4195 did the same for its ready-audit step.
-  for (const [workflow, uses] of [["auto-arm.yml", 0], ["nightly.yml", 1]] as const) {
+  // Octo STS mint, and nightly.yml was 2 until #4195 did the same for its ready-audit step and 1 until #4486
+  // retired the settings table's stored-token read (a hand-run read now, named in a11ign's known-gaps §60).
+  for (const [workflow, uses] of [["auto-arm.yml", 0], ["nightly.yml", 0]] as const) {
     assert.deepEqual(secretsRead(workflow), Array(uses).fill(SECRET_NAME),
       `${workflow} must read exactly ${uses} x secrets.${SECRET_NAME} and nothing else. A rename moves CI onto `
       + `another credential without a red test; \`${SECRET_HOLDER}\` holds ${SECRET_NAME} (#2358), so a `
@@ -180,9 +183,10 @@ test("#2358: trunk.yml no longer reads the arming secret -- the auto-revert path
   assert.ok(!secretsRead("trunk.yml").includes(SECRET_NAME),
     "trunk.yml reads the arming secret again: that is the revert path #2356 removed, or a new use of an "
     + "identity that completes merges, and either belongs on a row before it lands");
-  assert.ok(secretsRead("nightly.yml").length > 0,
-    "POSITIVE CONTROL for the assertion above: the reader finds the secret where it is known to be used "
-    + "(auto-arm.yml no longer reads it, #4198)");
+  // POSITIVE CONTROL for the assertion above: no workflow at the pinned project reads the secret any more (#4486), so
+  // the reader is shown to find it in a text that does, which is what keeps `!includes` from being vacuous.
+  assert.deepEqual(secretsIn("env:\n  GH_TOKEN: ${{ secrets.A11IGN_BOT_TOKEN }}\n"), [SECRET_NAME],
+    "the reader must find a secret where one is named");
 });
 
 // --- #1969: A TOKEN THAT IS SET BUT REFUSED IS NOT A TOKEN THAT WORKS -------------------------------

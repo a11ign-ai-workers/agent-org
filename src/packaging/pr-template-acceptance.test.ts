@@ -56,7 +56,14 @@ test("guidance sits ABOVE the header, because an HTML comment after it parses as
   // is HTML comments, so this is the shape a well-meaning edit reintroduces.
   const lines = body().split("\n");
   const header = lines.findIndex((l) => /^\s*Acceptance:/.test(l));
-  assert.ok(header >= 0, "the template must carry an `Acceptance:` header at all.");
+  if (header < 0) {
+    // ADR 0044 (a11ign#4422): the Acceptance lives in a file the pull request adds, and the template carries a pointer
+    // line instead of the header. With no header there is nothing for a comment to follow, so what is pinned is that
+    // the template says where the block goes and that the pointer line is not itself a header the parser reads.
+    assert.ok(lines.some((l) => /^Acceptance file:/.test(l) && l.includes(".acceptance/")),
+      "the template must carry an `Acceptance:` header, or the `Acceptance file:` pointer to `.acceptance/` (ADR 0044).");
+    return;
+  }
   const next = lines[header + 1] ?? "";
   assert.ok(next.trim() === "" || /^(?:\*\*|__)?Mutation:/i.test(next.trim()),
     "the line after `Acceptance:` must be blank (or `Mutation:`). Anything else — an HTML comment most "
