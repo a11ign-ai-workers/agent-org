@@ -157,6 +157,7 @@ test("costBy reads a turn once priced from its tokens and the repricing of the s
 
 /** Where a module may read the store's lines itself, and why. A reader not named here goes through `readStore`, `openStore` or `duplicateIds`, which keep the last copy of each id. */
 const ALLOWED: Record<string, string> = {
+  "src/crash-recover.ts": "`lastTurnProfiles` runs at boot after a hard crash, where the last line of the file may be torn: it skips a line that does not parse, which `readStore` refuses to do, and keeps the last model and effort per transcript, so an id twice changes nothing",
   "src/trace/otel-receiver.ts": "`loadSeenIds`, the receiver's id scan: it reads the ids of the `source: otel` lines it already appended so it does not append one twice; it sums nothing",
   "src/trace/freshness.ts": "`newestTurnAt`: the tail of the file, for the newest turn's `at`; a maximum, so an id twice and a stored `costUsd` change nothing, and the whole file is 500 MB every five minutes",
 };

@@ -41,6 +41,7 @@ import { createHash } from "node:crypto";
 import { refuseUnknownFlags, flagValue } from "./lib/cli-flags.ts";
 import { pnpmCliInvocation } from "./lib/npm-cli-executable.ts"; // #3386: a bare `pnpm` spawn is `pnpm.cmd` on Windows, which CVE-2024-27980 refuses
 import { blastTail, readBlockingRecord } from "./blast-tail.ts";
+import { haikuBriefTail } from "./haiku-brief.ts";
 import type { BlockingRecord } from "./blocking-impact.ts";
 import { HAIKU_DEFAULT_CI_FAILURES, haikuDefaultOn, routeEngineer, type Routed } from "./engineer-route.ts";
 import { DEFAULT_CAPS, ESCALATION_KIND, ESCALATION_USE, claimFacts, escalationLogLine, escalationNote, haikuStarts, isHaiku, shouldEscalate, transcriptCounts } from "./engineer-escalation.ts";
@@ -66,7 +67,7 @@ import { engineerBriefSentence, briefRoleSentence } from "./spawn-role-brief.ts"
 // re-export of `waiting-condition.ts`'s own field, so it is not re-imported here.
 import { SESSION_PREFIX, READY_LABEL, OUT_OF_RELEASE_LABEL } from "./project-vocabulary.ts";
 import { PARKED_LABEL } from "./wait-condition.ts"; // #4727: the state a filed stuck-cause row is born in
-import { readRowsByLabel, readUnlessRefused } from "./ticket-port/rows-by-label.ts"; // #5074: the tick's row lists are connections, never a search
+import { readClaimedRows, readRowsByLabel, readUnlessRefused } from "./ticket-port/rows-by-label.ts"; // #5074: the tick's row lists are connections, never a search
 import { inBuildReason, isInBuild, unansweredRefusal, lookupHeldRows, lookupOtherHeldIssues }
   from "./row-claim/own-pr-health-rule.ts";
 import { parseWorktreeList, isPrimaryWorktree, isWorkingTreeClean, mergeStatus, detachedMergeStatus }
@@ -3683,11 +3684,12 @@ const ENGINEER_BRIEF_SENTENCE = engineerBriefSentence(ENGINEER_BRIEF_ABSOLUTE);
  * `briefRole` (#828) is the role brief a SPAWNED seat is sent to, the engineer's by default (byte-identical to the sentence before #828); it is read on the `spawned` branch only, and nothing passes it yet.
  * `blocking` (#4605) is the gate's last count of shelved rows, which `blastTail` turns into the spawned order's `your claim blocks N rows` line; absent, no line, so a caller that does not read it is never the one that invents one.
  * `orderId` (#4068) is the wake id the follow-up header names and the ledger line for this delivery records; see {@link FOLLOW_UP_HEADER}.
+ * `model` (#5113) is the model a SPAWNED seat was started on; a Haiku one gets {@link haikuBriefTail} when `workers.haikuBrief` is on, and absent it, nothing is added.
  */
 export function addressed(order: { session: string; prompt: string; title?: string; causeKey?: string; cause?: string; }, label: string,
   { spawned, followUp = false, context, orderId, blocking = null, now = Date.now(), engineers = engineerRoles(), families = SPARE_FAMILIES,
-    briefRole = "engineer", ...launch }: LaunchFacts & {
-      spawned?: ClaimedRow; followUp?: boolean; context?: string; orderId?: string; engineers?: string[]; blocking?: BlockingRecord | null; now?: number;
+    briefRole = "engineer", model, ...launch }: LaunchFacts & {
+      spawned?: ClaimedRow; followUp?: boolean; context?: string; orderId?: string; engineers?: string[]; blocking?: BlockingRecord | null; now?: number; model?: string;
       families?: readonly import("./arm-pr.ts").SpareFamily[]; briefRole?: string;
   } = {}) {
   // `<you>` SUBSTITUTED, not merely explained: the order's own command text carries the placeholder, and
@@ -3701,7 +3703,7 @@ export function addressed(order: { session: string; prompt: string; title?: stri
     + `asks which session you are (\`--session=${label}\`).\n\n`;
   if (spawned) {
     const brief = briefRole === "engineer" ? ENGINEER_BRIEF_SENTENCE : briefRoleSentence(briefRole);
-    return `${identity}${prompt}\n\n${brief}${calmTail(spawned.row)}${tripsTail(spawned.row)}${blastTail(spawned.row, blocking, now)}`;
+    return `${identity}${prompt}\n\n${brief}${calmTail(spawned.row)}${tripsTail(spawned.row)}${blastTail(spawned.row, blocking, now)}${haikuBriefTail(model)}`;
   }
   return `${identity}${prompt}\n\n${engineerBriefLine(label, engineers, families)}${autonomyParagraphs(order, label)}`;
 }
@@ -5438,7 +5440,7 @@ function promptTarget(order: { causeKey: string; session: string; prompt: string
   try {
     run(["--session", "org", "agent", "prompt", target.label,
       addressed(carriedOrder(order, target), target.label,
-        { ...launch, spawned: target.claimed, followUp: isFollowUp(target, context), context, orderId, blocking: blocking() })]);
+        { ...launch, spawned: target.claimed, followUp: isFollowUp(target, context), context, orderId, blocking: blocking(), model: (target.profile as { model?: string } | undefined)?.model })]);
   } catch (err) {
     // A STARTED PROCESS IS LEFT RUNNING HERE, and the causeKey is NOT recorded. It is a healthy, idle
     // session under a roster label, so the next tick's `route` offers it this same order by the ordinary
@@ -7098,9 +7100,48 @@ export function heldRowsOfSpare(role: string, causes: Map<string, string>,
       throw err;
     }
   };
-  const rows = read(role, 0, repo === undefined ? { run } : { repo, run });
+  let rows: number[] | null;
+  try {
+    rows = read(role, 0, repo === undefined ? { run } : { repo, run });
+  } catch (err) {
+    // A read the tick remembers as failed throws for every spare on that tracker (`heldRowsReadOncePerTick`), and no `run` ran for this one.
+    causes.set(role, `${repo ?? "the first tracker"}: ${herdrReason(err)}`);
+    return null;
+  }
   if (rows === null && !causes.has(role)) causes.set(role, `${repo ?? "the first tracker"}: the answer was not a list of rows`);
   return rows;
+}
+
+/**
+ * #942: THE ROWS EACH SPARE HOLDS, READ ONCE PER TRACKER PER TICK. `tearDownSpares` asked for one `in-progress` list per live spare every tick
+ * (12.5 a tick measured, none cached), each the same question with one `session:` label changed. ONE list of a tracker's `in-progress` rows
+ * answers every spare on that tracker: a spare's rows are the ones carrying its own `session:<role>` label, the filter `lookupOtherHeldIssues`
+ * applies to the same read.
+ *
+ * A FAILED READ IS THE TICK'S ANSWER for that tracker too: it is remembered, every spare on it throws the same failure (so `heldRowsOfSpare`
+ * gives each its cause), and the tracker is not asked again within the tick. Never `[]` for a failure: "could not read who holds what" is not
+ * "nobody does".
+ *
+ * @returns the reader `heldRowsOfSpare` takes as `read`; its memory lives in this closure, so make ONE per tick
+ */
+export function heldRowsReadOncePerTick(): typeof lookupOtherHeldIssues {
+  const lists = new Map<string, { rows: ReturnType<typeof readClaimedRows>; } | { failed: unknown; }>();
+  return (role, excludeIssueNumber, { repo, run = defaultGh } = {}) => {
+    const key = repo ?? "";
+    let list = lists.get(key);
+    if (list === undefined) {
+      try {
+        list = { rows: readClaimedRows({ run, repo }) };
+      } catch (failed) {
+        list = { failed };
+      }
+      lists.set(key, list);
+    }
+    if ("failed" in list) throw list.failed;
+    const mine = `${SESSION_PREFIX}${role}`;
+    return list.rows.filter((row) => row.labels.some((label) => label.name === mine))
+      .map((row) => row.number).filter((n) => n !== excludeIssueNumber);
+  };
 }
 
 /** The repository root `role`'s worktrees are listed in: the tick's checkout, or the declared clone of its tracker's repository (#4685). THROWS when there is none, so no worktree reads as clean for want of a clone. */
@@ -7125,9 +7166,10 @@ export function tearDownSpares(agents: { label: string; status: string; }[], led
     const paths = sparePathsFrom(ledgerPath);
     mkdirSync(dirname(ledgerPath), { recursive: true });
     const unread = new Map<string, string>();
+    const held = heldRowsReadOncePerTick();
     const { ended, registry } = endFinishedSpares(agents, {
       spares: spareInstances(agents), registry: readSpareRegistry(paths.registry), now: Date.now(), run: defaultRun,
-      heldRows: (role) => heldRowsOfSpare(role, unread), unreadBecause: (role) => unread.get(role) ?? null,
+      heldRows: (role) => heldRowsOfSpare(role, unread, { read: held }), unreadBecause: (role) => unread.get(role) ?? null,
       rowState: (row, role) => { const repo = trackerOfSpare(role); return repo === null ? null : rowStateOf(row, repo); },
       worktrees: (role, rows) => spareWorktrees({ role, rows, repoRoot: repoRootOfSpare(role) }),
       record: (cycle) => appendSpareCycle(paths.cycles, cycle),

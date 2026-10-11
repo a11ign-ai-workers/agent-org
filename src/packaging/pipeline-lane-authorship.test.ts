@@ -329,6 +329,52 @@ test("#816 (3): every App role is accounted for -- its bot login owns a role in 
   }
 });
 
+// --- #796: the managers App in `gh pr list`'s spelling, and a role the wrapper knows when no read can say the login ---
+
+const MANAGERS_APP = "app/a11ign-managers"; // `gh pr list --json author`'s spelling, as `dependabot` is in `dependency-bot-login.ts`
+
+test("#796 (1): `app/a11ign-managers` is the owner's login too -- refused by the predicate, and `ownsReviewOnlyLane` is true for all four spellings", () => {
+  assert.ok(laneAuthorshipRefusal({ author: MANAGERS_APP, files: [WORKFLOW], lanes: LANES }));
+  assert.equal(laneAuthorshipRefusal({ author: MANAGERS_APP, files: [CARVED_OUT], lanes: LANES }), null);
+  assert.deepEqual([LEADS, MANAGERS_BOT, MANAGERS_BARE, MANAGERS_APP].map((a) => ownsReviewOnlyLane(a, LANES)), [true, true, true, true]);
+  assert.ok(ROLE_LOGIN.ceo.includes(MANAGERS_APP));
+});
+
+test("#796 (2): a login NEITHER read answers, with a role the wrapper declares, is decided by the role -- a manager is refused, a worker is not", () => {
+  const unreadable = () => fakeGh({ user: refuses403, viewer: refuses403 }).gh;
+  const managers = drivePrOpen([WORKFLOW], () => loginThrough(unreadable(), "managers"));
+  assert.equal(managers.code, EXIT_NOTHING_SENT);
+  assert.deepEqual(managers.sent, []);
+  assert.match(managers.said, /#1756 Ruling item 7/, "the lane check decided, not the could-not-say refusal");
+  assert.doesNotMatch(managers.said, /could not say who is opening it/);
+
+  // POSITIVE CONTROL: the same diff and the same unreadable reads, a role that owns no lane, is not refused for authorship
+  for (const role of ["workers", "scheduler", "reviewer"]) {
+    const out = drivePrOpen([WORKFLOW], () => loginThrough(unreadable(), role));
+    assert.doesNotMatch(out.said, /Ruling item 7|could not say who is opening it/, role);
+  }
+});
+
+test("#796 (3): no role, or a role the wrapper does not declare, is no identity -- unreadable still REFUSES, naming both failures", () => {
+  for (const role of [undefined, "", "root", "constructor", "app:managers"]) {
+    const { gh } = fakeGh({ user: refuses403, viewer: refuses403 });
+    assert.throws(() => loginThrough(gh, role), /`gh api user`: .*403.*the GraphQL `viewer` read: .*403/, String(role));
+    const out = drivePrOpen([WORKFLOW], () => loginThrough(fakeGh({ user: refuses403, viewer: refuses403 }).gh, role));
+    assert.match(out.said, /could not say who is opening it/, String(role));
+  }
+});
+
+test("#796 (4): a read that DOES answer outranks the role -- the role is asked only when both reads failed", () => {
+  const { gh, asked } = fakeGh({ user: refuses403, viewer: BOT });
+  assert.equal(loginThrough(gh, "managers"), BOT, "the viewer's login, not the role's");
+  assert.deepEqual(asked, ["user", "viewer"]);
+});
+
+test("#796 (5): `app:<role>` owns only the lane its role's App is declared to; an `app:` that names no role owns nothing", () => {
+  assert.deepEqual(["app:managers", "app:workers", "app:reviewer", "app:scheduler", "app:", "app:root", "app:constructor"]
+    .map((a) => ownsReviewOnlyLane(a, LANES)), [true, false, false, false, false, false, false]);
+});
+
 // --- the sweep: the same predicate, or arm-pr's refusal is undone one job later ---
 
 const SWEEP = fileURLToPath(new URL("../auto-arm-sweep.ts", import.meta.url));

@@ -33,7 +33,7 @@ writeFileSync(HOST_FILE, JSON.stringify({ schema: 1, home: SCRATCH, binDir: join
   gh: { workers: join(SCRATCH, "workers"), leads: join(SCRATCH, "leads"), leadsHeader: [], leadsWorkspaces: [] } }));
 process.env.AGENT_ORG_HOST = HOST_FILE;
 
-const { heldRowsOfSpare, endFinishedSpares, spareInstances } = await import("./wake.ts");
+const { heldRowsOfSpare, heldRowsReadOncePerTick, endFinishedSpares, spareInstances } = await import("./wake.ts");
 const { withScopedPrOwners } = await import("./work-gate.ts");
 const { ownerOfPr } = await import("./work-gate/pr-orders.ts");
 const { homeProjectDeclaration } = await import("./project-config.ts");
@@ -124,4 +124,41 @@ test("agent-org#4893 (2): a red agent-org pull request with no label is OWNED by
 
   const [other] = withScopedPrOwners([{ ...pr, body: "Closes agent-org#522" }], rows, { rowsRepo: "a11ign/a11ign" });
   assert.equal(ownerOfPr(other).source, "branch-row", "NEGATIVE CONTROL: read as the first tracker's rows the body line no longer names it, and only the branch suffix does");
+});
+
+/**
+ * agent-org#942 (a11ign#4148 residual): THE TICK READS EACH TRACKER'S `in-progress` ROWS ONCE, not once per live spare. A spare's rows are read
+ * off its own `session:` label in that list, so every spare on a tracker sees the same answer the per-spare read gave it.
+ */
+test("agent-org#942: a tick reads each tracker's in-progress rows once, and each spare takes its own from that list", () => {
+  const asked: string[] = [];
+  const gh = (args: string[]) => {
+    const tracker = args.includes("name=agent-org") ? AGENT_ORG : "first";
+    asked.push(tracker);
+    const row = (number: number, session: string) => ({ number, body: "", labels: { nodes: [{ name: `session:${session}` }] }, blockedBy: { nodes: [] } });
+    const nodes = tracker === AGENT_ORG ? [row(522, KEYED)] : [row(10, "worker-4874"), row(11, "worker-4875")];
+    return JSON.stringify({ data: { repository: { issues: { pageInfo: { hasNextPage: false, endCursor: null }, nodes } } } });
+  };
+  const held = heldRowsReadOncePerTick();
+  const causes = new Map<string, string>();
+  assert.deepEqual(heldRowsOfSpare("worker-4874", causes, { read: held, gh }), [10]);
+  assert.deepEqual(heldRowsOfSpare("worker-4875", causes, { read: held, gh }), [11]);
+  assert.deepEqual(heldRowsOfSpare(KEYED, causes, { read: held, gh }), [522]);
+  assert.deepEqual(heldRowsOfSpare("worker-4876", causes, { read: held, gh }), [], "a spare holding nothing reads [], not a failure");
+  assert.deepEqual(asked, ["first", AGENT_ORG], "NEGATIVE CONTROL: one read per tracker; a read per spare would ask four times");
+});
+
+test("agent-org#942: a failed read is the tick's answer for every spare on that tracker, with its cause, and is not asked again", () => {
+  let asked = 0;
+  const gh = () => {
+    asked += 1;
+    throw Object.assign(new Error("Command failed: gh api graphql"), { stderr: "\nnetwork is unreachable\n" });
+  };
+  const held = heldRowsReadOncePerTick();
+  const causes = new Map<string, string>();
+  assert.equal(heldRowsOfSpare("worker-4874", causes, { read: held, gh }), null);
+  assert.equal(causes.get("worker-4874"), "the first tracker: network is unreachable");
+  assert.equal(heldRowsOfSpare("worker-4875", causes, { read: held, gh }), null, "still null: a failure is never `[]`");
+  assert.equal(causes.get("worker-4875"), "the first tracker: network is unreachable", "the second spare is told the cause too, not `the answer was not a list of rows`");
+  assert.equal(asked, 1, "the tracker was asked once in the tick");
 });

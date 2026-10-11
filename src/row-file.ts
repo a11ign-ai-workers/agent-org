@@ -757,6 +757,245 @@ export function unreadableWaitReason(body: string): string | null {
     + `A wait on a SESSION's act is not a \`Waiting-for:\` line: put the \`${ANSWER_PREFIX}<session>\` label on the row, and removing it IS the answer. Nothing was filed.`;
 }
 
+// ---------------------------------------------------------------------------------------------------------------------------------------
+// #1015: A BUILD ROW'S `spec` BLOCK, REFUSED FIELD BY FIELD AT FILING (the validation half of a11ign#5109's structured format).
+//
+// BEHIND `rows.specBlock` in `.agent-org/project.json`, ABSENT MEANING OFF (a11ign#5100's rule): flag off, the whole rule is a no-op. Revert: the flag off.
+// A row with NO `spec` fence is exempt (a decomposition, investigation or fleet row carries none; the row states the exemption, this does not guess it).
+//
+// READ WITHOUT A YAML PARSER, DELIBERATELY: `yaml` is a devDependency and this file runs from the tool's checkout without one (`host-units.ts` says the same).
+// The block's grammar is the small subset a spec uses -- nested maps, lists, lists of maps, plain/quoted scalars, `|`/`>` block scalars, `[]`/`{}` and
+// flat `[a, b]` -- and anything else is REFUSED AS UNREADABLE rather than guessed at. `spec-block-refusal.test.ts` parses the same blocks with `yaml`
+// and asserts the two agree, which is what makes this a reading of YAML rather than a second dialect.
+// ---------------------------------------------------------------------------------------------------------------------------------------
+
+type SpecValue = string | SpecValue[] | { [key: string]: SpecValue };
+type SpecLine = { indent: number; text: string; raw: string; };
+
+/** The words a `then` may be made of and still assert nothing. The deeper vagueness lint is a11ign#5117's, at Ready. */
+const EMPTY_THENS: ReadonlySet<string> = new Set(["works", "correct", "as expected", "ok"]);
+const SPEC_KEY_LINE = /^("[^"]*"|'[^']*'|[A-Za-z_][\w.-]*):(?:\s+(.*))?$/;
+
+export class SpecUnreadable extends Error {}
+
+function unquoteSpecScalar(text: string): string {
+  if (text.startsWith("\"")) {
+    if (!/^"(?:[^"\\]|\\.)*"$/.test(text)) throw new SpecUnreadable(`the double-quoted scalar \`${text}\` is not closed on its line`);
+    return text.slice(1, -1).replace(/\\(["\\n])/g, (_all, c: string) => (c === "n" ? "\n" : c));
+  }
+  if (!/^'(?:[^']|'')*'$/.test(text)) throw new SpecUnreadable(`the single-quoted scalar \`${text}\` is not closed on its line`);
+  return text.slice(1, -1).replaceAll("''", "'");
+}
+
+/** One scalar, flow list or empty flow map from the text after `key:` or `- `. */
+function readSpecScalar(rest: string): SpecValue {
+  const text = rest.startsWith("\"") || rest.startsWith("'") ? rest.replace(/^("(?:[^"\\]|\\.)*"|'(?:[^']|'')*')\s*(?:#.*)?$/, "$1") : rest.replace(/\s+#.*$/, "").trim();
+  if (text === "~" || text === "null") return "";
+  if (text === "[]") return [];
+  if (text === "{}") return {};
+  if (text.startsWith("\"") || text.startsWith("'")) return unquoteSpecScalar(text);
+  if (/^[&*!{|>]/.test(text) && !/^[|>][+-]?$/.test(text)) throw new SpecUnreadable(`\`${text.slice(0, 20)}\` (an anchor, alias, tag or flow map) is not read in a spec block`);
+  if (text.startsWith("[")) {
+    if (!text.endsWith("]") || /[[{]/.test(text.slice(1, -1))) throw new SpecUnreadable(`the flow list \`${text.slice(0, 30)}\` is nested or not closed on its line`);
+    return text.slice(1, -1).split(",").map((item) => item.trim()).filter((item) => item !== "").map((item) => String(readSpecScalar(item)));
+  }
+  return text;
+}
+
+/** The block's value, or a thrown `SpecUnreadable`. Exported for `spec-block-refusal.test.ts`, which compares it with `yaml`'s on the forms a spec uses. */
+export function parseSpecYaml(source: string): SpecValue {
+  const lines: SpecLine[] = source.split("\n").map((raw) => {
+    if (/^\s*\t/.test(raw)) throw new SpecUnreadable("a line is indented with a tab, which YAML does not allow");
+    return { indent: raw.length - raw.trimStart().length, text: raw.trim(), raw };
+  });
+  let at = 0;
+  const skipBlank = (): void => { while (at < lines.length && (lines[at]!.text === "" || lines[at]!.text.startsWith("#"))) at += 1; };
+  const nextDeeper = (than: number): SpecLine | null => { skipBlank(); const line = lines[at]; return line && line.indent > than ? line : null; };
+
+  const blockScalar = (parentIndent: number, header: string): string => {
+    const folded = header.startsWith(">");
+    const body: string[] = [];
+    let blockIndent = -1;
+    while (at < lines.length) {
+      const line = lines[at]!;
+      if (line.text !== "" && line.indent <= parentIndent) break;
+      if (line.text !== "" && blockIndent < 0) blockIndent = line.indent;
+      body.push(line.text === "" ? "" : line.raw.slice(blockIndent));
+      at += 1;
+    }
+    while (body.length > 0 && body[body.length - 1] === "") body.pop();
+    const text = body.join(folded ? " " : "\n");
+    return header.includes("-") || text === "" ? text : `${text}\n`; // clip keeps one final newline; `+` is read as clip, which no check here can tell apart
+  };
+
+  const valueAfter = (parentIndent: number, rest: string, sameIndentSequence: boolean): SpecValue => {
+    if (/^[|>][+-]?(?:\s+#.*)?$/.test(rest)) return blockScalar(parentIndent, rest);
+    if (rest !== "" && !rest.startsWith("#")) return readSpecScalar(rest);
+    const deeper = nextDeeper(parentIndent);
+    if (deeper) return node(deeper.indent);
+    skipBlank();
+    const same = lines[at];
+    if (sameIndentSequence && same && same.indent === parentIndent && /^-(\s|$)/.test(same.text)) return node(parentIndent);
+    return "";
+  };
+
+  const sequence = (indent: number): SpecValue[] => {
+    const items: SpecValue[] = [];
+    for (skipBlank(); at < lines.length && lines[at]!.indent === indent && /^-(\s|$)/.test(lines[at]!.text); skipBlank()) {
+      const line = lines[at]!;
+      const rest = line.text.slice(1).trim();
+      if (SPEC_KEY_LINE.test(rest)) {
+        const offset = line.raw.indexOf(rest, indent + 1);
+        lines[at] = { indent: offset, text: rest, raw: " ".repeat(offset) + rest }; // the item's first key, as a line of its own map
+        items.push(mapping(offset));
+      } else {
+        at += 1;
+        items.push(valueAfter(indent, rest, false));
+      }
+    }
+    return items;
+  };
+
+  const mapping = (indent: number): { [key: string]: SpecValue } => {
+    const map: { [key: string]: SpecValue } = {};
+    for (skipBlank(); at < lines.length && lines[at]!.indent === indent; skipBlank()) {
+      const line = lines[at]!;
+      const found = SPEC_KEY_LINE.exec(line.text);
+      if (!found) throw new SpecUnreadable(`line \`${line.text.slice(0, 40)}\` is not a \`key: value\` line`);
+      const key = found[1]!.replace(/^(["'])(.*)\1$/, "$2");
+      if (Object.hasOwn(map, key)) throw new SpecUnreadable(`the key \`${key}\` appears twice at one level`);
+      at += 1;
+      map[key] = valueAfter(indent, found[2]?.trim() ?? "", true);
+    }
+    const stray = lines[at];
+    if (stray && stray.indent > indent) throw new SpecUnreadable(`line \`${stray.text.slice(0, 40)}\` is indented under a value that cannot hold it`);
+    return map;
+  };
+
+  const node = (indent: number): SpecValue => (/^-(\s|$)/.test(lines[at]!.text) ? sequence(indent) : mapping(indent));
+
+  skipBlank();
+  if (at >= lines.length) return {};
+  const value = node(lines[at]!.indent);
+  skipBlank();
+  if (at < lines.length) throw new SpecUnreadable(`line \`${lines[at]!.text.slice(0, 40)}\` is outside the block's top-level map`);
+  return value;
+}
+
+/** The bodies of every ```spec fence in a row body, in order, or the reason one is not closed. Other fences are skipped whole (a 4-backtick fence may SHOW a spec). */
+function specFencesOf(body: string): { blocks: string[]; unterminated: boolean; } {
+  const blocks: string[] = [];
+  const lines = body.split("\n");
+  for (let i = 0; i < lines.length; i += 1) {
+    const open = /^ {0,3}(`{3,})\s*([\w-]*)\s*$/.exec(lines[i]!);
+    if (!open) continue;
+    const close = new RegExp(`^ {0,3}\`{${open[1]!.length},}\\s*$`);
+    let end = i + 1;
+    while (end < lines.length && !close.test(lines[end]!)) end += 1;
+    if (end >= lines.length) return { blocks, unterminated: open[2] === "spec" };
+    if (open[2] === "spec") blocks.push(lines.slice(i + 1, end).join("\n"));
+    i = end;
+  }
+  return { blocks, unterminated: false };
+}
+
+const asList = (value: SpecValue | undefined): SpecValue[] | null => (Array.isArray(value) ? value : null);
+const asMap = (value: SpecValue | undefined): { [key: string]: SpecValue } | null =>
+  value !== undefined && typeof value === "object" && !Array.isArray(value) ? value : null;
+const isBlank = (value: SpecValue | undefined): boolean => value === undefined || (typeof value === "string" && value.trim() === "")
+  || (Array.isArray(value) && value.length === 0) || (typeof value === "object" && !Array.isArray(value) && Object.keys(value).length === 0);
+
+/** Every way one spec's parsed value fails the grammar, as `<field path>: <why>` (the first is what the refusal leads with). */
+function specFieldProblems(spec: SpecValue): string[] {
+  const root = asMap(spec);
+  if (!root) return ["spec: the block is not a map of fields (`files`, `tests`, `run`, `out_of_scope`)"];
+  const problems: string[] = [];
+  const need = (path: string, value: SpecValue | undefined): boolean => {
+    if (value === undefined) { problems.push(`${path}: missing (a required field)`); return false; }
+    if (isBlank(value)) { problems.push(`${path}: empty`); return false; }
+    return true;
+  };
+  const strings = (path: string, value: SpecValue): void => {
+    const list = asList(value);
+    if (!list) { problems.push(`${path}: must be a list`); return; }
+    list.forEach((item, i) => { if (typeof item !== "string" || item.trim() === "") problems.push(`${path}[${i}]: empty or not a string`); });
+  };
+  if (need("files", root.files)) strings("files", root.files!);
+  const tests = root.tests;
+  if (need("tests", tests)) {
+    const map = asMap(tests);
+    if (!map) problems.push("tests: must be a map with `path` and `cases`");
+    else {
+      if (need("tests.path", map.path) && typeof map.path !== "string") problems.push("tests.path: must be one path");
+      if (need("tests.cases", map.cases)) {
+        const cases = asList(map.cases);
+        if (!cases) problems.push("tests.cases: must be a list");
+        else cases.forEach((one, i) => {
+          const fields = asMap(one);
+          if (!fields) { problems.push(`tests.cases[${i}]: must be a map with \`given\`, \`when\` and \`then\``); return; }
+          for (const name of ["given", "when", "then"] as const) {
+            const at = `tests.cases[${i}].${name}`;
+            if (!need(at, fields[name])) continue;
+            if (typeof fields[name] !== "string") { problems.push(`${at}: must be a sentence`); continue; }
+            const said = (fields[name] as string).trim().toLowerCase().replace(/[\s.!]+$/, "");
+            if (name === "then" && EMPTY_THENS.has(said)) problems.push(`${at}: \`${said}\` asserts nothing -- name the value, the output or the refusal that is observed`);
+          }
+        });
+      }
+    }
+  }
+  if (need("run", root.run) && (typeof root.run !== "string" || /\n/.test(root.run.trim()))) problems.push("run: must be ONE command on one line");
+  if (need("out_of_scope", root.out_of_scope) && !(typeof root.out_of_scope === "string" || asList(root.out_of_scope))) problems.push("out_of_scope: must be a sentence or a list");
+  for (const optional of ["errors", "examples"] as const) {
+    if (root[optional] !== undefined && isBlank(root[optional])) problems.push(`${optional}: present but empty (omit it, or fill it)`);
+  }
+  return problems;
+}
+
+/** `rows.specBlock` of a project declaration's TEXT: on only when exactly `true`, so absent, unreadable and mistyped are all OFF. */
+export function specBlockFlagOf(declarationText: string): boolean {
+  try {
+    return JSON.parse(declarationText)?.rows?.specBlock === true;
+  } catch (cause) {
+    void cause; // not JSON is not a declaration that turned the flag on; the declaration reader refuses it where it matters
+    return false;
+  }
+}
+
+function readSpecBlockFlag(): boolean {
+  try {
+    return specBlockFlagOf(readFileSync(`${HOME_CHECKOUT}/.agent-org/project.json`, "utf8"));
+  } catch (cause) {
+    void cause; // no declaration at this checkout is a project that never declared the flag: OFF
+    return false;
+  }
+}
+
+/**
+ * #1015: THE `spec` BLOCK VERDICT, PURE (`null` means proceed). Exported so `row-promote` and the Ready-time spec lint (a11ign#5117) can call it.
+ * `enabled` is `rows.specBlock`; a caller that already holds the flag passes it, and tests do.
+ * @param {string} body @param {boolean} [enabled] @returns {string | null}
+ */
+export function specBlockRefusal(body: string, enabled: boolean = readSpecBlockFlag()): string | null {
+  if (!enabled) return null;
+  const { blocks, unterminated } = specFencesOf(body);
+  if (unterminated) return "REFUSING to file -- a ```spec fence is never closed, so its block cannot be read. Close it with a line of three backticks.";
+  if (blocks.length === 0) return null; // the exemption: a row with no spec fence is not a build row
+  if (blocks.length > 1) {
+    return `REFUSING to file -- the body has ${blocks.length} \`spec\` fences; a build row carries ONE spec block. Merge them into one.`;
+  }
+  let problems: string[];
+  try {
+    problems = specFieldProblems(parseSpecYaml(blocks[0]!));
+  } catch (cause) {
+    if (!(cause instanceof SpecUnreadable)) throw cause;
+    return `REFUSING to file -- the \`spec\` block does not read as YAML: ${cause.message}.`;
+  }
+  if (problems.length === 0) return null;
+  return `REFUSING to file -- the \`spec\` block fails at \`${problems[0]!.split(":")[0]}\`: ${problems.join("; ")}. A build row's spec names \`files\`, \`tests\` (\`path\` and `
+    + "`cases`, each with a `given`, `when` and `then` that asserts something), `run` and `out_of_scope`; a Haiku-tier engineer has less context than you have now.";
+}
+
 /**
  * THE VERDICT, PURE -- `null` means proceed. Reuses #707's `missingTemplateFields` outright rather than
  * re-deriving it; see this file's header for why that matters here specifically.
@@ -764,7 +1003,7 @@ export function unreadableWaitReason(body: string): string | null {
  * @returns {string | null}
  */
 
-export function fileRefusalReason(body: string | null): string | null {
+export function fileRefusalReason(body: string | null, options: { specBlock?: boolean } = {}): string | null {
   if (body === null) {
     return "row-file: no --body or --body-file (or --body-file -) found in these arguments -- this tool "
       + "cannot check a body it cannot read, so it refuses rather than filing one unchecked. Pass one of "
@@ -798,6 +1037,8 @@ export function fileRefusalReason(body: string | null): string | null {
   // #1488: and the section must PARSE as one -- see `acceptanceShapeRefusal`.
   const acceptance = acceptanceShapeRefusal(body);
   if (acceptance) return `row-file: ${acceptance}`;
+  const specBlock = specBlockRefusal(body, options.specBlock); // #1015: behind `rows.specBlock`, a row with no spec fence exempt
+  if (specBlock) return `row-file: ${specBlock}`;
   const wholeSuite = wholeSuiteAcceptanceReason(body, "row-file");
   if (wholeSuite) return wholeSuite;
   // #775: A COMMAND THAT CAN RUN BUT NEVER PASS. `rstest run` on an agent-org test without its config finds no suites; the rule is in

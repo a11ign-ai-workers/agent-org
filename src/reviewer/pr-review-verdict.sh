@@ -276,6 +276,10 @@ supersedes_block() {
     SUPERSEDE_HINT=" If this APPROVE corrects that block, name it on a line AFTER the verdict line: its id ($rid) or \`Review of #$n at ${commit:0:8}\`."
     return 1
   fi
+  # A REFUSED READ IS COULD-NOT-TELL, NEVER "YOURS" (agent-org#796): `gh api user` answers an installation token `HTTP 403`, and under the reviewer
+  # App `host/gh` answers it from the declaration (`<slug>[bot]`) only when `github.identity.reviewer.slug` is set. Without that, the call fails
+  # here, `undetermined` exits $EXIT_UNDETERMINED with nothing posted, and the correction waits for a run that can read its own account.
+  # No second read stands in for it: the standing block's author is a login, and a guess at "this account" is the wrong write the door cannot undo.
   me="$(gh api user --jq .login)" || undetermined "the reviewing account would not read"
   [[ -n "$me" && "$me" == "$standing_user" ]] && return 0
   SUPERSEDE_HINT=" That block was posted by $standing_user, not by this account (${me:-unknown}), so it is not yours to supersede."

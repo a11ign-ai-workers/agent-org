@@ -62,7 +62,7 @@ import { SESSION_PREFIX } from "./project-vocabulary.ts";
 import { launchGate } from "./board-snapshot-scope.ts";
 import { worktreeOwner } from "./worktree-owner.ts";
 import { isLiveSession } from "./arm-pr.ts";
-import { laneAuthorshipRefusal, loadLanes, reviewOnlyPathsIn } from "./lane-ownership.ts";
+import { APP_ROLE_LANE_OWNER, laneAuthorshipRefusal, loadLanes, reviewOnlyPathsIn } from "./lane-ownership.ts";
 import { declarationRefusal } from "./hand-fix-ledger.ts";
 import { referencesInReason } from "./merged-row-open-incident.ts";
 import { openPullsOf } from "./ticket-port/open-pulls.ts";
@@ -1326,13 +1326,20 @@ const ghFailureLine = (error: unknown) =>
  * GraphQL `viewer { login }` answers for the same token (`a11ign-workers[bot]`; measured 2026-10-11 from a worker session,
  * the 403 and the answer side by side). The second read runs only after the first fails, so a user token pays one call.
  *
- * AN IDENTITY NEITHER READ ANSWERS THROWS, naming both failures: `authorshipRefusal` refuses on it, because a login that
+ * #796: A THIRD READ, THE ROLE, WHEN BOTH FAIL AND THE CALLER KNOWS ONE. `role` is `AGENT_ORG_GH_ROLE`, the value `host/gh` routes the
+ * call's token by and records as `app:<role>` in the ledger, so it names the same App `gh pr create` will author as. It answers
+ * `app:<role>`, which `ownsReviewOnlyLane` resolves through `APP_ROLE_LANE_OWNER`: the lane check still decides, where it used to refuse
+ * "could not say who is opening it" for every manager. A role the wrapper does not declare is no identity (the third read is skipped, and
+ * `AGENT_ORG_GH_ROLE` unset is the ordinary case, where the workspace decides and only the two reads above can say).
+ *
+ * AN IDENTITY NONE OF THE READS ANSWERS THROWS, naming the failures: `authorshipRefusal` refuses on it, because a login that
  * cannot be read is never read as "not the owner" (#3254). An empty answer is a failure too, not a login.
  *
  * @param {(args: string[]) => string} gh runs `gh` with the args and returns its stdout, or throws
+ * @param {string | undefined} role the caller's declared App role; absent in a test unless it is the subject, so the environment cannot reach it
  * @returns {string}
  */
-export function loginThrough(gh: (args: string[]) => string): string {
+export function loginThrough(gh: (args: string[]) => string, role?: string): string {
   const reads: [string, string[]][] = [
     ["`gh api user`", ["api", "user", "--jq", ".login"]],
     ["the GraphQL `viewer` read", ["api", "graphql", "-f", "query={ viewer { login } }", "--jq", ".data.viewer.login"]],
@@ -1347,11 +1354,12 @@ export function loginThrough(gh: (args: string[]) => string): string {
       failures.push(`${name}: ${ghFailureLine(error)}`);
     }
   }
+  if (role && Object.hasOwn(APP_ROLE_LANE_OWNER, role)) return `app:${role}`;
   throw new Error(failures.join("; "));
 }
 
 /** The login `gh` will author the pull request as -- `gh pr create` runs under the same account (or App) and `GH_CONFIG_DIR`. */
-const defaultLogin = () => loginThrough((args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
+const defaultLogin = () => loginThrough((args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }), process.env.AGENT_ORG_GH_ROLE);
 
 /**
  * #3254, #1756 RULING ITEM 7: A REVIEW-ONLY LANE'S OWNER DOES NOT OPEN A PULL REQUEST INTO IT -- refused before
