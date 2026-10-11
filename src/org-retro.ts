@@ -40,6 +40,7 @@ import { WORKER_STATE_DIR, lastDeliveredTo, readDeclarations } from "./worker-st
 import { IDLE_CLAIMANT_MS, type Agent, type IdlePr } from "./idle-claimant.ts";
 // THE ROWS LEFT OPEN AFTER THEIR DELIVERABLE MERGED (#4769): the pure detector, and the claim-record marker its live read borrows.
 import { lookupConsumerFile } from "./closes-mismatch-check.ts";
+import { safetyCheckDenialEvents, safetyCheckDenials, safetyCheckDenialSummary, type SafetyCheckDenialReading } from "./safety-check-denial-incident.ts";
 import { CLOSED_ON_MERGE_NOT_OUTCOME, INERT_OPTION_MINUTES, inertOptionEvents, inertOptionIncidents, inertOptionSummary, type InertOptionReading, type MergedOptionPr } from "./inert-option-incident.ts";
 import { MERGED_ROW_OPEN_MINUTES, mergedRowOpenEvents, mergedRowOpenIncidents, mergedRowOpenSummary, type MergedRowOpenIncident, type NamingPr, type OpenRow } from "./merged-row-open-incident.ts";
 import { readJsonObject, STALL_STATE_FILE, type StallState } from "./claim-stall.ts";
@@ -342,6 +343,7 @@ function parsedFailureLedger(text: string | null | undefined): FailureEntry[] | 
  * `idleClaimedHours` absent or `null` is a read nobody made or that was refused (a tracker, a repository's pull requests or the declarations could not be read): `unknown`, never 0 (#4957).
  * `mergedRowOpen` absent or `null` is a read nobody made or that was refused (a tracker or repository could not be listed): `unknown`, never 0 (#4769).
  * `inertOptions` absent or `null` is a read nobody made or that was refused (a repository could not be listed): `unknown`, never 0 (agent-org#839).
+ * `safetyDenials` absent or `null` is a read nobody made or that found no transcript root: `unknown`, never 0; transcripts it could not read are counted apart (a11ign#4957).
  * `dora` absent is a read nobody asked for (no block); `dora: null` is one that was REFUSED, which prints `unknown`.
  * `merged` is the PRIMARY repository's list alone, the count's definition before #3593, and `mergedRepositories` is every declared one: absent is a project read
  * the old way (the total IS `merged`), `null` is a declaration that could not be read.
@@ -350,7 +352,7 @@ function parsedFailureLedger(text: string | null | undefined): FailureEntry[] | 
 export function buildReport(reads: {
         merged: any[] | null; mergedRepositories?: ReturnType<typeof readMerged> | null; openPrs: any[] | null; journal: string | null; ledger: string | null;
         turns: any[] | null; handFixes: ReturnType<typeof readHandFixLedger> | null; readings?: Readings; dora?: ReturnType<typeof readDora> | null;
-        unwaited?: ReturnType<typeof unwaitedStockRows> | null; untiered?: ReturnType<typeof untieredReadyRows> | null; failureLedger?: string | null; blockingRecord?: string | null; idleClaims?: IdleClaimIncident[] | null; idleClaimedHours?: IdleClaimedHours | null; mergedRowOpen?: MergedRowOpenIncident[] | null; inertOptions?: InertOptionReading | null;
+        unwaited?: ReturnType<typeof unwaitedStockRows> | null; untiered?: ReturnType<typeof untieredReadyRows> | null; failureLedger?: string | null; blockingRecord?: string | null; idleClaims?: IdleClaimIncident[] | null; idleClaimedHours?: IdleClaimedHours | null; mergedRowOpen?: MergedRowOpenIncident[] | null; inertOptions?: InertOptionReading | null; safetyDenials?: SafetyCheckDenialReading | null;
     }, now: number) {
   const window = { since: now - WINDOW_MS, until: now };
   const lines = reads.journal === null ? null : journalLines(reads.journal, window);
@@ -375,6 +377,7 @@ export function buildReport(reads: {
     idleClaimedHours: reads.idleClaimedHours ?? null,
     mergedRowOpen: mergedRowOpenSummary(reads.mergedRowOpen),
     inertOptions: inertOptionSummary(reads.inertOptions),
+    safetyDenials: safetyCheckDenialSummary(reads.safetyDenials),
     dora: reads.dora,
   };
   // `readings` absent is a read nobody made, which says `unknown` and never `no baseline`: only a read that found no file may say that.
@@ -691,6 +694,20 @@ function inertOptionLines(summary: ReturnType<typeof inertOptionSummary>): strin
 }
 
 /**
+ * THE REMOVALS CLAUDE CODE'S SAFETY CHECK DENIED (a11ign#4957 sixth class, class `safety-check-denied`): how many denials in how many session-days, and the first three refs, each
+ * `<cwd-dir>/<session id>@<day> <command shape>`. NOT a trended number. `null` is a read nobody could make; transcripts that could not be read are named, never counted as clean.
+ * A removal a person APPROVED leaves no denial, so this is a floor.
+ * @param {ReturnType<typeof safetyCheckDenialSummary>} summary @returns {string[]}
+ */
+function safetyDenialLines(summary: ReturnType<typeof safetyCheckDenialSummary>): string[] {
+  const label = "- Removals Claude Code's safety check denied in session transcripts";
+  if (summary === null) return [`${label}: ${UNKNOWN} (no transcript directory could be listed)`];
+  const first = summary.count === 0 ? "" : `; first: ${summary.first.join(", ")}`;
+  const unread = summary.unreadable === 0 ? "" : `; ${summary.unreadable} transcripts could not be read (unknown, not counted)`;
+  return [`${label}: ${summary.denials} in ${summary.count} session-days${first}${unread}`];
+}
+
+/**
  * The report as the text `ceo` is handed and posts on #928.
  * @param {ReturnType<typeof buildReport>} report @returns {string}
  */
@@ -698,7 +715,7 @@ export function renderReport(report: ReturnType<typeof buildReport>): string {
   const from = new Date(report.window.since).toISOString();
   const to = new Date(report.window.until).toISOString();
   return [`ORG RETROSPECTIVE ${report.date} -- the 24 hours ${from} to ${to}`, "",
-    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
+    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
 }
 
 /**
@@ -905,6 +922,22 @@ function readTurns(since: number): any[] | null {
   return turns;
 }
 
+/**
+ * THE LIVE READ OF THE SAFETY-CHECK DENIALS (a11ign#4957): every Claude transcript touched since `since`, through the pure `safetyCheckDenials`. `null` only when the transcript root
+ * could not be listed at all; a transcript that cannot be read or parsed is counted in `unreadable` and contributes nothing. Codex transcripts are not read: the denial is Claude Code's.
+ * @param {{ since: number, root?: string }} read @returns {SafetyCheckDenialReading | null}
+ */
+export function readSafetyCheckDenials({ since, root = join(process.env.HOME ?? "", ".claude", "projects") }: { since: number; root?: string; }): SafetyCheckDenialReading | null {
+  try { readdirSync(root); } catch { return null; }
+  const reading: SafetyCheckDenialReading = { incidents: [], unreadable: 0 };
+  for (const file of recentTranscripts(root, since)) {
+    let found: ReturnType<typeof safetyCheckDenials> = null;
+    try { found = safetyCheckDenials({ text: readFileSync(file, "utf8"), file, since }); } catch { /* unreadable: counted below, never clean */ }
+    if (found === null) reading.unreadable += 1; else reading.incidents.push(...found);
+  }
+  return reading;
+}
+
 /** @param {string} unit @returns {string | null} */
 function readJournal(unit: string): string | null {
   try {
@@ -1091,11 +1124,12 @@ export function readAll({ now, stateDir, unit = "a11ign-work-tick.service",
   readUnwaited = (at) => unwaitedStockRows({ reader: ghTrackerReader(homeProjectDeclaration().repo), now: at }),
   readUntiered = () => untieredReadyRows({ trackers: homeProjectDeclaration().tracker.map((tracker) => ghReadyReader(tracker)) }),
   readDoraReport = readDeclaredDora, readAgentListing = () => readAgents(), readIdleHours = (at) => attemptDora(() => readIdleClaimedHours({ now: at, stateDir })), readOpenRowIncidents = (at) => attemptDora(() => readMergedRowOpen({ now: at })),
-  readInertOptionReading = (at, recorded) => attemptDora(() => readInertOptions({ now: at, recorded })) }: {
+  readInertOptionReading = (at, recorded) => attemptDora(() => readInertOptions({ now: at, recorded })),
+  readDenials = (at) => readSafetyCheckDenials({ since: at - WINDOW_MS }) }: {
         now: number; stateDir: string; unit?: string; readHandFixes?: (now: number) => ReturnType<typeof readHandFixLedger>;
         readDoraReport?: (now: number) => ReturnType<typeof readDora> | null; readUnwaited?: (now: number) => ReturnType<typeof unwaitedStockRows>; readUntiered?: () => ReturnType<typeof untieredReadyRows>; readMergedRepositories?: (now: number) => ReturnType<typeof readMerged>;
         readAgentListing?: () => Agent[] | null; readIdleHours?: (now: number) => IdleClaimedHours | null; readOpenRowIncidents?: (now: number) => MergedRowOpenIncident[] | null;
-        readInertOptionReading?: (now: number, recorded: string[]) => InertOptionReading | null;
+        readInertOptionReading?: (now: number, recorded: string[]) => InertOptionReading | null; readDenials?: (now: number) => SafetyCheckDenialReading | null;
     }) {
   const since = now - WINDOW_MS;
   const mergedRepositories = attemptDora(() => readMergedRepositories(now));
@@ -1109,6 +1143,7 @@ export function readAll({ now, stateDir, unit = "a11ign-work-tick.service",
     idleClaimedHours: readIdleHours(now),
     mergedRowOpen: readOpenRowIncidents(now),
     inertOptions: readInertOptionReading(now, recordedRefs(failureLedger, CLOSED_ON_MERGE_NOT_OUTCOME)),
+    safetyDenials: readDenials(now),
     journal: readJournal(unit),
     ledger: readText(`${stateDir}/wake-ledger`),
     failureLedger,
@@ -1211,6 +1246,7 @@ function dailyRetrospective({ now, stateDir, log, read, readLedger, record }: {
     recordFailures({ logPath: join(stateDir, FAILURE_LEDGER_FILE), events: incidentEvents(inputs.idleClaims ?? []), now, report: (line) => log(`${line}\n`) });
     recordFailures({ logPath: join(stateDir, FAILURE_LEDGER_FILE), events: mergedRowOpenEvents(inputs.mergedRowOpen ?? []), now, report: (line) => log(`${line}\n`) });
     recordFailures({ logPath: join(stateDir, FAILURE_LEDGER_FILE), events: inertOptionEvents(inputs.inertOptions?.incidents ?? []), now, report: (line) => log(`${line}\n`) });
+    recordFailures({ logPath: join(stateDir, FAILURE_LEDGER_FILE), events: safetyCheckDenialEvents(inputs.safetyDenials?.incidents ?? []), now, report: (line) => log(`${line}\n`) });
     keepReading(record, { stateDir, date, numbers: report.numbers, mergedRepositories: report.mergedRepositories?.map((r) => r.repo) }, log);
     return [retrospectiveOrder(date, text)];
   } catch (err: any) {
