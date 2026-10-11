@@ -147,6 +147,7 @@
 // `session:<name>`, excluding the row being claimed right now), and ask GitHub which PR would close each.
 import { REPO } from "../project-identity.ts";
 import { gh, lookup } from "../merge-guard/lookups.ts";
+import { readClaimedRows } from "../ticket-port/rows-by-label.ts"; // #5039
 import { declaredRegionFiles, regionCovers } from "../region-paths.ts";
 // #2126: the reviewer NAME is parsed by the tree's own verdict parser, never a second reading of the
 // `, by <name>:` convention -- #1245/#1259 exist because six sessions each retyped one and two disagreed.
@@ -639,10 +640,12 @@ export function lookupOpenPrReviewHealth({ run = gh, log = (line) => process.std
  */
 export function lookupOtherHeldIssues(mySession: string, excludeIssueNumber: number, { run = gh, repo = REPO }: { run?: (args: string[]) => string; repo?: string; } = {}): number[] | null {
   return lookup(() => {
-    const raw = run(["issue", "list", "--repo", repo, "--state", "open",
-      "--label", CLAIM_LABEL, "--label", `${SESSION_PREFIX}${mySession}`, "--json", "number"]);
-    const parsed: { number: number; }[] = JSON.parse(raw);
-    return parsed.map((issue) => issue.number).filter((n) => n !== excludeIssueNumber);
+    // #5039: WITHOUT SEARCH -- the claimed rows are the one list the claim already reads (the identical argv, so `host/gh` answers it from disk),
+    // and the session's own are told apart by their `session:` label here rather than by a second search.
+    const mine = `${SESSION_PREFIX}${mySession}`;
+    return readClaimedRows({ run, repo })
+      .filter((row) => row.labels.some((label) => label.name === mine))
+      .map((row) => row.number).filter((n) => n !== excludeIssueNumber);
   });
 }
 

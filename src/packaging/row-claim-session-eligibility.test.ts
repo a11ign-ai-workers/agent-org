@@ -10,19 +10,40 @@
  * session's ability to claim ANYTHING when the network is down, the identical reasoning
  * `merge-guard.ts`'s `racesAnArmedMerge` states for the same choice made the same way.
  */
-import { test } from "node:test";
+import { test, beforeEach } from "node:test";
 import assert from "node:assert/strict";
 import { sessionEligibilityReason, claimRow, CLAIM_LABEL } from "../row-claim.ts";
+import { forgetRefusedReads } from "../ticket-port/rows-by-label.ts";
+import { connectionOf, readsRowsByLabel } from "./rows-by-label-fixtures.ts";
+
+// #5039: a read refused for a rate limit is remembered for the life of the process, and the test below that throws `gh: rate limited` from
+// EVERY call would otherwise refuse the label read of every test after it.
+beforeEach(() => { forgetRefusedReads(); });
 
 /**
  * ONE `run` MOCK ROUTING BY SUBCOMMAND SHAPE, since `sessionEligibilityReason` makes several distinct
  * `gh` calls in sequence (issue list, GraphQL, issue view, pr list) and each needs its own canned answer.
  */
 interface Routes {
+  /** The session whose rows `issueList` names: the claim reads ALL `in-progress` rows and tells a session's own apart by its `session:` label. */
+  session?: string;
   issueList?: string; graphql?: string; issueViewBody?: string; prList?: string;
   heldRowBody?: string; subIssues?: string; blockedBy?: string; prReviews?: string;
   prCommits?: string;
 }
+
+/**
+ * #5039: THE CLAIMED ROWS, as the label read answers them. The rows are written as `gh issue list --json` gave them (`[{ number }]`), and each
+ * carries `in-progress` and `session:<session>` so that the session's own are the ones the client-side filter keeps.
+ */
+function claimedRowsAnswer(rowsJson: string | undefined, session: string): string {
+  const rows: { number: number; labels?: ({ name: string; } | string)[]; }[] = JSON.parse(rowsJson ?? "[]");
+  return connectionOf(rows.map((row) => ({ labels: [CLAIM_LABEL, `session:${session}`], ...row })));
+}
+
+/** The rows `session` holds, as the label read answers them. */
+const heldRows = (session: string, ...numbers: number[]) => connectionOf(
+  numbers.map((number) => ({ number, labels: [CLAIM_LABEL, `session:${session}`] })));
 
 /** The CLAIMED row's own body (B4 reads its Region); any other issue is a row this session HOLDS (#989). */
 const CLAIMED_ROWS = ["455", "705", "2760"];
@@ -68,7 +89,8 @@ function routedRun(routes: Routes) {
   return (_cmd: string, args: string[]): string => {
     const held = heldRowRoute(routes, args);
     if (held !== null) return held;
-    if (args[0] === "issue" && args[1] === "list") return routes.issueList ?? "[]";
+    if (readsRowsByLabel(args) !== null) return claimedRowsAnswer(routes.issueList, routes.session ?? "worker-judge");
+    if (args[0] === "issue" && args[1] === "list") return "[]";
     if (args[0] === "api" && args[1] === "graphql") {
       return routes.graphql ?? JSON.stringify({ data: { repository: { issue: {
         closedByPullRequestsReferences: { nodes: [] } } } } });
@@ -202,6 +224,7 @@ test("MUTATION TARGET: --blocked-by=#N must not silently release a blockedBy-edg
       }
       return JSON.stringify({ number: 1852, title: "A row", labels: [] });
     }
+    if (readsRowsByLabel(args) !== null) return connectionOf([]);
     return "[]";
   };
   const result = claimRow(1852, "nobody-holds-this-row",
@@ -252,7 +275,7 @@ test("claimRow refuses a genuinely new claim when the session holds a row IN BUI
         // `lookupIssueBody` reads null and #707's template check is skipped, as it was before #989.
     }
     if (writesLabels(args)) { editCalled = true; return ""; }
-    if (args[0] === "issue" && args[1] === "list") return JSON.stringify([{ number: 472 }]);
+    if (readsRowsByLabel(args) !== null) return heldRows("worker-judge", 472);
     if (args[0] === "api" && /\/sub_issues$/.test(args[1] ?? "")) return "[]";
     if (args[0] === "api" && args[1] === "graphql") {
       // #989: no PR closes #472, so it is in build -- the claim is refused by the ROW, not by a PR.
@@ -275,6 +298,7 @@ test("claimRow proceeds normally when eligibility is silent -- unchanged from be
       return JSON.stringify({ number: 461, title: "A row", labels: [] });
     }
     if (writesLabels(args)) { editCalled = true; return ""; }
+    if (readsRowsByLabel(args) !== null) return connectionOf([]);
     return "[]";
   };
   const result = claimRow(461, "worker-judge", { run, moveStatus: () => ({ moved: true }) });
@@ -285,7 +309,7 @@ test("claimRow proceeds normally when eligibility is silent -- unchanged from be
 test("RESUMING a row this session already holds skips eligibility entirely -- not a new front", () => {
   let listAsked = false;
   const run = (cmd: string, args: string[]) => {
-    if (args[0] === "issue" && args[1] === "list") { listAsked = true; }
+    if (readsRowsByLabel(args) !== null || (args[0] === "issue" && args[1] === "list")) { listAsked = true; }
     if (args[0] === "issue" && args[1] === "view") {
       return JSON.stringify({ number: 461, title: "A row",
         labels: [{ name: CLAIM_LABEL }, { name: "session:worker-judge" }] });
@@ -307,6 +331,7 @@ test("RESUMING a row this session already holds still refuses on the row's own o
   let listAsked = false;
   let editCalled = false;
   const run = (cmd: string, args: string[]) => {
+    if (readsRowsByLabel(args) !== null) { listAsked = true; return connectionOf([]); }
     if (args[0] === "issue" && args[1] === "list") { listAsked = true; return "[]"; }
     if (writesLabels(args)) { editCalled = true; return ""; }
     if (args[0] === "issue" && args[1] === "view") {
@@ -355,7 +380,7 @@ function blockedByRun(routes: { rowLabels?: string, blockerState?: string, comme
     const shape = args.slice(0, 2).join(" ");
     if (writesLabels(args)) { routes.onEdit?.(); return ""; }
     if (shape === "issue comment") { routes.onComment?.(args[args.length - 1]); return ""; }
-    if (shape === "issue list") return JSON.stringify([{ number: 472 }]);
+    if (readsRowsByLabel(args) !== null) return heldRows("worker-audit", 472);
     if (shape === "api graphql") {
       return JSON.stringify({ data: { repository: { issue: {
         closedByPullRequestsReferences: { nodes: [{ number: 900, state: "OPEN", headRefOid: "abc" }] } } } } });
@@ -392,7 +417,7 @@ test("#989: --blocked-by cannot excuse a row IN BUILD, and says why rather than 
   // was never given produce the same output, which is the shape this repo has the longest record of.
   const run = (cmd: string, args: string[]): string => {
     const shape = args.slice(0, 2).join(" ");
-    if (shape === "issue list") return JSON.stringify([{ number: 472 }]);
+    if (readsRowsByLabel(args) !== null) return heldRows("worker-audit", 472);
     if (shape === "api graphql") {
       return JSON.stringify({ data: { repository: { issue: {
         closedByPullRequestsReferences: { nodes: [] } } } } });
@@ -432,6 +457,7 @@ test("MUTATION TARGET: --blocked-by given while the refusal is B4 (file overlap)
     if (args[0] === "pr" && args[1] === "list") {
       return JSON.stringify([{ number: 406, changedFiles: 1, files: [{ path: "packages/agent-org/src/merge-guard.ts" }] }]);
     }
+    if (readsRowsByLabel(args) !== null) return connectionOf([]);
     return "[]";
   };
   const result = claimRow(700, "worker-judge", { run, moveStatus: () => ({ moved: true }), blockedBy: "#731" });
@@ -468,6 +494,7 @@ const openPrReviews = (decision: string | null, reviews: unknown[] = []) => JSON
 
 test("#2126 (1): the session's own open PR reading CHANGES_REQUESTED refuses a fresh claim", () => {
   const run = routedRun({
+    session: "worker-tooling",
     issueList: JSON.stringify([{ number: 472 }]),
     graphql: heldWithOpenPr,
     prReviews: openPrReviews("CHANGES_REQUESTED"),
@@ -481,6 +508,7 @@ test("#2126 (1): the session's own open PR reading CHANGES_REQUESTED refuses a f
 test("#2126 (2): the same session with that PR reading APPROVED is ALLOWED -- #989 preserved", () => {
   // THE POSITIVE CONTROL FOR THE CASE ABOVE, and the assertion that this row did not quietly restore #476.
   const run = routedRun({
+    session: "worker-tooling",
     issueList: JSON.stringify([{ number: 472 }]),
     graphql: heldWithOpenPr,
     prReviews: openPrReviews("APPROVED"),
@@ -490,6 +518,7 @@ test("#2126 (2): the same session with that PR reading APPROVED is ALLOWED -- #9
 
 test("#2126 (2): REVIEW_REQUIRED is a pull request waiting on its REVIEWER, and is ALLOWED", () => {
   const run = routedRun({
+    session: "worker-tooling",
     issueList: JSON.stringify([{ number: 472 }]),
     graphql: heldWithOpenPr,
     prReviews: openPrReviews("REVIEW_REQUIRED"),
@@ -504,6 +533,7 @@ test("#2126 (3): four bot merge commits and no author commit do NOT clear the re
   // find no verdict at the current head at all; `reviewDecision` still reads CHANGES_REQUESTED because
   // `dismiss_stale_reviews` is false.
   const run = routedRun({
+    session: "worker-tooling",
     issueList: JSON.stringify([{ number: 472 }]),
     graphql: heldWithOpenPr,
     prReviews: openPrReviews("CHANGES_REQUESTED", [verdict("CHANGES_REQUESTED", VERDICT_HEAD, "reviewer")]),
@@ -518,6 +548,7 @@ test("#2126 (3): four bot merge commits and no author commit do NOT clear the re
 test("#2126 (4): contradictory verdicts at the SAME head are not refused -- they escalate to ceo", () => {
   const calls: string[][] = [];
   const base = routedRun({
+    session: "worker-tooling",
     issueList: JSON.stringify([{ number: 472 }]),
     graphql: heldWithOpenPr,
     prReviews: openPrReviews("CHANGES_REQUESTED", [
@@ -545,6 +576,7 @@ test("#2126 (4): the escalation is the DISPUTE's doing -- remove one side and th
   // fixture goes quiet.
   const calls: string[][] = [];
   const base = routedRun({
+    session: "worker-tooling",
     issueList: JSON.stringify([{ number: 472 }]),
     graphql: heldWithOpenPr,
     prReviews: openPrReviews("CHANGES_REQUESTED", [verdict("CHANGES_REQUESTED", REFUSED_HEAD, "reviewer")]),
@@ -560,6 +592,7 @@ test("#2126: the review-health read is ONE `pr list`, whatever the session holds
   // measurement that justified it. Three held rows, three open pull requests, one review-health call.
   let reviewReads = 0;
   const base = routedRun({
+    session: "worker-tooling",
     issueList: JSON.stringify([{ number: 472 }, { number: 473 }, { number: 474 }]),
     graphql: heldWithOpenPr,
     prReviews: openPrReviews("APPROVED"),
@@ -578,7 +611,7 @@ test("#2126: a row IN BUILD is still reported without ANY `pr list` round trip",
   // too, and a row in build has no open pull request for it to ask about. If this goes red the clause has
   // started spending a round trip on rows it can never say anything about.
   let prListAsked = false;
-  const base = routedRun({ issueList: JSON.stringify([{ number: 472 }]) });
+  const base = routedRun({ session: "worker-tooling", issueList: JSON.stringify([{ number: 472 }]) });
   const run = (cmd: string, args: string[]) => {
     if (args[0] === "pr" && args[1] === "list") prListAsked = true;
     return base(cmd, args);
@@ -588,7 +621,7 @@ test("#2126: a row IN BUILD is still reported without ANY `pr list` round trip",
 });
 
 test("#2126: a FAILED review-health read refuses nothing, the way every lookup here fails OPEN", () => {
-  const base = routedRun({ issueList: JSON.stringify([{ number: 472 }]), graphql: heldWithOpenPr });
+  const base = routedRun({ session: "worker-tooling", issueList: JSON.stringify([{ number: 472 }]), graphql: heldWithOpenPr });
   const run = (cmd: string, args: string[]) => {
     if (args[0] === "pr" && args[1] === "list"
       && /reviewDecision/.test(args[args.indexOf("--json") + 1] ?? "")) throw new Error("gh: 502");

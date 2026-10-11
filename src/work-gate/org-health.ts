@@ -443,7 +443,7 @@ const lastMerge = (read: number | { at: number; repo: string; } | null): { lastM
  * reading here (red, overdue, idle) is about it. Absent, a keyed pull request's hold is never read, so no `Waiting-for` of it is ever lifted or ordered.
  * #4295: `readMilestoneMoves` is the seam for THE EXACT START OF THE MILESTONE CLOCK, called only when the proxy trips it (`exactMilestoneClock`). IT IS THE REAL READ EXACTLY WHEN THE MERGE READ IS: a caller that
  * passes its own `lastMergedAt` reaches no remote (every test does), so it gets no exact read unless it passes one, and the gate's call site passes neither.
- * @param [io] `readBoardTruth` (#4045) is `undefined` WHEN THE CALLER DOES NOT ASK, which is every test; the gate's call site passes `boardTruthNow`, which reads the closed rows, the merged PRs and herdr (a fixed three calls a tick) and posts the day's table, so no test reaches a remote; `readReleaseRuns` (#4001) is `undefined` WHEN THE CALLER DOES NOT ASK, which is every test; the gate's call site passes the real one (ONE `gh api` call a tick, three while the newest release is a failure), so no test reaches a remote; `teamAccess` (#3634) is the team-level read, ONE `gh api` call per declared team each tick (the 2-minute tick is 30 calls an hour of a 5,000-an-hour core pool, 0.6% per team, the same price as `lastMergedAt`), and NO CALL AT ALL for a project that declares no `teamAccess`; a test that must reach no remote passes `() => undefined` `readToolAgreement` (#3533) is `undefined` WHEN THE CALLER DOES NOT ASK, which is every test
+ * @param [io] `readBoardTruth` (#4045) is `undefined` WHEN THE CALLER DOES NOT ASK, which is every test; the gate's call site passes `boardTruthNow`, which reads the closed rows, the merged PRs and herdr (a fixed three calls a tick) and posts the day's table, so no test reaches a remote; `readFleetBuildIncident` (#4405) is `undefined` WHEN THE CALLER DOES NOT ASK, which is every test; the gate's call site passes the real one (ONE `gh api` call a tick, the open `incident` issues), so no test reaches a remote; `readReleaseRuns` (#4001) is `undefined` WHEN THE CALLER DOES NOT ASK, which is every test; the gate's call site passes the real one (ONE `gh api` call a tick, three while the newest release is a failure), so no test reaches a remote; `teamAccess` (#3634) is the team-level read, ONE `gh api` call per declared team each tick (the 2-minute tick is 30 calls an hour of a 5,000-an-hour core pool, 0.6% per team, the same price as `lastMergedAt`), and NO CALL AT ALL for a project that declares no `teamAccess`; a test that must reach no remote passes `() => undefined` `readToolAgreement` (#3533) is `undefined` WHEN THE CALLER DOES NOT ASK, which is every test
  *           and the gate's call site passes the real one, so no test reaches a remote; `readWaits` (#2996) is the test's seam for the
  *           referenced items, so nothing here needs a token; `release` (#3364) is its seam for the hold release, so nothing here runs `pr-hold.ts`
  */
@@ -454,13 +454,14 @@ export function orgHealthNow({ prsRead, keyedPrsRead = [], readyRead, openRowsRe
       release?: typeof releaseHoldViaModule; readHolderAgents?: typeof readAgents; readToolAgreement?: typeof import("../org-health.ts").readToolAgreement; readNodeStrips?: typeof import("../node-strips-types.ts").readNodeStrips;
       readMilestoneMoves?: typeof readMilestoneMoves;
       readReleaseRuns?: () => import("../org-health.ts").ReleaseRuns | null | undefined;
+      readFleetBuildIncident?: () => import("../org-health.ts").FleetBuildIncident[] | null | undefined;
       readReleaseBehind?: () => import("../release-behind-main.ts").RepoFact[] | null | undefined;
       readClassRepeat?: () => import("../class-repeat.ts").ClassRepeatFact | null | undefined;
       teamAccess?: () => import("../org-health.ts").TeamAccessFact | undefined;
       readBoardTruth?: (input: BoardTruthInput) => ReturnType<typeof boardTruthAudit> | null | undefined;
   } = {}) {
   const { now = Date.now(), lastMergedAt = () => readLatestMerge(defaultRun, mergeRepositories()), readCaptures = (at) => readFleetCaptures({ now: at }), log, readCopies,
-    readLabJobs = dispatchedLabJobsOrSay, readWaits = waitTickFacts, release, readHolderAgents = readAgents, readToolAgreement = () => undefined, readNodeStrips = () => undefined, readReleaseRuns = () => undefined, readReleaseBehind = () => undefined, readClassRepeat = () => undefined,
+    readLabJobs = dispatchedLabJobsOrSay, readWaits = waitTickFacts, release, readHolderAgents = readAgents, readToolAgreement = () => undefined, readNodeStrips = () => undefined, readReleaseRuns = () => undefined, readFleetBuildIncident = () => undefined, readReleaseBehind = () => undefined, readClassRepeat = () => undefined,
     teamAccess = () => readTeamAccess(defaultRun), readBoardTruth = () => undefined,
     readMilestoneMoves: readMoves = io.lastMergedAt === undefined ? readMilestoneMoves : undefined } = io; // #4295: the real exact-start read exactly when the merge read is real
   const { prs, required, primaryDrift, claimRefusals, claimFacts } = decideArgs;
@@ -491,6 +492,7 @@ export function orgHealthNow({ prsRead, keyedPrsRead = [], readyRead, openRowsRe
     ...toolAgreementFact(readToolAgreement()),
     ...nodeStripsFact(readNodeStrips()), // #4390
     ...releaseRunsFact(readReleaseRuns()), // #4001
+    ...fleetBuildIncidentFact(readFleetBuildIncident()), // #4405
     ...releaseBehindFact(readReleaseBehind()), // #4128
     ...classRepeatFact(readClassRepeat()), // #4126
     ...teamAccessFact(teamAccess()),
@@ -845,6 +847,9 @@ const nodeStripsFact = (read: import("../node-strips-types.ts").NodeStripFact | 
 
 /** #4001: THE FACT, OR NOTHING: `undefined` is a caller that does not ask, silent, and `null` a refused read, which the signal says is unknown. */
 const releaseRunsFact = (read: import("../org-health.ts").ReleaseRuns | null | undefined) => (read === undefined ? {} : { releaseRuns: read });
+
+/** #4405: THE FACT, OR NOTHING: `undefined` is a caller that does not ask, silent, and `null` a refused list of the open incidents, which the signal says is unknown, never clear. */
+const fleetBuildIncidentFact = (read: import("../org-health.ts").FleetBuildIncident[] | null | undefined) => (read === undefined ? {} : { fleetBuildIncident: read });
 
 /** #4128: THE FACT, OR NOTHING: `undefined` is a caller that does not ask, silent, and `null` a refused listing of the repositories, which the signal says is unknown. */
 const releaseBehindFact = (read: import("../release-behind-main.ts").RepoFact[] | null | undefined) => (read === undefined ? {} : { releaseBehind: read });

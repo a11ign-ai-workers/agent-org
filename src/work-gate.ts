@@ -78,7 +78,7 @@ import { stateEntryPath } from "./host-config.ts"; // #2799
 // #2848: THE REPEATING-LINE QUESTION, in its own leaf for the reason `disk-headroom.ts` is one: it reads the journal, not GitHub.
 import { REPEAT_TICKS, normaliseLine, repeatingLinesTick, type RepeatingGroup } from "./repeating-lines.ts";
 // #2936: THE ORG-HEALTH QUESTION, in its own leaf for the same reason: relative imports only, so the gate keeps the property its own header states.
-import { redSinceOf, readToolAgreement, readReleaseRuns } from "./org-health.ts";
+import { redSinceOf, readToolAgreement, readReleaseRuns, readFleetBuildIncidents } from "./org-health.ts";
 import { ghQueueTick } from "./gh-ledger.ts"; // #4898
 import { readNodeStrips } from "./node-strips-types.ts";
 import { liveClassRepeatIo, readClassRepeat } from "./class-repeat.ts";
@@ -673,7 +673,9 @@ export const GH_READS = Object.freeze({
     "api repos/{repo}/actions/workflows/release.yml/runs (readReleaseRuns -- org-health's release-run-failed)",
     // #4126: ONE REST CALL on the core pool -- the 100 newest-updated closed rows, projected to number, state, close time and labels (readClassRepeat -- org-health's class-repeat). It makes ONE MORE
     // PER CLASS whose newest instance closed in the last 90 minutes (that class's closed rows, all time), which are the repeat's detail and are not counted here.
-    "api repos/{repo}/issues?state=closed (readClassRepeat -- org-health's class-repeat)"],
+    "api repos/{repo}/issues?state=closed (readClassRepeat -- org-health's class-repeat)",
+    // #4405: ONE REST CALL on the core pool -- the open issues labelled `incident` (readFleetBuildIncidents -- org-health's fleet-build-mixed-over-4h), kept when their body carries the fleet-build line.
+    "api repos/{repo}/issues?state=open&labels=incident (readFleetBuildIncidents -- org-health's fleet-build-mixed-over-4h)"],
   // #4128: NOT A PER-TICK READ, so it is in none of these lists. `releaseBehindNow` reads every dora repository at most ONCE AN HOUR (`cachedReleaseBehind`, kept in the state directory) and
   // judges the kept facts against the clock on every tick. Per hour, per repository: the latest release (the npm registry, or ONE `releases` call), one `commits?path=` call per releasable
   // path, and TWO calls (`commits/{sha}`, `commits/{sha}/pulls`) per unreleased commit up to 20 -- measured in the pull request that added it.
@@ -8586,7 +8588,7 @@ function main() {
   const keyedTrackers = otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [[scope.tracker.repo, read.openRows ?? []] as const])); // agent-org#695: each keyed tracker's rows by repository, which its shelvings' bare numbers are among
   const shelvedElsewhere = others.flatMap((tick, at) => tick.blocked.map((row) => ({ ...row, repo: otherScopes[at].scope.tracker?.repo })));
   orders.push(...blockingImpactOrders({ shelved: [...shelvedHere, ...shelvedElsewhere], openRows: allOpen, trackers: Object.fromEntries(keyedTrackers), prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], stateDir: REVIEWER_STATE_DIR }));
-  orders.push(...reviewerAuthTick({ orders }), ...repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) }), ...orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => readReleaseRuns(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) }),
+  orders.push(...reviewerAuthTick({ orders }), ...repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) }), ...orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => readReleaseRuns(defaultRun, repoNow()), readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) }),
     ...rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() }), ...chairmanAsksNow(openRowsRead),
     ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
   // FIRST OF ALL, AND ON PURPOSE (#2163): `wake` delivers in this order and records each delivery with a write, so

@@ -168,7 +168,7 @@ test("#2401 (1b): the reviewer's own account is `/home/agent/reviewer/gh`, never
   + "override wins key by key", () => {
   assert.equal(REVIEWER_GH_CONFIG_DIR, "/home/agent/reviewer/gh");
   assert.notEqual(REVIEWER_GH_CONFIG_DIR, spawnEnvironment().GH_CONFIG_DIR);
-  assert.deepEqual(reviewerEnvironment("reviewer-7", {}, "/r/reviewer-7"), { GH_CONFIG_DIR: "/home/agent/reviewer/gh",
+  assert.deepEqual(reviewerEnvironment("reviewer-7", {}, "/r/reviewer-7"), { GH_CONFIG_DIR: "/home/agent/reviewer/gh", AGENT_ORG_GH_ROLE: "reviewer",
     A11Y_REVIEWER_SESSION: "reviewer-7", npm_config_cache: "/r/reviewer-7/node_modules/.cache/npm" });
   assert.equal(reviewerEnvironment("reviewer-7").npm_config_cache, `${reviewCheckoutPath("reviewer-7")}/node_modules/.cache/npm`,
     "the default tree is the instance's own checkout");
