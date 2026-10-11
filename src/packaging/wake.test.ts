@@ -46,6 +46,7 @@ import { engineerEligibility, b2Verdict, ledgerKeyOf, ledgerLine } from "../wake
 import { AUTOCOMPACT_WINDOW_TOKENS, PER_ROW_DISALLOWED_TOOLS, WORKER_SETTINGS_PATH }
   from "../worker-profile.ts";
 import { sparePathsFrom } from "../wake.ts";
+import { hostConfigPath } from "../host-config.ts"; // #850: the pane carries the host the gate resolved
 import { handoffBacklog, backlogReport, handoffBatches, fitBatch, waitedFor, staleReport,
   PROMPT_ARG_MAX, HANDOFF_BATCH_BYTES, BATCH_WRAPPER_BYTES, targetLabelBytes }
   from "../wake.ts";
@@ -341,7 +342,7 @@ test("#1952 ACCEPTANCE: deliver STARTS a process when no engineer exists, and th
   const got = deliver([ROW_ORDER], NOBODY, ROSTER, { run: h.run, record: (k) => recorded.push(k) });
 
   assert.deepEqual(h.said("workspace create"),
-    ["--session org workspace create --label worker-capture --no-focus --env GH_CONFIG_DIR=/home/agent/workers/gh"],
+    [`--session org workspace create --label worker-capture --no-focus --env GH_CONFIG_DIR=/home/agent/workers/gh --env AGENT_ORG_HOST=${hostConfigPath()}`],
     "the pane comes from a workspace created for the role, and `--no-focus` keeps the tick off the display");
   assert.deepEqual(h.said("agent start"),
     ["--session org agent start worker-capture --kind claude --pane wB:p1 -- --model sonnet --effort high "
@@ -498,7 +499,7 @@ test("#2279 ACCEPTANCE: with all three standing engineers WORKING, `deliver` STA
   const got = deliver([ROW_ORDER], standingBusy, REAL_ROSTER, { run: h.run });
 
   assert.deepEqual(h.said("workspace create"),
-    ["--session org workspace create --label worker-2131 --no-focus --env GH_CONFIG_DIR=/home/agent/workers/gh"]);
+    [`--session org workspace create --label worker-2131 --no-focus --env GH_CONFIG_DIR=/home/agent/workers/gh --env AGENT_ORG_HOST=${hostConfigPath()}`]);
   assert.equal(h.said("agent start").length, 1);
   assert.ok(h.said("agent start")[0].startsWith("--session org agent start worker-2131 --kind claude "));
   assert.deepEqual(got.sent, ["worker-2131 <- engineers/ready-row-unclaimed/2131 (STARTED sonnet/high)"]);

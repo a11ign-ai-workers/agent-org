@@ -19,7 +19,8 @@ import { decide, LAUNCH_PLACEHOLDER, CAUSES, JUDGMENT_CAUSES, START_CAUSES, UNCL
   claimRefusalStreaksNow, nextRefusalStreaks, unclaimableRowOrders } from "./work-gate.ts";
 import { profileFor } from "./worker-profile.ts";
 import { worktreeTargetReason } from "./row-claim.ts";
-import { addressed, engineerRoles, launchAdvice, HOST_REPOS, PRIMARY_CHECKOUT } from "./wake.ts";
+import { addressed, engineerRoles, launchAdvice, HOST_REPOS, PRIMARY_CHECKOUT, ENGINEER_BRIEF } from "./wake.ts";
+import { HOME_CHECKOUT } from "./project-config.ts";
 import { SPARE_FAMILIES } from "./arm-pr.ts";
 
 const PATH_RE = /\/home\/agent\/repos\/[^\s`),;]+/g;
@@ -33,7 +34,10 @@ const gateOrder = () => {
   return order;
 };
 
-const paths = (text: string) => text.match(PATH_RE) ?? [];
+// THE BRIEF'S OWN ABSOLUTE PATH IS NOT A WORKTREE (#850): the engineer is sent to read it by its path in the home project, so it is the one
+// host path in the text that names no directory to work in, and it is left out of what is counted here.
+const BRIEF_PATH = join(HOME_CHECKOUT, ENGINEER_BRIEF);
+const paths = (text: string) => (text.match(PATH_RE) ?? []).filter((path) => path !== BRIEF_PATH);
 
 test("#2405 the gate names NO directory: it leaves the placeholder, because only wake knows who took the order", () => {
   const { prompt } = gateOrder();

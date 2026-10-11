@@ -58,7 +58,7 @@ import { ORDER_STALL_MINUTES, SIGNALS, orderStallReading, panePromptReading, org
 // no new metric, only this one read at delivery time.
 import { claudeTurns, sessionOf, transcriptFiles } from "./token-audit.ts";
 import { HOME_CHECKOUT, homeProjectDeclaration } from "./project-config.ts";
-import { stateEntryPath, hostConfigPath, readHostConfig } from "./host-config.ts"; // #2799; the other two for #2969's `clones`, read by host-config since #2991
+import { stateEntryPath, hostConfigPath, readHostConfig, HOST_CONFIG_ENV } from "./host-config.ts"; // #2799; the other two for #2969's `clones`, read by host-config since #2991
 import { REPO } from "./project-identity.ts";
 import { roleBriefPath } from "./project-roles.ts";
 import { engineerBriefSentence, briefRoleSentence } from "./spawn-role-brief.ts"; // #828: the sentence that sends a spawned seat to a role brief
@@ -936,6 +936,26 @@ function whyNoSpawn(order: { causeKey: string; startFresh?: boolean; }, { memory
   return memory?.() ?? claimable?.(order) ?? null;
 }
 
+/** Is `path` a regular file (a symlink to one counts); a path that cannot be read is not. */
+function isRegularFile(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isFile() === true;
+}
+
+/**
+ * Why a pane started now could not declare, or `null` (#850, `ceo`'s addition 1): its environment names a host declaration that is
+ * not a file. A PANE THAT CANNOT DECLARE IS WORSE THAN NONE: it sits idle on a refusal nobody reads, so the spawn is refused before
+ * the claim, with the value named. An environment that names none is not this refusal: the gate's own never lacks one
+ * ({@link spawnEnvironment} resolves {@link hostConfigPath}, which falls back to the declaration in the checkout the tool runs from),
+ * and a caller that built its own has decided something, as an `override` does.
+ * @param [isFile] a parameter so a test can hand it a fixture; a DIRECTORY is not a file (`existsSync` says it is, and `readHostConfig` cannot read it)
+ */
+export function whyNoHost(env: Record<string, string>, isFile: (path: string) => boolean = isRegularFile): string | null {
+  const host = env[HOST_CONFIG_ENV];
+  if (host === undefined) return null;
+  if (host === "" || !isFile(host)) return `${HOST_CONFIG_ENV} names ${JSON.stringify(host)}, which is not a file, so the pane could not run \`worker:state\` or \`pr:open\``;
+  return null;
+}
+
 /**
  * Start a fresh process for an engineer role that has none, and return the address it answers to.
  *
@@ -964,8 +984,8 @@ function whyNoSpawn(order: { causeKey: string; startFresh?: boolean; }, { memory
  *   in herdr's default directory and nothing is claimed (the pre-#2405 spawn, kept for a caller that has no claim)
  */
 function spawnWorker(order: { session: string; causeKey: string; cause?: string; title?: string; replaces?: { branch: string; }[]; as?: string; startFresh?: boolean; }, agents: { label: string; status: string; }[], roster: string[], { run = defaultRun, env = spawnEnvironment(), drained = [],
-  claimable, claimer, memory, claimRefused }: {
-        run?: (args: string[]) => string; env?: Record<string, string>; drained?: readonly string[];
+  claimable, claimer, memory, claimRefused, isFile = isRegularFile }: {
+        run?: (args: string[]) => string; env?: Record<string, string>; drained?: readonly string[]; isFile?: (path: string) => boolean;
         claimable?: (order: { causeKey: string; startFresh?: boolean; }) => string | null; claimer?: SpawnClaimer;
         memory?: () => string | null; claimRefused?: ClaimRefused;
     } = {}): {
@@ -979,6 +999,8 @@ function spawnWorker(order: { session: string; causeKey: string; cause?: string;
   // refused and sit idle" (#2324) means the answer is known before it exists.
   const unspawnable = whyNoSpawn(order, { memory, claimable });
   if (unspawnable !== null) return { refusal: `no spawn: ${unspawnable}` };
+  const unhosted = whyNoHost(env, isFile);
+  if (unhosted !== null) return { refusal: `no spawn: ${unhosted}` };
   const claimed = claimer?.claim(order, role.role, env);
   if (claimed !== undefined && "refusal" in claimed) {
     // THE PRECHECK ABOVE READS OPEN PULL REQUESTS ONLY; THE CLAIM ALSO REFUSES FOR A ROW ALREADY `in-progress` (#4524, third reopening), which only it can say.
@@ -3585,6 +3607,9 @@ function escalationFor(label: string) {
 /** The one engineer brief, from the repository root: general lessons, the acceptance standard, the resource ban. */
 export const ENGINEER_BRIEF = roleBriefPath("engineer.md").relative;
 
+/** The same brief by its ABSOLUTE path in the home project, which is what a spawned seat is sent to read (#850). */
+const ENGINEER_BRIEF_ABSOLUTE = roleBriefPath("engineer.md").absolute;
+
 /**
  * The paragraph that tells an ENGINEER to read {@link ENGINEER_BRIEF}, or nothing for any other label.
  *
@@ -3602,7 +3627,7 @@ function engineerBriefLine(label: string, engineers: string[], families: readonl
 }
 
 /** The one sentence that sends an engineer to {@link ENGINEER_BRIEF}; a spawned order carries it WITHOUT the roster test (#3444). Its text is `spawn-role-brief.ts`'s (#828). */
-const ENGINEER_BRIEF_SENTENCE = engineerBriefSentence(ENGINEER_BRIEF);
+const ENGINEER_BRIEF_SENTENCE = engineerBriefSentence(ENGINEER_BRIEF_ABSOLUTE);
 
 /**
  * The prompt as the woken session receives it: the order's text, prefixed with WHO IT IS.
@@ -5684,9 +5709,13 @@ export const WORKERS_GH_CONFIG_DIR = "/home/agent/workers/gh";
 /**
  * The environment a spawned workspace's shell starts with. An `override` wins, key by key, because a caller
  * that names its own account has decided something this default has no business second-guessing.
+ *
+ * `AGENT_ORG_HOST` IS THE FILE THE GATE ITSELF RESOLVED ({@link hostConfigPath}), WHETHER OR NOT THE GATE'S OWN ENVIRONMENT HAD IT
+ * (#850, chairman a11ign#4957 cause 1). A pane did not inherit it, so in a worktree with no `.agent-org/project.json` of its own
+ * (an agent-org one) `pr:open`, `worker:state` and the tests refused and twelve workers sat idle for up to ten hours.
  */
 export function spawnEnvironment(override: Record<string, string> = {}): Record<string, string> {
-  return { GH_CONFIG_DIR: WORKERS_GH_CONFIG_DIR, ...override };
+  return { GH_CONFIG_DIR: WORKERS_GH_CONFIG_DIR, [HOST_CONFIG_ENV]: hostConfigPath(), ...override };
 }
 
 /**
