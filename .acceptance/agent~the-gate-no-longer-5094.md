@@ -9,7 +9,7 @@ Closes a11ign/a11ign#5094
 - Changeset: `.changeset/the-codeowner-review-keys-by-repository.md`.
 
 ## Mutation
-- Restoring `ceo: "a11ign-ai-leads"` in `ROLE_LOGIN` turns nine tests red: two in `work-gate.test.ts` and seven in `work-gate-codeowner-review-repos.test.ts`. The file was restored from a backup copy and `diff` confirmed it byte-identical.
+- Restoring `ceo: "a11ign-ai-leads"` in `ROLE_LOGIN` turns fourteen of 442 tests red, in four files: two in `work-gate.test.ts`, five in `work-gate-codeowner-app-review.test.ts` and seven in `work-gate-codeowner-review-repos.test.ts` (re-measured at `3299ca99`). Two cases stay green under the mutation and so do not pin the retirement: `#796 (a)` in the app-review file, and the owner-authored case in the review-repos file. The file was restored from a backup copy and `diff` confirmed it byte-identical.
 
 ## Done-when 2: the owned-path check refuses an unsigned change
 The check in `src/owned-path-signoff.ts` refuses a change to an owned path whose body does not state each owned-path fact. The refusal names the fact and the states that satisfy it. `src/packaging/owned-path-signoff.test.ts` ("a change to an owned path with NO sign-off is refused, and it names each missing fact") runs `packages/nvda-worker/src/capture-core.ts` with the body "Fixes a typo." and asserts exit `1`, the fact `CAPTURE_PROTOCOL_VERSION` and the phrase "say one of: unchanged, bumped".
