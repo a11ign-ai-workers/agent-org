@@ -18,6 +18,7 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./lib/git-env.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 
 // THE PROJECT THIS RUNS AGAINST IS A RECORDED ONE (`claimed-region-overlap.test.ts`'s shape): the host file is set FIRST and the tool imported AFTER it, so the acceptance command as
 // written -- no `$AGENT_ORG_HOST` -- runs. `stateDir` is declared so the overrun's ledger line lands in the scratch directory and never in the host's own.
@@ -117,7 +118,7 @@ function ghFor({ sweeps, comments, prs = [], asker = ["agent-org:src/b.ts"] }: {
       if (args.includes("comments")) return JSON.stringify({ comments });
       return JSON.stringify({ number: ASKER, title: "A row", body: plainBody(...asker), labels: [], blockedBy: { nodes: [] } });
     }
-    if (args[0] === "issue" && args[1] === "list") return args.includes("number,labels,body,blockedBy") ? JSON.stringify(sweeps) : "[]";
+    if (readsRowsByLabel(args) !== null) return connectionOf(sweeps);
     if (args[0] === "pr" && args[1] === "list") return JSON.stringify(prs);
     return "[]";
   };
@@ -171,7 +172,7 @@ test("(1) `check` predicts the claim: the same refusal through `reportB4`, and i
 test("(1) a sweep that could not be read refuses as INCONCLUSIVE, never as clear", () => {
   const run = (_cmd: string, args: string[]) => {
     if (args[0] === "issue" && args[1] === "view") return JSON.stringify({ number: ASKER, body: plainBody("agent-org:src/b.ts"), labels: [], blockedBy: { nodes: [] } });
-    if (args[0] === "issue" && args[1] === "list") return JSON.stringify([sweepRow]);
+    if (readsRowsByLabel(args) !== null) return connectionOf([sweepRow]);
     return "[]"; // no comments on the sweep: it has no claim record, so its window has no start
   };
   assert.match(claimFor(run) ?? "", /INCONCLUSIVE/);
@@ -245,10 +246,11 @@ const FILING_BODY = (region: string) => `${plainBody(region)}\n## Acceptance\n\n
 /** `run` for a whole filing, with the sweep held by `worker-4389` and its pull request opened `prMinutesAgo` ago. */
 function filingRun(prMinutesAgo: number, body: string) {
   return (_cmd: string, args: string[]) => {
+    if (readsRowsByLabel(args) !== null) return connectionOf([sweepRow]);
     if (args[0] === "api") return "src/a.ts\nsrc/follow-up.ts";
     if (args[0] === "issue" && args[1] === "view" && args.includes("comments")) return JSON.stringify({ comments: [claimRecord(200)] });
-    if (args[0] === "issue" && args[1] === "list") return args.includes("number,labels,body,blockedBy") ? JSON.stringify([sweepRow]) : "[]";
     if (args[0] === "pr" && args[1] === "list") return JSON.stringify([sweepPr(prMinutesAgo)]);
+    if (args[0] === "issue" && args[1] === "list") return "[]"; // the filing's duplicate-title read and blast-radius read: no open row has it
     if (args.includes("milestone")) return "CI reset";
     return args.includes("body") ? body : "";
   };

@@ -16,6 +16,7 @@ import { spawnSync } from "node:child_process";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { appendFiledBy, createIssue, duplicateTitleRefusal, promoteRow, titleFromArgv } from "../row-file.ts";
+import { connectionOf, readsRowsByLabel } from "./rows-by-label-fixtures.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SESSION = "product-manager";
@@ -35,13 +36,18 @@ type Row = { number: number; title: string; state: "OPEN" | "CLOSED" };
 function tracker(rows: Row[], { outage = false } = {}) {
   const calls: string[][] = [];
   let creates = 0;
-  const read = (args: string[]) => {
+  const refuseOnOutage = () => {
     if (outage) throw Object.assign(new Error("HTTP 502: Bad gateway"), { status: 1 });
+  };
+  const read = (args: string[]) => {
+    refuseOnOutage();
     const wanted = args[args.indexOf("--state") + 1] === "open" ? "OPEN" : "CLOSED";
     return JSON.stringify(rows.filter((row) => row.state === wanted).map(({ number, title }) => ({ number, title })));
   };
   const run = (_cmd: string, args: string[]) => {
     calls.push(args);
+    // #5039: the claimed rows (the sweep window's, the blast radius's) are a by-label graphql read now, not an `issue list`: no row is held, and an outage is an outage for it too.
+    if (readsRowsByLabel(args) !== null) { refuseOnOutage(); return connectionOf([]); }
     if (args[0] === "issue" && args[1] === "list") return read(args);
     if (args.includes("milestone")) return "CI reset";
     return args.includes("body") ? appendFiledBy(BODY, SESSION) : "";

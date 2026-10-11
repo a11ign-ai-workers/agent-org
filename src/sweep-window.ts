@@ -14,13 +14,13 @@
 // THE STATE IS PURE ({@link sweepWindowState}); the reads go through an injected `run`, so a test reaches no network.
 import { declaresSweep } from "./blast-radius.ts";
 import { claimRecordOf, type RowComment } from "./claim-stall.ts";
-import { CLAIM_LABEL } from "./claim-labels.ts";
 import { FAILURE_LEDGER_FILE, recordFailures } from "./failure-ledger.ts";
 import { stateEntryPath } from "./host-config.ts";
 import { gh, lookup } from "./merge-guard/lookups.ts";
 import { homeProjectDeclaration } from "./project-config.ts";
 import { REPO } from "./project-identity.ts";
 import { SESSION_PREFIX } from "./project-vocabulary.ts";
+import { readClaimedRows } from "./ticket-port/rows-by-label.ts";
 import { claimedRegionOverlapReason, claimedRegionsOf, declaredClosedRows } from "./row-claim/file-overlap-rule.ts";
 import { declaredRegionFiles } from "./region-paths.ts";
 
@@ -71,20 +71,11 @@ export type SweepRow = {
 };
 export type SweepReads = { run?: (args: string[]) => string; repo?: string; repos?: readonly { key: string; repo: string }[] };
 
-/**
- * The most claimed rows one read asks for. It is the SAME ARGV `lookupClaimedRegions` sends, on purpose: `host/gh` answers an identical repeated read from disk for 20 seconds, so the
- * claim's second look at the claimed rows costs no API call. A full page is read as cut short, never as everything there is.
- */
-const CLAIMED_ROWS_LIMIT = 200;
-const CLAIMED_ROWS_FIELDS = "number,labels,body,blockedBy";
-
+/** #5039: THE SAME READ `lookupClaimedRegions` makes, on purpose -- `host/gh` answers an identical repeated read from disk for 20 seconds, so the claim's second look at the claimed rows costs no API call. WITHOUT SEARCH: see {@link readClaimedRows}. */
 type ListedRow = { number: number; labels?: { name: string }[]; body?: string | null };
 
 function listClaimedRows({ run, repo }: Required<Pick<SweepReads, "run" | "repo">>): ListedRow[] {
-  const listed = JSON.parse(run(["issue", "list", "--repo", repo, "--state", "open", "--label", CLAIM_LABEL, "--limit", String(CLAIMED_ROWS_LIMIT), "--json", CLAIMED_ROWS_FIELDS]));
-  if (!Array.isArray(listed)) throw new Error("the claimed rows did not come back as a list");
-  if (listed.length >= CLAIMED_ROWS_LIMIT) throw new Error(`${listed.length} claimed rows: the list may be cut short`);
-  return listed;
+  return readClaimedRows({ run, repo });
 }
 
 /** When each row's pull request opened: the EARLIEST open one declaring `Closes #<row>`, in any code repository the project declares. */

@@ -2044,7 +2044,8 @@ test("#2226 (5): the recipient rides AFTER the key, so no reader counts it as a 
 // declaring no file is not in build (#3073).
 const GH_STUB = `#!/bin/sh
 case "$*" in
-  "issue list"*"session:worker-judge"*) printf '%s' '[{"number":1926}]' ;;
+  "api graphql"*"label=in-progress"*) printf '%s' '{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[{"number":1926,"body":"## Region\\n\\n- docs/messaging.md\\n","labels":{"nodes":[{"name":"in-progress"},{"name":"session:worker-judge"}]},"blockedBy":{"nodes":[]}}]}}}}' ;; # #5039: the held rows are the in-progress ones, filtered by session client-side
+  "api graphql"*"label="*) printf '%s' '{"data":{"repository":{"issues":{"pageInfo":{"hasNextPage":false,"endCursor":null},"nodes":[]}}}}' ;;
   "issue list"*) printf '%s' '[]' ;;
   "api graphql"*) printf '%s' '{"data":{"repository":{"issue":{"closedByPullRequestsReferences":{"nodes":[]}}}}}' ;;
   "issue view"*) printf '%s' '{"body":"## Region\\n\\n- docs/messaging.md\\n"}' ;;

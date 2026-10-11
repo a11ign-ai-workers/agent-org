@@ -24,6 +24,7 @@ import {
 import { declaredRegionFiles, regionCoversIn, splitRegionEntry } from "../region-paths.ts";
 import { closesDeclarationReport, closesReferences, extractClosesDeclaration } from "../acceptance-commands.ts";
 import { checkBody, checkRegion, main } from "../pr-open.ts";
+import { connectionOf, readsRowsByLabel } from "./rows-by-label-fixtures.ts";
 
 const FIRST = { key: "", repo: "a11ign/a11ign" };
 const SECOND = { key: "nvda-worker", repo: "a11ign/nvda-worker" };
@@ -51,6 +52,7 @@ function fakeGh({ region, prs, failing = [] }: { region: string; prs: Record<str
   const calls: string[][] = [];
   const run = (args: string[]): string => {
     calls.push(args);
+    if (readsRowsByLabel(args) !== null) return connectionOf([]); // #5039: the claimed rows are read by label over graphql; nobody else holds one
     const repo = args[args.indexOf("--repo") + 1];
     if (args[0] === "pr" && args[1] === "list") {
       if (failing.includes(repo)) throw new Error(`HTTP 502 from ${repo}`);
@@ -355,6 +357,7 @@ test("a11ign/a11ign#4737 item 4: a keyed row's `blockedBy` edge is read from the
   const reads: string[][] = [];
   const run = (_cmd: string, args: string[]) => {
     reads.push(args);
+    if (readsRowsByLabel(args) !== null) return connectionOf([]); // #5039: no other row is claimed
     if (args[0] === "issue" && args[1] === "view") {
       return args[args.indexOf("--json") + 1] === "blockedBy"
         ? JSON.stringify({ blockedBy: { nodes: [{ number: 12, state: "OPEN" }] } })
