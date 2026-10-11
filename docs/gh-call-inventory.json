@@ -3,7 +3,7 @@
   "summary": {
     "files": 102,
     "spawns": 137,
-    "calls": 410,
+    "calls": 411,
     "shapes": {
       "api rest": 158,
       "api graphql": 41,
@@ -14,8 +14,8 @@
       "pr view": 17,
       "issue edit": 16,
       "label create": 12,
+      "pr merge": 7,
       "issue create": 6,
-      "pr merge": 6,
       "project item-edit": 6,
       "pr comment": 4,
       "run list": 4,
@@ -1077,6 +1077,7 @@
         "label create": 1,
         "label list": 1,
         "pr list": 3,
+        "pr merge": 1,
         "pr ready": 1,
         "project item-add": 1,
         "project item-edit": 1,
