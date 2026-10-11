@@ -1,0 +1,26 @@
+`pr:open` no longer refuses every worker's pull request into a review-only lane: `gh api user` answers an App's installation token `HTTP 403`, so the login is read from the GraphQL `viewer` when it fails (a11ign/agent-org#811, from a11ign/a11ign#4910).
+
+Closes a11ign/agent-org#811
+
+## What changes, and why
+
+- **`loginThrough(gh)`** (`src/pr-open.ts`) is what `defaultLogin` now is: `gh api user --jq .login`, and when that fails or answers nothing, `gh api graphql -f query='{ viewer { login } }'`. A user token pays one call, as before. An identity neither read answers throws with both failures named, so `authorshipRefusal` still refuses ("could not say who is opening it", #3254): unreadable is never "not the owner".
+- **stderr is piped**, so the 403 is no longer printed above the pass on every worker's PR, and the refusal quotes `gh`'s own line (`Resource not accessible by integration (HTTP 403)`) rather than `Command failed: gh api user ...`.
+- **Measured, from this worker session** (installation token, 2026-10-11): `gh api user --jq .login` printed `gh: Resource not accessible by integration (HTTP 403)`; `gh api graphql -f query='{viewer{login}}' --jq .data.viewer.login` printed `a11ign-workers[bot]`. The candidate "the role `host/gh` minted the token for" was not needed: the wrapper knows a role, not a login, and the login is what the lane map is keyed on.
+
+## How you verified it
+
+Acceptance below runs from the repository root: the row's literal command `cd ~/repos/agent-org && …` runs the primary checkout, which does not hold this change.
+
+Done-when 1: `src/packaging/pipeline-lane-authorship.test.ts` `#811 (1)`..`(4)`: an installation-token identity (`api user` refused, viewer `a11ign-workers[bot]`) opening a diff into `.github/workflows/` is not refused (and the viewer is asked only after `api user` fails); `a11ign-ai-leads` read through the same fallback still is (`#1756 Ruling item 7`); an identity neither read answers (viewer throws, or answers empty) is, naming the 403; and a user token pays one call. The existing `#3254` unreadable-login test at `:236` is unchanged and passes.
+Done-when 2, the live reading of `agent-org pr:open create` on a branch whose diff touches `.github/workflows/`, is NOT met by this PR, whose own diff touches no workflow: it is run from a worker session once this lands, and pasted on the row. The two reads above (the 403 and the viewer's answer, from a worker session's real token) are the measured half.
+
+Acceptance: `npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/pipeline-lane-authorship.test.ts src/pr-open.test.ts`
+
+Mutation: both directions, source restored with `cp` and `diff`ed byte-identical each time. (a) The fallback never answering (the viewer read removed from `loginThrough`): 3 of 32 fail, all new `#811` cases (1), (2) and (4); (3) still passes, as it should, since an unreadable identity still refuses. (b) The owner check never firing (`ownsReviewOnlyLane` returns false): 8 of 32 fail, the new `#811 (2)` among them and the pre-existing `#3254` owner-predicate tests, which is every case that asserts a refusal; no `#811` case that asserts a pass fails. Baseline before the change: 28 of 28 in the same two files; after: 32 of 32.
+
+## Anything a reviewer should be sceptical of
+
+- **`ROLE_LOGIN.ceo` (`src/lane-ownership.ts`, outside this row's Region) does not name the managers App, and `ceo` is already on it.** `host.json`'s `github.identity` declares `managers` (ceo, product-manager, orchestrator) as `github-apps`, and `~/.local/bin/gh` renders `APP_ROLES=scheduler workers managers`. Measured from a public read: App id `5267143`, which is `managers`' declared `appId`, is the slug `a11ign-managers`, so a leads session's `viewer` login is `a11ign-managers[bot]` (inferred from the slug; not read from a leads session, which this one is not). `ROLE_LOGIN.ceo` is `a11ign-ai-leads` only. **Before this change the 403 refused a leads session's workflow PR too, by accident; after it, that PR passes `pr:open`'s authorship check**, and so would `arm-pr` (which reads `lane-ownership.ts`'s map) and `work-gate.ts`'s own copy of it, unless they name the bot. This change does not treat "an App login" as "not an owner": the comparison is against the role map, and the map is missing an entry. The follow-up is one entry in each of the two `ROLE_LOGIN` copies plus a pin that every declared `github-apps` role's login is accounted for; it is filed as its own row, and **should land with or before this PR**.
+- **The fallback fires on any `api user` failure**, not only a 403. A 401 from a dead token fails the viewer read too and refuses as before; a transient error costs one extra GraphQL point and answers truthfully, since the viewer is the same identity `gh pr create` will author as.
+- **Type-check was not run in full**: this worktree's shared install has no `@types/node`, so `tsc` stops at the type library. Filtered to the two touched files it reports nothing beyond that class; CI's `typecheck` is the verdict.
