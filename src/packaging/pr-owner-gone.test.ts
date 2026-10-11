@@ -75,9 +75,13 @@ test("CONTROL: a PR with no label at all still falls to ceo and IS recorded", ()
   assert.deepEqual(unresolvedOwnerEvents([pr], ownerOfPr, "a11ign/a11ign"), [{ classKey: "owner-unresolved", ref: "a11ign/a11ign#4626" }]);
 });
 
-test("CONTROL: a rows read that came back empty is neither 'every row closed' nor 'unclaimed', and a PR naming no row has nothing to be either", () => {
+test("CONTROL: a rows read that came back empty is neither 'every row closed' nor 'unclaimed'", () => {
   assert.equal(ownerOfPr(owned(pr4626(), [])).source, "ceo");
-  assert.equal(ownerOfPr(owned(pr4626({ headRefName: "agent/some-slug", closingIssuesReferences: [] }))).source, "ceo");
+});
+
+test("#5115: a PR naming no row with an ENDED label is owner-gone too (the row's no-row shape), and with NO label it is still ceo", () => {
+  assert.deepEqual(ownerOfPr(owned(pr4626({ headRefName: "agent/some-slug", closingIssuesReferences: [] }))), { session: "product-manager", source: "owner-gone" });
+  assert.deepEqual(ownerOfPr(owned(pr4626({ labels: [], headRefName: "agent/some-slug", closingIssuesReferences: [] }))), { session: "ceo", source: "ceo" });
 });
 
 test("a dependency bot's PR still outranks the rung, and a live session the branch names outranks it too", () => {
@@ -104,4 +108,55 @@ test("the order's words say what state the row is in: 'is closed' for a closed r
   assert.match(unclaimed, /label names `worker-4624`, which has ENDED, and the row it closes is open and no session holds it/);
   assert.doesNotMatch(unclaimed, /is closed|NOBODY COULD BE NAMED/);
   assert.match(sentence(OPEN), /the row it closed is closed/, "and the closed row keeps its words");
+});
+
+/**
+ * #5115 (a11ign, the eighth `owner-unresolved` occurrence): a pull request whose owner ENDED and which closes NO row (`Closes: none -- <reason>`).
+ * Its body names no row, so `rowsNobodyHolds` has nothing to read; the owner is still known and gone, so it is `owner-gone`, not `ceo`. Each CONTROL
+ * is the same PR with ONE fact changed.
+ */
+const NONE = { ...ENDED, agents: () => ["worker-4437"], ended: () => new Map([["worker-5109", 1]]) };
+const pr5115 = (over: Record<string, unknown> = {}) => ({
+  number: 5115, headRefOid: "beef5115ef560000", isDraft: false, statusCheckRollup: RED, headRefName: "agent/pm-brief-half",
+  author: { login: "a11ign-ai-workers" }, labels: [{ name: "session:worker-5109" }], closingIssuesReferences: [],
+  body: "Closes: none -- the row closes on a11ign/agent-org#1007; this PR is the product-manager brief half.", ...over,
+});
+
+test("#5115: a label that ENDED on a PR closing no row is owned by product-manager, source owner-gone, and is not an owner-unresolved event", () => {
+  const pr = owned(pr5115(), OPEN, NONE);
+  assert.equal(pr.closingRowsNone, true);
+  assert.deepEqual(ownerOfPr(pr), { session: "product-manager", source: "owner-gone" });
+  assert.deepEqual(unresolvedOwnerEvents([pr], ownerOfPr, "a11ign/a11ign"), []);
+});
+
+test("#5115: the order says the owner ENDED and the PR closes no row, not 'nobody could be named'", () => {
+  const orders = decide({ prs: [owned(pr5115(), OPEN, NONE)], readyRows: [], openRows: OPEN } as never);
+  const failing = orders.filter((o: any) => o.cause === "pr-checks-failing");
+  assert.equal(failing.length, 1, "POSITIVE CONTROL: the red pull request is ordered at all");
+  assert.equal(failing[0].session, "product-manager");
+  assert.match(failing[0].prompt, /label names `worker-5109`, which has ENDED, and it closes no row/);
+  assert.doesNotMatch(failing[0].prompt, /NOBODY COULD BE NAMED/);
+});
+
+test("CONTROL: the same PR with its label ALIVE keeps the label", () => {
+  const pr = owned(pr5115(), OPEN, { ...NONE, agents: () => ["worker-4437", "worker-5109"] });
+  assert.deepEqual(ownerOfPr(pr), { session: "worker-5109", source: "label" });
+});
+
+test("CONTROL: the same PR with the rows read EMPTY (the read was refused) still falls to ceo, and is not flagged", () => {
+  const pr = owned(pr5115(), [], NONE);
+  assert.equal(pr.closingRowsNone, undefined);
+  assert.deepEqual(ownerOfPr(pr), { session: "ceo", source: "ceo" });
+});
+
+test("CONTROL: the same PR with NO label at all still falls to ceo and IS recorded", () => {
+  const pr = owned(pr5115({ labels: [] }), OPEN, NONE);
+  assert.deepEqual(ownerOfPr(pr), { session: "ceo", source: "ceo" });
+  assert.deepEqual(unresolvedOwnerEvents([pr], ownerOfPr, "a11ign/a11ign"), [{ classKey: "owner-unresolved", ref: "a11ign/a11ign#5115" }]);
+});
+
+test("CONTROL: the same PR naming an open row a LIVE session holds keeps closing-row", () => {
+  const pr = owned(pr5115({ closingIssuesReferences: [{ number: 4437 }] }), OPEN, NONE);
+  assert.equal(pr.closingRowsNone, undefined);
+  assert.deepEqual(ownerOfPr(pr), { session: "worker-4437", source: "closing-row" });
 });

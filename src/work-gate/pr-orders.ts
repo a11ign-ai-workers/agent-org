@@ -737,11 +737,13 @@ export function isChairmanAuthoredPr(pr: any): boolean {
 export const DEAD_OWNER_FALLBACK = "product-manager";
 
 /**
- * WHAT STATE THE DEAD OWNER'S ROW IS IN, in the clause every `owner-gone` sentence splices in (#4808). The rung answers two shapes and "the row it closed
+ * WHAT STATE THE DEAD OWNER'S ROW IS IN, in the clause every `owner-gone` sentence splices in (#4808). The rung answers three shapes and "the row it closed
  * is closed" is true of one: a row the owner left OPEN and back in the queue is not closed, and saying so would send the reader to a row that is not there.
- * `closingRowsClosed` keeps its words, so a PR flagged before #4808 reads as it did.
+ * A PR that closes no row at all (#5115) says so, rather than pointing at a row it never named. `closingRowsClosed` keeps its words, so a PR flagged before
+ * #4808 reads as it did.
  */
 function deadOwnerRowClause(pr: any) {
+  if (pr?.closingRowsNone) return "it closes no row";
   return pr?.closingRowsClosed ? "the row it closed is closed" : "the row it closes is open and no session holds it";
 }
 
@@ -762,14 +764,15 @@ function deadOwnerRowClause(pr: any) {
  *                     by construction and it used to fall to rung 7 as "nobody could be named": #4470, #4471 and #4472, an hour after #4386
  *                     closed the same class for agent-org's own pull requests. Its owner is `ceo` (the seat that rules on a dependency bump
  *                     and holds the publish order), and the ladder SAYS so, which is what keeps it out of `owner-unresolved`.
- *   7. `owner-gone`   a pull request whose label names an ENDED session AND whose named rows nobody holds: all CLOSED (#4644) or OPEN and UNCLAIMED (#4808).
- *                     Rungs 2-5 each need a LIVE session holding an OPEN claimed row, so both failed all four. a11ign#4626 (label `session:worker-4624`, row
- *                     #4624 closed while it stayed open) and a11ign#4805 (label `session:worker-4804`, row #4804 back in `backlog` with no claim) landed on
- *                     the `ceo` rung as "nobody could be named" when somebody could: the owner is known, and gone.
+ *   7. `owner-gone`   a pull request whose label names an ENDED session AND whose named rows nobody holds: all CLOSED (#4644), OPEN and UNCLAIMED (#4808), or
+ *                     it names NO row at all (`Closes: none`, #5115).
+ *                     Rungs 2-5 each need a LIVE session holding an OPEN claimed row, so all failed. a11ign#4626 (label `session:worker-4624`, row
+ *                     #4624 closed while it stayed open), a11ign#4805 (label `session:worker-4804`, row #4804 back in `backlog` with no claim) and a11ign#5115
+ *                     (label `session:worker-5109`, `Closes: none`) landed on the `ceo` rung as "nobody could be named" when somebody could: the owner is known, and gone.
  *                     `product-manager` owns it (`DEAD_OWNER_FALLBACK`): the way out is process -- reclaim the row, re-label the PR to a session that can
  *                     act, or close it -- and the ladder SAYS so, which keeps it out of `owner-unresolved`. `withClosingRowOwners` sets
- *                     `closingRowsClosed` / `closingRowsUnheld` ONLY on a PR carrying `labelEnded`, so a label that stands, a row held by a live session,
- *                     an unreadable (empty) rows list, a PR naming no row, or no label at all is unchanged.
+ *                     `closingRowsClosed` / `closingRowsUnheld` / `closingRowsNone` ONLY on a PR carrying `labelEnded`, so a label that stands, a row held by a
+ *                     live session, an unreadable (empty) rows list, or no label at all is unchanged.
  *   8. `chairman-author` a pull request the chairman opened (agent-org#950), with nothing above naming a session. Not a pull request nobody could
  *                     name: its reader is `ceo`, who holds the chairman's pull requests and the outage briefs, and a11ign/a11ign#5041 (the chairman's own
  *                     outage mitigation, branch `agent/scheduler-search-mitigation`, no label) reached rung 9 and was recorded as `owner-unresolved`, the
@@ -786,7 +789,7 @@ export function ownerOfPr(pr: any): { session: string; source: "label" | "closin
   if (pr?.branchOwner) return { session: pr.branchOwner.session, source: "branch-name" };
   if (pr?.stampOwner) return { session: pr.stampOwner.session, source: "stamp" };
   if (isDependencyBotPr(pr)) return { session: UNOWNED_PR_SESSION, source: "dependency-bot" };
-  if (pr?.closingRowsClosed || pr?.closingRowsUnheld) return { session: DEAD_OWNER_FALLBACK, source: "owner-gone" };
+  if (pr?.closingRowsClosed || pr?.closingRowsUnheld || pr?.closingRowsNone) return { session: DEAD_OWNER_FALLBACK, source: "owner-gone" };
   if (isChairmanAuthoredPr(pr)) return { session: UNOWNED_PR_SESSION, source: "chairman-author" };
   return { session: UNOWNED_PR_SESSION, source: "ceo" };
 }
