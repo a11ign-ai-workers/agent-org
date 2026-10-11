@@ -1,0 +1,438 @@
+// no-token: gh
+//
+// Every `gh` call in this file is a fixture: `crossRepoRedVerdict`, `refusalBeforeArming` and `runArmPr` take an injected `run`, and the
+// sweep is driven as a real process with a fake `gh` first on PATH. True of the IMPORT (`arm-pr.ts` and `auto-arm-sweep.ts` spawn `gh`)
+// and false of every CALL.
+/**
+ * agent-org#992: A LAB PULL REQUEST WHOSE CROSS-REPO LEG FAILS ON A TEST FILE THE NEWEST TRUNK RUN PASSED IS NOT ARMED unless its body
+ * declares `Cross-repo-red: <row>` naming an OPEN row.
+ *
+ * THE INSTANCE, MEASURED 2026-10-11. lab#81 (a11ign#5078, ADR 0045 cut 1) merged at 15:48:19Z. On its head `e929f712` the check run
+ * `checks (cross-repo)` (id 114504845032) read `failure` and `gate` read `success`; the leg failed on two files under
+ * `packages/lab/src/packaging/` (2 failed, 2939 passed). The newest `push` run on lab's `main` before it, 38151939490 at `77283f6e`
+ * (15:35:54Z), had the leg `success`. The red was the cut's known price (a11ign#5080 is the core-side row that greens it) and nothing
+ * at the gate asked that it be declared.
+ *
+ * THE LOG FIXTURE IS REAL: the lines of run 38152818440's `checks (cross-repo)` failed log (the merge's own run, which failed on the
+ * same two files), picked verbatim from `gh run view --log-failed`, colour escapes and all. Its escapes arrived as the two characters
+ * `^[` (printed through the host's `gh`); the raw ESC byte is the same lines with `^[` replaced, and both are read below.
+ * THE PULL REQUEST'S OWN WORKFLOW RUN ID is not in the row (it names the check run), so `PR_RUN` is a stand-in.
+ *
+ * Every test changes ONE thing from the case before it, so a refusal cannot pass by never being reached, and a `clear` cannot pass by
+ * the verdict never asking. The mutants the row ran are pasted in its `.acceptance` file.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { chmodSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { spawnSync } from "node:child_process";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { fileURLToPath } from "node:url";
+import { homeProjectDeclaration } from "../project-config.ts";
+import { readTrunkRed, trunkOfCodeRepository } from "../trunk-red.ts";
+import { runArmPr, EXIT } from "../arm-pr.ts";
+import { refusalBeforeArming } from "../auto-arm-sweep.ts";
+import { CROSS_REPO_LEG, crossRepoRedMarker, crossRepoRedVerdict, declaredRows, failingFilesFromRstestLog } from "../cross-repo-red.ts";
+
+const LAB = "a11ign/lab";
+const PRIMARY = "a11ign/a11ign";
+const DECLARED = [{ key: "", repo: PRIMARY }, { key: "lab", repo: LAB }];
+const LEG = "checks (cross-repo)";
+const STEP = "The tests of this leg";
+const PR_HEAD = "e929f712";
+const PR_RUN = "38150000001";
+const TRUNK_RUN = 38151939490;
+const FILES = ["packages/lab/src/packaging/every-test-file-is-run.test.ts", "packages/lab/src/packaging/layer-edges.test.ts"];
+const BODY = "Closes a11ign/a11ign#5078\n\nADR 0045 cut 1.";
+const DECLARED_BODY = `${BODY}\nCross-repo-red: a11ign/a11ign#5080\n`;
+
+/** Lines 189, 324, 1664-1668, 1697-1702, 1730, 1733 and 1737 of the merge run's failed log for the leg (every line is `job\tstep\ttimestamp text`). */
+const LAB81_LEG_LOG_LINES = [
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:49:32.7573122Z   ^[[33m✓^[[39m A DECLARATION NARROWER THAN THE WALK FAILS THE GUARD'S OWN RUN^[[90m (1.16s)^[[39m",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:49:38.5125205Z ^[[90mlog^[[39m^[[90m^[[2m | packages/lab/src/packaging/arm-pr.test.ts > #2391: a FAILED read-back leaves the position unknown, and unknown is not the front^[[22m^[[39m",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2542004Z ^[[1mSummary of all failing tests:^[[22m",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2542716Z ",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2545830Z ^[[41m^[[37m^[[1m FAIL ^[[22m^[[39m^[[49m ^[[90mpackages/lab/src/packaging/^[[39m^[[36mevery-test-file-is-run.test.ts^[[39m ^[[2m>^[[22m every tracked test file under packages/ is reached by at least one runner glob — the positive control for this emptiness lives in the next test, which asserts the same predicate REPORTS a real file that no glob reaches",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2548985Z ^[[31m^[[1mAssertionError^[[22m^[[39m^[[31m: 1 test file(s) are executed by no runner: packages/lab/scripts/generate-coverage-doc.test.ts",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2550353Z A test outside every runner glob passes by hand and is run by no gate (#1940). Either move it under a path a glob reaches, or grow a glob to include it — the 5 globs in force are:",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2636408Z ^[[90m        at ^[[90mpackages/lab/src/packaging/^[[90m^[[36mevery-test-file-is-run.test.ts^[[90m:127:3^[[39m",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2636829Z ",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2637808Z ^[[41m^[[37m^[[1m FAIL ^[[22m^[[39m^[[49m ^[[90mpackages/lab/src/packaging/^[[39m^[[36mlayer-edges.test.ts^[[39m ^[[2m>^[[22m the lab's edges agree with its own baseline: no new edge, no stale entry, every entry well-formed",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2638899Z ^[[31m^[[1mAssertionError^[[22m^[[39m^[[31m: Expected values to be strictly deep-equal:",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2639328Z + actual - expected",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2639468Z ",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2732140Z ^[[90m Test Files^[[39m ^[[1m^[[31m2 failed^[[39m^[[22m^[[2m | ^[[22m^[[1m^[[32m220 passed^[[39m^[[22m^[[90m (222)^[[39m",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:41.2777459Z ^[[90m      Tests^[[39m ^[[1m^[[31m2 failed^[[39m^[[22m^[[2m | ^[[22m^[[1m^[[32m2939 passed^[[39m^[[22m^[[2m | ^[[22m^[[33m13 skipped^[[39m^[[90m (2954)^[[39m",
+  "checks (cross-repo)\tThe tests of this leg\t2026-10-11T15:52:42.1993362Z ##[error]Process completed with exit code 1.",];
+const LAB81_LEG_LOG = LAB81_LEG_LOG_LINES.join("\n");
+
+/** One `FAIL` line in rstest's form (directory, file name and `>` painted apart), for the leg of a synthetic run. */
+const failLine = (file: string, job = LEG) => {
+  const slash = file.lastIndexOf("/");
+  return `${job}\t${STEP}\t2026-10-11T15:35:54.0000000Z ^[[41m^[[37m^[[1m FAIL ^[[22m^[[39m^[[49m ^[[90m${file.slice(0, slash + 1)}^[[39m^[[36m${file.slice(slash + 1)}^[[39m ^[[2m>^[[22m a test of it`;
+};
+const logOf = (...files: string[]) => files.map((file) => failLine(file)).join("\n");
+
+type World = {
+  prLeg?: string | null;             // the PR head's leg conclusion; `null` = the head has no cross-repo check run
+  prLog?: string;
+  trunkLeg?: string | null;          // the newest trunk run's leg conclusion; `null` = that run has no cross-repo job
+  trunkLog?: string;
+  rows?: Record<string, string>;     // `owner/repo#n` -> state; a row not listed does not exist
+  throwOn?: RegExp;                  // any call whose arguments match throws `HTTP 502`
+  comments?: { body: string }[];
+  body?: string;
+  totalCount?: number;
+};
+
+/** A fake `gh` for one lab pull request, recording every call. Unknown calls answer `""`, as the doors' own fixtures do. */
+function world(w: World = {}) {
+  const { prLeg = "failure", prLog = LAB81_LEG_LOG, trunkLeg = "success", trunkLog = "", comments = [], body = BODY } = w;
+  const rows = w.rows ?? { "a11ign/a11ign#5080": "OPEN", "a11ign/a11ign#5079": "CLOSED", "a11ign/lab#7": "OPEN" };
+  const calls: string[][] = [];
+  const run = (args: string[]): string => {
+    calls.push(args);
+    const line = args.join(" ");
+    if (w.throwOn?.test(line)) throw new Error("HTTP 502");
+    if (line.includes("headRefOid")) return `${PR_HEAD}\n`;
+    if (line.includes("check-runs?per_page=100")) {
+      const checks: unknown[] = [{ name: "gate", conclusion: "success", details_url: `https://github.com/${LAB}/actions/runs/${PR_RUN}/job/1` }];
+      if (prLeg !== null) checks.push({ name: LEG, conclusion: prLeg, details_url: `https://github.com/${LAB}/actions/runs/${PR_RUN}/job/114504845032` });
+      return JSON.stringify({ total_count: w.totalCount ?? checks.length, check_runs: checks });
+    }
+    if (line.includes("actions/workflows/ci.yml/runs")) {
+      const common = { head_sha: "77283f6e", status: "completed", html_url: `https://github.com/${LAB}/actions/runs/${TRUNK_RUN}` };
+      return JSON.stringify({ workflow_runs: line.includes("event=push")
+        ? [{ ...common, id: TRUNK_RUN, conclusion: "success", created_at: "2026-10-11T15:35:54Z", event: "push" }]
+        : [{ ...common, id: 38133429541, conclusion: "success", created_at: "2026-10-11T10:51:00Z", event: "schedule" }] });
+    }
+    if (line.includes(`actions/runs/${TRUNK_RUN}/jobs`)) {
+      return JSON.stringify({ jobs: [{ name: "gate", conclusion: "success" }, ...(trunkLeg === null ? [] : [{ name: LEG, conclusion: trunkLeg }])] });
+    }
+    if (line.startsWith(`run view ${PR_RUN} `)) return prLog;
+    if (line.startsWith(`run view ${TRUNK_RUN} `)) return trunkLog;
+    if (args[0] === "issue" && args[1] === "view") {
+      const wanted = args[args.indexOf("--json") + 1];
+      if (wanted === "state") {
+        const key = `${args[args.indexOf("--repo") + 1]}#${args[2]}`;
+        if (!(key in rows)) throw new Error("GraphQL: Could not resolve to an issue or pull request with the number of " + args[2] + ". (repository.issue)");
+        return JSON.stringify({ state: rows[key] });
+      }
+      return JSON.stringify(wanted === "labels" ? { labels: [] } : { blockedBy: { nodes: [], totalCount: 0 } });
+    }
+    if (args[0] === "pr" && args[1] === "view" && line.includes("comments")) return JSON.stringify({ comments });
+    if (args[0] === "pr" && args[1] === "view") return JSON.stringify({ labels: [], body, state: "OPEN", author: { login: "worker-1" } });
+    if (line.includes("timelineItems")) return JSON.stringify({ mergeQueueEntry: null, timelineItems: { nodes: [] } });
+    return "";
+  };
+  return { run, calls };
+}
+
+const ask = (w: World = {}, prBody: string | null = BODY, repo = LAB) => {
+  const fake = world(w);
+  return { ...fake, verdict: crossRepoRedVerdict({ number: 81, repo, prBody, run: fake.run, codeRepositories: DECLARED }) };
+};
+const why = (verdict: { kind: string }) => ("why" in verdict ? String(verdict.why) : "");
+const filesOf = (verdict: { kind: string }) => ("files" in verdict ? verdict.files : null);
+
+// --- the log reader ---
+
+test("#992 (4) failingFilesFromRstestLog reads the lab#81 leg's real failed log: exactly the two files, colour escapes included", () => {
+  assert.deepEqual(failingFilesFromRstestLog(LAB81_LEG_LOG, LEG), FILES);
+  assert.ok(LAB81_LEG_LOG.includes("^[[41m"), "the fixture still carries its colour escapes, so the stripping is what is tested");
+  const raw = LAB81_LEG_LOG.replaceAll("^[", "\u001b");
+  assert.ok(raw.includes("\u001b[41m") && !raw.includes("^["));
+  assert.deepEqual(failingFilesFromRstestLog(raw, LEG), FILES, "the raw ESC byte reads the same");
+});
+
+test("#992 (4) NEGATIVE CONTROL: a TAP log, an empty log, another job's FAIL lines, and a log with no FAIL line are each `null`, never `[]`", () => {
+  const tap = `${LEG}\t${STEP}\t2026-10-11T15:49:00.0000000Z not ok 3 - something failed\n${LEG}\t${STEP}\t2026-10-11T15:49:00.0000000Z # fail 1`;
+  assert.equal(failingFilesFromRstestLog(tap, LEG), null, "a TAP log is not an rstest log: `not ok N` names no file");
+  assert.equal(failingFilesFromRstestLog("", LEG), null);
+  assert.equal(failingFilesFromRstestLog(failLine(FILES[0], "gate"), LEG), null, "a FAIL line of ANOTHER job says nothing about this one");
+  const noFail = LAB81_LEG_LOG_LINES.filter((line) => !line.includes(" FAIL ")).join("\n");
+  assert.equal(failingFilesFromRstestLog(noFail, LEG), null, "log lines whose TEXT says FAIL (a test named `... FAILS ...`) are not failing files");
+  assert.ok(noFail.includes("FAILS"), "the fixture does carry such a line, so the case above is the one it names");
+});
+
+test("#992 (4) failingFilesFromRstestLog: distinct and sorted, a file that failed to load (no `> name`) counts, a `:line:col` suffix is dropped", () => {
+  const log = [failLine(FILES[1]), failLine(FILES[1]), failLine(FILES[0]),
+    `${LEG}\t${STEP}\t2026-10-11T15:35:54.0000000Z  FAIL  packages/lab/src/load.test.ts`,
+    `${LEG}\t${STEP}\t2026-10-11T15:35:54.0000000Z  FAIL  packages/lab/src/at.test.ts:12:5 > a name`].join("\n");
+  assert.deepEqual(failingFilesFromRstestLog(log, LEG), [...FILES, "packages/lab/src/at.test.ts", "packages/lab/src/load.test.ts"].sort());
+});
+
+// --- the leg-name rule is trunk-red.ts's, held by behaviour ---
+
+test("#992 the leg-name rule agrees with `readTrunkRed`'s, name by name (the copy here is held to the original by driving it)", () => {
+  const names = ["cross-repo", "checks (cross-repo)", "ci / cross-repo", "cross-repo-copies", "checks (cross-repo-copies)", "gate", "not-cross-repo", "xcross-repo"];
+  const stateDir = mkdtempSync(join(tmpdir(), "cross-repo-red-parity-"));
+  try {
+    const verdicts = names.map((name) => {
+      const run = (args: string[]) => {
+        const line = args.join(" ");
+        if (line.includes("/actions/workflows/")) return JSON.stringify({ workflow_runs: [{ id: 1, head_sha: "a", status: "completed", conclusion: "success", html_url: "u", created_at: "2026-10-11T15:00:00Z", event: "push" }] });
+        if (line.includes("/jobs")) return JSON.stringify({ jobs: [{ name, conclusion: "failure" }] });
+        return "[]";
+      };
+      const red = readTrunkRed(run, trunkOfCodeRepository("lab", LAB), { stateDir, report: () => {} });
+      return { name, theirs: red?.leg === name, ours: CROSS_REPO_LEG.test(name) };
+    });
+    assert.ok(verdicts.some((v) => v.theirs) && verdicts.some((v) => !v.theirs), "both answers occur, so agreement is not two silences");
+    for (const v of verdicts) assert.equal(v.ours, v.theirs, v.name);
+  } finally {
+    rmSync(stateDir, { recursive: true, force: true });
+  }
+});
+
+// --- the decider ---
+
+test("#992 (1) POSITIVE CONTROL: the lab#81 reading -- two files failing on the PR leg and green on the newest trunk run -- is `cross-repo-red`, naming both, the run and the line to add", () => {
+  const { verdict } = ask();
+  assert.equal(verdict.kind, "cross-repo-red", why(verdict));
+  assert.deepEqual(filesOf(verdict), FILES);
+  for (const file of FILES) assert.ok(why(verdict).includes(file), file);
+  assert.match(why(verdict), new RegExp(`newest trunk run \\(https://github\\.com/${LAB}/actions/runs/${TRUNK_RUN}, success\\)`));
+  assert.match(why(verdict), /Add a line `Cross-repo-red: <row>`/);
+  assert.match(why(verdict), /its body carries no `Cross-repo-red:` line/);
+});
+
+test("#992 (1) the declaration: an OPEN row is `clear` (`owner/repo#n` and a bare `#n` of the PR's own repository), and the row is read where it lives", () => {
+  const full = ask({}, DECLARED_BODY);
+  assert.deepEqual(full.verdict, { kind: "clear" });
+  const issueReads = full.calls.filter((args) => args[0] === "issue");
+  assert.deepEqual(issueReads, [["issue", "view", "5080", "--repo", PRIMARY, "--json", "state"]], "the core-side row's own tracker, not the PR's repository");
+  const bare = ask({}, `${BODY}\nCross-repo-red: #7\n`);
+  assert.deepEqual(bare.verdict, { kind: "clear" });
+  assert.deepEqual(bare.calls.filter((args) => args[0] === "issue").map((args) => args[4]), [LAB], "a bare `#n` is the PR's own repository");
+});
+
+test("#992 (1) each way a declaration can fail is refused with a `why` that says WHICH: a CLOSED row, a row that does not exist, `soon`, a missing line", () => {
+  const closed = ask({}, `${BODY}\nCross-repo-red: ${PRIMARY}#5079\n`).verdict;
+  assert.equal(closed.kind, "cross-repo-red");
+  assert.match(why(closed), /its `Cross-repo-red:` row does not stand: a11ign\/a11ign#5079 is CLOSED/);
+  assert.deepEqual(filesOf(closed), FILES);
+
+  const absent = ask({}, `${BODY}\nCross-repo-red: ${PRIMARY}#99999\n`).verdict;
+  assert.equal(absent.kind, "cross-repo-red", why(absent));
+  assert.match(why(absent), /a11ign\/a11ign#99999 does not exist/);
+
+  const soon = ask({}, `${BODY}\nCross-repo-red: soon\n`);
+  assert.equal(soon.verdict.kind, "cross-repo-red");
+  assert.match(why(soon.verdict), /its `Cross-repo-red:` line is malformed \(`soon` is not `#n` or `owner\/repo#n`\)/);
+  assert.deepEqual(soon.calls.filter((args) => args[0] === "issue"), [], "a malformed line names no row, so no row is read");
+
+  const none = ask({}, BODY).verdict;
+  assert.match(why(none), /its body carries no `Cross-repo-red:` line/);
+  for (const bad of ["#", "a11ign#7", "a/b/c#7", "#7 and more", "owner/repo#"]) {
+    assert.equal(ask({}, `${BODY}\nCross-repo-red: ${bad}\n`).verdict.kind, "cross-repo-red", `\`${bad}\` is not a row`);
+  }
+  assert.deepEqual(declaredRows("Cross-repo-red: #7\nCross-repo-red: a/b#8\n  cross-repo-red:   #9  ", LAB).rows,
+    [{ repo: LAB, number: 7 }, { repo: "a/b", number: 8 }, { repo: LAB, number: 9 }], "the line is read as `Closes` is: bare is the PR's repository, any case, any indent");
+});
+
+test("#992 (2) NEGATIVE CONTROL: a leg that PASSED, a PR with no leg at all, and a leg that was cancelled are `clear` (and the trunk is not even asked)", () => {
+  for (const prLeg of ["success", "cancelled", "skipped", null]) {
+    const { verdict, calls } = ask({ prLeg });
+    assert.deepEqual(verdict, { kind: "clear" }, String(prLeg));
+    assert.ok(!calls.some((args) => args.join(" ").includes("actions/workflows")), `${prLeg}: a leg that is not red asks nothing of the trunk`);
+  }
+});
+
+test("#992 (2) NEGATIVE CONTROL: an INHERITED red is not the PR's -- the same two files failing on the newest trunk run too are `clear`", () => {
+  const inherited = ask({ trunkLeg: "failure", trunkLog: logOf(...FILES) });
+  assert.deepEqual(inherited.verdict, { kind: "clear" });
+  assert.ok(inherited.calls.some((args) => args.join(" ").startsWith(`run view ${TRUNK_RUN} `)), "the trunk's log WAS read, so `clear` is a comparison and not a skip");
+  const control = ask({ trunkLeg: "failure", trunkLog: logOf(FILES[0]) });
+  assert.equal(control.verdict.kind, "cross-repo-red", "the control: trunk fails only one of the two");
+  assert.deepEqual(filesOf(control.verdict), [FILES[1]], "and only the file the trunk does not fail is named");
+});
+
+test("#992 (2) NEGATIVE CONTROL: a PR touching only SOME of trunk's failing files is `clear`", () => {
+  const trunk = logOf(...FILES, "packages/lab/src/other/a.test.ts", "packages/lab/src/other/b.test.ts");
+  const some = ask({ prLeg: "failure", prLog: logOf(FILES[1], "packages/lab/src/other/b.test.ts"), trunkLeg: "failure", trunkLog: trunk });
+  assert.deepEqual(some.verdict, { kind: "clear" });
+  const plusOne = ask({ prLeg: "failure", prLog: logOf(FILES[1], "packages/lab/src/new/c.test.ts"), trunkLeg: "failure", trunkLog: trunk });
+  assert.deepEqual(filesOf(plusOne.verdict), ["packages/lab/src/new/c.test.ts"], "the control: one file of its own is the whole refusal");
+});
+
+test("#992 (2) NEGATIVE CONTROL: a primary-project PR and an undeclared repository are `clear` with ZERO `gh` calls", () => {
+  for (const repo of [PRIMARY, "someone/else"]) {
+    const { verdict, calls } = ask({}, BODY, repo);
+    assert.deepEqual(verdict, { kind: "clear" }, repo);
+    assert.deepEqual(calls, [], `${repo}: the run double recorded no call`);
+  }
+  assert.equal(ask({}, BODY, LAB).verdict.kind, "cross-repo-red", "the control: the same world, asked of the lab, is refused");
+});
+
+test("#992 (3) every read that cannot be made is `cannot-ask` -- a run that THROWS, or a log that names no file, never arms", () => {
+  const unreadable: Record<string, World> = {
+    "the PR head": { throwOn: /headRefOid/ },
+    "the PR's check runs": { throwOn: /check-runs/ },
+    "the PR's failed log": { throwOn: new RegExp(`run view ${PR_RUN}`) },
+    "a PR log that names no failing file": { prLog: `${LEG}\t${STEP}\t2026-10-11T15:35:54.0000000Z ##[error]Process completed with exit code 1.` },
+    "the trunk's runs": { throwOn: /actions\/workflows/ },
+    "the trunk run's jobs": { throwOn: new RegExp(`actions/runs/${TRUNK_RUN}/jobs`) },
+    "a trunk run with no cross-repo job": { trunkLeg: null },
+    "a trunk leg that read cancelled": { trunkLeg: "cancelled" },
+    "the trunk's failed log": { trunkLeg: "failure", throwOn: new RegExp(`run view ${TRUNK_RUN}`) },
+    "a trunk log that names no failing file": { trunkLeg: "failure", trunkLog: "" },
+    "a page of check runs that was not read": { prLeg: null, totalCount: 250 },
+  };
+  assert.ok(Object.keys(unreadable).length >= 11, "the cases exist, so the loop below cannot pass by being empty");
+  for (const [name, w] of Object.entries(unreadable)) {
+    const { verdict } = ask(w);
+    assert.equal(verdict.kind, "cannot-ask", `${name}: ${why(verdict)}`);
+    assert.ok(why(verdict).length > 20, name);
+  }
+  assert.equal(crossRepoRedVerdict({ number: 81, repo: LAB, prBody: BODY, codeRepositories: DECLARED, run: () => { throw new Error("HTTP 502"); } }).kind, "cannot-ask");
+  assert.equal(ask({}, null).verdict.kind, "cannot-ask", "a body that was not read, over a red leg");
+  assert.equal(ask({ prLeg: "success" }, null).verdict.kind, "clear", "and over a green one nothing was needed of it");
+  assert.equal(ask({ throwOn: /issue view/ }, DECLARED_BODY).verdict.kind, "cannot-ask", "a declared row that could not be read is not a closed one");
+});
+
+test("#992 the project declares the lab as a code repository with a cross-repo leg, and the primary as the one with none (the doors below read it)", () => {
+  const declared = homeProjectDeclaration().code;
+  assert.ok(declared.some((code) => code.repo === LAB && code.key !== ""), "lab is declared, so the doors' default reading asks about it");
+  assert.equal(declared.find((code) => code.repo === PRIMARY)?.key, "", "the primary has the empty key, which `legSourceOf` never asks about");
+});
+
+// --- the two doors ---
+
+function driveArm(w: World = {}) {
+  const fake = world({ ...w, body: w.body ?? BODY });
+  const said: string[] = [];
+  const run = (_cmd: string, args: string[]) => fake.run(args);
+  const code = runArmPr({ argv: ["--pr=81", `--repo=${LAB}`], env: {}, run: run as never, sleep: () => "ok" as const,
+    log: (line: string) => said.push(line), error: (line: string) => said.push(line), lanes: { lanes: [] } });
+  const commented = fake.calls.filter((args) => args[0] === "pr" && args[1] === "comment");
+  return { code, said: said.join("\n"), merged: fake.calls.some((args) => args[0] === "pr" && args[1] === "merge"), commented, calls: fake.calls };
+}
+
+test("#992 (5) arm-pr: lab#81's reading is NOT armed -- no merge call, exit DONE, the line names both files and the declaration to add", () => {
+  const out = driveArm();
+  assert.equal(out.merged, false, out.said);
+  assert.equal(out.code, EXIT.DONE, "waiting on a declaration is not a failure, as a hold is not");
+  assert.match(out.said, new RegExp(`NOT arming #81 -- the cross-repo leg of #81 fails on 2 test files`));
+  for (const file of FILES) assert.ok(out.said.includes(file), file);
+  assert.match(out.said, /Cross-repo-red: <row>/);
+});
+
+test("#992 (5) arm-pr CONTROLS: the same PR declaring an OPEN row ARMS, and so does one whose red the trunk already has", () => {
+  const declared = driveArm({ body: DECLARED_BODY });
+  assert.equal(declared.merged, true, declared.said);
+  assert.equal(declared.commented.length, 0, "an armed PR gets no refusal comment");
+  const inherited = driveArm({ trunkLeg: "failure", trunkLog: logOf(...FILES) });
+  assert.equal(inherited.merged, true, inherited.said);
+  const closed = driveArm({ body: `${BODY}\nCross-repo-red: ${PRIMARY}#5079\n` });
+  assert.equal(closed.merged, false, "a CLOSED row is not a declaration");
+  assert.match(closed.said, /a11ign\/a11ign#5079 is CLOSED/);
+});
+
+test("#992 (3) arm-pr: a leg whose log cannot be read arms nothing and exits CANNOT_ASK, the code an unreadable label list gets", () => {
+  const out = driveArm({ throwOn: new RegExp(`run view ${PR_RUN}`) });
+  assert.equal(out.merged, false, out.said);
+  assert.equal(out.code, EXIT.CANNOT_ASK);
+  assert.match(out.said, /could not read the failed log/);
+  assert.equal(out.commented.length, 0, "nothing is known, so nothing is announced");
+});
+
+test("#992 (5) arm-pr: the refusal is COMMENTED once -- its marker holds the files, so a changed set is said afresh", () => {
+  const first = driveArm();
+  assert.equal(first.commented.length, 1, first.said);
+  const text = first.commented[0].join(" ");
+  assert.ok(text.includes(crossRepoRedMarker(FILES)), "the marker names the files");
+  assert.match(text, /arm-refused: cross-repo-red packages\/lab\/src\/packaging\/every-test-file-is-run\.test\.ts,packages\/lab\/src\/packaging\/layer-edges\.test\.ts/);
+  assert.match(text, /Not armed: the cross-repo leg of #81 fails on 2 test files/);
+  assert.doesNotMatch(text, /nothing needs doing here/, "something DOES need doing: the line to add");
+
+  const marker = first.commented[0][first.commented[0].indexOf("--body") + 1].split("\n")[0];
+  const again = driveArm({ comments: [{ body: "unrelated" }, { body: `${marker}\nNot armed` }] });
+  assert.equal(again.commented.length, 0, "ONE comment for one file set");
+  assert.equal(again.merged, false);
+
+  const changed = driveArm({ comments: [{ body: crossRepoRedMarker([FILES[0]]) }] });
+  assert.equal(changed.commented.length, 1, "a comment about a different file set does not stand in for this one");
+});
+
+test("#992 (5) the sweep's `refusalBeforeArming` refuses the SAME pull request, and clears it when the row is declared", () => {
+  const ask2 = (w: World) => { const fake = world(w); return refusalBeforeArming({ number: "81", repo: LAB, author: "worker-1", prBody: w.body ?? BODY, run: fake.run }); };
+  const refused = ask2({});
+  assert.equal(refused.kind, "cross-repo-red");
+  assert.deepEqual(filesOf(refused), FILES);
+  assert.equal(ask2({ body: DECLARED_BODY }).kind, "clear");
+  assert.equal(ask2({ throwOn: /check-runs/ }).kind, "cannot-ask");
+  const fake = world({});
+  assert.equal(refusalBeforeArming({ number: "81", repo: PRIMARY, author: "worker-1", prBody: BODY, run: fake.run }).kind, "clear");
+  assert.ok(!fake.calls.some((args) => args.join(" ").includes("check-runs")), "a primary PR is not asked about a leg");
+});
+
+// --- door two as the real process ---
+
+const SWEEP = fileURLToPath(new URL("../auto-arm-sweep.ts", import.meta.url));
+
+/** The real sweep over ONE open lab PR (#81), a fake `gh` answering from its arguments. */
+function driveSweep({ body = BODY, existingComment = "" }: { body?: string; existingComment?: string }) {
+  const dir = mkdtempSync(join(tmpdir(), "cross-repo-red-sweep-"));
+  try {
+    mkdirSync(join(dir, "bin"));
+    const put = (name: string, text: string) => writeFileSync(join(dir, name), text);
+    put("body.txt", body);
+    put("comments.json", JSON.stringify({ comments: [{ body: existingComment }] }));
+    put("pr.log", LAB81_LEG_LOG);
+    put("trunk.log", "");
+    put("checks.json", JSON.stringify({ total_count: 2, check_runs: [{ name: "gate", conclusion: "success" },
+      { name: LEG, conclusion: "failure", details_url: `https://github.com/${LAB}/actions/runs/${PR_RUN}/job/114504845032` }] }));
+    put("push.json", JSON.stringify({ workflow_runs: [{ id: TRUNK_RUN, head_sha: "77283f6e", status: "completed", conclusion: "success",
+      html_url: `https://github.com/${LAB}/actions/runs/${TRUNK_RUN}`, created_at: "2026-10-11T15:35:54Z", event: "push" }] }));
+    put("schedule.json", JSON.stringify({ workflow_runs: [] }));
+    put("jobs.json", JSON.stringify({ jobs: [{ name: "gate", conclusion: "success" }, { name: LEG, conclusion: "success" }] }));
+    writeFileSync(join(dir, "bin", "gh"), `#!/bin/bash
+echo "$*" >> "${dir}/calls"
+case "$*" in
+  *"issue view 5078 "*) echo '{"blockedBy":{"nodes":[],"totalCount":0}}' ;;
+  *"issue view 5080 "*) echo '{"state":"OPEN"}' ;;
+  *"issue view"*) echo 'HTTP 404' >&2; exit 1 ;;
+  *timelineItems*) echo '{"mergeQueueEntry":null,"timelineItems":{"nodes":[]}}' ;;
+  *"api graphql"*) echo '[{"number":81,"isDraft":false,"merged":false,"autoMergeRequest":null,"mergeQueueEntry":null}]' ;;
+  *"--json comments"*) cat "${dir}/comments.json" ;;
+  *"--json body"*) cat "${dir}/body.txt" ;;
+  *"--json labels"*) echo '[]' ;;
+  *"--json author"*) echo 'worker-1' ;;
+  *"--json headRefOid"*) echo ${PR_HEAD} ;;
+  *"check-runs?per_page=100"*) cat "${dir}/checks.json" ;;
+  *"check-runs"*) echo 2 ;;
+  *"event=push"*) cat "${dir}/push.json" ;;
+  *"event=schedule"*) cat "${dir}/schedule.json" ;;
+  *"actions/runs/${TRUNK_RUN}/jobs"*) cat "${dir}/jobs.json" ;;
+  *"run view ${PR_RUN} "*) cat "${dir}/pr.log" ;;
+  *"run view ${TRUNK_RUN} "*) cat "${dir}/trunk.log" ;;
+esac
+`);
+    chmodSync(join(dir, "bin", "gh"), 0o755);
+    const proc = spawnSync(process.execPath, [SWEEP], { encoding: "utf8", env: { ...process.env,
+      GITHUB_REPOSITORY: LAB, PATH: `${join(dir, "bin")}:${process.env.PATH}` } });
+    const calls = readFileSync(join(dir, "calls"), "utf8").split("\n").filter(Boolean);
+    return { said: proc.stdout + proc.stderr, status: proc.status, merged: calls.some((c) => c.startsWith("pr merge")),
+      commented: calls.filter((c) => c.startsWith("pr comment")) };
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+test("#992 (5) sweep, as a process: lab#81's reading is SKIPPED naming the files, nothing is merged, one comment is posted", () => {
+  const out = driveSweep({});
+  assert.equal(out.merged, false, out.said);
+  assert.match(out.said, /SWEEP: #81 SKIPPED -- the cross-repo leg of #81 fails on 2 test files/);
+  assert.equal(out.status, 0, "a PR waiting on a declaration is not an arming failure, as a hold is not");
+  assert.equal(out.commented.length, 1, out.said);
+  assert.match(out.commented[0], /arm-refused: cross-repo-red /);
+});
+
+test("#992 (5) sweep, as a process: a tick that finds the marker already on the PR posts nothing more, and a changed file set is said afresh", () => {
+  const once = driveSweep({ existingComment: `${crossRepoRedMarker(FILES)}\nNot armed` });
+  assert.equal(once.merged, false, once.said);
+  assert.equal(once.commented.length, 0, once.said);
+  const changed = driveSweep({ existingComment: crossRepoRedMarker([FILES[0]]) });
+  assert.equal(changed.commented.length, 1, changed.said);
+});
