@@ -1237,8 +1237,44 @@ const defaultBranchHead = (repo: string, branch: string): string | null => {
   }
 };
 
-/** The login `gh` will author the pull request as -- `gh pr create` runs under the same account and `GH_CONFIG_DIR`. */
-const defaultLogin = () => execFileSync("gh", ["api", "user", "--jq", ".login"], { encoding: "utf8" }).trim();
+/** `gh`'s own failure line: its stderr when it said one, else the error's first line. @param {unknown} error */
+const ghFailureLine = (error: unknown) =>
+  `${(error as { stderr?: unknown }).stderr ?? ""}`.trim().split("\n")[0] || messageOf(error).split("\n")[0];
+
+/**
+ * #811: THE LOGIN `gh` WILL AUTHOR THE PULL REQUEST AS, FROM `gh api user` AND, WHERE THAT IS REFUSED, FROM THE GRAPHQL VIEWER.
+ *
+ * Since #4910 a worker's `gh` runs on a GitHub App's installation token, and `GET /user` answers an installation token
+ * `HTTP 403 Resource not accessible by integration`, so `gh api user` refused every worker's PR into a review-only lane.
+ * GraphQL `viewer { login }` answers for the same token (`a11ign-workers[bot]`; measured 2026-10-11 from a worker session,
+ * the 403 and the answer side by side). The second read runs only after the first fails, so a user token pays one call.
+ *
+ * AN IDENTITY NEITHER READ ANSWERS THROWS, naming both failures: `authorshipRefusal` refuses on it, because a login that
+ * cannot be read is never read as "not the owner" (#3254). An empty answer is a failure too, not a login.
+ *
+ * @param {(args: string[]) => string} gh runs `gh` with the args and returns its stdout, or throws
+ * @returns {string}
+ */
+export function loginThrough(gh: (args: string[]) => string): string {
+  const reads: [string, string[]][] = [
+    ["`gh api user`", ["api", "user", "--jq", ".login"]],
+    ["the GraphQL `viewer` read", ["api", "graphql", "-f", "query={ viewer { login } }", "--jq", ".data.viewer.login"]],
+  ];
+  const failures: string[] = [];
+  for (const [name, args] of reads) {
+    try {
+      const login = gh(args).trim();
+      if (login) return login;
+      failures.push(`${name} answered no login`);
+    } catch (error) {
+      failures.push(`${name}: ${ghFailureLine(error)}`);
+    }
+  }
+  throw new Error(failures.join("; "));
+}
+
+/** The login `gh` will author the pull request as -- `gh pr create` runs under the same account (or App) and `GH_CONFIG_DIR`. */
+const defaultLogin = () => loginThrough((args) => execFileSync("gh", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }));
 
 /**
  * #3254, #1756 RULING ITEM 7: A REVIEW-ONLY LANE'S OWNER DOES NOT OPEN A PULL REQUEST INTO IT -- refused before
@@ -1263,7 +1299,7 @@ export function authorshipRefusal(mode: string, rest: string[], { git = defaultG
   try {
     author = login();
   } catch (error) {
-    return `pr-open: REFUSED -- this diff touches a review-only lane and \`gh api user\` could not say who is opening it: ${messageOf(error).split("\n")[0]}. Nothing was sent (#3254).`;
+    return `pr-open: REFUSED -- this diff touches a review-only lane and \`gh api user\` (and the GraphQL \`viewer\` read after it) could not say who is opening it: ${messageOf(error).split("\n")[0]}. Nothing was sent (#3254).`;
   }
   const refusal = laneAuthorshipRefusal({ author, files: diff.files, lanes });
   return refusal === null ? null : `pr-open: REFUSED -- ${refusal} Nothing was sent.`;
