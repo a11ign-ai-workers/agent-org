@@ -263,10 +263,25 @@ function namesDifferentFailureClasses(row: BoardRow, other: BoardRow): boolean {
   return a !== undefined && b !== undefined && a !== b;
 }
 
+/**
+ * The build a pipeline verify row names: its `Verifies: #n` line or its `<!-- verify-row: build #n -->` marker (`verify-row.ts` writes both). A reader of the body, so a row that names no build is `[]`.
+ * @param {string | undefined} body @returns {number[]}
+ */
+const buildsVerifiedBy = (body: string | undefined): number[] => [...String(body ?? "").matchAll(/^\s*Verifies:\s*#(\d+)\b|<!--\s*verify-row:\s*build\s+#(\d+)\s*-->/gim)].map((m) => Number(m[1] ?? m[2]));
+
+/**
+ * A verify row and the build it verifies are two rows (agent-org#765): the pipeline files `Verify <build title>` the moment a build closes, with its reading 24 hours out, so its title is the build's plus one word
+ * (a11ign#4901 against #4488). Closing it as a twin would drop that reading. Either row may be the one that names the other; two rows that merely read alike are compared by words alone.
+ * @param {BoardRow} row @param {BoardRow} other @returns {boolean}
+ */
+function verifiesOrVerifiedBy(row: BoardRow, other: BoardRow): boolean {
+  return buildsVerifiedBy(row.body).includes(other.number) || buildsVerifiedBy(other.body).includes(row.number);
+}
+
 /** @param {BoardRow} row @param {BoardRow} other @returns {boolean} */
 function nearDuplicates(row: BoardRow, other: BoardRow): boolean {
   const [a, b] = [wordsOf(row.title), wordsOf(other.title)];
-  return a.size >= DUPLICATE_MIN_WORDS && b.size >= DUPLICATE_MIN_WORDS && similarity(a, b) >= DUPLICATE_SIMILARITY && !namesDifferentRepos(row, other) && !namesDifferentFailureClasses(row, other);
+  return a.size >= DUPLICATE_MIN_WORDS && b.size >= DUPLICATE_MIN_WORDS && similarity(a, b) >= DUPLICATE_SIMILARITY && !namesDifferentRepos(row, other) && !namesDifferentFailureClasses(row, other) && !verifiesOrVerifiedBy(row, other);
 }
 
 /** @param {BoardRow} row @param {Map<number, BoardRow>} known @returns {Finding[]} */
