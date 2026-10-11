@@ -15,7 +15,7 @@ Evidence: the two files below, 53 of 53 (11 new, 42 existing). `tsc --noEmit` is
 
 Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/work-gate-closed-claim-keyed-pane.test.ts src/packaging/closed-row-ends-instance.test.ts`
 
-Closes: #757
+Closes: a11ign/agent-org#757
 
 Note on the row's own Acceptance: it names `src/work-gate-closed-claim.test.ts`, which does not exist (`git ls-files` finds no such file), and does `cd /home/agent/repos/agent-org`, the primary clone, which cannot see this branch (run verbatim there it prints `Could not find ...`). The command above runs the new file and the existing closed-claim tests, `src/packaging/closed-row-ends-instance.test.ts`, from this worktree.
 
