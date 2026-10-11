@@ -1,0 +1,34 @@
+[Unit]
+# THE AFTER-CRASH UNIT -- a11ign#5127. On 2026-10-11 the host went down hard at 18:05:24Z and came back with `project.json` at 0 bytes (every tick crashed), 16 empty
+# files in the tool checkout's `.git`, and every agent pane dead; the chairman repaired it by hand in about 20 minutes. `crash-recover.ts` is that repair: restore
+# truncated tracked files from HEAD, move empty git files aside and refetch, resume each dead pane by session id with the org's launch flags, `reset-failed`,
+# and say once what was done. ON A CLEAN BOOT IT DETECTS NOTHING AND CHANGES NOTHING.
+#
+# `Before=` THE TICK TIMER, so the first tick after a crash reads restored files. Flag `host.crashRecover` (on when absent); revert is `systemctl --user disable` this unit.
+Description=a11ign: repair and resume after an unclean shutdown (crash-recover.ts, #5127)
+Before=@@prefix@@work-tick.timer
+After=default.target
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+
+WorkingDirectory=@@checkout@@
+
+# A unit gets no login shell's PATH or HOME; the procedure starts `git`, `herdr`, `journalctl` and `systemctl` by name.
+Environment=PATH=@@binDir@@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=@@home@@
+
+# V8'S COMPILE CACHE GOES UNDER THE HOME, NOT /tmp -- #2458; `host-units.test.ts` pins it on every shipped service.
+Environment=NODE_COMPILE_CACHE=%h/.cache/node-compile-cache
+
+# THE WORKERS' ACCOUNT, as every unit that can reach a `gh` spawn declares it (#1974): the announcement goes through `chairman:reply`, whose readers use `gh`.
+Environment=GH_CONFIG_DIR=@@workersDir@@/gh
+
+ExecStart=%h/.local/bin/node packages/agent-org/src/crash-recover.ts
+
+# A refetch of a large repository is the long step; this bounds a hung one so the tick timer is not held for ever.
+TimeoutStartSec=900
+
+[Install]
+WantedBy=default.target

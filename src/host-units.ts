@@ -116,6 +116,8 @@ export const TOOL_ENTRIES = Object.freeze([
   "kernel-reboot.service.in", "kernel-reboot.timer.in",
   // a11ign#4879: the daily confidence reading's pair. The service runs `decision-confidence-post.ts`, which posts once per UTC day and dedupes itself; the timer is only a clock.
   "confidence-post.service.in", "confidence-post.timer.in",
+  // a11ign#5127: the after-crash unit, run once at boot BEFORE the tick timer; it has no timer of its own (`WantedBy=default.target`, `RemainAfterExit`).
+  "crash-recover.service.in",
   // a11ign#4823: the `claude` seat wrapper, COPIED like `gh` (`seatWrapperFiles`) but into the first directory on a pane's PATH, not `binDir`.
   "claude",
 ]);
