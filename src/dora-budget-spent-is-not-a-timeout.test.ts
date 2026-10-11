@@ -15,10 +15,11 @@
 import { test, afterEach } from "node:test";
 import assert from "node:assert/strict";
 import { execFileSync } from "node:child_process";
-import { chmodSync, readFileSync, writeFileSync } from "node:fs";
+import { chmodSync, existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
+import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { sandboxGitEnv } from "./lib/git-env.ts";
-import { tmpDirForFile } from "./lib/tmp-fixture.ts";
+import { removeAll, tmpDirForFile } from "./lib/tmp-fixture.ts";
 import { githubReaders, readRepository, tagReleasesFrom } from "./dora.ts";
 
 /* eslint-disable @typescript-eslint/no-explicit-any */
@@ -183,4 +184,45 @@ test("a tag the clone does NOT hold, even after the fetch, is asked of GitHub: t
   assert.deepEqual(asked, ["v-only-on-github"]);
   assert.equal(placed.find((release) => release.id === "v-only-on-github")?.commit, SHA);
   assert.deepEqual(placed.slice(0, TAGS).map((release) => release.commit), chain);
+});
+
+// ---------------------------------------------------------------------------------------------------------------------
+// PART THREE (#987): THE DIRECTORY THIS FILE MAKES IS REMOVED, OR THIS FILE FAILS. The merge-queue run 38150393779 left `dora-budget-*` holding 4 of its 5 entries
+// with all ten cases green, which ejected an unrelated pull request. These two are the helper's two halves, kept in the file that leaked.
+
+const FIXTURE = fileURLToPath(new URL("./lib/tmp-fixture.ts", import.meta.url));
+
+/** A child that makes a `tmpDirForFile` directory with a file in it and exits through `process.exit`, so the helper's `after` never gets to run. Returns the directory it made. */
+function childMakingADirectory(name: string, { exitFallback }: { exitFallback: boolean }): string {
+  const script = join(scratch, `${name}.ts`);
+  writeFileSync(script, `import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { tmpDirForFile } from ${JSON.stringify(FIXTURE)};
+const dir = tmpDirForFile("fixture-exit-");
+writeFileSync(join(dir, "kept"), "1");
+console.log(dir);
+${exitFallback ? "" : "process.removeAllListeners('exit');"}
+process.exit(0);
+`);
+  const out = execFileSync("node", [script], { env: { ...sandboxGitEnv(), PATH: process.env.PATH, TMPDIR: scratch }, encoding: "utf8" });
+  return out.trim();
+}
+
+test("a fork that exits before the helper's `after` runs still has its directory removed, and with the exit fallback taken away the same child leaves it (the positive control)", () => {
+  const left = childMakingADirectory("without-fallback", { exitFallback: false });
+  assert.ok(existsSync(join(left, "kept")), "the control: a child whose `after` never runs and has no exit fallback leaves its directory");
+  const removed = childMakingADirectory("with-fallback", { exitFallback: true });
+  assert.ok(!existsSync(removed), `${removed} is still there after its process exited`);
+});
+
+test("a directory that cannot be removed does not stop the others, and is named in a failure thrown at the end", () => {
+  const made = new Set([join(scratch, "stuck-a"), join(scratch, "stuck-b"), join(scratch, "stuck-c")]);
+  for (const dir of made) mkdirSync(dir);
+  const stuck = join(scratch, "stuck-b");
+  const remove = (dir: string) => { if (dir === stuck) throw Object.assign(new Error("busy"), { code: "ENOTEMPTY" }); execFileSync("rmdir", [dir]); };
+  assert.throws(() => removeAll(made, remove), (error: Error) => error.message.includes(`${stuck}: ENOTEMPTY`) && !error.message.includes("stuck-a"));
+  assert.ok(!existsSync(join(scratch, "stuck-a")) && !existsSync(join(scratch, "stuck-c")), "the directories either side of the stuck one are removed");
+  assert.deepEqual([...made], [stuck], "only the one that failed stays registered, for the exit fallback");
+  removeAll(made);
+  assert.ok(!existsSync(stuck));
 });
