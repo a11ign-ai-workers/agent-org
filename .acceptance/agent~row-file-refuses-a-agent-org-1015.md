@@ -6,4 +6,4 @@ Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json 
 
 Mutation: six, each red and each restore byte-identical: flag ignored (1 red); rule never fires (7); several fences allowed (1); vacuous `then` allowed (1); no-fence exemption removed (2); `run` unchecked (2).
 
-Closes: #1015
+Closes: a11ign/agent-org#1015
