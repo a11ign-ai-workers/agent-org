@@ -408,10 +408,11 @@ app_role() {
   else printf workers; fi
 }
 
-# `$1` a role: sets `app_id`, `app_key` and `app_inst` from the declaration rendered here (host.json's `github.identity`), or fails for a
-# role it declares no app for. The minter is handed these and never reads host.json: it would have to resolve the project from the cwd.
+# `$1` a role: sets `app_id`, `app_key`, `app_inst` and `app_slug` from the declaration rendered here (host.json's `github.identity`), or fails
+# for a role it declares no app for. The minter is handed the first three and never reads host.json: it would have to resolve the project from
+# the cwd. `app_slug` is empty for an app declared with no slug.
 app_declared() {
-  app_id=; app_key=; app_inst=
+  app_id=; app_key=; app_inst=; app_slug=
   @@appDeclared@@
 }
 
@@ -473,6 +474,40 @@ if [ -n "$APP_ROLES" ] && [ -z "${GH_TOKEN:-}" ] && [ -z "${GITHUB_TOKEN:-}" ]; 
         app_account=app:$app_who
       fi ;;
   esac
+fi
+
+# --- #791: `gh api user` UNDER AN APP IS ANSWERED FROM THE DECLARATION, NOT SENT TO GITHUB -----------------------------------------
+#
+# An installation token is refused `GET /user` (`403 Resource not accessible by integration`, measured 2026-10-10 under the workers' App), and
+# three callers ask it who they are: `pr:open` (`defaultLogin`, when a diff touches a review-only lane), the review door
+# (`pr-review-verdict.sh`, exit 4) and the weekly post. For a call that goes out as a role's App this prints `{"login":"<slug>[bot]"}`, the
+# login the App's writes are authored as, with no call to GitHub, and records the ledger line as `app:<role>`, resource `declared`.
+#
+#   - ONLY THE TWO SPELLINGS THE CALLERS USE: `api user` (or `api /user`) bare, and with `--jq .login` (`-q .login`, `--jq=.login`, `-q.login`,
+#     `-q=.login`). Any other argument (another filter, `-H`, `-i`, `--hostname`, a method) goes through, since a login is all this can say
+#     and a wrong answer to a different question is worse than GitHub's refusal. The answer carries `login` and nothing else.
+#   - ONLY A CALL THAT IS THE APP'S: `app_account` is set above only when the role's token was read or minted and is in `GH_TOKEN`. A mint that
+#     failed falls back to the account and the call goes through, where GitHub answers with that account's own login, which is true; an explicit
+#     `GH_TOKEN` or `GITHUB_TOKEN`, and a role with no App, never reach here either.
+#   - A ROLE WITH AN APP AND NO `slug` IS UNCHANGED: the wrapper has no login to give and does not guess one from the app's id or the account.
+app_login=
+app_user_asked() { # the call's arguments: succeeds for the bare `api user` or `api user --jq .login`, setting `app_user_jq` to 1 for the second
+  app_user_jq=0
+  [ "$1" = api ] && { [ "${2:-}" = user ] || [ "${2:-}" = /user ]; } || return 1
+  shift 2
+  case $# in
+    0) return 0 ;;
+    1) case "$1" in --jq=.login|-q.login|-q=.login) app_user_jq=1; return 0 ;; esac ;;
+    2) case "$1 $2" in "--jq .login"|"-q .login") app_user_jq=1; return 0 ;; esac ;;
+  esac
+  return 1
+}
+if [ -n "$app_account" ] && app_user_asked "$@" && app_declared "${app_account#app:}" && [ -n "$app_slug" ]; then
+  app_login="${app_slug}[bot]"
+  if [ "$app_user_jq" = 1 ]; then printf '%s\n' "$app_login"; else printf '{"login":"%s"}\n' "$app_login"; fi
+  LEDGER_RESOURCE=declared
+  ledger_record 0 "" "$1" "$2" 2>/dev/null || :
+  exit 0
 fi
 
 # --- #4505 MOVE 0 (agent-org#486): A DECISION COMMENT CARRIES THE ROLE AND RUN THAT POSTED IT --------------------------------

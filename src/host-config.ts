@@ -238,7 +238,7 @@ function readGithub(host: Record<string, unknown>, source: string): Readonly<Git
 function readRoleIdentity(role: Record<string, unknown>, at: string, source: string): Readonly<RoleIdentity> {
   const mode = requiredString(role, "mode", at, source);
   if (mode === "user-accounts") {
-    for (const name of ["appId", "keyPath", "installationId"]) {
+    for (const name of ["appId", "keyPath", "installationId", "slug"]) {
       if (Object.hasOwn(role, name)) throw new HostConfigRefusal(`${at}${name}`, "it names an app, and `mode` is `user-accounts`, so it would be ignored", source);
     }
     return USER_ACCOUNTS;
@@ -248,7 +248,22 @@ function readRoleIdentity(role: Record<string, unknown>, at: string, source: str
   }
   const keyPath = requiredPath(role, "keyPath", at, source);
   const installationId = Object.hasOwn(role, "installationId") ? githubId(role, "installationId", at, source) : undefined;
-  return Object.freeze({ mode, appId: githubId(role, "appId", at, source), keyPath, ...(installationId === undefined ? {} : { installationId }) });
+  const slug = Object.hasOwn(role, "slug") ? appSlug(role, at, source) : undefined;
+  return Object.freeze({ mode, appId: githubId(role, "appId", at, source), keyPath, ...(installationId === undefined ? {} : { installationId }),
+    ...(slug === undefined ? {} : { slug }) });
+}
+
+/**
+ * An app's slug: what `https://github.com/apps/<slug>` carries, and the login its writes are authored as is `<slug>[bot]`, which `host/gh` answers
+ * `gh api user` with. REFUSED when written WITH the `[bot]` suffix (it would be appended twice, and the wrapper would then name a login nobody has).
+ */
+const APP_SLUG = /^[A-Za-z0-9](?:[A-Za-z0-9-]*[A-Za-z0-9])?$/;
+function appSlug(from: Record<string, unknown>, at: string, source: string): string {
+  const value = from.slug;
+  if (typeof value !== "string" || !APP_SLUG.test(value)) {
+    throw new HostConfigRefusal(`${at}slug`, `it must be the app's slug as it appears in https://github.com/apps/<slug>, without \`[bot]\`, not ${JSON.stringify(value)}`, source);
+  }
+  return value;
 }
 
 /** An id GitHub issued, written as a string or as the integer a hand-written file naturally holds; refused when it is neither. */
@@ -560,7 +575,7 @@ function appTokenValues(host: HostConfig, checkout: string): Record<string, stri
   const arms = GITHUB_ROLES.flatMap((role) => {
     const identity = roleIdentity(host, role);
     if (identity.mode !== "github-apps") return [];
-    return [`    ${role}) app_id=${shellQuote(identity.appId)}; app_key=${shellQuote(identity.keyPath)}; app_inst=${shellQuote(identity.installationId ?? "")} ;;`];
+    return [`    ${role}) app_id=${shellQuote(identity.appId)}; app_key=${shellQuote(identity.keyPath)}; app_inst=${shellQuote(identity.installationId ?? "")}; app_slug=${shellQuote(identity.slug ?? "")} ;;`];
   });
   return {
     appRoles: GITHUB_ROLES.filter((role) => roleIdentity(host, role).mode === "github-apps").join(" "),
