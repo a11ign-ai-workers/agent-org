@@ -1278,4 +1278,8 @@ test("#5110 instanceRefused reads the named session's stop_reason: a refusal is 
   assert.equal(instanceRefused("worker-77", dir, reader), true);
   assert.equal(instanceRefused("worker-78", dir, reader), false, "the control: an ordinary end of turn");
   assert.equal(instanceRefused("worker-none", dir, reader), false, "no transcript names it");
+  writeFileSync(join(project, "c.jsonl"), `${transcript("worker-79", "refusal")}${turn("end_turn")}\n`);
+  assert.equal(instanceRefused("worker-79", dir, reader), false, "a refusal earlier, then a normal end: the latest response decides");
+  writeFileSync(join(project, "d.jsonl"), `${transcript("worker-80", "end_turn")}${turn("refusal")}\n`);
+  assert.equal(instanceRefused("worker-80", dir, reader), true, "a normal end earlier, then a refusal: refused now");
 });

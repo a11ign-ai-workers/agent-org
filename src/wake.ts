@@ -7937,7 +7937,7 @@ export function escalationsNow(recordText: string, live: readonly string[], coun
     const read = counts(session);
     const verdict = shouldEscalate({ model: facts.model, ciFailures: facts.ciFailures, turns: read?.turns ?? null, compactions: read?.compactions ?? null, escalated: facts.escalated }, caps);
     if (verdict.action === "escalate") found.push({ row, session, reason: verdict.reason });
-    else if (haikuDefault.on === true && !facts.escalated && isHaiku(facts.model) && haikuDefault.refused?.(session) === true) found.push({ row, session, reason: "it was refused (its last response ended in a refusal)" });
+    else if (haikuDefault.on === true && !facts.escalated && isHaiku(facts.model) && haikuDefault.refused?.(session) === true) found.push({ row, session, reason: "it was refused (its latest response ended in a refusal)" });
   }
   return found;
 }
@@ -7945,9 +7945,19 @@ export function escalationsNow(recordText: string, live: readonly string[], coun
 /** The evidence a Haiku-default start moves up on beyond the caps: the flag, and whether a session's transcript ends in a refusal. */
 export type HaikuDefaultEvidence = { on?: boolean; refused?: (label: string) => boolean };
 
+/** The `stop_reason` of the LATEST assistant response in a transcript: a refusal earlier in the session, followed by a normal end, is not a refusal now. `null` when none is named. */
+function latestStopReason(text: string): string | null {
+  let latest: string | null = null;
+  for (const line of text.split("\n")) {
+    const found = /"stop_reason"\s*:\s*"([^"]*)"/.exec(line);
+    if (found !== null) latest = found[1];
+  }
+  return latest;
+}
+
 /** A session's newest transcript, read for a refusal: the API's `stop_reason` of `refusal`. `false` is "none seen", and a transcript that cannot be read is no evidence either way. */
 export function instanceRefused(label: string, root: string = join(process.env.HOME ?? "", ".claude", "projects"), reader: { readText: (file: string) => string; readHead: (file: string) => string; } = TRANSCRIPT_READER): boolean {
-  return newestTranscriptRead(label, root, reader, (text) => (/"stop_reason"\s*:\s*"refusal"/.test(text) ? true : null)) === true;
+  return newestTranscriptRead(label, root, reader, (text) => latestStopReason(text) === "refusal" ? true : null) === true;
 }
 
 /** What {@link performEscalations} needs from the host, every one a seam so the whole of it is tested without one. */
