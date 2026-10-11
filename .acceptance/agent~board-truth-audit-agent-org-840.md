@@ -8,7 +8,7 @@ Evidence: `src/board-truth-audit.test.ts` 47 of 47, including the new test (1b),
 
 Assumptions: a `Waiting-for:` condition that cannot be read is not held and still flags; a `Not-before:` date is read as held while it is after now, using the same reader as `waiting-condition.ts`.
 
-Closes: #840
+Closes a11ign/agent-org#840
 
 Outside-Region: none
 
