@@ -94,7 +94,7 @@ test("the prompt a spawned seat is sent carries that absolute path and no bare r
   assert.doesNotMatch(prompt, /read `\.agent-org\//, "the sentence no longer begins a relative path");
 });
 
-test("a host declaration that is not a file refuses the spawn, naming it; a file, and an environment that names none, do not", () => {
+test("a host declaration that is not a file (absent, empty or a directory) refuses the spawn, naming it; a file, and an environment that names none, do not", () => {
   const root = fixtureRoot([]);
   try {
     const present = join(root, "host.json");
@@ -103,8 +103,11 @@ test("a host declaration that is not a file refuses the spawn, naming it; a file
     const absent = join(root, "gone.json");
     assert.match(whyNoHost({ [HOST_CONFIG_ENV]: absent }) ?? "", new RegExp(`${HOST_CONFIG_ENV} names "${absent}", which is not a file`));
     assert.match(whyNoHost({ [HOST_CONFIG_ENV]: "" }) ?? "", /which is not a file/, "an empty value names no file either");
+    assert.match(whyNoHost({ [HOST_CONFIG_ENV]: root }) ?? "", new RegExp(`names "${root}", which is not a file`),
+      "a DIRECTORY that exists is not a host declaration (the reviewer's reproduction was `/tmp`; `existsSync` says true for it)");
+    assert.match(whyNoHost({ [HOST_CONFIG_ENV]: tmpdir() }) ?? "", /which is not a file/, "the reviewer's own reproduction, the temp directory");
     assert.equal(whyNoHost({}), null, "a caller's own environment that names none is its decision, as an override is");
-    assert.equal(whyNoHost({ [HOST_CONFIG_ENV]: absent }, () => true), null, "the existence test is the seam's: it is read, not assumed");
+    assert.equal(whyNoHost({ [HOST_CONFIG_ENV]: absent }, () => true), null, "the file test is the seam's: it is read, not assumed");
   } finally {
     rmSync(root, { recursive: true, force: true });
   }
@@ -133,7 +136,7 @@ test("MUTATION: a wake.ts that drops the key, lets the host win over an override
     "{ GH_CONFIG_DIR: WORKERS_GH_CONFIG_DIR, ...override, [HOST_CONFIG_ENV]: hostConfigPath() }");
   assert.notEqual(flipped, source, "the override-flipping fixture really differs");
   assert.deepEqual(spawnProblems(flipped), ["an override no longer wins over the host"]);
-  const late = source.replace("const unhosted = whyNoHost(env, exists);", "const unhosted = null as string | null;");
+  const late = source.replace("const unhosted = whyNoHost(env, isFile);", "const unhosted = null as string | null;");
   assert.notEqual(late, source, "the refusal-dropping fixture really differs");
   assert.deepEqual(spawnProblems(late), ["spawnWorker no longer refuses an unreadable host before the claim"]);
 });

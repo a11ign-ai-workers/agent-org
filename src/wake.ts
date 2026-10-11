@@ -936,18 +936,23 @@ function whyNoSpawn(order: { causeKey: string; startFresh?: boolean; }, { memory
   return memory?.() ?? claimable?.(order) ?? null;
 }
 
+/** Is `path` a regular file (a symlink to one counts); a path that cannot be read is not. */
+function isRegularFile(path: string): boolean {
+  return statSync(path, { throwIfNoEntry: false })?.isFile() === true;
+}
+
 /**
  * Why a pane started now could not declare, or `null` (#850, `ceo`'s addition 1): its environment names a host declaration that is
  * not a file. A PANE THAT CANNOT DECLARE IS WORSE THAN NONE: it sits idle on a refusal nobody reads, so the spawn is refused before
  * the claim, with the value named. An environment that names none is not this refusal: the gate's own never lacks one
  * ({@link spawnEnvironment} resolves {@link hostConfigPath}, which falls back to the declaration in the checkout the tool runs from),
  * and a caller that built its own has decided something, as an `override` does.
- * @param [exists] a parameter so a test can hand it a fixture
+ * @param [isFile] a parameter so a test can hand it a fixture; a DIRECTORY is not a file (`existsSync` says it is, and `readHostConfig` cannot read it)
  */
-export function whyNoHost(env: Record<string, string>, exists: (path: string) => boolean = existsSync): string | null {
+export function whyNoHost(env: Record<string, string>, isFile: (path: string) => boolean = isRegularFile): string | null {
   const host = env[HOST_CONFIG_ENV];
   if (host === undefined) return null;
-  if (host === "" || !exists(host)) return `${HOST_CONFIG_ENV} names ${JSON.stringify(host)}, which is not a file, so the pane could not run \`worker:state\` or \`pr:open\``;
+  if (host === "" || !isFile(host)) return `${HOST_CONFIG_ENV} names ${JSON.stringify(host)}, which is not a file, so the pane could not run \`worker:state\` or \`pr:open\``;
   return null;
 }
 
@@ -979,8 +984,8 @@ export function whyNoHost(env: Record<string, string>, exists: (path: string) =>
  *   in herdr's default directory and nothing is claimed (the pre-#2405 spawn, kept for a caller that has no claim)
  */
 function spawnWorker(order: { session: string; causeKey: string; cause?: string; title?: string; replaces?: { branch: string; }[]; as?: string; startFresh?: boolean; }, agents: { label: string; status: string; }[], roster: string[], { run = defaultRun, env = spawnEnvironment(), drained = [],
-  claimable, claimer, memory, claimRefused, exists = existsSync }: {
-        run?: (args: string[]) => string; env?: Record<string, string>; drained?: readonly string[]; exists?: (path: string) => boolean;
+  claimable, claimer, memory, claimRefused, isFile = isRegularFile }: {
+        run?: (args: string[]) => string; env?: Record<string, string>; drained?: readonly string[]; isFile?: (path: string) => boolean;
         claimable?: (order: { causeKey: string; startFresh?: boolean; }) => string | null; claimer?: SpawnClaimer;
         memory?: () => string | null; claimRefused?: ClaimRefused;
     } = {}): {
@@ -994,7 +999,7 @@ function spawnWorker(order: { session: string; causeKey: string; cause?: string;
   // refused and sit idle" (#2324) means the answer is known before it exists.
   const unspawnable = whyNoSpawn(order, { memory, claimable });
   if (unspawnable !== null) return { refusal: `no spawn: ${unspawnable}` };
-  const unhosted = whyNoHost(env, exists);
+  const unhosted = whyNoHost(env, isFile);
   if (unhosted !== null) return { refusal: `no spawn: ${unhosted}` };
   const claimed = claimer?.claim(order, role.role, env);
   if (claimed !== undefined && "refusal" in claimed) {
