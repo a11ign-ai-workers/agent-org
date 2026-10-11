@@ -64,6 +64,9 @@ import { worktreeOwner } from "./worktree-owner.ts";
 import { isLiveSession } from "./arm-pr.ts";
 import { laneAuthorshipRefusal, loadLanes, reviewOnlyPathsIn } from "./lane-ownership.ts";
 import { declarationRefusal } from "./hand-fix-ledger.ts";
+import { referencesInReason } from "./merged-row-open-incident.ts";
+import { openPullsOf } from "./ticket-port/open-pulls.ts";
+import { gh as ghRead } from "./board-data.ts";
 import { VERIFY_STATE, readVerifyStamp, verifyRefusalLine } from "./verify-stamp.ts";
 import { QUEUED_EXIT, attachFollowUps } from "./gh-ledger.ts";
 import { claimedBranchReport, lookupClaimedRowsOfTrackers, trackerReposFor, type ClaimedRow, type ClaimedRows } from "./closes-mismatch-check.ts";
@@ -241,8 +244,9 @@ function regionPassLine({ rows, changed, standing, base }: { rows: string; chang
  * @param {{ rowBody: (number: number, repo?: string) => string, rootFiles?: Set<string>, tree: { key: string, repo: string | undefined } }} deps
  * @returns {{ kind: "region", region: string[] } | { kind: "unread", why: string } | { kind: "no-section", row: string }}
  */
-function readRegions(references: import("./acceptance-commands.ts").ClosesReference[], { rowBody, rootFiles, tree }: { rowBody: (number: number, repo?: string) => string; rootFiles?: Set<string>; tree: { key: string; repo: string | undefined; }; }): { kind: "region"; region: string[]; } | { kind: "unread"; why: string; } | { kind: "no-section"; row: string; } {
+function readRegions(references: import("./acceptance-commands.ts").ClosesReference[], { rowBody, rootFiles, tree, code = homeProjectDeclaration().code }: { rowBody: (number: number, repo?: string) => string; rootFiles?: Set<string>; tree: { key: string; repo: string | undefined; }; code?: readonly { key: string; repo: string; }[]; }): { kind: "region"; region: string[]; rows: RegionRow[]; } | { kind: "unread"; why: string; } | { kind: "no-section"; row: string; } {
   const union: Set<string> = new Set();
+  const rows: RegionRow[] = [];
   for (const reference of references) {
     const name = referenceName(reference);
     let text;
@@ -256,8 +260,29 @@ function readRegions(references: import("./acceptance-commands.ts").ClosesRefere
     if (declared === null) return { kind: "no-section", row: name };
     const keyBare = tree.key !== "" && statedRepository(text) === tree.repo;
     for (const path of declared) union.add(keyBare && splitRegionEntry(path).key === "" ? `${tree.key}:${path}` : path);
+    const repositories = new Set<string>();
+    for (const entry of declared) {
+      const repo = repositoryOfEntry(entry, text, code);
+      if (repo !== undefined) repositories.add(repo);
+    }
+    rows.push({ reference, name, repositories: [...repositories] });
   }
-  return { kind: "region", region: [...union] };
+  return { kind: "region", region: [...union], rows };
+}
+
+/** agent-org#923: one row the body closes, as its Region reads: the repositories its entries are read in, in no order. */
+type RegionRow = { reference: import("./acceptance-commands.ts").ClosesReference; name: string; repositories: string[]; };
+
+/**
+ * agent-org#923: THE REPOSITORY A REGION ENTRY IS READ IN -- the one `regionRepository` and `readRegions` both ask. An entry whose key names one of the
+ * project's code repositories is that repository's; a bare path is the row's stated repository, else the project's first. Undefined for a key the
+ * project does not declare, which is no repository to read and so is skipped, not refused.
+ * @param {string} entry @param {string} text the row's body @param {readonly { key: string, repo: string }[]} code
+ * @returns {string | undefined}
+ */
+function repositoryOfEntry(entry: string, text: string, code: readonly { key: string; repo: string; }[]): string | undefined {
+  const { key } = splitRegionEntry(entry);
+  return key === "" ? (statedRepository(text) ?? code[0]?.repo) : code.find((candidate) => candidate.key === key)?.repo;
 }
 
 /**
@@ -327,12 +352,13 @@ function originRepoOf(git: (args: string[]) => string, code: readonly { key: str
  * @param {string} body
  * @param {string[]} rest the args handed to `gh pr <mode>`
  * @param {{ git?: (args: string[]) => string, rowBody: (number: number, repo?: string) => string, rootFiles?: Set<string>,
- *   code?: readonly { key: string, repo: string }[] }} deps `code` is the project's code repositories, for which one THIS tree is (`--repo`)
+ *   code?: readonly { key: string, repo: string }[], openPulls?: (repo: string) => OpenPull[] | null }} deps `code` is the project's code
+ *   repositories, for which one THIS tree is (`--repo`); `openPulls` is wired for `create` only, and OFF when absent (agent-org#923)
  * @returns {{ refusal: string | null, note: string | null }}
  */
-export function checkRegion(body: string, rest: string[], { git = defaultGit, rowBody, rootFiles, code }: {
+export function checkRegion(body: string, rest: string[], { git = defaultGit, rowBody, rootFiles, code, openPulls }: {
         git?: (args: string[]) => string; rowBody: (number: number, repo?: string) => string; rootFiles?: Set<string>;
-        code?: readonly { key: string; repo: string; }[];
+        code?: readonly { key: string; repo: string; }[]; openPulls?: (repo: string) => OpenPull[] | null;
     }): { refusal: string | null; note: string | null; } {
   const closes = extractClosesDeclaration(body);
   if (closes.kind === "none") {
@@ -348,7 +374,7 @@ export function checkRegion(body: string, rest: string[], { git = defaultGit, ro
   if (bare) return { refusal: `pr-open: REFUSED -- \`Closes #${bare.number}\` names an issue of ${bareRepo}, not a row of ${REPO}. Write \`Closes ${REPO}#${bare.number}\`. Nothing was sent (#2995).`, note: null };
   const rows = references.map(referenceName).join(", ");
   const treeKey = treeKeyOf(rest, code);
-  const read = readRegions(references, { rowBody, rootFiles, tree: { key: treeKey, repo: prRepo } });
+  const read = readRegions(references, { rowBody, rootFiles, tree: { key: treeKey, repo: prRepo }, code: code ?? homeProjectDeclaration().code });
   if (read.kind === "no-section") {
     return { refusal: null, note: `REGION: not checked -- row ${read.row} has no Region section to read.` };
   }
@@ -356,6 +382,9 @@ export function checkRegion(body: string, rest: string[], { git = defaultGit, ro
     return { refusal: `pr-open: REFUSED -- ${read.why}, so the diff cannot be checked against ${rows}'s Region. `
       + "Retry once GitHub answers. Nothing was sent to GitHub (#2417).", note: null };
   }
+  // agent-org#923: the other half of a row that spans repositories is asked before the diff. Its refusal is about the row, not the diff.
+  const otherHalf = openPulls ? otherHalfRefusal(read.rows, { prRepo, openPulls }) : null;
+  if (otherHalf !== null) return { refusal: otherHalf, note: null };
   const base = `origin/${flagAfter(rest, "--base") ?? "main"}`;
   let changed: string[];
   try {
@@ -372,6 +401,57 @@ export function checkRegion(body: string, rest: string[], { git = defaultGit, ro
     return { refusal: regionRefusalText({ rows, outside, region: read.region, base, malformed }) + hint, note: null };
   }
   return { refusal: null, note: regionPassLine({ rows, changed, standing, base }) };
+}
+
+/** agent-org#923: an open pull request, as the other half of a row reads it: its number and its body. */
+export type OpenPull = { number: number; body: string; };
+
+/**
+ * agent-org#923: A `Closes` OF A ROW WHOSE REGION SPANS SEVERAL REPOSITORIES IS REFUSED while another repository's open pull request names that row,
+ * because that half is still open: a11ign#4969 closed its row with the second half unmerged. Only `create` asks, and the refusal says what to write
+ * instead (`Closes: none -- first half of <row>`). A repository whose open pull requests cannot be listed REFUSES too, as an unread row does: an
+ * empty answer after a failed read would pass exactly when GitHub is down. Every repository of the Region but this tree's is asked.
+ * @param {RegionRow[]} rows @param {{ prRepo: string, openPulls: (repo: string) => OpenPull[] | null }} deps
+ * @returns {string | null}
+ */
+function otherHalfRefusal(rows: RegionRow[], { prRepo, openPulls }: { prRepo: string; openPulls: (repo: string) => OpenPull[] | null; }): string | null {
+  for (const row of rows) {
+    if (row.repositories.length < 2) continue;
+    // Qualified in the refusal, because a bare `#N` in another repository's pull request reads as THAT repository's row.
+    const key = `${row.reference.repo ?? REPO}#${row.reference.number}`;
+    const spans = row.repositories.join(" and ");
+    for (const repo of row.repositories) {
+      if (repo === prRepo) continue;
+      const pulls = openPulls(repo);
+      if (pulls === null) {
+        return `pr-open: REFUSED -- ${row.name}'s Region spans ${spans}, and the open pull requests of ${repo} could not be read, so whether that half is still open cannot be said. `
+          + "Retry once GitHub answers. Nothing was sent to GitHub (agent-org#923).";
+      }
+      const holder = pulls.find((pull) => namesRow(pull, key, repo));
+      if (holder !== undefined) {
+        return `pr-open: REFUSED -- ${row.name}'s Region spans ${spans}, and ${repo}#${holder.number} is open and names ${key}, so a \`Closes\` of ${key} here `
+          + `would close the row while that half is still open. Write \`Closes: none -- first half of ${key}\` in this pull request instead, and close the row `
+          + "from the pull request that finishes its last half. Nothing was sent to GitHub (agent-org#923).";
+      }
+    }
+  }
+  return null;
+}
+
+/** agent-org#923: a `Refs` line of a pull request body, which names a row without closing it. */
+const REFS_LINE = /^\s*Refs\b.*$/gm;
+
+/**
+ * agent-org#923: whether an open pull request NAMES the row `rowKey` (`owner/repo#N`): its `Closes` list, a `Closes: none` reason, or a `Refs` line. A
+ * bare number is the pull request's own repository's, as GitHub reads it (`pullRepo`), so it names the row only from the row's repository.
+ * @param {OpenPull} pull @param {string} rowKey @param {string} pullRepo the repository the pull request is open in
+ * @returns {boolean}
+ */
+function namesRow(pull: OpenPull, rowKey: string, pullRepo: string): boolean {
+  const declaration = extractClosesDeclaration(pull.body);
+  const closed = declaration.kind === "closes" ? closesReferences(declaration) : declaration.kind === "none" ? referencesInReason(declaration.reason) : [];
+  const referenced = [...pull.body.matchAll(REFS_LINE)].flatMap(([line]) => referencesInReason(line));
+  return [...closed, ...referenced].some((reference) => `${reference.repo ?? pullRepo}#${reference.number}`.toLowerCase() === rowKey.toLowerCase());
 }
 
 /**
@@ -898,12 +978,13 @@ function acceptanceFileStep(body: string, rest: string[], { git, write, err }: {
  *           code?: readonly { key: string, repo: string }[], out: (line: string) => void, err: (line: string) => void }} deps
  * @returns {number | null} EXIT_NOTHING_SENT for a refusal, else null
  */
-function regionStep(body: string, rest: string[], { git, rowBody, rootFiles, code, out, err }: {
+function regionStep(body: string, rest: string[], { git, rowBody, rootFiles, code, openPulls, out, err }: {
         git?: (args: string[]) => string; rowBody?: (number: number, repo?: string) => string; rootFiles?: Set<string>;
-        code?: readonly { key: string; repo: string; }[]; out: (line: string) => void; err: (line: string) => void;
+        code?: readonly { key: string; repo: string; }[]; openPulls?: (repo: string) => OpenPull[] | null;
+        out: (line: string) => void; err: (line: string) => void;
     }): number | null {
   if (!rowBody) return null;
-  const region = checkRegion(body, rest, { git, rowBody, rootFiles, code });
+  const region = checkRegion(body, rest, { git, rowBody, rootFiles, code, openPulls });
   if (region.refusal) {
     err(`${region.refusal}\n`);
     return EXIT_NOTHING_SENT;
@@ -994,7 +1075,7 @@ function verifyStampStep(mode: string, rest: string[], body: string, { verifySta
  */
 export function main(argv: string[] = process.argv.slice(2),
   { run, git, prHead, runAcceptance, runMutation = runForReal, owner, rowBody, rowLabels, labelExists, rootFiles, code, login, lanes,
-    claimedRows, verifyStamp, write, readFile, branchHead, out = writeOut, err = writeErr }: {
+    claimedRows, verifyStamp, write, readFile, branchHead, openPulls, out = writeOut, err = writeErr }: {
           run?: (args: string[]) => void; git?: (args: string[]) => string;
           prHead?: (repo: string, number: string) => { ref: string; oid: string; } | null;
           runAcceptance?: (command: string) => number; runMutation?: (command: string) => number;
@@ -1004,6 +1085,7 @@ export function main(argv: string[] = process.argv.slice(2),
           code?: readonly { key: string; repo: string; }[]; login?: () => string; lanes?: { lanes: import("./lane-ownership.ts").Lane[]; } | null;
           verifyStamp?: (body: string) => import("./verify-stamp.ts").VerifyReading; write?: (path: string, text: string) => void;
           readFile?: (path: string) => string; branchHead?: (repo: string, branch: string) => string | null;
+          openPulls?: (repo: string) => OpenPull[] | null;
           out?: (line: string) => void; err?: (line: string) => void;
       } = {}): number {
   const [mode, ...given] = argv;
@@ -1032,7 +1114,7 @@ export function main(argv: string[] = process.argv.slice(2),
   const noFile = acceptanceFileStep(body, rest, { git, write, err });
   if (noFile !== null) return noFile;
   // #2417: before checkBody for the same reason, and before anything is sent.
-  const outsideRegion = regionStep(body, rest, { git, rowBody, rootFiles, code, out, err });
+  const outsideRegion = regionStep(body, rest, { git, rowBody, rootFiles, code, openPulls: mode === "create" ? openPulls : undefined, out, err });
   if (outsideRegion !== null) return outsideRegion;
   // agent-org#744: before checkBody too, for the same reason, and before anything is sent.
   const keepsRowOpen = claimedRowStep(body, rest, { git, code, claimedRows, out, err });
@@ -1205,8 +1287,7 @@ function regionRepository(body: string, { rowBody, rootFiles, code = homeProject
     const declared = declaredRegionFiles(text, rootFiles ? { rootFiles } : undefined);
     if (declared === null) return null;
     for (const entry of declared) {
-      const { key } = splitRegionEntry(entry);
-      const repo = key === "" ? (statedRepository(text) ?? code[0]?.repo) : code.find((candidate) => candidate.key === key)?.repo;
+      const repo = repositoryOfEntry(entry, text, code);
       if (repo === undefined) return null;
       repositories.add(repo);
     }
@@ -1457,6 +1538,6 @@ if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.arg
   } else {
     process.exitCode = main(undefined, { rowBody: defaultRowBody, verifyStamp: defaultVerifyStamp,
       claimedRows: (prRepo) => lookupClaimedRowsOfTrackers(trackerReposFor(prRepo)), branchHead: defaultBranchHead,
-      rowLabels: defaultRowLabels, labelExists: defaultLabelExists, write: writeAcceptanceFile });
+      rowLabels: defaultRowLabels, openPulls: (repo) => openPullsOf(repo, ghRead), labelExists: defaultLabelExists, write: writeAcceptanceFile });
   }
 }

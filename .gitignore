@@ -1,0 +1,3 @@
+# Installed dependencies. A release commit is staged with `git add -A`, so an installed
+# node_modules/ went into every tag from v0.155.5 (2,278 files), and `npm install` of such a tag fails (#931).
+node_modules/

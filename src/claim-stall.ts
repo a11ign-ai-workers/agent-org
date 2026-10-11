@@ -35,7 +35,8 @@ import { subjectMention } from "./review-attribution.ts";
 import { listingIsComplete } from "./herdr-agents.ts";
 // #2999: THE IDLE-CLAIMANT READING, a sibling leaf. It decides whether an idle holder has a wait the org can read; this file carries the
 // decision as the nudge and, a second reading later, as the release it already owned.
-import { idleClaimantReading, idleNudgePrompt, stoppedNudgePrompt, declareNudgePrompt, isStoppedHolder, IDLE_CLAIMANT_MS, STOPPED_CLAIMANT_MS } from "./idle-claimant.ts";
+import { idleClaimantReading, idleLimitMs, idleNudgePrompt, stoppedNudgePrompt, declareNudgePrompt, isStoppedHolder, IDLE_CLAIMANT_MS, STOPPED_CLAIMANT_MS,
+  type IdleReading } from "./idle-claimant.ts";
 import type { DeclarationReading } from "./worker-state.ts";
 // #458: the failure ledger is a leaf of its own (`node:fs` only), so a recorder here keeps this file one.
 import { recordFailures, type FailureEvent, type RecordResult } from "./failure-ledger.ts";
@@ -451,7 +452,7 @@ export function holderWorkAtRisk(io: HostReads, { merged, ...home }: {
  * Everything the reading knows about ONE claimed row. The two costly facts are THUNKS, so a row that is plainly moving (a comment or a commit inside N) costs no `git status`, and a tick pays for a worktree only when the cheap signals already say it has been quiet. `nothing` (#3407): the claim names no git object on purpose, so it can be nudged and never released
  */
 export type ClaimFacts = { row: number, title?: string, session: string, claimedAt: number, branch: string | null, worktree: string | null, comment: number | null, commit: number | null, push: number | null, file: () => number | null, work: () => ReturnType<typeof workAtRisk>, openPrs: number, mergedPr: { number: number, mergedAt: number, repoKey?: string, head?: string } | null, waiting: string | null, blockedBy: number[], waitKind?: string | null, ownPrs?: import("./idle-claimant.ts").IdlePr[], nothing?: boolean, declared?: DeclarationReading, mergedHeld?: string, clockHeld?: string, };
-export type Reading = { kind: "moving", lastMoveAt: number } | { kind: "pr-owned" } | { kind: "waiting", waiting: string } | { kind: "nudge", lastMoveAt: number, idleMs: number, idle?: boolean } | { kind: "nudged", nudgedAt: number, deliveredAt: number | null, lastMoveAt: number, idle?: boolean } | { kind: "idle-watch", since: number } | { kind: "vacating", since: number } | { kind: "release", why: "stalled" | "blocked" | "merged" | "gone" | "closed" | "wait", lastMoveAt: number | null, idleMs: number | null, nudgedAt: number | null, edges?: number[], waiting?: string, mergedPr?: number, mergedPrRepoKey?: string, mergedPrHead?: string, openPrs?: number[], openPrRepoKeys?: (string | undefined)[], since?: number, idle?: boolean, interrupt?: boolean } | { kind: "holding", why: string, expected?: boolean };
+export type Reading = { kind: "moving", lastMoveAt: number } | { kind: "pr-owned" } | { kind: "waiting", waiting: string } | { kind: "nudge", lastMoveAt: number, idleMs: number, idle?: boolean } | { kind: "nudged", nudgedAt: number, deliveredAt: number | null, lastMoveAt: number, idle?: boolean, idleSince?: number, idleAgain?: true } | { kind: "idle-watch", since: number } | { kind: "vacating", since: number } | { kind: "release", why: "stalled" | "blocked" | "merged" | "gone" | "closed" | "wait", lastMoveAt: number | null, idleMs: number | null, nudgedAt: number | null, edges?: number[], waiting?: string, mergedPr?: number, mergedPrRepoKey?: string, mergedPrHead?: string, openPrs?: number[], openPrRepoKeys?: (string | undefined)[], since?: number, idle?: boolean, interrupt?: boolean } | { kind: "holding", why: string, expected?: boolean };
 
 /** @param {(number | null)[]} times @returns {number | null} */
 function latest(times: (number | null)[]): number | null {
@@ -495,11 +496,30 @@ function overlayReading(facts: ClaimFacts, ctx: {
     waitKinds: [...(facts.waitKind ? [facts.waitKind] : []), ...(facts.blockedBy.length > 0 ? ["blocked-by"] : [])] }, ctx);
   if (idle.kind === "waiting" || (!regime && ownPrStillYoung(facts, ctx))) return base;
   const held = ctx.nudge === null ? null : rememberedNudge(facts, ctx);
-  if (held !== null) return held;
+  if (held !== null) return held.kind === "nudged" ? idleAgainReading(held, idle, facts, ctx) : held;
   if (idle.kind === "stall") return { kind: "nudge", idle: true, lastMoveAt: ctx.now - idle.idleMs, idleMs: idle.idleMs };
   if (idle.kind === "watching") return { kind: "idle-watch", since: idle.since };
   if (idle.kind === "unknown" && ctx.idleSince != null) return { kind: "idle-watch", since: ctx.idleSince };
   return base;
+}
+
+/**
+ * (agent-org#860, a11ign#4957 cause 3) A NUDGED HOLDER THAT IS IDLE AGAIN. The chairman's rule is that a second idle period after the nudge files an incident, and the
+ * only writer was a RELEASE carrying `nudgedAt`: a holder with a pull request is never released (#2999), a `Claimed-nothing:` claim is never released (#3407) and
+ * a keyed row's release is withheld, so each read `nudged` for good and left no line. The run is counted from the later of its own first idle tick and the nudge's DELIVERY,
+ * so a holder idle before the nudge reached it, or one the nudge never reached, is not "idle again" yet. `idleSince` is kept in the memory (`memoryOf`) and dropped the
+ * tick the holder is not idle, so a holder that worked in between starts the period over. A declared wait (`idle.kind` `waiting`) never gets here, the overlay having
+ * returned before the nudge is read, which is the "no declaration" half. NOT READ HERE, AND SAID: "no wake since the nudge" -- a later order to the holder is not
+ * subtracted, so one wake after the nudge does not excuse the holder; the gate sends none while a nudge is outstanding.
+ * @param {Reading & { kind: "nudged" }} held @param {IdleReading} idle @param {ClaimFacts} facts @param {Parameters<typeof claimReading>[1]} ctx @returns {Reading}
+ */
+function idleAgainReading(held: Reading & { kind: "nudged"; }, idle: IdleReading, facts: ClaimFacts, ctx: Parameters<typeof claimReading>[1]): Reading {
+  if (idle.kind !== "watching" && idle.kind !== "stall") return held;
+  const limit = idleLimitMs({ built: facts.nothing !== true, prs: facts.ownPrs ?? [],
+    ...(facts.declared !== undefined && facts.nothing !== true ? { declared: facts.declared } : {}) });
+  const runStart = held.deliveredAt === null ? idle.since : Math.max(idle.since, held.deliveredAt);
+  const again = held.deliveredAt !== null && ctx.now - runStart >= limit;
+  return { ...held, idleSince: idle.since, ...(again ? { idleAgain: true as const } : {}) };
 }
 
 /**
@@ -994,7 +1014,7 @@ export function nextStallState(before: StallState, readings: { facts: ClaimFacts
 function memoryOf(reading: Reading, now: number): { nudgedAt?: number; goneSince?: number; idleSince?: number; idle?: boolean; } | null {
   const idle = "idle" in reading && reading.idle ? { idle: true } : {};
   if (reading.kind === "nudge") return { nudgedAt: now, ...idle };
-  if (reading.kind === "nudged") return { nudgedAt: reading.nudgedAt, ...idle };
+  if (reading.kind === "nudged") return { nudgedAt: reading.nudgedAt, ...idle, ...(reading.idleSince === undefined ? {} : { idleSince: reading.idleSince }) };
   if (reading.kind === "idle-watch") return { idleSince: reading.since };
   if (reading.kind === "vacating") return { goneSince: reading.since };
   if (reading.kind !== "release") return null;
@@ -1204,15 +1224,19 @@ export const CLAIMED_WORKER_STALLED = "claimed-worker-stalled";
  * already was, the wake ledger (`nudgeKey`).
  *
  * THE REF CARRIES `nudgedAt`, NOT `now`: the release is read on the tick it happens, long after the nudge, and a ref that moved with the tick would make
- * one episode two lines. A `nudged` reading is the same episode still inside its grace and is NOT an event. NOT SEEN, AND SAID HERE SO IT IS NOT A SURPRISE:
- * a holder that is never released (a `Claimed-nothing:` claim, #3407; an open pull request of its own, #2999) reads `nudged` for good, so an unanswered
- * nudge to one is in the wake ledger only. A second row's unanswered nudge is a different ref, which is what `repeatsIn` counts as a repeat of the class.
+ * one episode two lines. A `nudged` reading is the same episode still inside its grace and is NOT an event, EXCEPT ONE THAT IS `idleAgain` (agent-org#860): the
+ * holder was told, and was idle for a full period after the delivery with nothing moved and nothing declared. That is the second idle period the chairman's rule
+ * files an incident for, and it is read on the tick, because a holder that is never released (a `Claimed-nothing:` claim, #3407; an open pull request of its own,
+ * #2999; a keyed row, agent-org#834) never reaches the release this writer used to wait for. The ref is the same, so the release that may follow is the same line.
+ * A second row's unanswered nudge is a different ref, which is what `repeatsIn` counts as a repeat of the class.
  * @param {{ facts: ClaimFacts, reading: Reading }[] | undefined} readings @param {number} now @returns {FailureEvent[]}
  */
 export function stalledNudgeEvents(readings: { facts: ClaimFacts; reading: Reading; }[] | undefined, now: number): FailureEvent[] {
-  return (readings ?? []).flatMap(({ facts, reading }) => reading.kind === "release" && reading.why === "stalled" && reading.nudgedAt !== null
-    ? [{ classKey: CLAIMED_WORKER_STALLED, ref: `${facts.session}/#${facts.row}/${reading.nudgedAt}`, at: now }]
-    : []);
+  return (readings ?? []).flatMap(({ facts, reading }) => {
+    // the same ref in both cases: a release later than an `idleAgain` reading is the SAME episode, and `recordFailures` skips a (key, ref) already logged
+    const unanswered = reading.kind === "release" ? (reading.why === "stalled" ? reading.nudgedAt : null) : reading.kind === "nudged" && reading.idleAgain === true ? reading.nudgedAt : null;
+    return unanswered === null ? [] : [{ classKey: CLAIMED_WORKER_STALLED, ref: `${facts.session}/#${facts.row}/${unanswered}`, at: now }];
+  });
 }
 
 /**

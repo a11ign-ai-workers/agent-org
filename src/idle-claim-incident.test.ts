@@ -25,7 +25,7 @@ const quietPr = (over: object = {}) => ({ number: 9, reviewDecision: "REVIEW_REQ
 const claim = (over: Partial<IdleClaim> = {}): IdleClaim => ({ row: 4001, session: "worker-7", idleSince: ago(IDLE_CLAIM_INCIDENT_MINUTES + 1), ...over });
 const incidents = (claims: IdleClaim[], agents: { label: string, status: string }[] | null = LISTING) => idleClaimIncidents({ claims, agents, now: NOW });
 
-test("the named constant is 60, above the nudge's 45", () => {
+test("the named constant is 60, above the nudge's 30", () => {
   assert.equal(IDLE_CLAIM_INCIDENT_MINUTES, 60);
   assert.ok(IDLE_CLAIM_INCIDENT_MINUTES > IDLE_CLAIMANT_MINUTES);
 });
@@ -153,7 +153,7 @@ test("readIdleClaims: an idle-watch entry 61 minutes old with no PR is an incide
 });
 
 test("readIdleClaims: an idle nudge dates the run IDLE_CLAIMANT_MINUTES before it; a stall nudge or a vacating entry is not an idle run", () => {
-  withState({ 4001: { session: "worker-7", nudgedAt: ago(30), idle: true }, 4002: { session: "worker-7", nudgedAt: ago(300) }, 4003: { session: "worker-7", goneSince: ago(300) } }, (stateDir) => {
+  withState({ 4001: { session: "worker-7", nudgedAt: ago(45), idle: true }, 4002: { session: "worker-7", nudgedAt: ago(300) }, 4003: { session: "worker-7", goneSince: ago(300) } }, (stateDir) => {
     const found = readIdleClaims({ now: NOW, stateDir, openPrs: [], agents: LISTING });
     assert.deepEqual(found?.map((i) => [i.row, i.idleMinutes]), [[4001, 75]]);
   });
