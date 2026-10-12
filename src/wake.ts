@@ -6153,10 +6153,14 @@ function startSeat(run: (args: string[]) => string, { name, brief, refusal, ...l
  * repeats on the next tick and `host:check` names the same seat, which is what makes the gate offer it. A seat whose start was refused repeats
  * the same way, and nothing is left half-open.
  *
+ * THE STARTS SHARE THE TICK'S START BUDGET (agent-org#1052, the budget agent-org#1025 put on `deliver`). After a herdr restart every seat reads
+ * absent, and each `agent start` may wait its whole 30 s, so N seats would hold the `seats` phase for N x 30 s. A seat whose start would BEGIN with the
+ * budget spent is left absent and named `SEATS DEFERRED`; the next tick reads it absent again and starts it, so no queue is kept.
  *
- * @returns one line per seat acted on or not checked, `[]` when every persistent seat is present
+ *
+ * @returns one line per seat acted on, deferred or not checked, `[]` when every persistent seat is present
  */
-export function startAbsentSeats({ run = defaultRun, env = spawnEnvironment(), checkout = HOME_CHECKOUT, sessionsPath = SESSIONS_FILE }: { run?: (args: string[]) => string; env?: Record<string, string>; checkout?: string; sessionsPath?: string | URL; } = {}): string[] {
+export function startAbsentSeats({ run = defaultRun, env = spawnEnvironment(), checkout = HOME_CHECKOUT, sessionsPath = SESSIONS_FILE, now = Date.now }: { run?: (args: string[]) => string; env?: Record<string, string>; checkout?: string; sessionsPath?: string | URL; now?: () => number; } = {}): string[] {
   let seats;
   try {
     seats = persistentEntries(sessionsPath);
@@ -6171,7 +6175,18 @@ export function startAbsentSeats({ run = defaultRun, env = spawnEnvironment(), c
     return [`SEATS NOT STARTED: ${[...absent].join(", ")} read absent, but herdr's listing does not show the standing panes, so it may be partial; `
       + "a start now could be a second seat under one name."];
   }
-  return seats.filter((s) => absent.has(s.name)).map((seat) => startSeat(run, seat, { env, checkout }));
+  // agent-org#1052: ONLY `agent start` IS TIMED, so the readings and the pane open around each start cost the budget nothing.
+  const starts = startBudgetOf(now);
+  const startRun = starts.timed(run);
+  const lines: string[] = [];
+  for (const seat of seats.filter((s) => absent.has(s.name))) {
+    if (starts.hold() !== null) {
+      lines.push(`SEATS DEFERRED: ${seat.name} waits for the next tick: this tick's agent starts have used their ${START_BUDGET_MS / 1000} s start budget.`);
+      continue;
+    }
+    lines.push(startSeat(startRun, seat, { env, checkout }));
+  }
+  return lines;
 }
 
 /** The most the self-test's tick call may take: it never waits for a seat (it remembers a queued entry), so this is a herdr call or two and a hung child is killed, not waited on. */
