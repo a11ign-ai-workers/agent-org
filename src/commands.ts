@@ -32,6 +32,7 @@ export const COMMANDS = {
   "messaging:pair": "messaging/providers/telegram/pair.ts",
   "messaging:selftest": "messaging/selftest.ts",
   "messaging:watch": "messaging/watch.ts",
+  "order:verify": "order-verify.ts",
   "pr:edit": "pr-open.ts",
   "pr:hold": "pr-hold.ts",
   "pr:open": "pr-open.ts",
