@@ -1,0 +1,32 @@
+[Unit]
+# THE TRACE PAGES' SERVER -- a11ign/agent-org#1159, the form `ceo` ruled on 2026-10-12. `src/trace-publish-serve.ts` has the design: it serves the directory `trace-publish.service`
+# writes, on 127.0.0.1:8788 and nowhere else, read-only, GET and HEAD only, with no listing. The tailnet reaches it through `tailscale serve --bg --https=8443 http://127.0.0.1:8788`,
+# a host act the operator makes once (the PR says how), which is a PROXY mount and so needs no root to change afterwards.
+#
+# A LONG-RUNNING SERVICE NO CLOCK STARTS, like `otel-receiver.service` (`LONG_RUNNING_TEMPLATES`): `enable --now` on the SERVICE is what runs it. It is the pages' only server,
+# and it restarts on failure, so the tailnet mount does not go dark while the process is down.
+Description=a11ign: serve the trace pages on loopback for the tailnet mount (a11ign/agent-org#1159)
+After=network.target
+
+[Service]
+Type=simple
+WorkingDirectory=@@checkout@@
+
+# SAME REASON EVERY OTHER SHIPPED SERVICE DECLARES THEM: a systemd unit gets no login shell's PATH and no HOME. HOME is where the pages are (`~/.cache/a11ign/trace-pages`).
+Environment=PATH=@@binDir@@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=@@home@@
+
+# V8'S COMPILE CACHE GOES UNDER THE HOME, NOT /tmp -- #2458; `host-units.test.ts` pins it on every shipped service.
+Environment=NODE_COMPILE_CACHE=%h/.cache/node-compile-cache
+
+# THE WORKERS ACCOUNT, DECLARED THOUGH THIS PROGRAM MAKES NO `gh` CALL: a shipped service that names no account is a finding (#3643).
+Environment=GH_CONFIG_DIR=@@workersDir@@/gh
+
+ExecStart=%h/.local/bin/node packages/agent-org/src/trace-publish-serve.ts
+
+# RESTART WHAT FAILED. A port already taken is a failure that mends when the other listener goes; the pages are files, so a restart loses nothing.
+Restart=on-failure
+RestartSec=10
+
+[Install]
+WantedBy=default.target
