@@ -39,7 +39,7 @@ import { ANSWER_PREFIX } from "./waiting-condition.ts";
 import { declaredClosedRows } from "./row-claim/file-overlap-rule.ts";
 import { declaredGhAccount } from "./gh-identity.ts";
 import { repeatingLinesTick } from "./repeating-lines.ts";
-import { readToolAgreement, readReleaseRuns, readReleaseFailures, fileReleaseIncidents, readFleetBuildIncidents, type ReleaseRuns } from "./org-health.ts";
+import { readToolAgreement, readReleaseRuns, readReleaseFailures, fileReleaseIncidents, readFleetBuildIncidents, type ReleaseRuns, type CanaryState } from "./org-health.ts";
 import { readNodeStrips } from "./node-strips-types.ts";
 import { liveClassRepeatIo, readClassRepeat } from "./class-repeat.ts";
 // #2938: THE DAILY RETROSPECTIVE, in its own leaf for the same reason: it reads the journal, the ledger and a day of PRs once, and says what it found.
@@ -61,7 +61,7 @@ import { orgHealthNow, rulingOrdersNow, boardTruthNow, waitTickFacts, releaseRep
 import { approvedUnqueuedNow } from "./approved-unqueued.ts";
 import { recordRouteOutcomesOnHost } from "./work-gate/route-outcome-pass.ts";
 import { quietOrgHealth } from "./work-gate/org-health-suppression.ts";
-import { unparkOtherTrackers, unparkingWaits } from "./unpark-satisfied.ts"; // #4050: a parked row whose every condition is true is un-parked where the tick reads the waits; agent-org#5177: and in every other tracker, behind `rows.autoUnpark`
+import { unparkOtherTrackers, unparkingWaits, withTrackerRows } from "./unpark-satisfied.ts"; // #4050: a parked row whose every condition is true is un-parked where the tick reads the waits; agent-org#5177: and in every other tracker, behind `rows.autoUnpark`
 // #2898: WHO OWNS A PULL REQUEST lives in `work-gate/pr-owners.ts`, which imports the shared session reads BACK from this file (the cycle `pr-orders.ts` above describes);
 // every name it exported is re-exported here, so no caller of `work-gate.ts` changes.
 import { withWaitingEdges } from "./work-gate/pr-waits.ts";
@@ -464,8 +464,8 @@ export function readOtherScopes(run: (args: string[], repo?: string) => string =
  * #1075: THE WAIT READ, ONCE, AHEAD OF THE DECISION -- so `partitionUnclaimed` can shelve a ready row whose body names a condition not yet true. `orgHealthNow`
  * takes this SAME read as its `readWaits` (below), so the gate makes the wait reads it always made, only earlier. A refused list is `null`, and the offer fails open.
  */
-function waitReadsBeforeDecide(prs: any[] | null, otherScopes: Parameters<typeof pullRequestsOfOthers>[0], openRowsRead: any[] | null) {
-  return waitTickFacts({ prsRead: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)], openRowsRead, now: Date.now() });
+function waitReadsBeforeDecide(prs: any[] | null, otherScopes: Parameters<typeof pullRequestsOfOthers>[0], openRowsRead: any[] | null, state: CanaryState) {
+  return waitTickFacts({ prsRead: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)], openRowsRead: withTrackerRows(openRowsRead, otherScopes, state), now: Date.now() });
 }
 
 /**
@@ -533,9 +533,9 @@ function main() {
 
   // The third read is only needed to size the refill, and a refused one must not read as an empty shelf.
   // #3566: this one, `needs:chairman` and the open rows (`openRowsRead`) are asked TOGETHER, and with the other repositories' lists (slice 6).
-  const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); endGateSpan("readLanes"); const waitReads = endGateSpan("waitReads", waitReadsBeforeDecide(prs, otherScopes, openRowsRead)); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
+  const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); endGateSpan("readLanes"); const reenqueueState = readReenqueueState(); const waitReads = endGateSpan("waitReads", waitReadsBeforeDecide(prs, otherScopes, openRowsRead, reenqueueState)); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
   // agent-org#5177: the other trackers' parked rows, which `otherScopeTicks` ticks but the home seam never reads; flag `rows.autoUnpark`, default OFF.
-  unparkOtherTrackers({ state: readReenqueueState(), scopes: otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }])), facts: waitReads?.facts ?? null, now: Date.now(), run: defaultRun, log: (line) => process.stderr.write(line) });
+  unparkOtherTrackers({ state: reenqueueState, scopes: otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }])), facts: waitReads?.facts ?? null, now: Date.now(), run: defaultRun, log: (line) => process.stderr.write(line) });
   const unreadChairmanRows = endGateSpan("chairmanReads", chairmanReadsRefused(chairmanBlocked ?? [])); // #3390: said, not skipped -- an unread row is not an unanswered one
   if (unreadChairmanRows.length > 0) process.stderr.write(`chairman-answered: could not read the timeline of ${unreadChairmanRows.map((n) => `#${n}`).join(", ")}; those rows are NOT checked this tick\n`);
   // ONE COALESCE PER REFUSED LANE, NAMED. `prs ?? []` was written three times and `readyRows ?? []` twice;

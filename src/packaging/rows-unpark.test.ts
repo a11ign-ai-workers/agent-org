@@ -9,7 +9,8 @@
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { emptyCanaryState, withMachineryFlag } from "../org-health.ts";
-import { AUTO_UNPARK_FLAG, COMMENT_MARKER, PARKED, githubIo, readSatisfaction, unparkOtherTrackers, unparkSatisfied, type UnparkIo } from "../unpark-satisfied.ts";
+import { AUTO_UNPARK_FLAG, COMMENT_MARKER, PARKED, githubIo, readSatisfaction, unparkOtherTrackers, unparkSatisfied, withTrackerRows, type UnparkIo } from "../unpark-satisfied.ts";
+import { waitTickFacts } from "../work-gate/org-health.ts";
 import type { WaitFacts } from "../wait-condition.ts";
 
 const NOW = Date.parse("2026-10-11T00:05:00Z");
@@ -162,4 +163,36 @@ test("the other tracker's GitHub writes name that tracker, and a promotion from 
   io.setLabels(7, ["ready"]);
   assert.deepEqual(gh.calls.map((args) => args.join(" ").includes(HOME)), [false, false]);
   assert.equal(io.promote(7).ok, false, "promotion from a row of another tracker is refused");
+});
+
+const MERGED_1116 = JSON.stringify({ state: "closed", closed_at: "2026-10-08T05:00:00Z", updated_at: "2026-10-08T05:00:00Z", merged_at: "2026-10-08T05:00:00Z", labels: [] });
+const NO_RELEASES = { distTags: () => null, tagExists: () => null };
+
+test("(9) the reviewer's path: a non-home row's `Waiting-for: merged #1116` is read against ITS repository, so the satisfied wait un-parks it; the home's #1116 cannot answer for it", () => {
+  const waiting = tickRow(904, ["parked", "lane:any"], { body: `${COMPLETE}\nWaiting-for: merged #1116\n`, repoKey: "agent-org", repo: OTHER, blockedBy: { nodes: closedAll } });
+  const otherScopes = [{ scope: { tracker: { repo: OTHER } }, read: { openRows: [waiting] } }];
+  const reads: string[] = [];
+  const run = (args: string[]): string => {
+    reads.push(args[1]);
+    if (args[1] === `repos/${OTHER}/issues/1116`) return MERGED_1116;
+    throw new Error(`the fake has no answer for: ${args.join(" ")}`);
+  };
+
+  // THE CONTROL: the wait read as the tick made it before this change, which held the home rows alone. The other tracker's row is never in it, so its reference is unknown.
+  const homeOnly = waitTickFacts({ prsRead: [], openRowsRead: [], now: NOW, run, readers: NO_RELEASES });
+  assert.equal(readSatisfaction(waiting, homeOnly!.facts, NOW)!.verdict, "unread", "the row's own #1116 is not in the facts, so its satisfied wait cannot un-park it");
+
+  // The flag OFF keeps the home-only list, so the facts are the ones the tick always read.
+  assert.deepEqual(withTrackerRows([], otherScopes, canary(false)), [], "flag off: the other tracker's rows are not added to the wait read");
+
+  // The change: the other tracker's rows are in the list with their repository, so `Waiting-for: merged #1116` is read as agent-org#1116.
+  const facts = waitTickFacts({ prsRead: [], openRowsRead: withTrackerRows([], otherScopes, canary(true)), now: NOW, run, readers: NO_RELEASES });
+  assert.deepEqual(reads, [`repos/${OTHER}/issues/1116`], "the reference is read ONCE, against agent-org, never against the home repository");
+  assert.equal(facts!.facts.items[`${OTHER}#1116`]?.state, "merged", "the fact is keyed by its repository");
+
+  const gh = ghFor(OTHER, { 904: ["parked", "lane:any"] });
+  const log: string[] = [];
+  unparkOtherTrackers({ state: canary(true), scopes: [{ repo: OTHER, rows: [waiting] }], facts: facts!.facts, now: NOW, run: gh.run, log: (line) => log.push(line) });
+  assert.ok(!gh.labels[904].includes(PARKED), "the satisfied wait lets the row be un-parked in its own repository");
+  assert.equal(readSatisfaction(waiting, facts!.facts, NOW)!.verdict, "satisfied", "the same row is satisfied once the reference is read against its own repository");
 });

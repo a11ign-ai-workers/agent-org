@@ -349,3 +349,15 @@ export function unparkOtherTrackers({ state, scopes, facts, now, run, log }: { s
     for (const { number, reason } of result.unread) log(`unpark-satisfied: ${repo}#${number} is parked and NOT un-parked: ${reason}\n`);
   }
 }
+
+/**
+ * #1118's NOT CONVINCED: THE WAIT READ MUST SEE EVERY TRACKER'S OPEN ROWS, not only the home one's. `waitTickFacts` builds its items from the lists it is given, so a
+ * non-home row's `Waiting-for:` is never read unless that row is in the list, and `unparkOtherTrackers` would then find its reference unknown. Each row arrives tagged
+ * with its own repository (`readLanes`), which qualifies its waits (`ownedBy`). A refused read of another tracker contributes nothing, so its references stay unknown.
+ * `null` (a refused home read) stays `null`. With `rows.autoUnpark` OFF the list is the home one alone, so the facts the tick reads are the ones it always read.
+ * @param {any[] | null} openRowsRead the home tracker's open rows @param {{ scope: { tracker: unknown }, read: { openRows: any[] | null } }[]} otherScopes
+ */
+export function withTrackerRows(openRowsRead: any[] | null, otherScopes: { scope: { tracker: unknown; }; read: { openRows: any[] | null; }; }[], state: CanaryState): any[] | null {
+  if (openRowsRead === null || !machineryFlagOn(state, AUTO_UNPARK_FLAG)) return openRowsRead;
+  return [...openRowsRead, ...otherScopes.flatMap(({ scope, read }) => (scope.tracker === null || !Array.isArray(read.openRows) ? [] : read.openRows))];
+}
