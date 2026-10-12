@@ -461,6 +461,14 @@ export function readOtherScopes(run: (args: string[], repo?: string) => string =
 }
 
 /**
+ * #1075: THE WAIT READ, ONCE, AHEAD OF THE DECISION -- so `partitionUnclaimed` can shelve a ready row whose body names a condition not yet true. `orgHealthNow`
+ * takes this SAME read as its `readWaits` (below), so the gate makes the wait reads it always made, only earlier. A refused list is `null`, and the offer fails open.
+ */
+function waitReadsBeforeDecide(prs: any[] | null, otherScopes: Parameters<typeof pullRequestsOfOthers>[0], openRowsRead: any[] | null) {
+  return waitTickFacts({ prsRead: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)], openRowsRead, now: Date.now() });
+}
+
+/**
  * #2849: `decide`, with the call RECORDED for the shadow-window runner (#2846): the arguments it was given and its RAW return, before
  * `withStalePrimaryNotice`. A helper rather than three lines in `main`, which is at its physical-line limit. DORMANT unless
  * `<stateDir>/shadow-window-open` exists, and a failed write is a stderr line, never a different tick (`shadow-reads.ts`).
@@ -525,7 +533,7 @@ function main() {
 
   // The third read is only needed to size the refill, and a refused one must not read as an empty shelf.
   // #3566: this one, `needs:chairman` and the open rows (`openRowsRead`) are asked TOGETHER, and with the other repositories' lists (slice 6).
-  const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); endGateSpan("readLanes"); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
+  const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); endGateSpan("readLanes"); const waitReads = endGateSpan("waitReads", waitReadsBeforeDecide(prs, otherScopes, openRowsRead)); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
   const unreadChairmanRows = endGateSpan("chairmanReads", chairmanReadsRefused(chairmanBlocked ?? [])); // #3390: said, not skipped -- an unread row is not an unanswered one
   if (unreadChairmanRows.length > 0) process.stderr.write(`chairman-answered: could not read the timeline of ${unreadChairmanRows.map((n) => `#${n}`).join(", ")}; those rows are NOT checked this tick\n`);
   // ONE COALESCE PER REFUSED LANE, NAMED. `prs ?? []` was written three times and `readyRows ?? []` twice;
@@ -555,7 +563,7 @@ function main() {
   const required = endGateSpan("required", requiredWhenNeeded(openPrs));
   const baseTip = endGateSpan("baseTip", baseTipWhenRed(openPrs)), armingSplit = endGateSpan("arming", readArmingOf(openPrs, required)); // #3019: BEFORE the arguments -- ejected PRs are stamped onto `prs` and leave `unarmed`; agent-org#488: the gate arms a lone unarmed one here
   const decideArgs = { primaryDrift, prs: endGateSpan("withStaleRefusals", withStaleRefusals(endGateSpan("withVerifyStamps", withVerifyStamps(endGateSpan("withEjections", withEjections(endGateSpan("withWaitingEdges", withWaitingEdges(endGateSpan("withPrOwners", withPrOwners(endGateSpan("withEvidenceLabelAges", withEvidenceLabelAges(endGateSpan("withPatchIds", withPatchIds(openPrs, defaultRun, required)))), allOpen, stampLookup(), { agents: liveWorkspaceLabels, ended: endedSessionLabels })), allOpen, { dir: REVIEWER_STATE_DIR })), armingSplit?.ejections)), { checkout: verifyCheckoutOf("") })), required)), readyRows: rows, promotableRows: promotableRows ?? [],
-    chairmanBlocked: chairmanBlocked ?? [], prFiles, drain, required, baseTip,
+    chairmanBlocked: chairmanBlocked ?? [], prFiles, drain, required, baseTip, waitFacts: waitReads?.facts ?? null,
     epics: epicRowsOf(allOpen),
     answerOwed: rowsOwingAnswers({ openRows: allOpen, openPrs, closedRows: closedAnswerRows(closedRows) }),
     openRows: allOpen,
@@ -590,7 +598,7 @@ function main() {
   const performed = performedOnPrs + strippedClosedClaims; // #3883: a tick that took labels off a closed row did something, and must not read as an idle org
   orders.push(...incident.signal);
   // #4602: THE SAME `blocked` THE TICK REPORTS AS WITHHELD (below), counted per holder and over time -- computed once, so the count and the report cannot disagree.
-  const shelvedHere = partitionUnclaimed(rows, prFiles, { rowBranches, branchPrs, openRows: allOpen, chairmanRows: offerHierarchy.chairmanRows }).blocked;
+  const shelvedHere = partitionUnclaimed(rows, prFiles, { rowBranches, branchPrs, openRows: allOpen, chairmanRows: offerHierarchy.chairmanRows, waitFacts: waitReads?.facts ?? null }).blocked;
   const keyedTrackers = otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [[scope.tracker.repo, read.openRows ?? []] as const])); // agent-org#695: each keyed tracker's rows by repository, which its shelvings' bare numbers are among
   const shelvedElsewhere = others.flatMap((tick, at) => tick.blocked.map((row) => ({ ...row, repo: otherScopes[at].scope.tracker?.repo })));
   orders.push(...endGateSpan("blockingImpact", blockingImpactOrders({ shelved: [...shelvedHere, ...shelvedElsewhere], openRows: allOpen, trackers: Object.fromEntries(keyedTrackers), prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], stateDir: REVIEWER_STATE_DIR })));
@@ -601,7 +609,7 @@ function main() {
   orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => (releaseSeen.runs = readReleaseRuns(defaultRun, repoNow())),
     readReleaseFailures: () => readReleaseFailures(defaultRun, releaseRepositories(), { known: { [repoNow()]: releaseSeen.runs } }), // agent-org#887: every repository the org releases; the project's runs are the ones read just above
     raiseReleaseIncidents: (reads) => { fileReleaseIncidents(reads, { run: defaultRun, tracker: repoNow() }); },
-    readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) })),
+    readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(() => waitReads, { run: defaultRun }) })),
     ...endGateSpan("rulingOrders", rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() })), ...chairmanAsksNow(openRowsRead),
     ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
   endGateSpan("chairmanAsks+holdHolders");

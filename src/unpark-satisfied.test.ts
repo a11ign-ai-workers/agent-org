@@ -229,7 +229,8 @@ test("the comment says why, in each shape", () => {
 
 test("pins: the parked label is the gate's, and the gate wires the pass into the wait read", () => {
   assert.equal(PARKED, PARKED_LABEL);
-  assert.match(workGateSource(), /readWaits: unparkingWaits\(waitTickFacts, \{ run: defaultRun \}\)/, "the call site that makes the pass run every tick");
+  assert.match(workGateSource(), /readWaits: unparkingWaits\(\(\) => waitReads, \{ run: defaultRun \}\)/, "the call site that makes the pass run every tick");
+  assert.match(workGateSource(), /const waitReads = endGateSpan\("waitReads", waitReadsBeforeDecide\(/, "the one wait read, made ahead of the decision and handed to the pass (#1075)");
 });
 
 test("pin: the labels that block a ready row are the audit's own, one by one", () => {

@@ -2,6 +2,7 @@ import { existsSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { READY_LABEL, CLAIM_LABEL } from "../../claim-labels.ts";
 import { waitingOn, todayIso, describeWaiting, ANSWER_PREFIX } from "../../waiting-condition.ts";
+import { conditionHolds, declaredWaitsOf, waitItemOf, type WaitFacts } from "../../wait-condition.ts";
 import { subjectIdentity, subjectMention, subjectRef } from "../../review-attribution.ts";
 import { declaredRegionFiles } from "../../region-paths.ts";
 import { claimedRegionOverlapReason, claimedRegionsOf, fileOverlapReason } from "../../row-claim/file-overlap-rule.ts";
@@ -166,6 +167,7 @@ export function partitionUnclaimed(readyRows: any[], prFiles: { number: number; 
         branchPrs?: { branch: string; number: number; state: string; }[] | null;
         clock?: { today?: string; nowMs?: number; };
         chairmanRows?: ReadonlySet<number>;
+        waitFacts?: WaitFacts | null;
     }): { offerable: any[]; blocked: { number: number; owner: string | null; reason: string; }[]; yielding: Yielding[]; } {
   const offerable = [];
   const blocked = [];
@@ -174,6 +176,7 @@ export function partitionUnclaimed(readyRows: any[], prFiles: { number: number; 
   const onOrigin = branchIndex(options?.rowBranches);
   const replaceable = branchesToReplace(options?.rowBranches, options?.branchPrs);
   const blockersOf = blockersFromRows(options?.openRows);
+  const waitFacts = options?.waitFacts;
   const claimed = claimedRegionsOf(options?.openRows, options) ?? [];
   for (const row of readyRows) {
     // #2005's OPEN-CHECK, ANSWERED BY THIS LINE AND NOT BY A NEW RULE. The filer asked whether
@@ -219,6 +222,16 @@ export function partitionUnclaimed(readyRows: any[], prFiles: { number: number; 
     if (waiting) {
       blocked.push({ number: Number(row.number), ...subjectIdentity(row), owner: laneOwnerOf(row),
         reason: `${describeWaiting(waiting)} -- declared on the row, and it clears itself` });
+      continue;
+    }
+    // #1075: A BODY `Waiting-for:` IS A WAIT TOO. `waitingOn` reads only the fields above, so a Ready row whose body names an open
+    // `merged <ref>` was offered on every tick until the wait cleared. A wait whose condition is FALSE is shelved here, read against the
+    // same facts the stale-wait order reads. A wait that is UNKNOWN (`null`: an unread reference, `manual`, an unreadable line) and a
+    // tick with no facts (`waitFacts` absent or `null`) are offered as before: a failed read never shelves a row.
+    const unmet = waitFacts ? declaredWaitsOf(waitItemOf(row, "row")).waits.find((wait) => conditionHolds(wait, waitFacts) === false) : undefined;
+    if (unmet) {
+      blocked.push({ number: Number(row.number), ...subjectIdentity(row), owner: laneOwnerOf(row),
+        reason: `Waiting-for: ${unmet.text} is not true yet -- declared on the row, and it clears itself` });
       continue;
     }
     const { reason, yielded } = overlapVerdict(row, { prFiles, claimed, options: { ...options, blockersOf } });
