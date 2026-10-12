@@ -60,7 +60,7 @@ import { HAIKU_TIER_LABEL } from "./worker-profile.ts";
 import { UNNAMED_FIELD, underspecifiedLines, underspecifiedReading, underspecifiedStops, type UnderspecifiedReading } from "./spec-lint.ts";
 import { commentsSince } from "./ticket-port/comments-since.ts";
 import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: the claimed rows and the merged list are connections, never a search
-import { asListJson, readMergedPullRequests, readMergedUpdatedSince, SINCE_PAGE_SIZE, WindowCutShort } from "./ticket-port/rows-since.ts";
+import { asListJson, readMergedPullRequests, readRowsSince, type SinceRead, SINCE_PAGE_SIZE, WindowCutShort } from "./ticket-port/rows-since.ts";
 
 /** The cause this file feeds (`cause-declaration.ts` declares it), addressed to `ceo`. */
 export const RETRO_CAUSE = "org-retrospective";
@@ -1131,6 +1131,17 @@ export function readRetroReads(stateDir: string): RetroReads {
 export function keepRetroReads(stateDir: string, memory: RetroReads) {
   const usedOnly = <T>(entries: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(entries).filter(([key]) => memory.used.has(key)));
   keepReadings(join(stateDir, RETRO_READS_FILE), { marks: usedOnly(memory.marks), contents: usedOnly(memory.contents) });
+}
+
+/**
+ * The pull requests MERGED and UPDATED at or after `since`, newest update first, in `gh pr list --json` shape, with NO merge-time filter (agent-org#1081). A merged row
+ * is updated when it merges, and again when its body or comments change, so a caller that keeps the rows it has and walks only the pages above its mark (the newest
+ * `updatedAt` it saw) reads what changed, and a body edited after the merge is among those rows. The caller keeps the rows whose own time it means (`mergedAt`).
+ * A window longer than `maxPages` THROWS, as `readRowsSince` does: the caller reads in full instead.
+ */
+function readMergedUpdatedSince({ repo, select, run, since, maxPages }: { repo: string; select: string; run: Parameters<typeof readRowsSince>[0]["run"]; since: string; maxPages?: number; }): Record<string, unknown>[] {
+  const ask: SinceRead = { kind: "pullRequests", states: ["MERGED"], orderBy: "UPDATED_AT", repo, select: `${select} mergedAt`, since, ...(maxPages === undefined ? {} : { maxPages }) };
+  return readRowsSince({ ask, run }).map(asListJson);
 }
 
 /**
