@@ -118,7 +118,8 @@ import { readReenqueueState } from "./work-gate/causes/pr-ejected.ts";
 import { holdHolderOrdersNow } from "./work-gate/causes/pr-holds.ts";
 import { stampLookup, withEvidenceLabelAges, withPatchIds } from "./work-gate/causes/pr-reviews.ts";
 import { EXIT, claimedCommentsForClock, defaultRun, draining, readBranchPrsOfUnclaimed, readClaimedRowComments, readPrs, readReadyRows,
-  readRowBranches, readWithFirstWaveTogether, releaseBehindNow, repoNow, runBatch } from "./work-gate/reads.ts";
+  readRowBranches, readWithFirstWaveTogether, releaseBehindNow, repoNow, runBatch, otherScopesToRead, rememberOtherScopesRead, isAmbientRun } from "./work-gate/reads.ts";
+import { type Pacing, pacedUnread, pacingNow, pacingOn } from "./work-gate/pacing.ts";
 import { answerGivenOrders, bareAnswerLabelOrders, closedAnswerRows, endedSessionLabels, liveWorkspaceLabels, readClosedAnswerRows, rowsOwingAnswers,
   withAnswerLabel } from "./work-gate/causes/rows-answers.ts";
 import { readRecentlyClosed, unclaimedClearings } from "./work-gate/causes/rows-blocker-cleared.ts";
@@ -458,6 +459,16 @@ function trackerReadings({ allOpen, rows }: { allOpen: any[]; rows: any[]; }) {
 }
 
 /**
+ * (agent-org#1240) THE POOL THIS TICK LEFT, read ONCE PER PROCESS: `readOtherScopes` (inside the first wave, which asks it twice) and `main` both
+ * ask it, so the probe is one call. Flag off, it reads nothing and paces nothing.
+ */
+let tickPool: Pacing | undefined;
+export function tickPacing(): Pacing {
+  tickPool ??= pacingNow(defaultRun, pacingOn());
+  return tickPool;
+}
+
+/**
  * Every NON-PRIMARY scope the declaration lists, with its lanes read ONCE. Empty for one project, which is what keeps one project's orders
  * identical to what they were. #3095: read BEFORE the primary's own B4 comparison, because that comparison needs these pull requests too,
  * and handed on to `otherScopeTicks` so it is not a second read.
@@ -466,7 +477,9 @@ function trackerReadings({ allOpen, rows }: { allOpen: any[]; rows: any[]; }) {
  */
 export function readOtherScopes(run: (args: string[], repo?: string) => string = defaultRun, batch: typeof runBatch | undefined = run === defaultRun ? runBatch : undefined): { scope: Scope; read: ReturnType<typeof readLanes>; }[] {
   const scopes = scopesOf([homeProjectDeclaration()]).filter((scope) => scope.key !== "");
-  return readWithFirstWaveTogether((aimed) => scopes.map((scope) => ({ scope, read: readLanes(scope, aimed) })), run, batch);
+  // agent-org#1240: BELOW THE RESERVE none are read (and `main` reports them unread); on a webhook tick (flag on) only the repositories the events named, and those due a sweep; every one otherwise
+  const wanted = isAmbientRun(run) && tickPacing().paced ? [] : otherScopesToRead(run, scopes);
+  return readWithFirstWaveTogether((aimed) => wanted.map((scope) => ({ scope, read: readLanes(scope, aimed) })), run, batch);
 }
 
 /**
@@ -559,7 +572,10 @@ function main() {
 
   // The third read is only needed to size the refill, and a refused one must not read as an empty shelf.
   // #3566: this one, `needs:chairman` and the open rows (`openRowsRead`) are asked TOGETHER, and with the other repositories' lists (slice 6).
-  const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); endGateSpan("readLanes"); const reenqueueState = readReenqueueState(); const waitReads = endGateSpan("waitReads", waitReadsBeforeDecide(prs, otherScopes, openRowsRead, reenqueueState)); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
+  // agent-org#1240: BELOW THE POOL'S RESERVE (flag on), `orgHealth` and the other repositories are skipped and REPORTED unread (`pacedSkips`)
+  const pacing = endGateSpan("pacing", tickPacing());
+  const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); endGateSpan("readLanes"); rememberOtherScopesRead(otherScopes);
+  const pacedSkips = [{ refused: pacedUnread(pacing, scopesOf([homeProjectDeclaration()]).some((scope) => scope.key !== "")) }]; const reenqueueState = readReenqueueState(); const waitReads = endGateSpan("waitReads", waitReadsBeforeDecide(prs, otherScopes, openRowsRead, reenqueueState)); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
   // agent-org#5177: the other trackers' parked rows, which `otherScopeTicks` ticks but the home seam never reads; flag `rows.autoUnpark` in `machinery-canary.json` (not project.json), default OFF.
   unparkOtherTrackers({ state: reenqueueState, scopes: otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }])), facts: waitReads?.facts ?? null, now: Date.now(), run: defaultRun, log: (line) => process.stderr.write(line) });
   const unreadChairmanRows = endGateSpan("chairmanReads", chairmanReadsRefused(chairmanBlocked ?? [])); // #3390: said, not skipped -- an unread row is not an unanswered one
@@ -635,7 +651,7 @@ function main() {
     trackers: [{ repo: repoNow(), rows: openRowsRead }, ...otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }]))] }))); // a11ign#5125: a row closed under an open half is said once; `null` rows are a refused read and say nothing
   orders.push(...endGateSpan("queueEntryNoRun", queueEntryNoRunOrders({ prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], scope: repoNow(), run: defaultRun, state: readReenqueueState(), stateDir: REVIEWER_STATE_DIR, now: Date.now(), log: (line) => process.stderr.write(line) }))); // agent-org#1195: flag `queue.queueEntryNoRun`, OFF by default; reads and writes nothing while it is
   const releaseSeen: { runs?: ReleaseRuns | null } = {}; // a11ign#5100: the release read `orgHealthNow` makes, kept for the canary, so it costs no second call
-  orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", orgHealthTogether({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips,
+  orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", pacing.paced ? [] : orgHealthTogether({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips,
     raiseReleaseIncidents: (reads) => { fileReleaseIncidents(reads, { run: defaultRun, tracker: repoNow() }); }, // agent-org#887: every repository the org releases; the project's runs are read in the wave below
     readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readFlagSwitches: () => readFlagLedger(), readTickRecord: () => readTickRecordState(stateEntryPath(TICK_RECORD_FILE)), readTickHealth: tickHealthNow, readWaits: unparkingWaits(() => waitReads, { run: defaultRun }) },
     // agent-org#1225: the org's gh reads asked together (the wave), then the effects above, in their order, on the data the wave read
@@ -643,7 +659,7 @@ function main() {
     ...endGateSpan("rulingOrders", rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() })), ...chairmanAsksNow(openRowsRead),
     ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
   endGateSpan("chairmanAsks+holdHolders");
-  orders.push(...machineryCanaryNow({ unread: unreadLanes({ prs, readyRows, others }), unarmed: armingSplit === null ? null : armingSplit.unarmed, releaseRuns: releaseSeen.runs ?? null, suppressions: incident.suppressions, stranded: armingSplit?.stranded ?? [] })); endGateSpan("machineryCanary"); // a11ign#5100, a11ign#5125
+  orders.push(...machineryCanaryNow({ unread: unreadLanes({ prs, readyRows, others: [...others, ...pacedSkips] }), unarmed: armingSplit === null ? null : armingSplit.unarmed, releaseRuns: releaseSeen.runs ?? null, suppressions: incident.suppressions, stranded: armingSplit?.stranded ?? [] })); endGateSpan("machineryCanary"); // a11ign#5100, a11ign#5125
   endGateSpan("approvedUnqueued", approvedUnqueuedNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)], repos: homeProjectDeclaration().tracker.map((t) => t.repo), repo: repoNow(), stateDir: REVIEWER_STATE_DIR, run: defaultRun })); // agent-org#893: the daily reading on #928; never throws, adds no order
   // FIRST OF ALL, AND ON PURPOSE (#2163): `wake` delivers in this order and records each delivery with a write, so
   // on a full disk the tick can end partway. The order that says the disk is full must not be the one behind it.
@@ -659,7 +675,7 @@ function main() {
   // leaves a set silently is the defect both filters exist to fix.
   endGateSpan("reportWithheld", reportWithheld({ drain, blocked: [...shelvedHere, ...partitionFleetBatch(allOpen).waiting, ...others.flatMap((tick) => tick.blocked)] }));
 
-  const unread = unreadLanes({ prs, readyRows, others });
+  const unread = unreadLanes({ prs, readyRows, others: [...others, ...pacedSkips] });
   if (unread.length > 0) exitPartial(unread, emitted.length);
   // PERFORMED COUNTS AS WORK. A tick that marked a draft ready did something, and exiting QUIET would
   // report it as an idle org to every reader of this exit code.

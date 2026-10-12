@@ -1,0 +1,155 @@
+// no-token: gh -- imports `work-gate/pacing.ts`, which reads the GraphQL pool through an injected `run`; every probe here is a stub, and nothing is spawned (agent-org#1240)
+/**
+ * agent-org#1240: THE GATE PACES ITS GRAPHQL SPEND AGAINST A NAMED RESERVE, AND A WEBHOOK TICK READS THE OTHER REPOSITORIES ONLY WHERE ITS EVENTS NAMED THEM.
+ *
+ * Each rule is pinned by a positive assertion and a RED CONTROL: the same rule with its condition removed, which the assertion must refuse.
+ *   - the flag is OFF by default, and a poll tick or a test's `run` reads every repository as it always has;
+ *   - below the reserve the pool is paced, at the reserve it is not (the boundary is named, not implied);
+ *   - a paced tick names what it did not read, and never names nothing;
+ *   - a webhook tick reads a repository its events named, and one due a sweep, and no other;
+ *   - the sweep is every `GRAPHQL_SWEEP_MINUTES`, and a repository read inside that window is not read again;
+ *   - the memory of read times survives a write of another repository's, and a missing or malformed file reads every repository.
+ */
+import { test } from "node:test";
+import assert from "node:assert/strict";
+import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
+import { GRAPHQL_RESERVE, GRAPHQL_SWEEP_MINUTES, OTHER_SCOPES_MEMORY, PACING_FLAG, pacedUnread, pacingNow, pacingOn, readOtherScopesMemory, rememberOtherScopes, scopesToRead } from "../work-gate/pacing.ts";
+import type { Scope } from "../work-gate/vocabulary.ts";
+import { workGateSource } from "../lib/work-gate-source.ts";
+import { emptyCanaryState, withMachineryFlag } from "../org-health.ts";
+
+const MINUTE = 60_000;
+const NOW = Date.parse("2026-10-12T12:00:00Z");
+
+/** A `gh api graphql -i` answer carrying the pool's headers, as `poolFromHeaders` reads them. */
+const answer = (remaining: number) => `HTTP/2.0 200 OK\nX-Ratelimit-Limit: 5000\nX-Ratelimit-Remaining: ${remaining}\nX-Ratelimit-Resource: graphql\nX-Ratelimit-Reset: 1800000000\n\n{"data":{}}`;
+
+/** A `run` that answers with `remaining` and counts its calls, so "the probe was never made" is itself a checked fact. */
+function probe(remaining: number | null) {
+  const calls: string[][] = [];
+  const run = (args: string[]) => {
+    calls.push(args);
+    if (remaining === null) throw Object.assign(new Error("refused"), { stdout: "" });
+    return answer(remaining);
+  };
+  return { run, calls };
+}
+
+/** A declared other repository: its key, and the code and tracker repositories it names. */
+const scope = (key: string, code: string | null, tracker: string | null): Scope => ({ key, code: code === null ? null : { repo: code }, tracker: tracker === null ? null : { repo: tracker } });
+
+test("the flag is OFF by default: a canary state with no record for it is OFF, and a state that cannot be read is OFF too", () => {
+  assert.equal(pacingOn(() => emptyCanaryState()), false);
+  assert.equal(pacingOn(() => withMachineryFlag(emptyCanaryState(), { name: PACING_FLAG, on: false })), false);
+  // RED CONTROL: the same state with the flag switched on IS on, so a `pacingOn` that always answered false would fail the line above
+  assert.equal(pacingOn(() => withMachineryFlag(emptyCanaryState(), { name: PACING_FLAG, on: true })), true);
+  assert.equal(pacingOn(() => { throw new Error("no state directory"); }), false);
+  assert.equal(PACING_FLAG, "gate.graphqlPacing");
+});
+
+test("flag OFF reads nothing and paces nothing, even on a pool the reserve would refuse", () => {
+  const { run, calls } = probe(GRAPHQL_RESERVE - 1);
+  assert.deepEqual(pacingNow(run, false), { paced: false, remaining: null });
+  assert.equal(calls.length, 0, "the probe is not made with the flag off");
+  // RED CONTROL: the same pool, flag on, IS paced: the flag is the only thing that stood between this tick and the skip
+  assert.equal(pacingNow(probe(GRAPHQL_RESERVE - 1).run, true).paced, true);
+});
+
+test("the reserve is a boundary: below it the pool is paced, at it the pool is not", () => {
+  assert.equal(GRAPHQL_RESERVE, 1000, "the reserve is named, and the PR says so");
+  assert.deepEqual(pacingNow(probe(999).run, true), { paced: true, remaining: 999 });
+  assert.deepEqual(pacingNow(probe(1000).run, true), { paced: false, remaining: 1000 });
+  // RED CONTROL: a reserve of zero would pace nothing at 999, and this assertion would refuse it
+  assert.notEqual(pacingNow(probe(999).run, true).paced, false);
+});
+
+test("a probe that cannot be read is not paced: the reads then refuse on their own and are reported as they are", () => {
+  assert.deepEqual(pacingNow(probe(null).run, true), { paced: false, remaining: null });
+  // RED CONTROL: a pool read as 0 IS paced, so the null case above is not paced by the same rule
+  assert.equal(pacingNow(probe(0).run, true).paced, true);
+});
+
+test("a paced tick names what it did not read, and a tick that was not paced names nothing", () => {
+  assert.deepEqual(pacedUnread({ paced: true, remaining: 10 }, true), ["the other repositories' lanes", "the org-health reads"]);
+  // a one-project host has no other repositories to be unread, so only the org-health reads are named
+  assert.deepEqual(pacedUnread({ paced: true, remaining: 10 }, false), ["the org-health reads"]);
+  assert.deepEqual(pacedUnread({ paced: false, remaining: 5000 }, true), []);
+  // RED CONTROL: a paced tick that named nothing would read as clean, which is the defect the row forbids
+  assert.notDeepEqual(pacedUnread({ paced: true, remaining: 10 }, false), []);
+});
+
+test("a repository no event named, read inside the sweep window, is not read", () => {
+  const scopes = [scope("a", "org/a-code", "org/a-rows"), scope("b", "org/b-code", null)];
+  const fresh = ({ a: NOW - MINUTE, b: NOW - MINUTE });
+  assert.deepEqual(scopesToRead({ scopes, named: [], lastReadAt: fresh, nowMs: NOW }), []);
+  // RED CONTROL: with no memory at all every repository is due, so the same empty event list reads both
+  assert.deepEqual(scopesToRead({ scopes, named: [], lastReadAt: {}, nowMs: NOW }).map((s) => s.key), ["a", "b"]);
+});
+
+test("a repository is read when an event names its code or its tracker repository", () => {
+  const scopes = [scope("a", "org/a-code", "org/a-rows"), scope("b", "org/b-code", "org/b-rows")];
+  const fresh = ({ a: NOW - MINUTE, b: NOW - MINUTE });
+  const byCode = scopesToRead({ scopes, named: [{ repo: "org/a-code", kind: "pr", number: 7 }], lastReadAt: fresh, nowMs: NOW });
+  assert.deepEqual(byCode.map((s) => s.key), ["a"]);
+  const byTracker = scopesToRead({ scopes, named: [{ repo: "org/b-rows", kind: "issue", number: 3 }], lastReadAt: fresh, nowMs: NOW });
+  assert.deepEqual(byTracker.map((s) => s.key), ["b"]);
+  // RED CONTROL: a naming that matched nothing would leave both repositories out, which the first assertion of this test already refuses
+  assert.notEqual(byCode.length, 0);
+});
+
+test("the named list NOT KNOWN (null) reads every repository, as a poll tick does", () => {
+  const scopes = [scope("a", "org/a-code", null), scope("b", "org/b-code", null)];
+  const fresh = ({ a: NOW, b: NOW });
+  assert.deepEqual(scopesToRead({ scopes, named: null, lastReadAt: fresh, nowMs: NOW }).map((s) => s.key), ["a", "b"]);
+  // RED CONTROL: `[]` (nothing named) reads none of them, so `null` and `[]` are not the same answer
+  assert.deepEqual(scopesToRead({ scopes, named: [], lastReadAt: fresh, nowMs: NOW }), []);
+});
+
+test("the sweep reads a repository no event named once it is GRAPHQL_SWEEP_MINUTES old, and not one minute before", () => {
+  assert.equal(GRAPHQL_SWEEP_MINUTES, 15, "the sweep interval is named, and the PR says so");
+  const scopes = [scope("a", "org/a-code", null)];
+  const atBoundary = scopesToRead({ scopes, named: [], lastReadAt: { a: NOW - GRAPHQL_SWEEP_MINUTES * MINUTE }, nowMs: NOW });
+  assert.deepEqual(atBoundary.map((s) => s.key), ["a"]);
+  const justBefore = scopesToRead({ scopes, named: [], lastReadAt: { a: NOW - (GRAPHQL_SWEEP_MINUTES * MINUTE - 1) }, nowMs: NOW });
+  assert.deepEqual(justBefore, []);
+  // RED CONTROL: a sweep that never fired would leave the boundary repository unread, which the first assertion refuses
+  assert.notDeepEqual(atBoundary, []);
+});
+
+test("a repository never read is due at once, so a host with no memory reads whole", () => {
+  const scopes = [scope("new", "org/new-code", null)];
+  assert.deepEqual(scopesToRead({ scopes, named: [], lastReadAt: {}, nowMs: NOW }).map((s) => s.key), ["new"]);
+});
+
+test("the memory keeps every repository's read time, and a missing or malformed file is empty, so every repository is then due", () => {
+  const dir = mkdtempSync(join(tmpdir(), "gate-pacing-"));
+  try {
+    const path = join(dir, OTHER_SCOPES_MEMORY);
+    assert.deepEqual(readOtherScopesMemory(path), {}, "a missing file is an empty memory");
+    rememberOtherScopes({ path, keys: ["a"], nowMs: NOW });
+    rememberOtherScopes({ path, keys: ["b"], nowMs: NOW + MINUTE });
+    assert.deepEqual(readOtherScopesMemory(path), { a: NOW, b: NOW + MINUTE }, "a write of one repository keeps the others' times");
+    // RED CONTROL: a write that replaced the file would have lost `a`, and `a` would then be due at once
+    assert.equal(readOtherScopesMemory(path).a, NOW);
+    writeFileSync(path, "{not json");
+    assert.deepEqual(readOtherScopesMemory(path), {}, "a malformed file reads as empty");
+    writeFileSync(path, JSON.stringify({ version: 1, readAtMs: { a: "yesterday" } }));
+    assert.deepEqual(readOtherScopesMemory(path), {}, "a non-numeric stamp is dropped, not read as a time");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the gate's source carries the wiring: the pool is read once inside `readLanesAfterOutageCheck`, orgHealth is skipped below the reserve, and the paced skips are named unread", () => {
+  const source = workGateSource();
+  assert.equal(source.match(/readLanesAfterOutageCheck\(\)/g)?.length, 1, "main still makes the one call the structure tests pin");
+  assert.match(source, /function tickPacing\(\): Pacing \{\n  tickPool \?\?= pacingNow\(defaultRun, pacingOn\(\)\);/);
+  assert.match(source, /const wanted = isAmbientRun\(run\) && tickPacing\(\)\.paced \? \[\] : otherScopesToRead\(run, scopes\);/);
+  assert.match(source, /const pacing = endGateSpan\("pacing", tickPacing\(\)\);/);
+  assert.match(source, /\.\.\.endGateSpan\("orgHealth", pacing\.paced \? \[\] : orgHealthTogether\(/);
+  assert.match(source, /const unread = unreadLanes\(\{ prs, readyRows, others: \[\.\.\.others, \.\.\.pacedSkips\] \}\);/);
+  // RED CONTROL: the unpaced source has no skip, so the orgHealth pattern above is what the flag changes
+  assert.doesNotMatch(source, /endGateSpan\("orgHealth", orgHealthTogether\(/);
+});

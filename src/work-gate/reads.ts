@@ -12,6 +12,7 @@ import { type Budget, GATE_VALIDATORS_DIR, conditionalGate, graphqlReadOf, meter
 import { type Ask, parseReply, readValidators, saveValidators } from "../trace/publish.ts";
 import { narrowedPrList, readPrList, writePrList } from "../pr-list-memory.ts";
 import { readTickScopes } from "../tick-scopes.ts";
+import { OTHER_SCOPES_MEMORY, pacingOn, readOtherScopesMemory, rememberOtherScopes, scopesToRead } from "./pacing.ts";
 import { cachedReleaseBehind, readReleaseBehind, npmRegistryRead } from "../release-behind-main.ts";
 import { armedFromApi, openPullRequestsQueryArgs } from "../auto-arm-sweep.ts";
 import { REPO } from "../project-identity.ts";
@@ -1370,6 +1371,32 @@ function webhookMode(): boolean {
   } catch (error) {
     void error; // no readable declaration is `poll`
     return false;
+  }
+}
+
+/**
+ * (agent-org#1240) THE OTHER REPOSITORIES A TICK READS. Flag off, a poll tick, or a run that is not the gate's own: all of them. Flag on and a webhook
+ * tick: those the event queue named and those due a sweep (`scopesToRead`). Asked from `readOtherScopes`, so the first-wave rehearsal asks it too; it
+ * reads the memory and writes nothing, which is why the memory is stamped from the REAL reads by `rememberOtherScopesRead` in `main`.
+ */
+export function otherScopesToRead(run: object, scopes: readonly Scope[]): Scope[] {
+  if (!(isAmbientRun(run) && pacingOn() && webhookMode())) return [...scopes];
+  const tickScopesPath = process.env[TICK_SCOPES_VARIABLE];
+  return scopesToRead({ scopes, named: tickScopesPath === undefined ? null : readTickScopes(tickScopesPath), lastReadAt: readOtherScopesMemory(stateEntryPath(OTHER_SCOPES_MEMORY)), nowMs: Date.now() });
+}
+
+/**
+ * (agent-org#1240) Stamps the repositories whose lanes were ALL answered as read now. A refused lane is not a sweep: that repository is due again next tick,
+ * and its refusal is already reported PARTIAL. A failed write is said, and the next webhook tick then finds every repository due, which reads whole.
+ */
+export function rememberOtherScopesRead(reads: { scope: Scope; read: { prs: unknown; readyRows: unknown; promotableRows: unknown; chairmanBlocked: unknown; openRows: unknown; }; }[]): void {
+  if (!(pacingOn() && webhookMode())) return;
+  const keys = reads.filter(({ read }) => [read.prs, read.readyRows, read.promotableRows, read.chairmanBlocked, read.openRows].every((lane) => lane !== null)).map(({ scope }) => scope.key);
+  if (keys.length === 0) return;
+  try {
+    rememberOtherScopes({ path: stateEntryPath(OTHER_SCOPES_MEMORY), keys, nowMs: Date.now() });
+  } catch (error) {
+    process.stderr.write(`work-gate: the other repositories' read times could not be remembered (${String((error as Error).message).split("\n")[0]}); the next webhook tick reads them all\n`);
   }
 }
 

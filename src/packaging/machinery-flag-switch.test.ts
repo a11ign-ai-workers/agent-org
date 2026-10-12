@@ -18,6 +18,7 @@ import { CANARY_STATE_FILE, emptyCanaryState, machineryFlagOn, withMachineryFlag
 import { readReenqueueState, REENQUEUE_EJECTED_FLAG } from "../work-gate/causes/pr-ejected.ts";
 import { CHAIN_WAIT_FLAG } from "../work-gate/causes/org-health-chain-wait.ts";
 import { CLOSED_UNDER_HALF_FLAG } from "../work-gate/causes/rows-closed-under-half.ts";
+import { PACING_FLAG } from "../work-gate/pacing.ts";
 import { QUEUE_ENTRY_NO_RUN_FLAG } from "../work-gate/causes/queue-entry-no-run.ts";
 import { RECHECK_FLAG } from "../work-gate/shared-file-orders.ts";
 import { AUTO_UNPARK_FLAG } from "../unpark-satisfied.ts";
@@ -63,7 +64,7 @@ test("(1) the other six registered flags are switched on and read through their 
   assert.equal(machineryFlagOn(state, RECHECK_FLAG), true, "holds.recheck is switched by the command, which `recheckFlagOn` then reads (agent-org#1187)");
   assert.equal(machineryFlagOn(state, OPEN_PR_HOLD_FLAG), true, "prune.holdOpenPr is switched by the command, which `openPrHoldOn` then reads (agent-org#1221)");
   assert.equal(machineryFlagOn(state, REFUSE_ASKING_ANNOUNCEMENTS_FLAG), true, "messaging.refuseAskingAnnouncements is switched by the command, which `canaryFlagOn` in watch.ts then reads (agent-org#1222)");
-  assert.deepEqual(FLAG_REGISTRY, [REENQUEUE_EJECTED_FLAG, CHAIN_WAIT_FLAG, CLOSED_UNDER_HALF_FLAG, AUTO_UNPARK_FLAG, QUEUE_ENTRY_NO_RUN_FLAG, RECHECK_FLAG, OPEN_PR_HOLD_FLAG, REFUSE_ASKING_ANNOUNCEMENTS_FLAG], "the registry is the eight flags a module reads");
+  assert.deepEqual(FLAG_REGISTRY, [REENQUEUE_EJECTED_FLAG, CHAIN_WAIT_FLAG, CLOSED_UNDER_HALF_FLAG, AUTO_UNPARK_FLAG, QUEUE_ENTRY_NO_RUN_FLAG, RECHECK_FLAG, OPEN_PR_HOLD_FLAG, REFUSE_ASKING_ANNOUNCEMENTS_FLAG, PACING_FLAG], "the registry is the eight flags a module reads");
 });
 
 test("(2) a name no module reads is refused, and nothing is written", () => {
