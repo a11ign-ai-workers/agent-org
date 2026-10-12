@@ -1,3 +1,4 @@
+// no-token: readRowLabels -- missingUnitPrograms never reaches the gh spawn in readRowLabels (host-units.ts:3072); a logging gh stub on PATH saw 0 calls
 /**
  * #1112: `host:check` read the `%h` of an ExecStart as a literal directory under the unit's WorkingDirectory and reported a program
  * that is there as PROGRAM MISSING. systemd expands `%h` to the home before anything runs, so the file a unit starts is under the home.
