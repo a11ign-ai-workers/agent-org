@@ -1,6 +1,6 @@
 A red check's class is read from its failing assertions, behind `CI_CLASS.assertionsOnly`, shipped OFF. With the flag ON, `readCiFailure` reads the rate-limit and lost-runner text from the failing assertion lines when one is named, and from the whole log when none is. A passing test that prints "rate limit" or "502" beside a real assertion failure is now `own-defect`, routed to `owner`; a runner lost before any assertion ran stays `infrastructure`. With the flag OFF the classifier is unchanged.
 
-Acceptance: `bash -c 'cd /home/agent/repos/wt-agent-org-1166 && node --test src/ci-failure-class-assertions.test.ts'`
+Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --test src/ci-failure-class-assertions.test.ts`
 
 Measured: `pass 5, fail 0` for the acceptance file (node 24, native TS). Mutations: each of four breaks at least one test, and `src/ci-failure-class.ts` was restored byte-identical each time (`diff` against a copy). Regression: `src/ci-failure-class.test.ts` and `src/wake-ci-class-review-depth.test.ts` pass with the three files together, 47 of 47. `pnpm run typecheck` exits 0.
 
