@@ -19,6 +19,7 @@
 //     A project whose rows live elsewhere gets `no-action` from `applicable` (the ref does not match the order's own) and its seat.
 //   * an order names a SET of rows (`rowCallCountOrders`'s key is `1,2,3`), and `itemOfKey` reads a set as no item: only an order naming ONE row is
 //     served by a run, and the others go to the seat as today.
+import { CLAIM_LABEL } from "../../claim-labels.ts";
 import { formatRowCallCountAssessment } from "../../work-gate/row-call-count-orders.ts";
 import type { ItemRef, TicketFlag, TicketItem, TicketPort } from "../../ticket-port/port.ts";
 import type { BriefQuestion } from "../brief.ts";
@@ -35,8 +36,8 @@ export const ESCALATE = "escalate";
 export const ALLOWED = [ONE_UNIT, SPLIT, ESCALATE] as const;
 export const DEFAULT_ANSWER = ONE_UNIT;
 
-/** The state a claimed row is in: the order's gap is a claim, and a row that left it has nothing to decide. */
-export const CLAIMED_STATE = "in-progress";
+/** The state a claimed row is in (the port names it as the claim label does): the order's gap is a claim, and a row that left it has nothing to decide. */
+export const CLAIMED_STATE: string = CLAIM_LABEL;
 
 /** The tiers, and the one a run starts at when the tier question is not asked or not answered. A run is never a standing seat, so nothing is above Sonnet. */
 export const TIER_DEFAULT = "haiku";
