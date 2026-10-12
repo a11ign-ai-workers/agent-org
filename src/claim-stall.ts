@@ -469,9 +469,9 @@ export function holderWorkAtRisk(io: HostReads, { merged, ...home }: {
 // --- THE READING ----------------------------------------------------------------------------------------------------
 
 /**
- * Everything the reading knows about ONE claimed row. The two costly facts are THUNKS, so a row that is plainly moving (a comment or a commit inside N) costs no `git status`, and a tick pays for a worktree only when the cheap signals already say it has been quiet. `nothing` (#3407): the claim names no git object on purpose, so it can be nudged and never released
+ * Everything the reading knows about ONE claimed row. The four git facts (`commit`, `push`, `file`, `work`) are THUNKS that {@link claimFactsFrom} MEMOISES, so a row costs only the reads its reading asks for, each at most once per tick (agent-org#1083): a row an open pull request owns costs no git at all, a row that is plainly moving (a comment or a commit inside N) costs no `git status`, and a tick pays for a worktree only when the cheap signals already say it has been quiet. A thunk that throws {@link Unreadable} is not cached, and {@link readClaim} turns it into `holding`. `nothing` (#3407): the claim names no git object on purpose, so it can be nudged and never released
  */
-export type ClaimFacts = { row: number, title?: string, session: string, claimedAt: number, branch: string | null, worktree: string | null, comment: number | null, commit: number | null, push: number | null, file: () => number | null, work: () => ReturnType<typeof workAtRisk>, openPrs: number, mergedPr: { number: number, mergedAt: number, repoKey?: string, head?: string } | null, waiting: string | null, blockedBy: number[], waitKind?: string | null, ownPrs?: import("./idle-claimant.ts").IdlePr[], nothing?: boolean, declared?: DeclarationReading, mergedHeld?: string, clockHeld?: string, };
+export type ClaimFacts = { row: number, title?: string, session: string, claimedAt: number, branch: string | null, worktree: string | null, comment: number | null, commit: () => number | null, push: () => number | null, file: () => number | null, work: () => ReturnType<typeof workAtRisk>, openPrs: number, mergedPr: { number: number, mergedAt: number, repoKey?: string, head?: string } | null, waiting: string | null, blockedBy: number[], waitKind?: string | null, ownPrs?: import("./idle-claimant.ts").IdlePr[], nothing?: boolean, declared?: DeclarationReading, mergedHeld?: string, clockHeld?: string, };
 export type Reading = { kind: "moving", lastMoveAt: number } | { kind: "pr-owned" } | { kind: "waiting", waiting: string } | { kind: "nudge", lastMoveAt: number, idleMs: number, idle?: boolean } | { kind: "nudged", nudgedAt: number, deliveredAt: number | null, lastMoveAt: number, idle?: boolean, idleSince?: number, idleAgain?: true } | { kind: "idle-watch", since: number } | { kind: "vacating", since: number } | { kind: "release", why: "stalled" | "blocked" | "merged" | "gone" | "closed" | "wait", lastMoveAt: number | null, idleMs: number | null, nudgedAt: number | null, edges?: number[], waiting?: string, mergedPr?: number, mergedPrRepoKey?: string, mergedPrHead?: string, openPrs?: number[], openPrRepoKeys?: (string | undefined)[], since?: number, idle?: boolean, interrupt?: boolean } | { kind: "holding", why: string, expected?: boolean };
 
 /** @param {(number | null)[]} times @returns {number | null} */
@@ -584,7 +584,7 @@ export function claimReading(facts: ClaimFacts, ctx: Parameters<typeof overlayRe
  * @param {ClaimFacts} facts @param {Parameters<typeof claimReading>[1]} ctx @returns {Reading | null}
  */
 function rememberedNudge(facts: ClaimFacts, ctx: Parameters<typeof claimReading>[1]): Reading | null {
-  const lastMoveAt = (latest([facts.claimedAt, facts.comment, facts.commit, facts.push, ctx.restartAt, facts.file()]) as number);
+  const lastMoveAt = (latest([facts.claimedAt, facts.comment, facts.commit(), facts.push(), ctx.restartAt, facts.file()]) as number);
   return secondReading(facts, ctx, lastMoveAt);
 }
 
@@ -623,7 +623,7 @@ function clockReading(facts: ClaimFacts, ctx: Parameters<typeof claimReading>[1]
   if (gone !== null) return gone;
   if (facts.blockedBy.length > 0) return blockedReading(facts);
   if (facts.waiting !== null) return waitReading(facts, facts.waiting);
-  const cheap = (latest([facts.claimedAt, facts.comment, facts.commit, facts.push, ctx.restartAt]) as number);
+  const cheap = (latest([facts.claimedAt, facts.comment, facts.commit(), facts.push(), ctx.restartAt]) as number);
   if (ctx.now - cheap < interval) return { kind: "moving", lastMoveAt: cheap };
   const lastMoveAt = (latest([cheap, facts.file()]) as number);
   if (ctx.now - lastMoveAt < interval) return { kind: "moving", lastMoveAt };
@@ -816,9 +816,21 @@ function pullRequestsAcrossRepos(input: ClaimInput): { open: OpenPr[]; merged: M
 }
 
 /**
+ * `read`, run at most once: the second ask is the first's answer. A read that THROWS is not remembered (the next ask runs it again), so a refused
+ * read is never mistaken for an answer. Scoped to ONE row's facts and so to one tick: `performRelease`'s fresh re-read goes through
+ * {@link holderWorkAtRisk} itself and never through a memo, which is what makes it a re-read.
+ * @template T @param {() => T} read @returns {() => T}
+ */
+function once<T>(read: () => T): () => T {
+  let held: { value: T } | undefined;
+  return () => (held ??= { value: read() }).value;
+}
+
+/**
  * One claimed row's facts, or `{ skip }` saying why it is NOT EVALUATED this tick -- a row with no claim record cannot say
- * when it was claimed, and git that will not answer is not "no commits". A skipped row is neither nudged nor released,
- * and the caller SAYS so: silence about a claim it could not read would look like a claim that was fine.
+ * when it was claimed. A skipped row is neither nudged nor released, and the caller SAYS so: silence about a claim it could not read would look like
+ * a claim that was fine. Git that will not answer is not "no commits" either, but it is found when the fact is ASKED FOR (agent-org#1083), where
+ * {@link readClaim} holds the row; the tick's own `movesOf` is the one reader that asks for every row, and names the row in `skipped`.
  *
  * The branch is the claim record's own (`Claimed-branch:`), so the gate needs no naming convention. Whether a pull request is
  * THIS row's is `ownsPr`'s answer, the same one for the open and the merged lookup (#3445): the work of #3390 merged on a branch it never claimed.
@@ -834,35 +846,30 @@ export function claimFactsFrom(input: ClaimInput, io: HostReads): ClaimFacts | {
   }
   const worktree = record.worktree === null ? null : resolve(input.repo, record.worktree);
   const dir = worktree !== null && io.exists(worktree) ? worktree : input.repo;
-  try {
-    const branch = record.branch;
-    const claimant = { row: input.row, branch, session: input.session, soleHolder: input.sessionRows === 1,
-      ...(input.trackerRepo === undefined ? {} : { trackerRepo: input.trackerRepo }) };
-    const ownPrs = prs.open.filter((p) => ownsPr(claimant, p) !== null);
-    // ONE read of the row's label history serves both the merge's anchor and the clock's: the seam is asked at most once per claim per tick
-    let labelled: { at: number | null } | undefined;
-    const labelledAt = (): number | null => (labelled ??= { at: sessionLabelAddedAt(io.labelEvents?.(claimant.row) ?? null, claimant.session) }).at;
-    const { merged, held } = landedWork({ merged: prs.merged ?? [], claimant, record, io, labelledAt });
-    const clock = claimClock({ record, input, io, labelledAt });
-    return { row: input.row, session: input.session, claimedAt: clock.at, branch, worktree,
-      ...(input.title === undefined ? {} : { title: input.title }),
-      comment: commentMove(input.comments, record, input.session),
-      commit: branch === null ? null : newestOwnCommit(io.git, dir, branch),
-      push: branch === null ? null : newestOwnCommit(io.git, dir, `origin/${branch}`),
-      file: () => (worktree !== null && io.exists(worktree) ? fileMove(io, worktree) : null),
-      work: () => holderWorkAtRisk(io, { worktree, branch, repo: input.repo,
-        ...(merged?.repoKey ? { merged: { repoKey: merged.repoKey, head: merged.headRefName, claimant } } : {}) }),
-      openPrs: ownPrs.length,
-      mergedPr: merged === null ? null : { number: merged.number, mergedAt: Date.parse(String(merged.mergedAt)), ...(merged.repoKey ? { repoKey: merged.repoKey } : {}),
-        ...(merged.headRefName ? { head: merged.headRefName } : {}) },
-      waiting: input.waiting, blockedBy: input.blockedBy,
-      ...(input.waitKind === undefined ? {} : { waitKind: input.waitKind }),
-      ownPrs, ...(record.nothing ? { nothing: true } : {}), ...(held === null ? {} : { mergedHeld: held }),
-      ...(clock.held === null ? {} : { clockHeld: clock.held }) };
-  } catch (err) {
-    if (err instanceof Unreadable) return { skip: `#${input.row}: ${err.message}` };
-    throw err;
-  }
+  const branch = record.branch;
+  const claimant = { row: input.row, branch, session: input.session, soleHolder: input.sessionRows === 1,
+    ...(input.trackerRepo === undefined ? {} : { trackerRepo: input.trackerRepo }) };
+  const ownPrs = prs.open.filter((p) => ownsPr(claimant, p) !== null);
+  // ONE read of the row's label history serves both the merge's anchor and the clock's: the seam is asked at most once per claim per tick
+  let labelled: { at: number | null } | undefined;
+  const labelledAt = (): number | null => (labelled ??= { at: sessionLabelAddedAt(io.labelEvents?.(claimant.row) ?? null, claimant.session) }).at;
+  const { merged, held } = landedWork({ merged: prs.merged ?? [], claimant, record, io, labelledAt });
+  const clock = claimClock({ record, input, io, labelledAt });
+  return { row: input.row, session: input.session, claimedAt: clock.at, branch, worktree,
+    ...(input.title === undefined ? {} : { title: input.title }),
+    comment: commentMove(input.comments, record, input.session),
+    commit: branch === null ? () => null : once(() => newestOwnCommit(io.git, dir, branch)),
+    push: branch === null ? () => null : once(() => newestOwnCommit(io.git, dir, `origin/${branch}`)),
+    file: once(() => (worktree !== null && io.exists(worktree) ? fileMove(io, worktree) : null)),
+    work: once(() => holderWorkAtRisk(io, { worktree, branch, repo: input.repo,
+      ...(merged?.repoKey ? { merged: { repoKey: merged.repoKey, head: merged.headRefName, claimant } } : {}) })),
+    openPrs: ownPrs.length,
+    mergedPr: merged === null ? null : { number: merged.number, mergedAt: Date.parse(String(merged.mergedAt)), ...(merged.repoKey ? { repoKey: merged.repoKey } : {}),
+      ...(merged.headRefName ? { head: merged.headRefName } : {}) },
+    waiting: input.waiting, blockedBy: input.blockedBy,
+    ...(input.waitKind === undefined ? {} : { waitKind: input.waitKind }),
+    ownPrs, ...(record.nothing ? { nothing: true } : {}), ...(held === null ? {} : { mergedHeld: held }),
+    ...(clock.held === null ? {} : { clockHeld: clock.held }) };
 }
 
 /**

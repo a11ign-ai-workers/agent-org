@@ -313,10 +313,11 @@ test("#2470 a row that DECLARES its wait is not stalled, and a row with no claim
     "silence about a claim that could not be read would look like a claim that was fine");
 });
 
-test("#2470 a git that will not answer is NOT 'no commits': the row is skipped by name and nothing is nudged or released", () => {
+test("#2470 a git that will not answer is NOT 'no commits': the row is held by name and nothing is nudged or released", () => {
   const broken = tickWith({ broken: 128 }, [claim(N_MIN + 300)]);
   assert.deepEqual(broken.orders, []);
-  assert.match(broken.log.join(""), /#2407: git .* exited 128 -- not evaluated/);
+  // agent-org#1083: the commit is read when the reading asks for it, so the refusal is a `holding` reading rather than a build-time skip
+  assert.match(broken.log.join(""), /#2407 \(worker-7\) is HELD, not released: git rev-parse .* exited 128/);
   assert.equal(tickWith({ commit: null }, [claim(N_MIN + 300)]).orders.length, 1, "control: the same row with a working git IS nudged");
 });
 
@@ -685,8 +686,8 @@ test("#2863 a PARTIAL listing with the holder agentless still proves nothing: li
 const OPEN_PR = { number: 9, headRefName: BRANCH };
 const goneFor = (minutes: number) => ({ 2407: { session: "worker-7", goneSince: ago(minutes) } });
 /** `claimReading`'s facts for a row with ONE open pull request of its own and nothing else going on. */
-const withOpenPr = (): Facts => ({ row: 2407, session: "worker-7", claimedAt: ago(1000), branch: BRANCH, worktree: WT, comment: null, commit: null,
-  push: null, file: () => null, work: () => ({ state: "none", dirty: 0, unpushed: 0 }), openPrs: 1, ownPrs: [OPEN_PR], mergedPr: null, waiting: null,
+const withOpenPr = (): Facts => ({ row: 2407, session: "worker-7", claimedAt: ago(1000), branch: BRANCH, worktree: WT, comment: null, commit: () => null,
+  push: () => null, file: () => null, work: () => ({ state: "none", dirty: 0, unpushed: 0 }), openPrs: 1, ownPrs: [OPEN_PR], mergedPr: null, waiting: null,
   blockedBy: [] } as Facts);
 const readWith = (agents: Agent[], goneSince: number | null) => claimReading(withOpenPr(),
   { now: NOW, restartAt: null, nudge: null, agents, goneSince });
@@ -735,7 +736,7 @@ test("#3048 the tick: the order carries the PR and the ANSWER, and the claim is 
 // --- the reading, directly ---------------------------------------------------------------------------------------------------------
 
 test("#2470 claimReading is pure in its inputs: an UNDELIVERED `nudged` row keeps offering its key, a delivered one goes quiet", () => {
-  const facts = { row: 1, session: "s", claimedAt: ago(1000), branch: BRANCH, worktree: WT, comment: null, commit: null, push: null,
+  const facts = { row: 1, session: "s", claimedAt: ago(1000), branch: BRANCH, worktree: WT, comment: null, commit: () => null, push: () => null,
     file: () => null, work: () => ({ state: "none", dirty: 0, unpushed: 0 }), openPrs: 0, mergedPr: null, waiting: null, blockedBy: [] } as Facts;
   const undelivered = readClaim(facts, { now: NOW, restartAt: null, nudge: { nudgedAt: NOW - MIN, deliveredAt: null } });
   assert.equal(undelivered.kind, "nudged");
@@ -1849,7 +1850,7 @@ test("#2470 an EXPECTED hold (a blocked holder with work) is not said every tick
   assert.deepEqual(expected.orders, []);
   assert.equal(/HELD/.test(expected.log.join("")), false, "expected: silent");
   const unreadable = tickWith({ broken: 128 }, [claim(20)], { blockedBy: [2258] });
-  assert.equal(/not evaluated/.test(unreadable.log.join("")), true, "CONTROL: an unreadable worktree is said");
+  assert.match(unreadable.log.join(""), /#2407 \(worker-7\) is HELD, not released: blocked, and the worktree could not be read/, "CONTROL: an unreadable worktree is said");
 });
 
 test("#2470 (9) a pane interrupted for LESS than the settle time is left alone (a person who pressed Esc is about to type); a settled one is resumed", () => {
@@ -2124,7 +2125,7 @@ const IDLE_FOR_N = { now: NOW, restartAt: null, nudge: null, agents: IDLE_HOLDER
 const unreviewedPr = (ageMs: number | undefined, over: object = {}) => ({ number: 9, headRefName: BRANCH, reviewDecision: "REVIEW_REQUIRED", labels: [{ name: "session:worker-7" }],
   checksPending: false, ...(ageMs === undefined ? {} : { createdAt: iso(NOW - ageMs) }), ...over });
 const holderWith = (pr: object | null): Facts => ({ ...withOpenPr(), openPrs: pr === null ? 0 : 1, ownPrs: pr === null ? [] : [pr],
-  comment: ago(60), commit: ago(60), push: ago(60) } as Facts);
+  comment: ago(60), commit: () => ago(60), push: () => ago(60) } as Facts);
 
 test("#4017 each of the five measured shapes -- an idle holder, a pull request of its own opened under an hour ago, no reviewer yet -- reads `pr-owned`, never a nudge", () => {
   for (const { row, pr, repoKey, ageMin } of NUDGED_WITH_A_PR_OPEN) {

@@ -15,7 +15,7 @@ import { familyNumber } from "../arm-pr.ts";
 import { CLAIM_LABEL } from "../claim-labels.ts";
 import { gitRun, pathExists, statMtime, readStallState, writeStallState, STALL_STATE_FILE, nextStallState,
   claimStalledOrders, readHerdrRestart, claimFactsFrom, readClaim, readLabelEvents, nudgeDeliveredAt, nudgeKey, closedClaimOrders,
-  restartNotices, recordStalledNudges, AGENT_SESSIONS_FILE } from "../claim-stall.ts";
+  restartNotices, recordStalledNudges, AGENT_SESSIONS_FILE, Unreadable } from "../claim-stall.ts";
 import { subjectMention, subjectRef } from "../review-attribution.ts";
 import { FAILURE_LEDGER_FILE } from "../failure-ledger.ts";
 import { readAgents, readAgentSessions } from "../herdr-agents.ts";
@@ -91,11 +91,31 @@ export type TrackerClaims = { key: string; repo: string; rows: any[] | null; cla
 export type LabelEventsOf = (row: number, repo: string) => ReturnType<NonNullable<import("../claim-stall.ts").HostReads["labelEvents"]>>;
 
 function movesOf(facts: import("../claim-stall.ts").ClaimFacts): ClaimMoves {
-  return { claimedAt: facts.claimedAt, comment: facts.comment, commit: facts.commit, push: facts.push,
+  return { claimedAt: facts.claimedAt, comment: facts.comment, commit: facts.commit(), push: facts.push(),
     // #3569: the fields `idleClaimantReading` reads a holder's wait from (a review, a check, an approval, a hold), already on `ownPrs` -- no new read.
     openPrs: (facts.ownPrs ?? []).map((pr: any) => ({ createdAt: pr.createdAt, labels: pr.labels, number: pr.number, repoKey: pr.repoKey,
       reviewDecision: pr.reviewDecision, checksPending: pr.checksPending })),
     mergedAt: facts.mergedPr?.mergedAt ?? null };
+}
+
+/**
+ * The home tracker's moves for `onFacts`, the ONE reader that asks every row for its commit and push (its consumers, `org-health` and
+ * `blockerClearedOrders`, hold them as plain numbers). A row whose git would not answer is left out of `moves` and named in `skipped`, as it was when the
+ * build itself read git: its reading is `holding` (agent-org#1083), and a missing move is "not read", never "no commit".
+ * @param {{ readings: { facts: ClaimFacts }[], skipped: Map<number, string> }} home @returns {ClaimFactsOfTick}
+ */
+function movesOfTick(home: { readings: { facts: import("../claim-stall.ts").ClaimFacts; }[]; skipped: Map<number, string>; }): ClaimFactsOfTick {
+  const moves = new Map<number, ClaimMoves>();
+  const skipped = new Map(home.skipped);
+  for (const { facts } of home.readings) {
+    try {
+      moves.set(facts.row, movesOf(facts));
+    } catch (err) {
+      if (!(err instanceof Unreadable)) throw err;
+      skipped.set(facts.row, `#${facts.row}: ${err.message}`);
+    }
+  }
+  return { moves, skipped };
 }
 
 /**
@@ -185,7 +205,7 @@ function evaluateClaims({ rows, claimedComments, openPrs, mergedPrs, elsewhere, 
   const homeBefore = unscoped(before);
   const home = homeUnread ? { readings: [], skipped: new Map<number, string>() }
     : readClaims({ ...shared, held, byRow: commentsByRow(claimedComments), key: "", trackerRepo: homeProjectDeclaration().tracker[0].repo, io, before: homeBefore });
-  if (!homeUnread) onFacts?.({ moves: new Map(home.readings.map(({ facts }) => [facts.row, movesOf(facts)])), skipped: home.skipped });
+  if (!homeUnread) onFacts?.(movesOfTick(home));
   const others = readable.map((unit) => {
     const { key, repo: trackerRepo } = unit.tracker;
     const read = readClaims({ ...shared, held: unit.held, byRow: commentsByRow(unit.tracker.claimedComments), key, trackerRepo,
