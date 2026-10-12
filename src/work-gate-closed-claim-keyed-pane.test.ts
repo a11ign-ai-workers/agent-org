@@ -44,13 +44,20 @@ const BARE = "worker-4877";
 const BRANCH = "agent/a-closed-row-ends-agent-org-730";
 
 const record = (session: string) => ({ body: claimRecordComment({ session, branch: BRANCH, worktree: "../wt-agent-org-730" }),
-  createdAt: "2026-10-10T19:30:00Z", author: { login: "a11ign-ai-workers" } });
+  created_at: "2026-10-10T19:30:00Z", user: { login: "a11ign-ai-workers" } });
 
-/** One row as GraphQL answers it: `state` and `labels` decide whether it comes back as a closed claim. */
-const issue = (number: number, state: string, session: string) => ({ number, state,
-  labels: { nodes: ["in-progress", "started", `session:${session}`].map((name) => ({ name })) },
-  comments: { nodes: [record(session)] }, closedByPullRequestsReferences: { nodes: [] as { number: number }[] } });
-const graphql = (...issues: ReturnType<typeof issue>[]) => JSON.stringify({ data: { repository: Object.fromEntries(issues.map((i) => [`r${i.number}`, i])) } });
+/** One row, as the REST reads answer it (agent-org#1113): `state` decides whether it comes back as a closed claim, and its labels and comments carry `session`. */
+type IssueRow = { number: number; state: "OPEN" | "CLOSED"; session: string; };
+const issueRow = (number: number, state: IssueRow["state"], session: string): IssueRow => ({ number, state, session });
+/** The REST answers for the rows handed in, by path: `issues/<n>`, its comments and its timeline. Any other path is an absent row (HTTP 404). */
+const restFor = (...rows: IssueRow[]) => (call: Call) => {
+  for (const { number, state, session } of rows) {
+    if (pathOf(call) === `issues/${number}`) return JSON.stringify({ number, state: state.toLowerCase(), labels: ["in-progress", "started", `session:${session}`].map((name) => ({ name })), comments: 1 });
+    if (pathOf(call) === `issues/${number}/comments?per_page=100&page=1`) return JSON.stringify([record(session)]);
+    if (pathOf(call) === `issues/${number}/timeline`) return "[]";
+  }
+  throw Object.assign(new Error("Command failed: gh api"), { status: 1, stderr: "gh: Not Found (HTTP 404)" });
+};
 
 type Call = { args: string[]; repo: string | undefined };
 /** A `gh` seam that records every call with the repository it was aimed at, and answers `answer(call)`. */
@@ -63,9 +70,11 @@ function seam(answer: (call: Call) => string) {
   };
   return { calls, run };
 }
-const queryOf = (call: Call) => call.args.find((a) => a.startsWith("query="))!;
-const rowsAsked = (call: Call) => [...queryOf(call).matchAll(/issue\(number: (\d+)\)/g)].map((m) => Number(m[1]));
-const field = (call: Call, name: string) => call.args.find((a) => a.startsWith(`${name}=`))?.slice(name.length + 1);
+const pathOf = (call: Call) => call.args[call.args.length - 1].replace(/^repos\/[^/]+\/[^/]+\//, "");
+const repoOf = (call: Call) => call.args[call.args.length - 1].match(/^repos\/([^/]+\/[^/]+)\//)?.[1];
+/** The row numbers a call asks for: an `issues/<n>` read only, not the comments or the timeline of a row. */
+const rowsAsked = (call: Call) => { const number = pathOf(call).match(/^issues\/(\d+)$/); return number ? [Number(number[1])] : []; };
+const issueReads = (calls: Call[]) => calls.filter((call) => rowsAsked(call).length > 0);
 
 /** The orders the gate hands the stall pass for one tick's closed claims, decided as `main` decides them. */
 function ordersOf(agents: Agent[], answer: (call: Call) => string, log: (line: string) => void = () => {}) {
@@ -80,10 +89,10 @@ test("positive control: the fixture project DECLARES agent-org, so a keyed pane 
 });
 
 test("agent-org#757 (1): a CLOSED row held by worker-agent-org-<n> yields the release, in ITS tracker, and the interrupt when the pane is mid-turn", () => {
-  const closed = (call: Call) => (call.repo === AGENT_ORG ? graphql(issue(730, "CLOSED", KEYED)) : "{}");
+  const closed = (call: Call) => (call.repo === AGENT_ORG ? restFor(issueRow(730, "CLOSED", KEYED))(call) : "{}");
   const { orders, calls } = ordersOf([{ label: KEYED, status: "working" }], closed);
-  assert.equal(calls.length, 1, "ONE read, for the one tracker the listed pane is of");
-  assert.deepEqual([calls[0].repo, field(calls[0], "owner"), field(calls[0], "name"), rowsAsked(calls[0])], [AGENT_ORG, "a11ign", "agent-org", [730]],
+  assert.deepEqual(issueReads(calls).map((c) => c.repo), [AGENT_ORG], "ONE issue read, for the one tracker the listed pane is of");
+  assert.deepEqual([calls[0].repo, repoOf(calls[0]), rowsAsked(calls[0])], [AGENT_ORG, AGENT_ORG, [730]],
     "asked of agent-org's repository, for agent-org's row 730 -- the home tracker's 730 is a different row");
   assert.equal(orders.length, 1);
   const [order] = orders;
@@ -96,27 +105,27 @@ test("agent-org#757 (1): a CLOSED row held by worker-agent-org-<n> yields the re
 });
 
 test("agent-org#757 (1) an IDLE keyed pane on a closed row is released and NOT interrupted (there is nothing to interrupt)", () => {
-  const { orders } = ordersOf([{ label: KEYED, status: "idle" }], () => graphql(issue(730, "CLOSED", KEYED)));
+  const { orders } = ordersOf([{ label: KEYED, status: "idle" }], restFor(issueRow(730, "CLOSED", KEYED)));
   assert.deepEqual(orders.map((o) => [o.release?.row, o.release?.tracker, o.release?.why, o.release?.interrupt]), [[730, "agent-org", "closed", undefined]]);
 });
 
 test("agent-org#757 (1) CONTROL: the SAME keyed pane whose row is still OPEN yields nothing", () => {
-  const { orders, calls } = ordersOf([{ label: KEYED, status: "working" }], () => graphql(issue(730, "OPEN", KEYED)));
-  assert.equal(calls.length, 1, "the read IS made: the row is asked about, and found open");
+  const { orders, calls } = ordersOf([{ label: KEYED, status: "working" }], restFor(issueRow(730, "OPEN", KEYED)));
+  assert.deepEqual(issueReads(calls).map((c) => c.repo), [AGENT_ORG], "the read IS made: the row is asked about, and found open");
   assert.deepEqual(orders, []);
 });
 
 test("agent-org#757 (2) the existing path: worker-4877 on a CLOSED home row still yields the release, with no tracker key", () => {
-  const { orders, calls } = ordersOf([{ label: BARE, status: "working" }], () => graphql(issue(4877, "CLOSED", BARE)));
+  const { orders, calls } = ordersOf([{ label: BARE, status: "working" }], restFor(issueRow(4877, "CLOSED", BARE)));
   assert.deepEqual([calls[0].repo, rowsAsked(calls[0])], [undefined, [4877]], "the home tracker's read is made exactly as it always was: no repository aimed");
   assert.deepEqual(orders.map((o) => [o.session, o.release?.row, o.release?.tracker, o.release?.why, o.release?.interrupt, o.subject]),
     [[BARE, 4877, undefined, "closed", true, "row-4877"]]);
 });
 
 test("agent-org#757 (1) both spellings of ONE number are two rows: each is asked of its own tracker, and neither answers for the other", () => {
-  const answer = (call: Call) => (call.repo === AGENT_ORG ? graphql(issue(730, "CLOSED", KEYED)) : graphql(issue(730, "OPEN", "worker-730")));
+  const answer = (call: Call) => (call.repo === AGENT_ORG ? restFor(issueRow(730, "CLOSED", KEYED))(call) : restFor(issueRow(730, "OPEN", "worker-730"))(call));
   const { orders, calls } = ordersOf([{ label: "worker-730", status: "working" }, { label: KEYED, status: "idle" }], answer);
-  assert.deepEqual(calls.map((c) => [c.repo, rowsAsked(c)]), [[undefined, [730]], [AGENT_ORG, [730]]]);
+  assert.deepEqual(issueReads(calls).map((c) => [c.repo, rowsAsked(c)]), [[undefined, [730]], [AGENT_ORG, [730]]]);
   assert.deepEqual(orders.map((o) => [o.session, o.release?.tracker]), [[KEYED, "agent-org"]], "only agent-org's 730 is closed");
 });
 
@@ -124,7 +133,7 @@ test("agent-org#757 (1) one tracker's refused read is said, and does NOT hold th
   const log: string[] = [];
   const answer = (call: Call) => {
     if (call.repo === AGENT_ORG) throw Object.assign(new Error("Command failed: gh"), { status: 1, stderr: "HTTP 502", stdout: "" });
-    return graphql(issue(4877, "CLOSED", BARE));
+    return restFor(issueRow(4877, "CLOSED", BARE))(call);
   };
   const { orders, read } = ordersOf([{ label: BARE, status: "idle" }, { label: KEYED, status: "idle" }], answer, (l) => log.push(l));
   assert.deepEqual(orders.map((o) => o.release?.row), [4877]);
@@ -144,7 +153,7 @@ test("agent-org#757 (3) a keyed label naming a tracker the project does NOT decl
   assert.equal(log.length, 1);
   assert.match(log[0], /worker-capture-2407 names tracker `capture`, which the project does not declare/);
   // CONTROL: the declared spelling of the same shape IS read, so the refusal above is the key's and not the shape's.
-  const declaredRead = ordersOf([{ label: "worker-agent-org-2407", status: "working" }], () => graphql(issue(2407, "OPEN", "worker-agent-org-2407")));
+  const declaredRead = ordersOf([{ label: "worker-agent-org-2407", status: "working" }], restFor(issueRow(2407, "OPEN", "worker-agent-org-2407")));
   assert.deepEqual(declaredRead.calls.map((c) => c.repo), [AGENT_ORG]);
 });
 
@@ -159,7 +168,7 @@ test("agent-org#757 the read is made in the follow-ups' wave, so a keyed pane co
   const seen: Call[] = [];
   const run = (args: string[], repo?: string) => {
     seen.push({ args, repo });
-    return args[0] === "api" && args.some((a) => a.includes("issue(number:")) ? graphql(issue(730, "CLOSED", KEYED)) : "[]";
+    return args[0] === "api" && args[args.length - 1].includes("/issues/730") ? restFor(issueRow(730, "CLOSED", KEYED))({ args, repo }) : "[]";
   };
   const got = readOpenRowFollowUps(open, run as never, undefined as never, () => [{ label: KEYED, status: "idle" }]) as unknown as
     { closedClaims: ReturnType<typeof closedClaimsWhenWorkerListed> };
