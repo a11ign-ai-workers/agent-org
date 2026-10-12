@@ -8,6 +8,10 @@ Measured: `VERDICT pass: 9 tests in 1 file` for the acceptance file. With `src/u
 
 Not here, and named: the live reading after agent-org#904 merges is out of scope (resource ban); a non-home row still needs a human promote after it is un-parked; the refusal's generic text says `row-file --promote=<n>`, which is wrong for a non-home row; `readWaitRef` still swallows errors to `null`; `MAX_WAIT_READS = 30` with PRs-first ordering can starve later references. `rows.autoUnpark` is NOT flipped in `machinery-canary.json` by this change.
 
+Flag: rows.autoUnpark
+Health-signals: claims-refused, wakes-held
+Revert: turn `rows.autoUnpark` off in `machinery-canary.json` (it ships OFF), or revert this PR
+
 Closes a11ign/a11ign#5177
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
