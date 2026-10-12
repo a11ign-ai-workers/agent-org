@@ -128,7 +128,7 @@ import { partitionFleetBatch } from "./work-gate/causes/rows-fleet-batch.ts";
 import { engineerShareReads } from "./work-gate/causes/rows-offer.ts";
 import { anyBlockerClearingCandidate, blockerClearedReading, boardingPortOf, claimStallsWithFacts, closedClaimsWhenWorkerListed, decide, exitPartial,
   ghQueueTickOrSay, homeRowsOf, labJobRecordsOrSay, markOutageReads, offerHierarchyNow, otherScopeTicks, outageThisTick, portOf,
-  promotedWhenUnblocked, pullRequestsOfOthers, readArmingOf, readHostDrift, readLanes, readTrackerLanes, recordTickFailures, reportClearingDrops,
+  promotedWhenUnblocked, pullRequestsOfOthers, readArmingOf, readChairmanPriorityOfOffer, readHostDrift, readLanes, readTrackerLanes, recordTickFailures, reportClearingDrops,
   rowsOffBoardOrSay, settleCitedRepeatingLines, settleOffBoardRows, settleOverdueLists, unreadLanes, withClosedClaims, withEjections,
   withStaleRefusals } from "./work-gate/tick.ts";
 import { REVIEWER_STATE_DIR, type Scope, comparablePrFiles, labelsOf, scopesOf } from "./work-gate/vocabulary.ts";
@@ -442,10 +442,12 @@ function closingsWhenRowsCleared(openRows: any[], run: (args: string[]) => strin
 
 /**
  * The reads about a scope's ROWS that are made per tick beyond the lists themselves. Run inside `inRepo` for the tracker repository.
+ * #1085: `chairmanRows` is the tracker's own verified chairman rows, so a keyed scope offers its chairman's row first as `main` does (the labeller still decides).
  */
-function trackerReadings({ allOpen }: { allOpen: any[]; }) {
+function trackerReadings({ allOpen, rows }: { allOpen: any[]; rows: any[]; }) {
   return { claimedComments: claimedRowCommentsWhenHeld(allOpen) ?? [], epics: epicRowsOf(allOpen),
-    closedRows: closedAnswerRows(readClosedAnswerRows()), closings: closingsWhenRowsCleared(allOpen) };
+    closedRows: closedAnswerRows(readClosedAnswerRows()), closings: closingsWhenRowsCleared(allOpen),
+    chairmanRows: readChairmanPriorityOfOffer(rows, allOpen).chairmanRows };
 }
 
 /**
