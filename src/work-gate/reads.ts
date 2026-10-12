@@ -12,7 +12,8 @@ import { type Budget, GATE_VALIDATORS_DIR, conditionalGate, graphqlReadOf, meter
 import { type Ask, parseReply, readValidators, saveValidators } from "../trace/publish.ts";
 import { narrowedPrList, readPrList, writePrList } from "../pr-list-memory.ts";
 import { readTickScopes } from "../tick-scopes.ts";
-import { OTHER_SCOPES_MEMORY, pacingOn, readOtherScopesMemory, rememberOtherScopes, scopesToRead } from "./pacing.ts";
+import type { Scope as TickScope } from "../event-queue.ts";
+import { GRAPHQL_SWEEP_MINUTES, OTHER_SCOPES_MEMORY, pacingOn, readOtherScopesMemory, rememberOtherScopes, scopesToRead } from "./pacing.ts";
 import { cachedReleaseBehind, readReleaseBehind, npmRegistryRead } from "../release-behind-main.ts";
 import { armedFromApi, openPullRequestsQueryArgs } from "../auto-arm-sweep.ts";
 import { REPO } from "../project-identity.ts";
@@ -1379,19 +1380,67 @@ function webhookMode(): boolean {
  * tick: those the event queue named and those due a sweep (`scopesToRead`). Asked from `readOtherScopes`, so the first-wave rehearsal asks it too; it
  * reads the memory and writes nothing, which is why the memory is stamped from the REAL reads by `rememberOtherScopesRead` in `main`.
  */
-export function otherScopesToRead(run: object, scopes: readonly Scope[]): Scope[] {
-  if (!(isAmbientRun(run) && pacingOn() && webhookMode())) return [...scopes];
-  const tickScopesPath = process.env[TICK_SCOPES_VARIABLE];
-  return scopesToRead({ scopes, named: tickScopesPath === undefined ? null : readTickScopes(tickScopesPath), lastReadAt: readOtherScopesMemory(stateEntryPath(OTHER_SCOPES_MEMORY)), nowMs: Date.now() });
+export function otherScopesToRead(run: object, scopes: readonly Scope[], facts?: GateFacts): Scope[] {
+  const gate = eventGateOf(run, facts);
+  return gate === null ? [...scopes] : scopesToRead({ scopes, ...gate });
+}
+
+/** The facts an event gate is decided from: the flag, the host's declaration, the event queue's named scopes (`null`: none, so read all), the memory and the clock. */
+export type GateFacts = { on: boolean; webhook: boolean; tickScopesPath: string | undefined; memoryPath: string; nowMs: number; };
+
+/** What an event gate says a tick may read: the repositories it named and the memory of each one's last whole read. */
+export type EventGate = { named: readonly TickScope[]; lastReadAt: Readonly<Record<string, number>>; nowMs: number; };
+
+/**
+ * (agent-org#1240) THE EVENT GATE THIS TICK APPLIES, or `null` for none: the run is not the gate's own, the flag is off, the host polls, or the event
+ * queue's file cannot be read (which reads everything, as a poll tick does). `facts` is the test's; omitted, they are read from this host.
+ */
+export function eventGateOf(run: object, facts?: GateFacts): EventGate | null {
+  if (!isAmbientRun(run)) return null;
+  const live = facts ?? (pacingOn() && webhookMode() ? liveGateFacts() : null);
+  if (live === null || !live.on || !live.webhook) return null;
+  const named = live.tickScopesPath === undefined ? null : readTickScopes(live.tickScopesPath);
+  return named === null ? null : { named, lastReadAt: readOtherScopesMemory(live.memoryPath), nowMs: live.nowMs };
+}
+
+function liveGateFacts(): GateFacts {
+  return { on: true, webhook: true, tickScopesPath: process.env[TICK_SCOPES_VARIABLE], memoryPath: stateEntryPath(OTHER_SCOPES_MEMORY), nowMs: Date.now() };
+}
+
+/**
+ * (agent-org#1240) THE OTHER REPOSITORIES THE EVENT GATE DROPPED, each REPORTED unread with its reason, as a paced skip is (`unreadLanes`). Empty where
+ * no gate applies: a dropped repository is never silently clean.
+ */
+export function unreadScopes(run: object, scopes: readonly Scope[], facts?: GateFacts): string[] {
+  const gate = eventGateOf(run, facts);
+  if (gate === null) return [];
+  const read = new Set(scopesToRead({ scopes, ...gate }).map((scope) => scope.key));
+  return scopes.filter((scope) => !read.has(scope.key)).map((scope) => `the lanes of ${scope.code?.repo ?? scope.tracker?.repo ?? scope.key} (no event named it, and it was read less than ${GRAPHQL_SWEEP_MINUTES} minutes ago)`);
+}
+
+/**
+ * (agent-org#1240) WHETHER THE PRIMARY'S OWN TRACKER LANES ARE READ THIS TICK: on an event-gated tick, only when an event named the home repository or
+ * its last whole read is a sweep old. No gate, or no home repository to name: read, as it always has.
+ */
+export function primaryDue(run: object, home: Scope | undefined, facts?: GateFacts): boolean {
+  const gate = eventGateOf(run, facts);
+  return gate === null || home === undefined || scopesToRead({ scopes: [home], ...gate }).length > 0;
+}
+
+/** `read()` when `primaryDue`, else every lane `null`: the same answer a refused read gives, so every reader already says it could not read them. */
+export function primaryLanes<T extends object>(run: object, home: Scope | undefined, read: () => T, skipped: { [K in keyof T]: null }, facts?: GateFacts): T | { [K in keyof T]: null } {
+  return primaryDue(run, home, facts) ? read() : skipped;
 }
 
 /**
  * (agent-org#1240) Stamps the repositories whose lanes were ALL answered as read now. A refused lane is not a sweep: that repository is due again next tick,
  * and its refusal is already reported PARTIAL. A failed write is said, and the next webhook tick then finds every repository due, which reads whole.
+ * `homeKey` is the primary's key when ITS tracker lanes were answered this tick (`primaryLanes`), so its sweep is remembered as the others' are.
  */
-export function rememberOtherScopesRead(reads: { scope: Scope; read: { prs: unknown; readyRows: unknown; promotableRows: unknown; chairmanBlocked: unknown; openRows: unknown; }; }[]): void {
+export function rememberOtherScopesRead(reads: { scope: Scope; read: { prs: unknown; readyRows: unknown; promotableRows: unknown; chairmanBlocked: unknown; openRows: unknown; }; }[], homeKey: string | null = null): void {
   if (!(pacingOn() && webhookMode())) return;
-  const keys = reads.filter(({ read }) => [read.prs, read.readyRows, read.promotableRows, read.chairmanBlocked, read.openRows].every((lane) => lane !== null)).map(({ scope }) => scope.key);
+  const answered = reads.filter(({ read }) => [read.prs, read.readyRows, read.promotableRows, read.chairmanBlocked, read.openRows].every((lane) => lane !== null)).map(({ scope }) => scope.key);
+  const keys = homeKey === null ? answered : [homeKey, ...answered];
   if (keys.length === 0) return;
   try {
     rememberOtherScopes({ path: stateEntryPath(OTHER_SCOPES_MEMORY), keys, nowMs: Date.now() });

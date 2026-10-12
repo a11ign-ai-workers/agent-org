@@ -118,8 +118,8 @@ import { readReenqueueState } from "./work-gate/causes/pr-ejected.ts";
 import { holdHolderOrdersNow } from "./work-gate/causes/pr-holds.ts";
 import { stampLookup, withEvidenceLabelAges, withPatchIds } from "./work-gate/causes/pr-reviews.ts";
 import { EXIT, claimedCommentsForClock, defaultRun, draining, readBranchPrsOfUnclaimed, readClaimedRowComments, readPrs, readReadyRows,
-  readRowBranches, readWithFirstWaveTogether, releaseBehindNow, repoNow, runBatch, otherScopesToRead, rememberOtherScopesRead, isAmbientRun } from "./work-gate/reads.ts";
-import { type Pacing, pacedUnread, pacingNow, pacingOn } from "./work-gate/pacing.ts";
+  readRowBranches, readWithFirstWaveTogether, releaseBehindNow, repoNow, runBatch, otherScopesToRead, rememberOtherScopesRead, isAmbientRun, primaryDue, primaryLanes, unreadScopes } from "./work-gate/reads.ts";
+import { type Pacing, orgHealthSkipped, pacedUnread, pacingNow, pacingOn, primaryUnread } from "./work-gate/pacing.ts";
 import { answerGivenOrders, bareAnswerLabelOrders, closedAnswerRows, endedSessionLabels, liveWorkspaceLabels, readClosedAnswerRows, rowsOwingAnswers,
   withAnswerLabel } from "./work-gate/causes/rows-answers.ts";
 import { readRecentlyClosed, unclaimedClearings } from "./work-gate/causes/rows-blocker-cleared.ts";
@@ -511,7 +511,13 @@ function decideAndTap(args: Parameters<typeof decide>[0]): ReturnType<typeof dec
  * reads, stay outside it.
  */
 export function readLanesAfterOutageCheck(run: (args: string[], repo?: string) => string = defaultRun, batch: typeof runBatch | undefined = run === defaultRun ? runBatch : undefined) {
-  return readWithFirstWaveTogether((read) => ({ ...readTrackerLanes(read), otherScopes: readOtherScopes(read) }), run, batch);
+  // agent-org#1240: on an event-gated tick the primary's tracker lanes are read only when an event named the home repository (or its sweep is due); otherwise they are the refused nulls
+  return readWithFirstWaveTogether((read) => ({ ...primaryLanes(read, homeScopeOf(), () => readTrackerLanes(read), { promotableRows: null, chairmanBlocked: null, openRowsRead: null }), otherScopes: readOtherScopes(read) }), run, batch);
+}
+
+/** The primary's own scope: the declaration's key `""`, which `scopesOf` gives first. `undefined` if the declaration names none, and the primary is then always read. */
+function homeScopeOf(): Scope | undefined {
+  return scopesOf([homeProjectDeclaration()]).find((scope) => scope.key === "");
 }
 
 /**
@@ -574,8 +580,13 @@ function main() {
   // #3566: this one, `needs:chairman` and the open rows (`openRowsRead`) are asked TOGETHER, and with the other repositories' lists (slice 6).
   // agent-org#1240: BELOW THE POOL'S RESERVE (flag on), `orgHealth` and the other repositories are skipped and REPORTED unread (`pacedSkips`)
   const pacing = endGateSpan("pacing", tickPacing());
-  const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); endGateSpan("readLanes"); rememberOtherScopesRead(otherScopes);
-  const pacedSkips = [{ refused: pacedUnread(pacing, scopesOf([homeProjectDeclaration()]).some((scope) => scope.key !== "")) }]; const reenqueueState = readReenqueueState(); const waitReads = endGateSpan("waitReads", waitReadsBeforeDecide(prs, otherScopes, openRowsRead, reenqueueState)); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
+  // agent-org#1240: ON AN EVENT-GATED TICK the primary's tracker lanes are read only when an event named it (or its sweep is due), and `orgHealth` with them; the other repositories the events did not name are dropped. Each is REPORTED unread
+  const declaredOthers = scopesOf([homeProjectDeclaration()]).filter((scope) => scope.key !== "");
+  const primaryRead = primaryDue(defaultRun, homeScopeOf());
+  const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); endGateSpan("readLanes");
+  const eventUnread = pacing.paced ? [] : unreadScopes(defaultRun, declaredOthers); // read BEFORE the memory is stamped: a repository just read would otherwise look dropped
+  rememberOtherScopesRead(otherScopes, primaryRead && promotableRows !== null && chairmanBlocked !== null && openRowsRead !== null ? (homeScopeOf()?.key ?? null) : null);
+  const pacedSkips = [{ refused: pacedUnread(pacing, declaredOthers.length > 0) }, { refused: primaryUnread(pacing, primaryRead) }, { refused: eventUnread }]; const reenqueueState = readReenqueueState(); const waitReads = endGateSpan("waitReads", waitReadsBeforeDecide(prs, otherScopes, openRowsRead, reenqueueState)); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
   // agent-org#5177: the other trackers' parked rows, which `otherScopeTicks` ticks but the home seam never reads; flag `rows.autoUnpark` in `machinery-canary.json` (not project.json), default OFF.
   unparkOtherTrackers({ state: reenqueueState, scopes: otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }])), facts: waitReads?.facts ?? null, now: Date.now(), run: defaultRun, log: (line) => process.stderr.write(line) });
   const unreadChairmanRows = endGateSpan("chairmanReads", chairmanReadsRefused(chairmanBlocked ?? [])); // #3390: said, not skipped -- an unread row is not an unanswered one
@@ -651,7 +662,7 @@ function main() {
     trackers: [{ repo: repoNow(), rows: openRowsRead }, ...otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }]))] }))); // a11ign#5125: a row closed under an open half is said once; `null` rows are a refused read and say nothing
   orders.push(...endGateSpan("queueEntryNoRun", queueEntryNoRunOrders({ prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], scope: repoNow(), run: defaultRun, state: readReenqueueState(), stateDir: REVIEWER_STATE_DIR, now: Date.now(), log: (line) => process.stderr.write(line) }))); // agent-org#1195: flag `queue.queueEntryNoRun`, OFF by default; reads and writes nothing while it is
   const releaseSeen: { runs?: ReleaseRuns | null } = {}; // a11ign#5100: the release read `orgHealthNow` makes, kept for the canary, so it costs no second call
-  orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", pacing.paced ? [] : orgHealthTogether({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips,
+  orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", orgHealthSkipped(pacing, primaryRead) ? [] : orgHealthTogether({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips,
     raiseReleaseIncidents: (reads) => { fileReleaseIncidents(reads, { run: defaultRun, tracker: repoNow() }); }, // agent-org#887: every repository the org releases; the project's runs are read in the wave below
     readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readFlagSwitches: () => readFlagLedger(), readTickRecord: () => readTickRecordState(stateEntryPath(TICK_RECORD_FILE)), readTickHealth: tickHealthNow, readWaits: unparkingWaits(() => waitReads, { run: defaultRun }) },
     // agent-org#1225: the org's gh reads asked together (the wave), then the effects above, in their order, on the data the wave read

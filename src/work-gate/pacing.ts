@@ -6,8 +6,10 @@
  * {@link GRAPHQL_RESERVE} points are left it skips `orgHealth` and the other repositories' lanes FIRST. A skipped lane is REPORTED unread, never
  * clean (`unreadLanes`). A pool that cannot be read is NOT below the reserve: the reads then fail on their own and are reported as they are.
  *
- * Flag on AND a webhook tick, the other repositories are read only when the event queue (`A11Y_TICK_SCOPES_FILE`) names their repository, or
- * when their last whole read is older than {@link GRAPHQL_SWEEP_MINUTES}. A missing or malformed event file reads them all, as a poll tick does.
+ * Flag on AND a webhook tick, the primary's tracker lanes and `orgHealth` are read only when the event queue (`A11Y_TICK_SCOPES_FILE`) names the
+ * home repository, or when the home's last whole read is older than {@link GRAPHQL_SWEEP_MINUTES} (`primaryDue`). The other repositories are read
+ * only when the event queue names their repository, or when their last whole read is older than {@link GRAPHQL_SWEEP_MINUTES}. A repository an event
+ * gate drops is REPORTED unread (`unreadScopes`), never clean. A missing or malformed event file reads them all, as a poll tick does.
  *
  * THE CLOCK IS AN ARGUMENT, never read here, so the rules are pinned without waiting for one.
  */
@@ -69,6 +71,20 @@ export function pacingNow(run: (args: string[]) => string, on: boolean = pacingO
 export function pacedUnread(pacing: Pacing, others: boolean): string[] {
   if (!pacing.paced) return [];
   return [...(others ? ["the other repositories' lanes"] : []), "the org-health reads"];
+}
+
+/**
+ * The lanes an event-gated tick did NOT read, named for `unreadLanes`: the primary's tracker lanes when `primaryRead` is false, and the org-health
+ * reads with them unless the pool already named those (`pacedUnread`). Nothing when the primary was read.
+ */
+export function primaryUnread(pacing: Pacing, primaryRead: boolean): string[] {
+  if (primaryRead) return [];
+  return ["the primary's tracker lanes (promotable rows, chairman-blocked rows, open rows)", ...(pacing.paced ? [] : ["the org-health reads"])];
+}
+
+/** `orgHealth` is skipped below the reserve, and on an event-gated tick whose primary lanes were not read (`primaryDue`). */
+export function orgHealthSkipped(pacing: Pacing, primaryRead: boolean): boolean {
+  return pacing.paced || !primaryRead;
 }
 
 /**
