@@ -22,7 +22,10 @@ import { DEFERRAL_LOG_FILE, parseDeferralLog } from "../deferral-log.ts";
 import { parseLedger as parseGhLedger, parseRollup, rollupPathOf } from "../gh-ledger.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
 import { measure, mergedRows, parseLedger, readInstances, readTranscripts, rowsClosedBy } from "../wakes-per-row.ts";
-import { aggregate, claimsOf, MOVES, renderAggregate, weekStart } from "./aggregate.ts";
+import { aggregate, claimsOf, MOVES, renderAggregate, weekStart, type TrackerClass } from "./aggregate.ts";
+import { ORG_TRACKER_REPO, rowTracker } from "../row-tracker.ts";
+import { declaredRegionFiles } from "../region-paths.ts";
+import type { ProjectDeclaration } from "../project-config.ts";
 import { buildMap } from "./map.ts";
 import { swimlane } from "./swimlane.ts";
 import { conditionalReader, readValidators, saveValidators } from "./publish.ts";
@@ -1240,21 +1243,43 @@ async function readSources({ since, storePath, budget, log }: { since: number; s
   const addedOfMerged = appendToStore(store, seen).added;
   const named = githubEventsOfNamed({ held: store.events, since, rowRepo, gh, validators: metered.validators }); // after the merged reading is in the store: a subject it read is not read twice
   const addedOfNamed = appendToStore(store, named.events).added;
+  const trackerOf = readTrackers({ rows: mergedRows(pulls, { from: since, to: now }, rowRepo).map((entry) => entry.row), rowRepo, declaration, gh }); // last: one call a row, and the events above must not lose the budget to it
   saveValidators({ out: validatorsDir, held: heldValidators, now }); // AFTER the events are in the store: a validator is kept only for a reading the store already holds
   const github = { calls: gh.calls, read: seen.length + named.events.length, added: addedOfMerged + addedOfNamed, remaining: { first: metered.first?.remaining ?? null, last: metered.rate?.remaining ?? null }, stopped: gh.stopped, named: { unread: named.unread.length, failed: named.failed } };
-  return { rowRepo, cache, now, ledger, store, ingested, pulls, openRows, unreadRows, github, moves };
+  return { rowRepo, cache, now, ledger, store, ingested, pulls, openRows, unreadRows, github, moves, trackerOf };
+}
+
+/**
+ * Each merged row's tracker by its Region, as `row-file` files a row (`rowTracker`): one counted read of each row's body, until the budget is spent. A row the budget cut
+ * is not in the map, and its week is PARTIAL. A Region that is missing or unreadable is `unclassified`, never read as org by default.
+ */
+function readTrackers({ rows, rowRepo, declaration, gh }: { rows: number[]; rowRepo: string; declaration: ProjectDeclaration; gh: (args: string[]) => any; }): Map<number, TrackerClass> {
+  const trackerOf = new Map<number, TrackerClass>();
+  try {
+    for (const row of rows) trackerOf.set(row, trackerClassOf(gh([`repos/${rowRepo}/issues/${row}`]).body, declaration));
+  } catch (error) {
+    if (!isSpent(error)) throw error;
+  }
+  return trackerOf;
+}
+
+function trackerClassOf(body: string | null | undefined, declaration: ProjectDeclaration): TrackerClass {
+  if (typeof body !== "string") return "unclassified";
+  const { tracker, unreadable } = rowTracker(declaredRegionFiles(body), declaration, declaration.tracker);
+  if (unreadable) return "unclassified";
+  return tracker.repo === ORG_TRACKER_REPO ? "org" : "product";
 }
 
 async function mainAggregate() {
   const { since, store: storePath, json, budget } = parseAggregateArgs(process.argv.slice(2));
   const log = json ? console.error : console.log; // stdout of a `--json 1` run is the JSON and nothing before it
-  const { rowRepo, cache, now, ledger, store, ingested, pulls, openRows, unreadRows, github, moves } = await readSources({ since, storePath, budget, log });
+  const { rowRepo, cache, now, ledger, store, ingested, pulls, openRows, unreadRows, github, moves, trackerOf } = await readSources({ since, storePath, budget, log });
   const starts = Array.from({ length: Math.floor((weekStart(now) - since) / (WEEK_DAYS * MS_PER_DAY)) + 1 }, (_, week) => since + week * WEEK_DAYS * MS_PER_DAY);
   const { readings, unreadable, skippedInstances } = wakesPerRowByWeek({ starts, pulls, rowRepo, claims: claimsOf(store.events), ledger, cache });
   const held = { from: ingested.firstRunSince, basis: `the ingest state's first run, ${new Date(ingested.firstRunAt).toISOString()}, over transcripts modified after that time` };
   const { HOME_CHECKOUT } = await import("../project-config.ts");
   const { paths: pullPaths, note } = readMergePaths({ checkout: HOME_CHECKOUT, rowRepo, since });
-  const result = aggregate({ events: store.events, pulls, rowRepo, now, since, held, readings, unreadable: [...new Set([...ingested.failed, ...unreadable])], unreadRows, openRows, moves, pullPaths });
+  const result = aggregate({ events: store.events, pulls, rowRepo, now, since, held, readings, unreadable: [...new Set([...ingested.failed, ...unreadable])], unreadRows, openRows, moves, pullPaths, trackerOf });
   // A skipped spare-cycles line is named, never silently dropped (agent-org#1122): the aggregate still posts, and says what it did not read.
   const skipped = skippedInstances > 0 ? [`spare-cycles: ${skippedInstances} unparseable line${skippedInstances === 1 ? "" : "s"} skipped, not read as instances (agent-org#1122)`] : [];
   if (json) skipped.forEach((line) => console.error(line)); // stdout of a `--json 1` run is the JSON and nothing before it
