@@ -247,11 +247,11 @@ test("the reader reuses runs the tick already read, and says what it could not r
 
 type Item = { number: number; title: string; createdAt: string; body: string };
 /** A tracker that lists open and closed incident items, records `issue create` and `issue close`, and refuses the rest. */
-function fakeTracker({ open = [] as Item[], closed = [] as Item[], refuse = false } = {}) {
+function fakeTracker({ open = [] as Item[], closed = [] as Item[], refuse = false, refuseClosed = false } = {}) {
   const writes: string[][] = [];
   const gh = (args: string[]) => {
     if (args[0] === "issue" || args.includes("PATCH")) { writes.push(args); return "https://github.com/x/y/issues/1\n"; }
-    if (refuse) throw new Error("HTTP 502");
+    if (refuse || (refuseClosed && args.includes("state=closed"))) throw new Error("HTTP 502");
     return JSON.stringify(args.includes("state=closed") ? closed : open);
   };
   return { gh, writes };
@@ -288,6 +288,16 @@ test("the incident is filed ONCE: an open item for the repository, or a closed o
   assert.deepEqual(closedSame.writes, [], "a person who closed it did not ask for it again");
   const closedOlder = fakeTracker({ closed: [item(AGENT_ORG, 4000)] });
   assert.equal(fileReleaseIncidents(rows, { run: closedOlder.gh, tracker: TRACKER, say: quiet([]) }).filed.length, 1);
+});
+
+test("a closed list that cannot be read files NOTHING and says so: an unread list is never 'no one closed it'", () => {
+  const said: string[] = [];
+  const { gh, writes } = fakeTracker({ refuseClosed: true });
+  const out = fileReleaseIncidents([read(AGENT_ORG, AGENT_ORG_STREAK, LINE)], { run: gh, tracker: TRACKER, say: quiet(said) });
+  assert.deepEqual(out, { filed: [], closed: [] });
+  assert.deepEqual(writes, []);
+  assert.equal(said.length, 1);
+  assert.ok(said[0].includes("could not read the closed incidents"), said[0]);
 });
 
 test("a repository that RELEASES again closes its open incident, and only its own", () => {
