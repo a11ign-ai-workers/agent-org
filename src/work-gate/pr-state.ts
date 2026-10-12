@@ -71,17 +71,28 @@ export function mergeCandidates(prs: any[], required: string[] | null = null): a
 }
 
 /**
- * PURE. The pull requests that are not a draft, not held and settled green on every required check --
+ * PURE. #958: the DRAFTS that are green, not held and not conflicting -- `mergeCandidates`' population with the draft exclusion lifted and
+ * nothing else changed. It exists for the one reader that must see a draft: `reviewBlocked`, for a refusal the author owes rework on. Every
+ * other cause keeps `mergeCandidates`, whose drafts belong to `draft-awaiting-verdict`.
+ */
+export function draftCandidates(prs: any[], required: string[] | null = null): any[] {
+  return greenUnheldPrs(prs, required, { drafts: true })
+    .filter((pr) => pr.isDraft === true)
+    .filter((pr) => conflictStateOf(pr) !== CONFLICT_STATE.CONFLICTING);
+}
+
+/**
+ * PURE. The pull requests that are not a draft (unless `drafts`), not held and settled green on every required check --
  * BEFORE asking whether they can merge. Both halves of that question are read from this one population:
  * `mergeCandidates` keeps the ones that can, `conflictedPrs` the ones that cannot, so the two partition it
  * and no pull request is called stranded by one cause and healthy by another on the same tick (#2084's
  * argument for extracting `mergeCandidates`, applied once more).
  */
-function greenUnheldPrs(prs: any[], required: string[] | null = null): any[] {
+function greenUnheldPrs(prs: any[], required: string[] | null = null, { drafts = false }: { drafts?: boolean } = {}): any[] {
   return (prs ?? [])
-    .filter((pr) => pr && pr.isDraft !== true && Number.isFinite(Number(pr.number)))
+    .filter((pr) => pr && (drafts || pr.isDraft !== true) && Number.isFinite(Number(pr.number)))
     // A DRAFT IS EXCLUDED AT THE SOURCE, NOT BY THE HOLD RULE: `gh pr merge --auto` refuses a draft
-    // outright, so an unarmed draft is correct rather than stranded.
+    // outright, so an unarmed draft is correct rather than stranded. (`draftCandidates` lifts the draft exclusion for `reviewBlocked`; the hold rule stays.)
     .filter((pr) => armabilityOf({ labels: labelsOf(pr) }).arm)
     .filter((pr) => checksSettledGreen(
       blockingChecks(newestPerName(pr.statusCheckRollup ?? []), required)) === true);
