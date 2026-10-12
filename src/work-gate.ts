@@ -40,6 +40,7 @@ import { declaredClosedRows } from "./row-claim/file-overlap-rule.ts";
 import { declaredGhAccount } from "./gh-identity.ts";
 import { repeatingLinesTick } from "./repeating-lines.ts";
 import { readToolAgreement, readReleaseRuns, readReleaseFailures, fileReleaseIncidents, readFleetBuildIncidents, type ReleaseRuns, type CanaryState } from "./org-health.ts";
+import { readFlagLedger } from "./flag-switch-ledger.ts"; // agent-org#1135: the gate is the one caller that reads the project's declarations; `orgHealthNow` otherwise does not ask
 import { readNodeStrips } from "./node-strips-types.ts";
 import { liveClassRepeatIo, readClassRepeat } from "./class-repeat.ts";
 // #2938: THE DAILY RETROSPECTIVE, in its own leaf for the same reason: it reads the journal, the ledger and a day of PRs once, and says what it found.
@@ -613,7 +614,7 @@ function main() {
   orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => (releaseSeen.runs = readReleaseRuns(defaultRun, repoNow())),
     readReleaseFailures: () => readReleaseFailures(defaultRun, releaseRepositories(), { known: { [repoNow()]: releaseSeen.runs } }), // agent-org#887: every repository the org releases; the project's runs are the ones read just above
     raiseReleaseIncidents: (reads) => { fileReleaseIncidents(reads, { run: defaultRun, tracker: repoNow() }); },
-    readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(() => waitReads, { run: defaultRun }) })),
+    readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readFlagSwitches: () => readFlagLedger(), readWaits: unparkingWaits(() => waitReads, { run: defaultRun }) })),
     ...endGateSpan("rulingOrders", rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() })), ...chairmanAsksNow(openRowsRead),
     ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
   endGateSpan("chairmanAsks+holdHolders");
