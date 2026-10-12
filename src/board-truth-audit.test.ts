@@ -15,6 +15,7 @@ import { declaredRowsFromBody } from "./close-rows-for-merged-pr.ts";
 import { boardTruthReading, orgHealthOrders, orgHealthReadings, SIGNALS } from "./org-health.ts";
 import { STALL_UNTOLD_RELEASE_MS } from "./claim-stall.ts";
 import { boardRowsOf, boardTruthFact, boardTruthNow, orgHealthNow } from "./work-gate/org-health.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 const NOW = Date.parse("2026-10-08T12:00:00Z");
 /** The aliased `Roadmap` read (a11ign/agent-org#517) as a fake `gh` answers it: every row asked for comes back boarded nowhere and under no epic, so the question is READ and finds nothing. `board-truth-audit-roadmap.test.ts` holds the question's own cases. */
@@ -484,7 +485,7 @@ test("the tick posts through boardTruthNow once, a failed post never stops the t
   const failing = boardTruthNow({ openRowsRead: [tickRow(13, [])], waitFacts: null, now: NOW }, wire({ post: () => { throw new Error("HTTP 502\nbody"); }, log: (l: string) => said.push(l) }));
   assert.equal(failing.findings.length, 1, "the audit is returned all the same");
   assert.match(said.join(""), /not posted \(HTTP 502\); the next tick asks again/);
-  const gate = readFileSync(new URL("./work-gate.ts", import.meta.url), "utf8");
+  const gate = workGateSource();
   assert.match(gate, /orgHealthNow\([^]*readBoardTruth: boardTruthNow/, "a gate that never passed it would leave the signal dead, as #2980's fleet facts did");
 });
 

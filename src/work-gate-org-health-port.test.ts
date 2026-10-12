@@ -13,10 +13,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import { SIGNALS, orgHealthOrders, overdueReading, type OverdueCandidate, type Reading } from "./org-health.ts";
 import { OVERDUE_LAST_WRITTEN_FILE, OVERDUE_LIST_SWITCH_ENV, settleOverdueLists } from "./work-gate.ts";
 import type { Decision, ItemRef, TicketPort } from "./ticket-port/port.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 const HOME = "a11ign/a11ign";
 const NOW = Date.parse("2026-10-10T12:00:00Z");
@@ -185,7 +185,7 @@ test("an order that is not the overdue list is left alone, whoever it is for", (
 });
 
 test("the gate's `main` passes its orders through the settle, after the dead man's switch and before the suppression", () => {
-  const source = readFileSync(fileURLToPath(new URL("./work-gate.ts", import.meta.url)), "utf8");
+  const source = workGateSource();
   const switchAt = source.indexOf("...deadMansSwitch({ orders,");
   const callAt = source.indexOf("quietOrgHealth(settleOverdueLists(orders, { portFor: portOf })");
   assert.ok(switchAt > 0 && callAt > switchAt, "the call site exists, and sits after the dead man's switch has read the orders");

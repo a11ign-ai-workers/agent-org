@@ -10,11 +10,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { repeatingLinesTick } from "./repeating-lines.ts";
 import { CITE_MIN_CHARS, REPEATING_LINE_SWITCH_ENV, isCountMilestone, repoNow, settleCitedRepeatingLines } from "./work-gate.ts";
 import type { Decision, ItemRef, TicketItem, TicketPort } from "./ticket-port/port.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 const HOME = "a11ign/a11ign";
 const KEYED = "a11ign/agent-org";
@@ -124,7 +123,7 @@ test("the lookup goes through a fake port, not a direct gh spawn", () => {
 });
 
 test("the function that looks up a cite spawns nothing, and the scan that says so sees a spawn when there is one (its positive control)", () => {
-  const source = readFileSync(fileURLToPath(new URL("./work-gate.ts", import.meta.url)), "utf8");
+  const source = workGateSource();
   const start = source.indexOf("export function settleCitedRepeatingLines");
   const body = source.slice(start, source.indexOf("\n}\n", start));
   const spawns = (text: string) => /execFileSync|execSync|spawnSync|spawn\(|defaultRun|runBatch|\bgh\b/.test(text);

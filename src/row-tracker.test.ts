@@ -4,9 +4,9 @@
 // the host's declaration would answer the host's trackers whatever these say, and the cases below would not agree with it.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { ORG_TRACKER_REPO, rowTracker, trackerNamed } from "./row-tracker.ts";
 import { productRegionsOf, rowKind } from "./work-gate.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 const HOME = { key: "", repo: "example/product", board: { owner: "example", number: 1 } };
 const ORG = { key: "agent-org", repo: "a11ign/agent-org", board: { owner: "example", number: 9 } };
@@ -120,7 +120,7 @@ test("#4078: a key that is not declared is refused, naming every key that IS", (
 });
 
 test("#4078: ORG_TRACKER_REPO is the repository work-gate.ts calls the tool's own", () => {
-  const source = readFileSync(new URL("./work-gate.ts", import.meta.url), "utf8");
+  const source = workGateSource();
   const declared = /^const TOOL_REPO = "([^"]+)";$/m.exec(source);
   assert.ok(declared, "the positive control: the pattern finds work-gate's constant, so an equality below is not between two nothings");
   assert.equal(ORG_TRACKER_REPO, declared[1]);

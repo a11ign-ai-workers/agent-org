@@ -44,6 +44,7 @@ import { fetchReadyIssueNumbers } from "../board-snapshot.ts";
 import { ghReadyReader } from "../untiered-ready-rows.ts";
 import { readClosedRows } from "../trace/haiku-tier-report.ts";
 import { readMergedSince } from "../org-retro.ts";
+import { workGateSource } from "../lib/work-gate-source.ts";
 import { closedAnswerConnection, connectionOf, readsClosedAnswerRows, readsRecentlyClosed, readsRowsByLabel, readsRowsSince, recentlyClosedConnection,
   sinceAnswer } from "./rows-by-label-fixtures.ts";
 
@@ -189,7 +190,7 @@ test("POSITIVE CONTROL (source, #5074): `wake.ts` and `row-file.ts` are walked, 
 });
 
 test("POSITIVE CONTROL (source, #5050): the gate's list reads are SEEN by the walk -- `work-gate.ts` still names `issue list`, so the walk is reading a file that lists", () => {
-  const gate = readFileSync(join(SRC, "work-gate.ts"), "utf8");
+  const gate = workGateSource();
   assert.match(gate, /\["issue", "list", "--state", "open", "--limit"/, "the whole open list is still an `issue list` (it is no search), so the guard is looking at real list calls");
   assert.doesNotMatch(gate, /"--label", (?:CHAIRMAN|BACKLOG|READY|CLAIM)_LABEL/, "and the four label lists it used to build are gone");
 });

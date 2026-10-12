@@ -22,6 +22,7 @@ import { laneReason } from "./row-claim/runner-rule.ts";
 import { readStandIns, writeStandIn } from "./row-claim/lane-stand-in.ts";
 import { ONE_SHOT_SPAWN_CAUSES, createOrchestratorOneShot, orchestratorOneShotEnabled, withOrchestratorOneShot } from "./orchestrator-one-shot.ts";
 import { startedPanes } from "./packaging/started-pane.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 const STANDING = ["worker-capture", "worker-judge", "worker-tooling"];
 const held = STANDING.map((label) => ({ label, status: "working" }));
@@ -276,7 +277,7 @@ const PINNED = {
 };
 
 test("ROUTED_TO, FLEET_LAB_PATTERNS and fleetOrLabAcceptance are byte-identical to origin/main; an edited fixture fails the check", () => {
-  const workGate = readFileSync(new URL("./work-gate.ts", import.meta.url), "utf8");
+  const workGate = workGateSource();
   const acceptance = readFileSync(new URL("./acceptance-commands.ts", import.meta.url), "utf8");
   assert.deepEqual(untouchedRules(workGate, acceptance), PINNED);
   // THE NEGATIVE CONTROLS: an edit to each of the three source texts moves its own digest and no other.

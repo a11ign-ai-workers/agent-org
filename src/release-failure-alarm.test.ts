@@ -16,6 +16,7 @@ import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:f
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 // THE PROJECT THIS FILE RUNS AGAINST IS A RECORDED ONE (`org-health-release-failed.test.ts`'s rule): the host file is set FIRST and the tool imported AFTER it, dynamically.
 const SCRATCH = mkdtempSync(join(tmpdir(), "release-failure-alarm-"));
@@ -349,7 +350,7 @@ test("the replacement is by ASKING: the project-only read still orders as it did
 });
 
 test("the gate's call site passes the per-repository read and the incident, and the reads are counted, so the signal is not dead for want of a fact (#2980's lesson)", () => {
-  const gate = readFileSync(fileURLToPath(new URL("./work-gate.ts", import.meta.url)), "utf8");
+  const gate = workGateSource();
   assert.match(gate, /readReleaseFailures: \(\) => readReleaseFailures\(defaultRun, releaseRepositories\(\), \{ known: \{ \[repoNow\(\)\]: releaseSeen\.runs \} \}\)/);
   assert.match(gate, /raiseReleaseIncidents: \(reads\) => \{ fileReleaseIncidents\(reads, \{ run: defaultRun, tracker: repoNow\(\) \}\); \}/);
   assert.ok(GH_READS.unconditional.some((r: string) => r.includes("readReleaseRuns") && r.includes("release.yml/runs")));

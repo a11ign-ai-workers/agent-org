@@ -13,6 +13,7 @@ import { ROUTE_OUTCOMES } from "../route-outcome.ts";
 import type { ClosedRow } from "../trace/haiku-tier-report.ts";
 import { readStore, type TraceEvent } from "../trace/store.ts";
 import { GRACE_MS, HORIZON_MS, ROWS_PER_TICK, readStoreFor, routeOutcomePass, type RouteOutcomePassInput } from "./route-outcome-pass.ts";
+import { workGateSource } from "../lib/work-gate-source.ts";
 
 const BODY = "## Region\n\n```\nsrc/a.ts\nsrc/a.test.ts\n```\n\n## Acceptance\n\n```bash\npnpm test\n```\n\n## Done-when\n\n1. The Acceptance passes.\n";
 const rowOf = (number: number): RouteRow => ({ number, title: "Rename a helper", labels: ["ready"], body: BODY });
@@ -260,7 +261,7 @@ test("readStoreFor reads around a damaged line it does not need, and refuses one
 // --- the gate calls it ---
 
 test("the gate calls the pass once per tick, beside the closed-row strip and behind its listing condition (positive control: the call is matched; negative: a comment is not)", () => {
-  const source = readFileSync(join(import.meta.dirname, "..", "work-gate.ts"), "utf8");
+  const source = workGateSource();
   const call = /^\s*(?:const \w+ = )?recordRouteOutcomesOnHost\(/;
   const calls = source.split("\n").filter((line) => call.test(line));
   assert.equal(calls.length, 1, "exactly one call site");

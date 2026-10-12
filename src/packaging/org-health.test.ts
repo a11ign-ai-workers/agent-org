@@ -20,6 +20,7 @@ import { fileURLToPath } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sandboxGitEnv } from "../lib/git-env.ts";
+import { workGateSource } from "../lib/work-gate-source.ts";
 
 // --- (#3233) THE PROJECT THIS FILE RUNS AGAINST IS A RECORDED ONE, NOT A11IGN'S CHECKOUT ---
 //
@@ -281,7 +282,7 @@ test("#4047: a refused read of EITHER repository is unknown, never the other's t
 });
 
 test("#4047: the tick's default reads every declared code repository through readLatestMerge, and hands its repository on", () => {
-  const source = readFileSync(fileURLToPath(new URL("../work-gate/org-health.ts", import.meta.url)), "utf8");
+  const source = workGateSource();
   assert.match(source, /lastMergedAt = \(\) => readLatestMerge\(defaultRun, mergeRepositories\(\)\)/);
   assert.match(source, /\.\.\.lastMerge\(lastMergedAt\(\)\)/);
 });

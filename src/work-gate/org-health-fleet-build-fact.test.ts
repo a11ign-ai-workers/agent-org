@@ -10,10 +10,11 @@
  */
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { cpSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import { workGateSource } from "../lib/work-gate-source.ts";
 
 // THE PROJECT THIS FILE RUNS AGAINST IS A RECORDED ONE (`org-health-auto-off-refusal.test.ts`'s rule): the host file is set FIRST and the tool imported AFTER it, dynamically.
 const SCRATCH = mkdtempSync(join(tmpdir(), "org-health-fleet-build-fact-"));
@@ -74,6 +75,6 @@ test("a reader that returns null is a stated unknown in the log, and is neither 
 
 test("the gate's call site passes the real reader and the read is counted, so the signal is not dead for want of a fact (#2980's lesson)", () => {
   assert.ok(GH_READS.unconditional.some((r: string) => r.includes("readFleetBuildIncidents") && r.includes("labels=incident")), "the read is counted where reads are counted");
-  const gate = readFileSync(fileURLToPath(new URL("../work-gate.ts", import.meta.url)), "utf8");
+  const gate = workGateSource();
   assert.match(gate, /readFleetBuildIncident: \(\) => readFleetBuildIncidents\(defaultRun, repoNow\(\)\)/);
 });
