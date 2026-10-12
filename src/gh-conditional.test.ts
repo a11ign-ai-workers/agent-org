@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { budgetLine, budgetOf, conditionalGate, meteredRun, partitionUnchanged, restConditionalOn, seenOf, TICK_POINTS_CAP } from "./gh-conditional.ts";
+import { budgetLine, budgetOf, conditionalGate, meteredBatch, meteredRun, partitionUnchanged, restConditionalOn, seenOf, TICK_POINTS_CAP } from "./gh-conditional.ts";
 import { readValidators, saveValidators, type Validated } from "./trace/publish.ts";
 
 const ETAG = 'W/"abc123"';
@@ -152,4 +152,38 @@ test("(c) positive control: REST, a mutation and a plain write are not charged, 
 test("(c) flag off: a null budget hands the run back unchanged, and nothing is charged", () => {
   const run = (_args: string[]) => "ok";
   assert.equal(meteredRun(run, null), run);
+});
+
+test("(c) metered batch: the reads past the cap are answered as refused and never sent; the rest of the batch goes out as asked", () => {
+  const sent: string[][] = [];
+  const send = (calls: { args: string[] }[]) => { calls.forEach((call) => sent.push(call.args)); return calls.map(() => "ok"); };
+  const refused = (message: string) => `refused: ${message}`;
+  const budget = budgetOf({ cap: 2 });
+  const answers = meteredBatch([
+    { args: ["pr", "list", "--limit", "100"] },
+    { args: ["issue", "list", "--limit", "500"] },
+    { args: ["pr", "list", "--state", "merged"] },
+    { args: ["pr", "merge", "5", "--squash"] },
+  ], budget, send, refused);
+
+  assert.deepEqual(answers, ["ok", "ok", "refused: gate-budget: refused `gh pr list` at 2/2 points", "ok"]);
+  assert.deepEqual(sent.map((args) => args.slice(0, 2).join(" ")), ["pr list", "issue list", "pr merge"], "the refused read is never sent");
+  assert.deepEqual(budget.summary(), { total: 2, cap: 2, byCause: { "pr list": 1, "issue list": 1 } });
+});
+
+test("(c) metered batch: a batch with nothing admitted sends nothing at all", () => {
+  let sends = 0;
+  const budget = budgetOf({ cap: 0 });
+  const answers = meteredBatch([{ args: ["pr", "list"] }], budget, (calls) => { sends += 1; return calls.map(() => "ok"); }, (message) => message);
+  assert.equal(sends, 0);
+  assert.equal(answers[0], "gate-budget: refused `gh pr list` at 0/0 points");
+});
+
+test("(c) metered batch: a null budget sends the batch whole, as it always was", () => {
+  const calls = [{ args: ["pr", "list"] }, { args: ["issue", "list"] }];
+  const seen: unknown[] = [];
+  const answers = meteredBatch(calls, null, (sent) => { seen.push(sent); return sent.map(() => "ok"); }, () => "refused");
+  assert.equal(seen.length, 1);
+  assert.equal(seen[0], calls, "the same calls, the same array, handed to send");
+  assert.deepEqual(answers, ["ok", "ok"]);
 });

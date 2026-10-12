@@ -107,6 +107,10 @@ export function graphqlReadOf(args: string[]): boolean {
   return head === "api" && verb === "graphql" && !args.some((arg) => /^query=\s*mutation\b/.test(arg));
 }
 
+const causeOf = (args: string[]) => args.slice(0, 2).join(" ");
+
+const refusalOf = (args: string[], budget: Budget) => `gate-budget: refused \`gh ${causeOf(args)}\` at ${budget.summary().total}/${budget.summary().cap} points`;
+
 /**
  * `run`, metered: a GraphQL read is charged to the budget first, and REFUSED when the charge would pass its cap. A refusal THROWS, as a failed
  * `gh` does, so every reader's own refusal path takes it: nothing new is thrown at a caller. A `null` budget is the flag being off, and
@@ -115,9 +119,22 @@ export function graphqlReadOf(args: string[]): boolean {
 export function meteredRun(run: (args: string[], repo?: string) => string, budget: Budget | null): (args: string[], repo?: string) => string {
   if (budget === null) return run;
   return (args, repo) => {
-    if (graphqlReadOf(args) && !budget.spend(args.slice(0, 2).join(" "), POINTS_PER_GRAPHQL_READ)) {
-      throw new Error(`gate-budget: refused \`gh ${args.slice(0, 2).join(" ")}\` at ${budget.summary().total}/${budget.summary().cap} points`);
-    }
+    if (graphqlReadOf(args) && !budget.spend(causeOf(args), POINTS_PER_GRAPHQL_READ)) throw new Error(refusalOf(args, budget));
     return run(args, repo);
   };
+}
+
+/**
+ * `send`, metered call by call, as `meteredRun` meters a read one at a time: each GraphQL read in the batch is charged in order, and one that
+ * would pass the cap is answered as a failed call (`refused`) and never sent. The charge is made BEFORE the batch goes out, so a batch whose
+ * worker is killed is still counted, which is what GitHub may have spent; the caller's one-by-one fallback then charges its reads again.
+ * A `null` budget sends the whole batch as it always was.
+ */
+export function meteredBatch<T extends { args: string[]; }, A>(calls: T[], budget: Budget | null, send: (sent: T[]) => A[], refused: (message: string) => A): A[] {
+  if (budget === null) return send(calls);
+  const refusals = calls.map(({ args }) => (graphqlReadOf(args) && !budget.spend(causeOf(args), POINTS_PER_GRAPHQL_READ) ? refusalOf(args, budget) : null));
+  const sent = calls.filter((_, at) => refusals[at] === null);
+  const answers = sent.length === 0 ? [] : send(sent);
+  let next = 0;
+  return refusals.map((message) => (message === null ? answers[next++] : refused(message)));
 }

@@ -7,7 +7,7 @@ import { newestPerName } from "../newest-check-run.ts";
 import { LS_REMOTE_ARGS, rowBranchesInListing } from "../row-claim/row-branch-rule.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
 import { stateEntryPath } from "../host-config.ts";
-import { budgetLine, meteredRun, restConditionalOn, tickBudget } from "../gh-conditional.ts";
+import { budgetLine, meteredBatch, meteredRun, restConditionalOn, tickBudget } from "../gh-conditional.ts";
 import { cachedReleaseBehind, readReleaseBehind, npmRegistryRead } from "../release-behind-main.ts";
 import { armedFromApi, openPullRequestsQueryArgs } from "../auto-arm-sweep.ts";
 import { REPO } from "../project-identity.ts";
@@ -189,6 +189,11 @@ Promise.all(JSON.parse(process.argv[1]).map(one)).then((answers) => process.stdo
  * @returns one answer per call, in order
  */
 export function runBatch(calls: { args: string[]; repo: string | undefined; }[], env: NodeJS.ProcessEnv = process.env, callMs: number = GH_READ_TIMEOUT_MS): ({ stdout: string; } | { failed: true; stdout: string; stderr: string; status: number | null; code?: string; })[] {
+  return meteredBatch(calls, TICK_METERED, (sent) => runUnmetered(sent, env, callMs), (stderr) => ({ failed: true, stdout: "", stderr, status: null }));
+}
+
+/** `runBatch` without the budget: the calls it is handed are sent. */
+function runUnmetered(calls: { args: string[]; repo: string | undefined; }[], env: NodeJS.ProcessEnv, callMs: number) {
   const answers = [];
   for (let from = 0; from < calls.length; from += BATCH_MAX_CALLS) {
     const chunk = calls.slice(from, from + BATCH_MAX_CALLS);
