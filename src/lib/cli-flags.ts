@@ -1,4 +1,4 @@
-// COPIED FROM `scripts/cli-flags.ts` at cc4dd7e09 (#2658, child 3g of #69; ADR 0040, decision 4): the tool's own copy, so `agent-org` imports nothing outside
+// COPIED FROM `scripts/cli-flags.ts` at a9ae7147d (#2658, child 3g of #69; ADR 0040, decision 4): the tool's own copy, so `agent-org` imports nothing outside
 // its package. The product keeps its original and the two can drift, with no cross-repository pin: `copies-drifted` in `src/org-health.ts` reads them.
 // CHANGED FROM THE ORIGINAL: NOTHING but this header.
 // ==== end of copy header ====
@@ -97,7 +97,7 @@ export function flagValue(argv: readonly string[], name: string): string | undef
  *
  * This read `startsWith("--")`, on the reasoning that only long flags are ever this repo's own. But an
  * ANSIBLE-shaped argument is single-dash, and several of these commands wrap `ansible-playbook` — so
- * `npm run fleet:provision -- -e worker_edge_allow_downgrade=true` passed straight through the guard,
+ * `npm run fleet:provision -- -e worker_edge_allow_downgrade=true` (control's script today) passed straight through the guard,
  * was never forwarded by the wrapper, and the whole fleet was provisioned WITHOUT the authorisation the
  * operator believed they had given. Measured 2026-09-05. The role then refused, correctly, with a message
  * telling the operator to pass the very flag they had just passed.
