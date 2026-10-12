@@ -25,11 +25,12 @@ import { REVIEWER_STATE_DIR } from "./work-gate/vocabulary.ts";
 import { AUTO_UNPARK_FLAG } from "./unpark-satisfied.ts";
 import { OPEN_PR_HOLD_FLAG } from "./prune-worktrees.ts";
 import { REFUSE_ASKING_ANNOUNCEMENTS_FLAG } from "./messaging/core.ts";
+import { PACING_FLAG } from "./work-gate/pacing.ts";
 
 const REFUSED = 2;
 
 /** The flags a module reads. A name that is not here is refused by `switchFlag`. */
-export const FLAG_REGISTRY: readonly string[] = Object.freeze([REENQUEUE_EJECTED_FLAG, CHAIN_WAIT_FLAG, CLOSED_UNDER_HALF_FLAG, AUTO_UNPARK_FLAG, QUEUE_ENTRY_NO_RUN_FLAG, RECHECK_FLAG, OPEN_PR_HOLD_FLAG, REFUSE_ASKING_ANNOUNCEMENTS_FLAG]);
+export const FLAG_REGISTRY: readonly string[] = Object.freeze([REENQUEUE_EJECTED_FLAG, CHAIN_WAIT_FLAG, CLOSED_UNDER_HALF_FLAG, AUTO_UNPARK_FLAG, QUEUE_ENTRY_NO_RUN_FLAG, RECHECK_FLAG, OPEN_PR_HOLD_FLAG, REFUSE_ASKING_ANNOUNCEMENTS_FLAG, PACING_FLAG]);
 
 export const USAGE = [
   "usage: agent-org machinery:flag on|off <name> [--signals=a,b] --session=<you>",
