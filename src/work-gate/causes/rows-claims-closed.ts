@@ -3,7 +3,7 @@ import { homeProjectDeclaration } from "../../project-config.ts";
 import { SESSION_PREFIX } from "../../project-vocabulary.ts";
 import { listingIsComplete } from "../../herdr-agents.ts";
 import { familyMember } from "../../arm-pr.ts";
-import { defaultRun, repoNow } from "../reads.ts";
+import { capturingStderr, defaultRun, repoNow } from "../reads.ts";
 import { ROW_LABELS, aimOf, labelledRows, labelsOf, scopesOf } from "../vocabulary.ts";
 
 /**
@@ -19,25 +19,56 @@ import { ROW_LABELS, aimOf, labelledRows, labelsOf, scopesOf } from "../vocabula
  * agent-org#757: A KEYED INSTANCE (`worker-agent-org-<n>`) HOLDS A ROW OF ITS OWN TRACKER, so `tracker` aims the read there and tags each row it returns with the tracker's key and
  * repository (`closedClaimsWhenWorkerListed` asks once per tracker). Absent, the read is the home tracker's, made exactly as it always was.
  * @param numbers the rows of the listed per-row instances
+ * #948: A REFUSAL SAYS WHY. `null` used to come back with the failure thrown away, so the tick printed UNREAD for 31 ticks and nothing said what refused. The
+ * refusal is named on `log` first: `gh`'s own first stderr line (captured, `capturingStderr`), else its exit status or signal, else the error's message.
  * @param [tracker] the declared tracker the numbers are rows of, `undefined` being the home tracker
+ * @param [log] where a refusal is said, one line naming the repository
  */
-export function readClosedClaimedRows(numbers: number[], run: (args: string[], repo?: string) => string = defaultRun, tracker?: { key: string; repo: string; }): KeyedClosedClaimedRow[] | null {
-  const [owner, name] = (tracker?.repo ?? repoNow()).split("/");
+export function readClosedClaimedRows(numbers: number[], run: (args: string[], repo?: string) => string = defaultRun, tracker?: { key: string; repo: string; },
+  log: (line: string) => void = (line) => process.stderr.write(line)): KeyedClosedClaimedRow[] | null {
+  const repo = tracker?.repo ?? repoNow();
+  const [owner, name] = repo.split("/");
   const row = "number state closedByPullRequestsReferences(first: 5) { nodes { number headRefName title } } labels(first: 50) { nodes { name } }"
     + " comments(last: 100) { nodes { body createdAt author { login } } }";
   const query = `query($owner: String!, $name: String!) { repository(owner: $owner, name: $name) { ${numbers.map((n) => `r${n}: issue(number: ${n}) { ${row} }`).join(" ")} } }`;
+  const refused = (why: string): null => {
+    log(`closed-claim: the read of ${repo} was refused: ${why}\n`);
+    return null;
+  };
+  let answer: string;
   try {
-    const args = ["api", "graphql", "-f", `query=${query}`, "-F", `owner=${owner}`, "-F", `name=${name}`];
-    const repository = JSON.parse(tracker === undefined ? run(args) : run(args, tracker.repo))?.data?.repository;
-    if (repository === null || typeof repository !== "object") return null;
+    answer = capturingStderr(run)(["api", "graphql", "-f", `query=${query}`, "-F", `owner=${owner}`, "-F", `name=${name}`], tracker?.repo);
+  } catch (error) {
+    return refused(refusalOf(error));
+  }
+  let parsed: any;
+  try {
+    parsed = JSON.parse(answer);
+  } catch (error) {
+    return refused(`its answer was not JSON (${refusalOf(error)})`);
+  }
+  const repository = parsed?.data?.repository;
+  if (repository === null) return refused("its answer has data.repository null");
+  if (typeof repository !== "object") return refused("its answer has no data.repository");
+  try {
     const issues: any[] = Object.values(repository);
     return issues
       .filter((issue) => issue !== null && issue.state === "CLOSED" && issue.labels.nodes.some((l: { name: string; }) => l.name === CLAIM_LABEL))
       .map((issue) => ({ number: issue.number, labels: issue.labels.nodes, comments: issue.comments.nodes,
         closedByPullRequestsReferences: issue.closedByPullRequestsReferences.nodes, ...(tracker === undefined ? {} : { tracker }) }));
-  } catch {
-    return null;
+  } catch (error) {
+    return refused(`its rows could not be read (${refusalOf(error)})`);
   }
+}
+
+/** The first line of what refused a read (#948): `gh`'s captured stderr, else its exit status or signal, else the error's own message. */
+function refusalOf(error: unknown): string {
+  const { stderr, status, signal, message } = (error ?? {}) as { stderr?: unknown; status?: unknown; signal?: unknown; message?: unknown; };
+  const first = (text: unknown) => String(text).trim().split("\n")[0];
+  if (typeof stderr === "string" && stderr.trim() !== "") return first(stderr);
+  if (typeof status === "number") return `gh exited with status ${status}`;
+  if (typeof signal === "string") return `gh was stopped by ${signal}`;
+  return first(message ?? error);
 }
 
 /** A closed claimed row as `readClosedClaimedRows` returns it; `tracker` is set for a row of a tracker other than the home one (agent-org#757). */

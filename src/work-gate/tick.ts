@@ -862,9 +862,11 @@ export function closedClaimsWhenWorkerListed(agents: { label: string; status: st
   let answered = 0;
   for (const [key, numbers] of asked) {
     const tracker = key === "" ? undefined : homeProjectDeclaration().tracker.find((t) => t.key === key);
-    const read = tracker === undefined && key !== "" ? null : readClosedClaimedRows(numbers, run, tracker);
+    const read = tracker === undefined && key !== "" ? null : readClosedClaimedRows(numbers, run, tracker, log);
     if (read === null) {
-      if (asked.size > 1) log(`closed-claim: the closed rows of ${key === "" ? "the home tracker" : `tracker \`${key}\``} were NOT read this tick (UNREAD, which is not "no closed claim").\n`);
+      // #948: a refused read printed its own `closed-claim: the read of <repo> was refused:` line, and this one names the same repository so the pair reads together
+      const named = key === "" ? repoNow() : tracker?.repo;
+      if (asked.size > 1) log(`closed-claim: the closed rows of ${key === "" ? "the home tracker" : `tracker \`${key}\``} were NOT read this tick (UNREAD, which is not "no closed claim"${named === undefined ? "" : `; the cause is the \`closed-claim: the read of ${named}\` line`}).\n`);
       continue;
     }
     answered++;

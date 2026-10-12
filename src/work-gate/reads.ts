@@ -138,7 +138,7 @@ const capturedRun = ghWithin(GH_READ_TIMEOUT_MS, { stdio: "pipe" });
 /**
  * The reader a refusal-handling read asks through: the default one is swapped for the capturing one, and a test's `run` stands for `gh` as it is.
  */
-export const capturingStderr = (run: (args: string[]) => string) => (run === defaultRun ? capturedRun : run);
+export const capturingStderr = (run: (args: string[], repo?: string) => string) => (run === defaultRun ? capturedRun : run);
 
 /** The most `gh` calls one batch has in flight: the other repositories number single digits, and GitHub answers a burst with a secondary limit. */
 export const BATCH_MAX_CALLS = 16;
