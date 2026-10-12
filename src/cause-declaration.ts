@@ -516,11 +516,13 @@ export const TOOL_CAUSE_DECLARATIONS = Object.freeze([
     kind: "claude",
     model: "sonnet",
     // MEDIUM, and the recipient is `ceo`, a standing decision-holder that is never spawned (#3567), so this is the profile a spawned worker would
-    // take if one ever were. `work-tick-health.ts` has already read the tick's own cost line and named the phase that took longest, or found the
-    // marker a killed tick left; the work is deciding which row owns that phase, a short judgment over stated figures.
+    // take if one ever were. AGENT-ORG#1208: ONLY A KILLED TICK WAKES NOW. A slow one is a comment edit on one standing row (`work-tick-health.ts`'s
+    // `recordSlowTick`) that `ceo` reads daily, so this cause has no wake path for it and must not regain one; a refused write is retried and said by
+    // `org-health`, never delivered as an order. `work-tick-health.ts` has found the marker a killed tick left and a killed tick wrote no cost line, so
+    // the work is deciding which row owns the phase the lines before it show, a short judgment over stated figures.
     effort: "medium",
-    why: "the tick has already measured itself, or found what a killed one left; the output is a decision about which phase to chase "
-      + "and who owns it, over figures the order states",
+    why: "a killed tick left no cost line and no trend, so the tick has only found its marker; the output is a decision about which phase to chase "
+      + "and who owns it, over figures the order states (a slow tick is recorded on a standing row and wakes nobody)",
   }),
   declareCause("repeating-log-line", GROUPS.JUDGMENT, {
     kind: "claude",

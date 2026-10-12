@@ -4,20 +4,25 @@
 // (the `wake` one records what it was handed), with the PATH pointed at an empty directory. ERASABLE TYPESCRIPT ONLY: node strips the types itself.
 
 /**
- * a11ign/a11ign#3567: a tick over `TICK_SLOW_SECONDS` wakes `ceo` in the same tick, and a tick killed by the timeout is read by the NEXT one from the
- * start marker it left. Neither is noise: the control comes first (a 60 s tick says nothing), then 181 s says it ONCE, then a dead tick's marker says it
- * once and is cleared.
+ * a11ign/a11ign#3567, split by agent-org#1208: a tick over `TICK_SLOW_SECONDS` is RECORDED, as an edit of one standing comment, and wakes nobody; a tick killed
+ * by the timeout still wakes `ceo` once, read by the NEXT tick from the start marker it left. The control comes first (a 60 s tick writes nothing), then
+ * 181 s is one edit and no order, a refused write is a state the next tick retries, and a dead tick's marker still says it once and is cleared.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
 import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, symlinkSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
-import { join } from "node:path";
+import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HEARTBEAT_COMMENT_ID, writeHeartbeat } from "./work-tick.ts";
-import { TICK_KILLED, TICK_MARKER_FILE, TICK_OVERRAN, TICK_SLOW, TICK_SLOW_SECONDS, clearOwnMarker, deliverTickOrders, killedTickOrders, readKilledTick,
-  readMarker, slowThresholdSeconds, slowTickOrders, tickMarkerPath, writeStartMarker } from "./work-tick-health.ts";
+import { SIGNALS, orgHealthOrders, orgHealthReadings, tickRecordReading } from "./org-health.ts";
+import { ORG_HEALTH_CLASSES } from "./work-gate/org-health-suppression.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
+import { TICK_KILLED, TICK_MARKER_FILE, TICK_OVERRAN, TICK_RECORD_FILE, TICK_RECORD_MARKER, TICK_RECORD_TABLE_ROWS, TICK_SLOW_SECONDS, clearOwnMarker,
+  deliverTickOrders, isSlowTick, killedTickOrders, parseCostLines, percentile, readKilledTick, readMarker, readTickRecordState, recordSlowTick, renderTickRecord,
+  slowThresholdSeconds, tickMarkerPath, tickRecordOf, tickRecordTargetFrom, tickRecordUnwrittenLine, writeStartMarker, type CostLine,
+  type RecordIo } from "./work-tick-health.ts";
 
 const SRC = fileURLToPath(new URL(".", import.meta.url));
 const PRELOAD = join(SRC, "lib", "crash-exit.ts");
@@ -29,49 +34,211 @@ const costLine = (wallS: number, extra: Record<string, unknown> = {}) => ({
   at: START + wallS * 1000, wallMs: wallS * 1000, prestartMs: null, cpuMs: { self: 4000, children: 21_000 },
   phases: { startup: { wallMs: 900, cpuMs: 800 }, gate: { wallMs: wallS * 800, cpuMs: 15_000 }, wake: { wallMs: 700, cpuMs: 100 } }, ...extra,
 });
-const slow = (line: ReturnType<typeof costLine>) => slowTickOrders(line, { costPath: COST_PATH });
+const NOW = START + 3600_000;
+
+/** A record sink that says what it was asked: `calls` in order, an id for `find`, and a `post` that answers `posted`. `fail` makes the named call throw like a refused `gh`. */
+function sink({ found = null, posted = null, fail = null }: { found?: number | null; posted?: number | null; fail?: "find" | "post" | "edit" | null } = {}) {
+  const calls: string[] = [];
+  const bodies: string[] = [];
+  const refuse = (name: "find" | "post" | "edit") => { if (fail === name) throw Object.assign(new Error("gh failed"), { stderr: "gh: HTTP 403: Resource not accessible\nsecond line" }); };
+  const io: RecordIo = {
+    find: () => { calls.push("find"); refuse("find"); return found; },
+    post: (body) => { calls.push("post"); bodies.push(body); refuse("post"); return posted; },
+    edit: (id, body) => { calls.push(`edit ${id}`); bodies.push(body); refuse("edit"); },
+  };
+  return { io, calls, bodies };
+}
+
+/** `recordSlowTick` over a temp state file; `costLines` is what the cost file holds. Returns what it did and said. */
+function recording(dir: string, line: CostLine | null, io: RecordIo | { refusal: string }, { costLines = line === null ? [] : [line], now = NOW }: { costLines?: CostLine[]; now?: number } = {}) {
+  const said: string[] = [];
+  const statePath = join(dir, TICK_RECORD_FILE);
+  const outcome = recordSlowTick({ line, costText: costLines.map((entry) => JSON.stringify(entry)).join("\n"), now, costPath: COST_PATH, statePath, io, say: (text) => said.push(text) });
+  return { outcome, said, state: readTickRecordState(statePath, now), statePath };
+}
 
 // --- SLOW: THE CONTROL FIRST ---------------------------------------------------------------------------------------------------------------------
 
-test("#3567 CONTROL: a 60 s tick reports nothing, and neither does one of exactly the limit", () => {
+test("#3567 CONTROL: a 60 s tick is not slow, and neither is one of exactly the limit", () => {
   assert.equal(TICK_SLOW_SECONDS, 180, "the limit is the row's named constant");
-  assert.deepEqual(slow(costLine(60)), []);
-  assert.deepEqual(slow(costLine(TICK_SLOW_SECONDS)), [], "over the limit, not at it");
+  assert.equal(isSlowTick(costLine(60)), false);
+  assert.equal(isSlowTick(costLine(TICK_SLOW_SECONDS)), false, "over the limit, not at it");
+  assert.equal(isSlowTick(costLine(181)), true);
+  assert.equal(isSlowTick(costLine(100, { prestartMs: 90_000 })), true, "ExecStartPre counts toward the wall, because `TimeoutStartSec` counts it");
 });
 
-test("#3567: a 181 s tick reports ONCE, to ceo, with its wall, its CPU and the phase that took longest", () => {
-  const orders = slow(costLine(181));
-  assert.equal(orders.length, 1);
-  const [order] = orders;
-  assert.equal(order.session, "ceo");
-  assert.equal(order.cause, TICK_OVERRAN);
-  assert.equal(order.subject, TICK_SLOW);
-  assert.match(order.prompt, /TOOK 181\.0 s/);
-  assert.match(order.prompt, /CPU 25\.0 s \(4\.0 s its own, 21\.0 s its children's\)/);
-  assert.match(order.prompt, /took longest: `gate`, 144\.8 s wall, 15\.0 s CPU/);
-  assert.ok(order.prompt.includes(COST_PATH), "it says where the rest of the reading is");
+test("agent-org#1208 CONTROL: a fast tick with nothing owed touches nothing: no read, no write, no state file", () => inDir((dir) => {
+  const { io, calls } = sink();
+  const done = recording(dir, costLine(60), io);
+  assert.equal(done.outcome, "not-due");
+  assert.deepEqual(calls, []);
+  assert.equal(existsSync(done.statePath), false);
+}));
+
+test("agent-org#1208: a 181 s tick is ONE write to the standing comment and carries no order (the first one posts it, the next ones EDIT it)", () => inDir((dir) => {
+  const first = sink();
+  const one = recording(dir, costLine(181), first.io);
+  assert.equal(one.outcome, "written");
+  assert.deepEqual(first.calls, ["find", "post"], "no cached id: look for the comment by its marker once, then post it");
+  assert.equal(first.bodies[0].split("\n")[0], TICK_RECORD_MARKER);
+
+  // The comment is now known by id (what `find` answered on a later tick is cached): every later slow tick is an EDIT of that one comment.
+  writeFileSync(one.statePath, JSON.stringify({ commentId: 6_100_000_001, unwritten: null }));
+  const second = sink();
+  const two = recording(dir, costLine(200), second.io);
+  assert.equal(two.outcome, "written");
+  assert.deepEqual(second.calls, ["edit 6100000001"], "an edit in place: no find, no post, so the row does not grow");
+  assert.equal(two.state.commentId, 6_100_000_001);
+}));
+
+test("agent-org#1208: the body is the 24 h table: marker first, p50/p95 over EVERY tick of the window, the slow ones listed with their longest phase, older ticks left out", () => {
+  const old = costLine(500, { at: NOW - 25 * 3600_000 });
+  const lines = [60, 70, 80, 90, 190, 250].map((wallS, index) => costLine(wallS, { at: NOW - (index + 1) * 600_000 }));
+  const record = tickRecordOf([old, ...lines], { now: NOW });
+  assert.equal(record.ticks, 6, "the 25 h old tick is outside the window");
+  assert.equal(record.p50Ms, 80_000);
+  assert.equal(record.p95Ms, 250_000);
+  assert.deepEqual(record.slow.map((tick) => tick.wallMs), [190_000, 250_000], "the slow ones, newest first");
+  const body = renderTickRecord(record, { now: NOW, costPath: COST_PATH });
+  assert.equal(body.split("\n")[0], TICK_RECORD_MARKER);
+  assert.match(body, /\*\*6\*\* ticks, wall \*\*p50 80\.0 s, p95 250\.0 s\*\*/);
+  assert.match(body, /\*\*2\*\* over the 180 s limit/);
+  assert.match(body, /\| 190\.0 \| 25\.0 \| `gate` \| 152\.0 \| 15\.0 \|/);
+  assert.doesNotMatch(body, /NaN/);
 });
 
-test("#3567: the key is the tick's START, so the same tick read twice is one key and the next tick is another", () => {
-  const [first] = slow(costLine(181));
-  const [again] = slow(costLine(181));
-  const [next] = slow({ ...costLine(181), at: costLine(181).at + 120_000 });
-  assert.equal(first.causeKey, again.causeKey);
-  assert.notEqual(first.causeKey, next.causeKey);
-  assert.equal(first.causeKey, `ceo/${TICK_OVERRAN}/${TICK_SLOW}-${START}`);
+test("agent-org#1208: this tick's own line counts once when the cost file holds it and once when appending it failed", () => {
+  const own = costLine(181);
+  assert.equal(tickRecordOf([own], { now: NOW, current: own }).ticks, 1, "the file holds it: not counted twice");
+  assert.equal(tickRecordOf([], { now: NOW, current: own }).ticks, 1, "the file does not: the tick's own line is still the record");
+  assert.deepEqual(tickRecordOf([], { now: NOW }), { ticks: 0, p50Ms: null, p95Ms: null, slow: [] }, "no tick is `null`, never a zero");
 });
 
-test("#3567: ExecStartPre counts toward the wall, because `TimeoutStartSec` counts it", () => {
-  const line = costLine(100, { prestartMs: 90_000 });
-  const [order] = slow(line);
-  assert.match(order.prompt, /TOOK 190\.0 s/);
-  assert.match(order.prompt, /of which 90\.0 s was `ExecStartPre`/);
+test("agent-org#1208: the table is capped, and the body says how many older slow ticks it left out", () => {
+  const lines = Array.from({ length: TICK_RECORD_TABLE_ROWS + 5 }, (_unused, index) => costLine(200, { at: NOW - (index + 1) * 60_000 }));
+  const body = renderTickRecord(tickRecordOf(lines, { now: NOW }), { now: NOW, costPath: COST_PATH });
+  assert.equal(body.split("\n").filter((row) => row.startsWith("| 20")).length, TICK_RECORD_TABLE_ROWS);
+  assert.match(body, /and 5 older slow ticks/);
+});
+
+test("agent-org#1208: percentiles are nearest-rank, and an empty list has none", () => {
+  assert.equal(percentile([], 50), null);
+  assert.equal(percentile([5], 95), 5);
+  assert.equal(percentile([1, 2, 3, 4], 50), 2);
+  assert.equal(percentile(Array.from({ length: 100 }, (_unused, index) => index + 1), 95), 95);
+});
+
+test("agent-org#1208: lines of the cost file that are not cost lines (a cut first line, a blank) are skipped, not fatal", () => {
+  const good = JSON.stringify(costLine(60));
+  assert.equal(parseCostLines(`ms":123}\n\n${good}\n{"at":1}\n`).length, 1);
+});
+
+test("#3730: a longest phase some other process timed has a wall and NO CPU, and the table says n/a rather than printing NaN", () => {
+  const line = costLine(181);
+  line.phases = { ...line.phases, "github-status": { wallMs: 999_999 } } as typeof line.phases;
+  const body = renderTickRecord(tickRecordOf([line], { now: NOW }), { now: NOW, costPath: COST_PATH });
+  assert.match(body, /`github-status` \| 1000\.0 \| n\/a/);
+  assert.doesNotMatch(body, /NaN/);
+});
+
+// --- A REFUSED WRITE IS A STATE, RETRIED, AND NEVER A WAKE -----------------------------------------------------------------------------------------
+
+test("agent-org#1208: a refused write is `unwritten` with the reason, said once, and the NEXT tick (a fast one) retries it and clears it", () => inDir((dir) => {
+  const refused = sink({ fail: "find" });
+  const first = recording(dir, costLine(181), refused.io);
+  assert.equal(first.outcome, "unwritten");
+  assert.equal(first.state.unwritten?.since, NOW);
+  assert.match(first.state.unwritten?.why ?? "", /HTTP 403/);
+  assert.doesNotMatch(first.state.unwritten?.why ?? "", /second line/, "one line of what gh said");
+  assert.match(first.said.join(""), /TICK RECORD NOT WRITTEN .*the next tick retries it/);
+
+  // A fast tick, later: nothing of its own to say, but the record is owed, so it is retried, and `since` is the FIRST refusal's until a write lands.
+  const still = sink({ fail: "post" });
+  const second = recording(dir, costLine(60, { at: NOW + 120_000 }), still.io, { now: NOW + 120_000 });
+  assert.equal(second.outcome, "unwritten");
+  assert.equal(second.state.unwritten?.since, NOW, "the unwritten line says since when, not since the last retry");
+
+  const landing = sink({ found: 42 });
+  const third = recording(dir, costLine(60, { at: NOW + 240_000 }), landing.io, { now: NOW + 240_000 });
+  assert.equal(third.outcome, "written");
+  assert.deepEqual(landing.calls, ["find", "edit 42"]);
+  assert.equal(third.state.unwritten, null);
+  assert.equal(third.state.commentId, 42);
+}));
+
+test("agent-org#1208: an edit refused for a cached id forgets the id, so the retry looks the comment up again (it may have been deleted)", () => inDir((dir) => {
+  writeFileSync(join(dir, TICK_RECORD_FILE), JSON.stringify({ commentId: 7, unwritten: null }));
+  const done = recording(dir, costLine(181), sink({ fail: "edit" }).io);
+  assert.equal(done.outcome, "unwritten");
+  assert.equal(done.state.commentId, null);
+}));
+
+test("agent-org#1208: a row the project does not declare is a refused write with its reason, and calls nothing", () => inDir((dir) => {
+  const done = recording(dir, costLine(181), { refusal: "the project declaration does not declare units.tickRecordIssue" });
+  assert.equal(done.outcome, "unwritten");
+  assert.match(done.state.unwritten?.why ?? "", /units\.tickRecordIssue/);
+}));
+
+test("agent-org#1208: org-health's one line names the reason and since when, and there is none while the record is written", () => {
+  assert.equal(tickRecordUnwrittenLine({ commentId: 1, unwritten: null }, NOW), null);
+  const line = tickRecordUnwrittenLine({ commentId: null, unwritten: { since: NOW - 10 * 60_000, why: "gh: HTTP 403" } }, NOW);
+  assert.match(line ?? "", /unwritten since 2026-10-04T22:30:04\.000Z \(10 min\): gh: HTTP 403\. Slow ticks are not being recorded and wake nobody\./);
+});
+
+test("agent-org#1208: an unreadable state file is an unwritten record, never a quiet one", () => inDir((dir) => {
+  const path = join(dir, TICK_RECORD_FILE);
+  writeFileSync(path, "{not json");
+  assert.match(readTickRecordState(path, NOW).unwritten?.why ?? "", /not valid JSON/);
+  assert.deepEqual(readTickRecordState(join(dir, "absent.json"), NOW), { commentId: null, unwritten: null }, "CONTROL: no file is nothing owed");
+}));
+
+test("agent-org#1208: the standing row is read from `units.tickRecordIssue` in the FIRST tracker's repository, and an absent or malformed one is a reason", () => {
+  const declared = (units: object) => JSON.stringify({ tracker: [{ key: "", repo: "a11ign/a11ign" }, { key: "agent-org", repo: "a11ign/agent-org" }], units });
+  assert.deepEqual(tickRecordTargetFrom(declared({ tickRecordIssue: 1208 })), { repo: "a11ign/a11ign", issue: 1208 });
+  for (const bad of [{}, { tickRecordIssue: "1208" }, { tickRecordIssue: 0 }, { tickRecordIssue: 1.5 }]) {
+    assert.match((tickRecordTargetFrom(declared(bad)) as { refusal: string }).refusal, /units\.tickRecordIssue/, JSON.stringify(bad));
+  }
+  assert.match((tickRecordTargetFrom("{not json") as { refusal: string }).refusal, /not valid JSON/);
+  assert.match((tickRecordTargetFrom(JSON.stringify({ tracker: [], units: { tickRecordIssue: 1 } })) as { refusal: string }).refusal, /no tracker/);
 });
 
 test("#3567: the limit is overridable only by a positive number, and a bad one falls back to the constant", () => {
   assert.equal(slowThresholdSeconds({}), TICK_SLOW_SECONDS);
   assert.equal(slowThresholdSeconds({ A11Y_TICK_SLOW_SECONDS: "2" }), 2);
   for (const bad of ["", "0", "-5", "soon"]) assert.equal(slowThresholdSeconds({ A11Y_TICK_SLOW_SECONDS: bad }), TICK_SLOW_SECONDS, bad);
+});
+
+// --- ORG-HEALTH CARRIES THE ONE LINE (agent-org#1208) ----------------------------------------------------------------------------------------------
+
+const HEALTH_FACTS = { now: NOW, lastMergedAt: NOW - 600_000, work: null, redPrs: [], refusals: {}, drift: null, primarySince: null };
+const UNWRITTEN = { commentId: null, unwritten: { since: NOW - 30 * 60_000, why: "gh: HTTP 403" } };
+
+test("agent-org#1208: the reading is clear while the record is written and trips, with the reason and the first refusal's time, while it is not", () => {
+  assert.equal(tickRecordReading({ now: NOW, state: { commentId: 5, unwritten: null } }).status, "clear");
+  const tripped = tickRecordReading({ now: NOW, state: UNWRITTEN });
+  assert.equal(tripped.status, "tripped");
+  assert.match(tripped.detail, /unwritten since .*\(30 min\): gh: HTTP 403/);
+  assert.equal(tripped.firstTrippedAt, UNWRITTEN.unwritten.since);
+  assert.equal(tripped.discriminator, `${SIGNALS.TICK_RECORD_UNWRITTEN}@2026-10-04`, "one outage is one key for the day, however many ticks retry");
+});
+
+test("agent-org#1208: through `orgHealthReadings` an unwritten record is an order to ceo that names the reason, and a caller that does not ask adds no reading", () => {
+  const orders = orgHealthOrders(orgHealthReadings({ ...HEALTH_FACTS, tickRecord: UNWRITTEN } as never)).filter((order) => order.subject === SIGNALS.TICK_RECORD_UNWRITTEN);
+  assert.deepEqual(orders.map((order) => order.session), ["ceo"]);
+  assert.match(orders[0].prompt, /HTTP 403/);
+  assert.doesNotMatch(orders[0].prompt, /undefined/);
+  const quiet = orgHealthOrders(orgHealthReadings({ ...HEALTH_FACTS, tickRecord: { commentId: 1, unwritten: null } } as never)).filter((order) => order.subject === SIGNALS.TICK_RECORD_UNWRITTEN);
+  assert.deepEqual(quiet, [], "CONTROL: a written record orders nothing");
+  const unasked = orgHealthOrders(orgHealthReadings(HEALTH_FACTS as never)).filter((order) => order.subject === SIGNALS.TICK_RECORD_UNWRITTEN);
+  assert.deepEqual(unasked, []);
+});
+
+test("agent-org#1208: the class is a DIGEST, which rides the next order and wakes `ceo` only on churn: an unwritten record is never a wake per overrun", () => {
+  assert.equal(ORG_HEALTH_CLASSES[SIGNALS.TICK_RECORD_UNWRITTEN].severity, "digest");
+});
+
+test("agent-org#1208: WIRING: the gate hands `orgHealthNow` the real record state, so the line is not dead for want of a fact (#2980's lesson)", () => {
+  assert.match(workGateSource(), /readTickRecord: \(\) => readTickRecordState\(stateEntryPath\(TICK_RECORD_FILE\)\)/);
 });
 
 // --- KILLED: THE MARKER ------------------------------------------------------------------------------------------------------------------------
@@ -138,7 +305,7 @@ test("#3567: a killed tick's order names when it started and how long it ran at 
 // --- DELIVERY ----------------------------------------------------------------------------------------------------------------------------------
 
 test("#3567: delivery hands `wake` one JSON line per order, and a `wake` that refuses is SAID, never swallowed", () => {
-  const [order] = slow(costLine(181));
+  const [order] = killedTickOrders({ at: START, pid: 1, unreadable: false }, { foundAt: START + 613_000, costPath: COST_PATH });
   const said: string[] = [];
   const seen: { input: string }[] = [];
   const fake = (status: number) => ((_node: string, _args: string[], options: { input: string }) => { seen.push(options); return { status, stdout: "", stderr: "" }; }) as unknown as typeof spawnSync;
@@ -149,7 +316,7 @@ test("#3567: delivery hands `wake` one JSON line per order, and a `wake` that re
   assert.deepEqual(said, []);
   const refused: string[] = [];
   assert.equal(deliverTickOrders([order], { node: "n", args: [], spawn: fake(1), say: (text) => refused.push(text) }), false);
-  assert.match(refused.join(""), /TICK HEALTH NOT DELIVERED \(tick-slow\).*nowhere to go/);
+  assert.match(refused.join(""), /TICK HEALTH NOT DELIVERED \(tick-killed\).*nowhere to go/);
 });
 
 // --- THROUGH THE REAL TICK ---------------------------------------------------------------------------------------------------------------------
@@ -177,6 +344,7 @@ function tickIn(dir: string, gate = "process.exit(0);") {
   const args = [`--import=${PRELOAD}`, join(src, "work-tick.ts"), `--ledger=${ledger}`];
   return {
     marker: tickMarkerPath(ledger),
+    recordState: join(dirname(ledger), TICK_RECORD_FILE),
     run: (extra?: NodeJS.ProcessEnv) => spawnSync(process.execPath, args, { encoding: "utf8", cwd: dir, env: env(extra) }),
     runUntilKilled: (killAfterMs: number) => spawnSync(process.execPath, args, { encoding: "utf8", cwd: dir, env: env(), timeout: killAfterMs, killSignal: "SIGKILL" }),
     delivered: () => (existsSync(join(dir, "delivered.jsonl")) ? readFileSync(join(dir, "delivered.jsonl"), "utf8").split("\n").filter(Boolean).map((line) => JSON.parse(line)) : []),
@@ -191,15 +359,13 @@ test("#3567 CONTROL, through the tick: an ordinary tick tells nobody, and leaves
   assert.equal(existsSync(tick.marker), false, "a tick that ends by itself clears its marker");
 }));
 
-test("#3567, through the tick: a tick over the limit wakes ceo once, before it exits, and clears its marker", () => inDir((dir) => {
+test("agent-org#1208, through the tick: a tick over the limit wakes NOBODY, says its record is unwritten (no row is declared here), and clears its marker", () => inDir((dir) => {
   const tick = tickIn(dir, `setTimeout(() => process.exit(0), 1300);`);
   const ran = tick.run({ A11Y_TICK_SLOW_SECONDS: "1" });
   assert.equal(ran.status, 0, ran.stderr);
-  const delivered = tick.delivered();
-  assert.equal(delivered.length, 1, JSON.stringify(delivered));
-  assert.equal(delivered[0].subject, TICK_SLOW);
-  assert.equal(delivered[0].session, "ceo");
-  assert.match(delivered[0].prompt, /took longest: `gate`/);
+  assert.deepEqual(tick.delivered(), [], "a slow tick is recorded, not delivered");
+  assert.match(ran.stderr, /TICK RECORD NOT WRITTEN/);
+  assert.notEqual(readTickRecordState(tick.recordState).unwritten, null, "the refusal is state, which org-health reads");
   assert.equal(existsSync(tick.marker), false);
 }));
 
@@ -231,14 +397,6 @@ test("#3567, through the tick: a tick whose gate CRASHES clears its marker too, 
   assert.equal(tick.run().status, ran.status);
   assert.deepEqual(tick.delivered(), [], "and the next tick has no marker to read");
 }));
-
-test("#3730: a longest phase some other process timed has a wall and NO CPU, and the order says so rather than printing NaN", () => {
-  const line = costLine(181);
-  line.phases = { ...line.phases, "github-status": { wallMs: 999_999 } } as typeof line.phases;
-  const [order] = slow(line);
-  assert.match(order.prompt, /took longest: `github-status`, 1000\.0 s wall, CPU not measured\./);
-  assert.doesNotMatch(order.prompt, /NaN/);
-});
 
 // --- THE HEARTBEAT IS WRITTEN TO EVERY DECLARED TRACKER (a11ign/a11ign#4080, row 2 of #4056) ---------------------------------------------------------
 

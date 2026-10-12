@@ -36,6 +36,9 @@
 // THE "MERGED BUT OFF" COUNT, agent-org#1135 (class `hand-reroute`, a11ign#4437):
 //   flag-without-a-switch        any         a `*_FLAG` the code ships (`src/flag-switch-ledger.ts`) whose key no declaration file carries, `false` counting as decided. Named once a day with the date
 //                                            of the merge that added it, to `product-manager`, who files the a11ign switch row the chairman's rule (a11ign#928, 2026-10-12) asks for with the change.
+// THE TICK RECORD, agent-org#1208 (a11ign#928: a slow tick is recorded on one standing row and wakes nobody):
+//   tick-record-unwritten        any         the standing comment a slow tick edits could not be written (or the project declares no row). A DIGEST that rides the next order and is
+//                                            never an order of its own to wake on; the tick retries each tick, so it clears itself. The record's own p50/p95 are on the row.
 // WHY THE 180-MINUTE "NOT PROGRESSING" SIGNAL WAS REPLACED, not tuned: it fired at about 13x the median open-to-merge, exempted held and
 // drafted PRs by construction (so a hold whose reason had gone, agent-org #149, and an approved draft with no stamp, #3406, were
 // invisible), and counted any comment as activity, so a PR the bots kept commenting on never aged (#2950 sat 7.5 h; #3460 was re-queued).
@@ -70,6 +73,7 @@ import { READY_LABEL, STATE_LABELS, stateLabelFindings } from "./claim-labels.ts
 import { boardTruthTable } from "./board-truth-audit.ts";
 // The registry of flags the code ships and the declarations that decide them (agent-org#1135); it imports only the two config leaves this file already does.
 import type { FlagLedger } from "./flag-switch-ledger.ts";
+import { tickRecordUnwrittenLine, type TickRecordState } from "./work-tick-health.ts"; // a leaf (`node:*` only): the tick's own record state and the one line it says
 // The checkout the tool serves and the project's own words are read from where they are declared (`standalone-roots.test.ts`, `project-vocabulary.test.ts`).
 import { HOME_CHECKOUT } from "./project-config.ts";
 import { ANSWER_PREFIX, BACKLOG_LABEL } from "./project-vocabulary.ts";
@@ -239,6 +243,7 @@ export const SIGNALS = Object.freeze({
   MILESTONE_CLOCK: "primary-milestone-idle",
   CLAIM_REFUSAL_STORM: "claim-refusal-storm",
   FLAG_WITHOUT_SWITCH: "flag-without-a-switch",
+  TICK_RECORD_UNWRITTEN: "tick-record-unwritten",
 });
 
 /** Signals whose first reader is not `ceo`: the order goes to that session as well as to `ceo`, who takes every signal. */
@@ -727,6 +732,18 @@ export function flagSwitchReading({ day, ledger }: { day: string; ledger: FlagLe
   return { signal, status: "tripped", firstTrippedAt: null,
     discriminator: `${signal}@${day}:${ledger.unset.map((flag) => flag.key).sort().join(",")}`,
     detail: `${ledger.unset.length} of ${ledger.shipped} flags the code ships ${ledger.unset.length === 1 ? "is" : "are"} OFF because no declaration sets ${ledger.unset.length === 1 ? "it" : "them"}:\n${lines.join("\n")}` };
+}
+
+/**
+ * SIGNAL: THE TICK RECORD IS UNWRITTEN (agent-org#1208). A slow tick wakes nobody and is recorded on one standing row; this is the line that says when it could not be
+ * (a refused write, or no row declared), so a record that stopped is seen and the fallback is never a wake per overrun. `state` is the tick's own record state file, read by the
+ * gate; an unreadable file is already `unwritten` there, so there is no unknown of this reading's own. Keyed on the day the write first failed, so one outage is one line.
+ */
+export function tickRecordReading({ now, state }: { now: number; state: TickRecordState; }): Reading {
+  const signal = SIGNALS.TICK_RECORD_UNWRITTEN;
+  const line = tickRecordUnwrittenLine(state, now);
+  if (line === null || state.unwritten === null) return clear(signal);
+  return { signal, status: "tripped", firstTrippedAt: state.unwritten.since, discriminator: `${signal}@${isoOf(state.unwritten.since).slice(0, 10)}`, detail: line };
 }
 
 /**
@@ -1910,6 +1927,8 @@ export function orgHealthReadings(facts: {
          * a default read of the project's declarations put a signal into 25 tests that assert the exact orders of a tick (the shape of agent-org#1073), so the live gate hands it over (`work-gate.ts`).
          */
         flagSwitches?: FlagLedger | null;
+        /** agent-org#1208: the tick record's state file as `readTickRecordState` reads it; OMITTED when the caller does not ask, and handed over by the live gate for the reason `flagSwitches` is. */
+        tickRecord?: TickRecordState;
         /** agent-org#1168: the approved-DIRTY readings. `enabled` is `health.approvedDirty`'s decision; OFF gives no reading, so the caller may always pass it. */
         approvedDirty?: ApprovedDirtyFacts;
     }): Reading[] {
@@ -1940,6 +1959,7 @@ export function orgHealthReadings(facts: {
   if (facts.milestoneClock !== undefined) readings.push(milestoneClockReading({ now: facts.now, fact: facts.milestoneClock === null ? null : { ...facts.milestoneClock, endedAt: facts.lastMergedAt } }));
   if (facts.claimRefusals !== undefined) readings.push(claimRefusalStormReading({ now: facts.now, refusals: facts.claimRefusals }));
   if (facts.flagSwitches !== undefined) readings.push(flagSwitchReading({ day: isoOf(facts.now).slice(0, 10), ledger: facts.flagSwitches }));
+  if (facts.tickRecord !== undefined) readings.push(tickRecordReading({ now: facts.now, state: facts.tickRecord }));
   if (facts.approvedDirty !== undefined) readings.push(...approvedDirtyReadings({ now: facts.now, ...facts.approvedDirty }));
   return readings;
 }
@@ -2044,6 +2064,9 @@ const REMEDY = (Object.freeze({
     + "The chairman's rule (a11ign#928, 2026-10-12) is that a flagged change ships with its a11ign switch row, filed at the same time. For each key, file that row `" + READY_LABEL + "` WITH AN OWNER in this turn "
     + "(or find the one already filed and say so on it), naming the declaration file that carries the key and the value to set. `false` counts as decided, so a flag the org means to leave off is set to `false`, "
     + "not left absent. A flag switched by `machinery:flag` is not counted (`FLAGS_WITH_ANOTHER_HOME`); one that is, and should not be, is a change to that map and not to a declaration.",
+  [SIGNALS.TICK_RECORD_UNWRITTEN]: "The tick could not write its record: a slow tick is recorded on one standing row (a comment the tick edits in place) and wakes nobody, so a write that fails is "
+    + "this line and not an order per overrun. The reason is quoted above. A `units.tickRecordIssue` that is not declared is a change to the project declaration (`.agent-org/project.json`, the "
+    + "first tracker's row); a refused `gh` write is the token or the row, and the next tick retries by itself. Do NOT clear it by deleting `tick-record.json`, which only hides the outage.",
   [APPROVED_DIRTY_SIGNAL]: "An approved pull request has been DIRTY (it conflicts with main) for more than " + APPROVED_DIRTY_MINUTES + " minutes and nobody has pushed to its head inside that window, so it cannot land and nothing is rebasing it. "
     + "The named PRs are above. Rebase each one onto main, or if its author is away, say so on the PR and name who takes it; a push to the head clears the finding, and so does a merge. "
     + "Do not clear it by approving again, which changes nothing about the conflict.",
