@@ -4613,9 +4613,15 @@ function pipelineLane(): { owner: string; paths: string[]; except?: string[]; } 
  * A lane's role-name owner, spelled as the GitHub login CODEOWNERS names -- `codeowners-lane-sync.test.ts`'s
  * own `ROLE_LOGIN`, deliberately re-asserted here rather than shared: `docs/lane-ownership.json` names the
  * ROLE ("ceo") and never the account, and a shared module would make the mapping look derived from a file
- * that does not carry it. `ceo`'s to move, same as that test's copy.
+ * that does not carry it.
+ *
+ * `ceo` HAS NO ENTRY (a11ign#5044 step 2). The login that held it was the `a11ign-ai-leads` App, and an App cannot
+ * be a code owner (a11ign#4981), so the review CODEOWNERS asks for can never be given by that account. With no login
+ * for the pipeline lane's owner, `pipelineCodeownerReviewMissing` names nothing: the cause is retired, and the
+ * owned-path check (`owned-path-signoff.ts`) is what answers for owned paths now. Restoring `ceo` here turns the
+ * #1959 retirement test red.
  */
-const ROLE_LOGIN = Object.freeze({ ceo: "a11ign-ai-leads" });
+const ROLE_LOGIN: Readonly<Record<string, string>> = Object.freeze({});
 
 /**
  * Does this PR touch a path CODEOWNERS actually assigns to the lane's owner -- inside `paths` and outside
