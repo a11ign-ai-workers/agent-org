@@ -17,6 +17,7 @@ import readyRows, {
 } from "./ready-rows-untiered.ts";
 import { loadClasses, whyNotClass, type DecisionOrder } from "../registry.ts";
 import { serveByRun, type ServeOrder } from "../../serve-by-run.ts";
+import { homeProjectDeclaration } from "../../project-config.ts";
 import { hasTierDecision } from "../../untiered-ready-rows.ts";
 import type { ItemRef, TicketItem, TicketPort } from "../../ticket-port/port.ts";
 
@@ -25,10 +26,13 @@ after(() => rmSync(ROOT, { recursive: true, force: true }));
 let made = 0;
 const fresh = (): string => { const dir = join(ROOT, `case-${made += 1}`); mkdirSync(dir, { recursive: true }); return dir; };
 
-const REF: ItemRef = { tracker: "github", scope: "a11ign/agent-org", id: 909 };
+const TRACKERS = homeProjectDeclaration().tracker;
+const OTHER = TRACKERS[1] ?? TRACKERS[0]!;
+const KEY = OTHER.key;
+const REF: ItemRef = { tracker: "github", scope: OTHER.repo, id: 909 };
 const ORDER: ServeOrder = {
-  session: "product-manager", cause: "ready-rows-untiered", causeKey: "product-manager/ready-rows-untiered/agent-org#909,agent-org#910",
-  prompt: "2 `ready` row(s) have made NO tier decision:\n  agent-org#909 Class `ready-rows-untiered`\n  agent-org#910 Another row\nFor each row above: put `tier:haiku` on it ...",
+  session: "product-manager", cause: "ready-rows-untiered", causeKey: `product-manager/ready-rows-untiered/${KEY}#909,${KEY}#910`,
+  prompt: `2 \`ready\` row(s) have made NO tier decision:\n  ${KEY}#909 Class \`ready-rows-untiered\`\n  ${KEY}#910 Another row\nFor each row above: put \`tier:haiku\` on it ...`,
 };
 const NOW = Date.parse("2026-10-12T10:00:00.000Z");
 const COMMAND_BODY = "## What it is\nx\n\n## Acceptance\n\n```bash\nnpx rstest run src/a.test.ts\n```\n\n## Tier\n";
@@ -74,7 +78,7 @@ test("POSITIVE CONTROL: the posted line is counted as a decision by the sweep's 
   assert.ok(Buffer.byteLength(ROLE_EXCERPT, "utf8") <= ROLE_EXCERPT_CAP_BYTES, "under the named cap");
   assert.deepEqual(tierQuestion(), { text: tierQuestion().text, default: TIER_DEFAULT, allowed: [TIER_DEFAULT, TIER_LARGER] });
   assert.deepEqual(itemOf(ORDER), REF);
-  assert.deepEqual(itemOf({ prompt: "1 row:\n  #12 t" }), { tracker: "github", scope: "a11ign/a11ign", id: 12 });
+  assert.deepEqual(itemOf({ prompt: "1 row:\n  #12 t" }), { tracker: "github", scope: TRACKERS[0]!.repo, id: 12 });
   assert.equal(itemOf({ prompt: "1 row:\n  nope#12 t" }), null);
   assert.equal(itemOf({}), null);
   assert.equal(reasonOf("Tier: sonnet -- already"), "already");

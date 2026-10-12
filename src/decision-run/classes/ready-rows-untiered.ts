@@ -12,6 +12,7 @@
 // WHAT THE PORT CANNOT SHOW: a `Tier:` line in a COMMENT, and the `tier:haiku` label (`TicketFlag` has no such flag, so `flagsOf` drops it). "The gap is gone" is therefore read
 // from the state (no longer `ready`), the body and any flag the item does show; the apply's staleness check (any event newer than the read) is what covers the rest.
 import type { ItemRef, TicketFlag } from "../../ticket-port/port.ts";
+import { homeProjectDeclaration } from "../../project-config.ts";
 import { READY_LABEL } from "../../claim-labels.ts";
 import { hasTierDecision } from "../../untiered-ready-rows.ts";
 import { HAIKU_TIER_LABEL } from "../../worker-profile.ts";
@@ -56,8 +57,19 @@ const SCHEMA = {
   },
 } as const;
 
-/** The repository each tracker key of a listed row (`agent-org#7`; the first tracker's key may be empty or its own name) names. An unknown key is no item. */
-export const SCOPES: Readonly<Record<string, string>> = { "": "a11ign/a11ign", a11ign: "a11ign/a11ign", "agent-org": "a11ign/agent-org" };
+/**
+ * The repository a listed row's tracker key (`agent-org#7`) names, read from the project's declaration and never written here (#2616). The empty key and the FIRST tracker's own key
+ * are the primary's. An undeclared key, or a declaration that cannot be read, is `null`: no item, and so no action.
+ */
+export function scopeOf(trackerKey: string): string | null {
+  try {
+    const trackers = homeProjectDeclaration().tracker;
+    if (trackerKey === "" || trackerKey === trackers[0]?.key) return trackers[0]?.repo ?? null;
+    return trackers.find((t) => t.key === trackerKey)?.repo ?? null;
+  } catch {
+    return null;
+  }
+}
 
 /** What `buildQuestion` learned about an order, for `actionsFor`, which is not given the item. Keyed by the order, overwritten each time it is asked. */
 type Read = Readonly<{ ref: ItemRef | null; open: boolean; checkable: boolean }>;
@@ -66,8 +78,8 @@ const read = new Map<string, Read>();
 /** The first row the order lists, or `null` when none parses or its tracker is not declared here. */
 export function itemOf(order: Pick<DecisionOrder, "prompt">): ItemRef | null {
   const found = /^[ \t]+([a-z0-9-]*)#(\d+)\b/m.exec(order.prompt ?? "");
-  const scope = found === null ? undefined : SCOPES[found[1] ?? ""];
-  return found === null || scope === undefined ? null : { tracker: "github", scope, id: Number(found[2]) };
+  const scope = found === null ? null : scopeOf(found[1] ?? "");
+  return found === null || scope === null ? null : { tracker: "github", scope, id: Number(found[2]) };
 }
 
 /**
