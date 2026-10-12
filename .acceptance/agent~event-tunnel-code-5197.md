@@ -32,3 +32,5 @@ The row also names deliveries per hour, signature refusals and receiver restarts
 platform: Tailscale's own `funnel --bg` is the mechanism (no tunnel is reimplemented); GitHub's `PATCH /app/hook/config` is the registration.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+History: full

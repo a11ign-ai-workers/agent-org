@@ -1,4 +1,5 @@
 // no-token: none -- nothing here reaches `gh`, `tailscale`, `systemctl` or GitHub: the fetch is a recorder, the host is a fixture, and the key is generated for the run
+// requires: history -- the unit tests import `host-units.ts`, which reads git history to say where an orphaned unit came from
 //
 // a11ign/a11ign#5197: THE LAST MILE OF THE EVENT FEED. Five things are pinned, each by running the code and not by reading it:
 //   1. THE DECLARATION: `events.tunnel` and `events.publicUrl` read back, are refused BY FIELD NAME, and a host that names neither reads as it always did;
