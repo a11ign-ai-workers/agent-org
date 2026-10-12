@@ -17,8 +17,9 @@ name: ci
 # here red for about 50 minutes that way (a11ign/a11ign#3886). PROJECT_REF is therefore a FULL COMMIT SHA, which separates the two.
 #
 # BUMPING `PROJECT_REF` IS A PULL REQUEST, and the only way the project's changes reach this repository's CI: Dependabot cannot read a commit pin, so
-# `src/ci-pins-the-project.test.ts` holds it to a full commit sha and nothing else. The order is fixed: the project bumps nothing, this repository bumps the pin when
-# it wants to read a newer project, and a red `gate` is this repository's own. `control` and `lab` pin `CORE_REF` the same way.
+# `renovate.json` carries a regex rule for the `PROJECT_REF` line below (a11ign/a11ign#5153), and `src/ci-pins-the-project.test.ts` holds the value to a full commit sha and nothing else.
+# The order is fixed: the project bumps nothing, this repository bumps the pin when it wants to read a newer project (Renovate opens the pull request,
+# on `bot/project-ref-bump`, and this repository's own `gate` decides it), and a red `gate` is this repository's own. `control` and `lab` pin `CORE_REF` the same way.
 #
 # THE TESTS' SIBLINGS COME FROM THE LAB: the tool's tests were extracted from the lab package (`project/packages/lab/src/packaging/`), where they sat beside helper
 # modules and fixtures that were not extracted. a11ign/a11ign deleted that package (#3505) and takes a11ign/lab as a pinned tag, so the job lays the lab at the tag the project's
@@ -98,7 +99,7 @@ jobs:
         run: |
           rm -rf project/packages/agent-org
           mkdir project/packages/agent-org
-          cp -r src host scripts docs .github CHANGELOG.md package.json LICENSE README.md .gitignore project/packages/agent-org/
+          cp -r src host scripts docs .github CHANGELOG.md package.json LICENSE README.md .gitignore renovate.json project/packages/agent-org/
           rsync -a --ignore-existing --exclude='*.test.ts' --exclude='*.test.mjs' project/packages/lab/src/packaging/ project/packages/agent-org/src/packaging/
           # The project deleted `project/packages/agent-org` (a11ign/a11ign#2976) and loads the tool by path (`toolModule`, a11ign/a11ign#3534). The fixture that once needed its static import
           # rewritten to reach the tool (`board-document-chrome-resolver.test.ts`) is this repository's own now, and imports `../board-document.mjs` as it stands: nothing to rewrite.
