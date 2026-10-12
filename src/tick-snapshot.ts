@@ -28,7 +28,7 @@
 import { spawnSync } from "node:child_process";
 import { mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { driftOf, fileDrift, type FileDrift } from "./event-drift.ts";
+import { countSuppressed, driftOf, fileDrift, type Facts, type FileDrift, noContentChange, suppressedPath } from "./event-drift.ts";
 
 /** A repository is re-read at least this often even when every probe says unchanged: what a probe cannot see (a non-Actions status) is bounded by it. */
 export const MAX_UNCHANGED_SECONDS = 300;
@@ -74,18 +74,48 @@ const asRun = (run: GhRun) => (args: string[]): string => {
 };
 
 /**
- * One probe: conditional if a tag is held. `changed` is true for a 200 whose tag is not the one held, or for an answer that is none of 200, 304, 404 and 410; a 404 or 410 is a repository
- * with no Actions (or no issues) and is a steady state, not a change. A 200 with the SAME tag is not a change either (a CDN may ignore the condition).
- * @param {{ path: string, held: string | undefined, run: GhRun }} probe
- * @returns {{ changed: boolean, etag: string | undefined, why: string }}
+ * What a 200 body says besides its tag (agent-org#1207): the newest `updated_at` of the items it lists and how many there are. The body is the array of issues, or the
+ * `workflow_runs` of an Actions answer. `undefined` when the body is neither, or an item has no readable `updated_at`: nothing is then confirmed, and so nothing is drift.
+ * @param {string} stdout @returns {Facts | undefined}
  */
-export function probeOnce({ path, held, run }: { path: string; held: string | undefined; run: GhRun; }): { changed: boolean; etag: string | undefined; why: string; } {
+export function factsOf(stdout: string): Facts | undefined {
+  const split = stdout.match(/\r?\n\r?\n/);
+  if (split === null || split.index === undefined) return undefined;
+  let parsed: unknown;
+  try {
+    parsed = JSON.parse(stdout.slice(split.index + split[0].length));
+  } catch {
+    return undefined;
+  }
+  const items: unknown = Array.isArray(parsed) ? parsed : (parsed as { workflow_runs?: unknown } | null)?.workflow_runs;
+  if (!Array.isArray(items)) return undefined;
+  let newest: string | null = null;
+  let newestMs = -Infinity;
+  for (const item of items) {
+    const at: unknown = (item as { updated_at?: unknown } | null)?.updated_at;
+    const ms = typeof at === "string" ? Date.parse(at) : NaN;
+    if (!Number.isFinite(ms)) return undefined;
+    if (ms > newestMs) {
+      newestMs = ms;
+      newest = at as string;
+    }
+  }
+  return { newest, count: items.length };
+}
+
+/**
+ * One probe: conditional if a tag is held. `changed` is true for a 200 whose tag is not the one held, or for an answer that is none of 200, 304, 404 and 410; a 404 or 410 is a repository
+ * with no Actions (or no issues) and is a steady state, not a change. A 200 with the SAME tag is not a change either (a CDN may ignore the condition). A 200 also says what it read (`facts`).
+ * @param {{ path: string, held: string | undefined, run: GhRun }} probe
+ * @returns {{ changed: boolean, etag: string | undefined, why: string, facts?: Facts }}
+ */
+export function probeOnce({ path, held, run }: { path: string; held: string | undefined; run: GhRun; }): { changed: boolean; etag: string | undefined; why: string; facts?: Facts; } {
   const conditional = held === undefined || held === ABSENT ? [] : ["-H", `If-None-Match: ${held}`];
   const { stdout } = run(["api", "-i", ...conditional, path]);
   const answer = parseAnswer(stdout);
   if (answer.status === HTTP_NOT_MODIFIED) return { changed: false, etag: held, why: "304" };
   if (answer.status === HTTP_NOT_FOUND || answer.status === HTTP_GONE) return { changed: false, etag: ABSENT, why: String(answer.status) };
-  if (answer.status === HTTP_OK && answer.etag !== null) return { changed: answer.etag !== held, etag: answer.etag, why: answer.etag === held ? "200 same tag" : "200 new tag" };
+  if (answer.status === HTTP_OK && answer.etag !== null) return { changed: answer.etag !== held, etag: answer.etag, why: answer.etag === held ? "200 same tag" : "200 new tag", facts: factsOf(stdout) };
   return { changed: true, etag: held, why: `unreadable (${answer.status ?? "no status"})` };
 }
 
@@ -96,9 +126,10 @@ export function probeOnce({ path, held, run }: { path: string; held: string | un
 export type TickEvents = { changed: ReadonlySet<string>, healthy: boolean, reconcileEverySeconds: number };
 
 /**
- * what is kept per repository: the tag each probe path last returned, and when its generation last moved
+ * what is kept per repository: the tag each probe path last returned, and when its generation last moved. `facts` is the content each tag was read with (agent-org#1207), by
+ * probe path; a tag held without it (a file written before this check) is a baseline, not a drift.
  */
-export type Held = { tags: Record<string, string>, bumpedAt: number };
+export type Held = { tags: Record<string, string>, bumpedAt: number, facts?: Record<string, Facts> };
 
 /** @param {string} path @returns {Record<string, Held>} */
 function readTags(path: string): Record<string, Held> {
@@ -145,23 +176,39 @@ export function refreshTickSnapshot({ repos, homeRepo, configDir, run = ghRun, n
   const tagsPath = join(root, "etags.json");
   const tags = readTags(tagsPath);
   const nowS = Math.floor(nowMs / MS);
-  const lines = [];
-  for (const repo of repos) {
+  // Phase 1: read every repository. Nothing is filed or written yet, so the drifts of the pass can be filed together (agent-org#1207).
+  const reads = repos.map((repo) => {
     const held = tags[repo] ?? { tags: {}, bumpedAt: 0 };
     const before = readGeneration(join(root, "gen", slugOf(repo)));
     const due = before === null || nowS - held.bumpedAt >= reconcileSeconds;
     const eventNamed = named.has(repo.toLowerCase());
     // Poll: the probes are the answer. Events: none, except ONCE when the repository is due, as the safety net for a delivery the receiver never got (agent-org#982).
-    const probes = !viaEvents || due ? probePaths(repo).map((path) => ({ path, held: held.tags[path], ...probeOnce({ path, held: held.tags[path], run }) })) : [];
+    const probes = !viaEvents || due ? probePaths(repo).map((path) => ({ path, held: held.tags[path], heldFacts: held.facts?.[path], ...probeOnce({ path, held: held.tags[path], run }) })) : [];
     const drift = viaEvents && due ? driftOf({ repo, probes, named: eventNamed, windowStartS: held.bumpedAt, nowS }) : null;
-    // A refused filing leaves the window and the held tags as they were, so the next tick is due and the same probe says CHANGED again: retried, not lost.
-    const filed = drift === null ? null : file(drift);
-    const unfiled = drift !== null && !filed;
+    // A tag that moved over the same content is counted, not filed: the health signal stays visible without an incident per repository per window.
+    const sameContent = viaEvents && due && drift === null && probes.some(noContentChange) ? 1 : 0;
     const changed = (viaEvents && eventNamed) || probes.some((p) => p.changed);
+    return { repo, held, before, due, probes, drift, sameContent, changed, eventNamed };
+  });
+  // Phase 2: file the pass's drifts as ONE incident naming every drifted repository (agent-org#1207). A refused filing leaves their windows and held tags as they were, so the next tick is due and the same probes say CHANGED again: retried, not lost.
+  const drifts = reads.flatMap((r) => (r.drift === null ? [] : [r.drift]));
+  const filed = drifts.length === 0 ? true : file(drifts);
+  const sameContent = reads.reduce((n, r) => n + r.sameContent, 0);
+  if (sameContent > 0) countSuppressed(suppressedPath(root), nowMs, sameContent);
+  // Phase 3: write each repository's state and its line.
+  const lines = [];
+  for (const { repo, held, before, due, probes, drift, changed, eventNamed } of reads) {
+    const unfiled = drift !== null && !filed;
     const counter = changed || due ? (before?.counter ?? 0) + 1 : (before?.counter ?? 1);
     // While events answer, tags are kept as they are except at a reconcile that filed (or found nothing): they are what the probes compare against on the tick the receiver is found dead, where a difference reads as a change.
-    const kept = viaEvents && (!due || unfiled) ? held.tags : Object.fromEntries(probes.flatMap((p) => (p.etag === undefined ? [] : [[p.path, p.etag]])));
-    tags[repo] = { tags: kept, bumpedAt: unfiled ? held.bumpedAt : changed || due ? nowS : held.bumpedAt };
+    // The content each tag was read with is kept with it, so a kept tag and its facts are always the same read.
+    const keep = viaEvents && (!due || unfiled);
+    const kept = keep ? held.tags : Object.fromEntries(probes.flatMap((p) => (p.etag === undefined ? [] : [[p.path, p.etag]])));
+    const keptFacts = keep ? held.facts : Object.fromEntries(probes.flatMap((p): [string, Facts][] => {
+      const facts = p.facts ?? (p.etag === p.held ? p.heldFacts : undefined);
+      return p.etag === undefined || facts === undefined ? [] : [[p.path, facts]];
+    }));
+    tags[repo] = { tags: kept, bumpedAt: unfiled ? held.bumpedAt : changed || due ? nowS : held.bumpedAt, facts: keptFacts };
     for (const slug of repo === homeRepo ? [slugOf(repo), slugOf("")] : [slugOf(repo)]) writeWhole(join(root, "gen", slug), `${counter} ${nowS}\n`);
     const driftNote = drift === null ? "" : `; MISSED DELIVERY inferred from the ${drift.probe} probe, ${filed ? "incident filed" : "incident NOT filed, retried next tick"}`;
     const why = viaEvents ? (eventNamed ? "event" : "no event") : probes.map((p) => p.why).join(", ");
