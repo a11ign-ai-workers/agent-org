@@ -41,6 +41,7 @@ import { referencesOf, releaseReferencesOf, waitItemOf, staleWaits, bareWaits, m
 import { stallReasonOf, ownerOfPr } from "./pr-orders.ts";
 import { claimedScopesOf, scopeAddedReadings, scopeAddedOrders } from "./scope-added-orders.ts"; // #4759
 import { idleHoldIncidents, idleHoldOrders } from "./idle-hold-incidents.ts"; // #571
+import { forgetReads } from "./reads.ts"; // agent-org#1145: the child's write makes the memo's answers stale
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -368,11 +369,14 @@ const PR_HOLD_ENTRY = fileURLToPath(new URL("../pr-hold.ts", import.meta.url));
  * `rearm-on-release` (a bare label removal leaves it unarmed: "Lifting a hold does not arm"). A child process rather than an import, because the module is a
  * CLI whose `main` runs on load. Exit `0` is DONE; `2` (released but the re-arm could not be proven) is NOT done, so the order still goes to a session.
  * #3479: `repoKey` AIMS IT at the pull request's repository, and the first repository's call is exactly what it was (no flag).
+ * agent-org#1145: the child's `gh` writes are not seen by the read memo (`defaultRun` forgets only the writes it makes itself), so a read of this pull request
+ * after the release is asked again. The memo is forgotten whether the release exited `0` or not: a `2` or a crash may still have written the label.
  * @returns whether the release reported done
  */
 export function releaseHoldViaModule(number: number, session: string, repoKey?: string): boolean {
   const aim = repoKey ? [`--repo-key=${repoKey}`] : [];
   const result = spawnSync(process.execPath, [PR_HOLD_ENTRY, String(number), `--session=${session}`, "--release", ...aim], { encoding: "utf8" });
+  forgetReads();
   if (result.status !== 0) process.stderr.write(`COULD NOT lift hold:${session} on pr-${subjectRef(repoKey, number)} (exit ${result.status}): ${String(result.stderr).trim()}\n`);
   return result.status === 0;
 }

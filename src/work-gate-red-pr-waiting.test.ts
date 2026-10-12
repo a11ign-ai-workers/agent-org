@@ -17,6 +17,8 @@ import { mkdtempSync, rmSync, readFileSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { perPullRequestOrders } from "./work-gate/pr-orders.ts";
+import { claimStallTick } from "./work-gate.ts";
+import { claimRecordComment } from "./row-claim.ts";
 import { withWaitingEdges, PR_WAITS_FILE } from "./work-gate/pr-waits.ts";
 import { isWaitingRed } from "./red-pr.ts";
 import { endedRuns } from "./wake.ts";
@@ -154,4 +156,30 @@ test("an unwritable memory costs one stderr line and no order: the wait still ho
     const stamped = withWaitingEdges([labPr(49, HEAD_A, 4278)], [OPEN_EDGE] as never, { dir: join(file, "under-a-file"), rowsRepo: HOME_REPO });
     assert.equal(isWaitingRed(stamped[0] as never), true);
   });
+});
+
+// --- agent-org#743: THE IDLE NUDGE FOR A RED PULL REQUEST WAITS WHERE THE ORDER DOES ------------------------------------------------------------------------------
+
+/**
+ * #4606 stopped `pr-checks-failing` ordering a worker to fix a red pull request whose row waits on an open native `blockedBy` edge, because the wait is data the org
+ * already reads. agent-org#743 sends an idle holder on a red pull request a nudge of its own (`claim-stall.ts`), and it would contradict that if the same holder were
+ * told to fix what its row says it is blocked on. THE CONTROL IS THE SAME HOLDER WITH THE EDGE CLOSED, which is nudged: the silence is the edge's and nothing else's.
+ */
+test("agent-org#743 an idle holder on a red pull request whose row waits on an OPEN edge is not nudged to fix it; with the edge closed it is, naming the check", () => {
+  const NOW = Date.parse("2026-10-09T17:00:00Z");
+  const BRANCH = "agent/some-slug-4278";
+  const claim = { body: claimRecordComment({ session: "worker-9", branch: BRANCH, worktree: "../wt-4278" }), createdAt: new Date(NOW - 600 * 60_000).toISOString(),
+    author: { login: "a11ign-ai-workers" } };
+  const pr = { number: 49, headRefName: BRANCH, reviewDecision: "REVIEW_REQUIRED", labels: [{ name: "session:worker-9" }], checksPending: false,
+    createdAt: new Date(NOW - 300 * 60_000).toISOString(), statusCheckRollup: RED };
+  const agents = [{ label: "ceo", status: "done" }, { label: "orchestrator", status: "done" }, { label: "worker-9", status: "idle" }];
+  const tick = (edge: "OPEN" | "CLOSED") => claimStallTick({
+    rows: [{ number: 4278, title: "row", body: "", labels: [{ name: "in-progress" }, { name: "session:worker-9" }], blockedBy: { nodes: [{ number: 4525, state: edge }] } }],
+    claimedComments: [{ number: 4278, comments: [claim] }], openPrs: [pr], mergedPrs: null,
+    io: { git: () => ({ status: 0, out: "" }), exists: () => false, mtime: () => null }, repo: "/repo", now: NOW, restartAt: null, agents, stateDir: "/state",
+    ledger: () => "", log: () => undefined, read: () => ({ 4278: { session: "worker-9", idleSince: NOW - 50 * 60_000 } }), write: () => undefined } as never) as { prompt: string; release?: unknown }[];
+  assert.deepEqual(tick("OPEN").filter((o) => o.release === undefined), [], "the edge is a field: the holder is waiting, red or not");
+  const [order, ...rest] = tick("CLOSED");
+  assert.equal(rest.length, 0);
+  assert.match(order.prompt, /ITS PULL REQUEST IS RED: #49 \(`gate`\)/, "CONTROL: the edge gone, the red check is the holder's to fix");
 });

@@ -2186,3 +2186,88 @@ test("#460 the tick: a young pull request no longer excuses an idle holder that 
     rmSync(other, { recursive: true, force: true });
   }
 });
+
+// --- (agent-org#743, a11ign#4437) a holder idle on a RED pull request is told, and three unanswered nudges release it ---------------------------------------
+
+/**
+ * THE WHOLE LIFE OF ONE STALL THROUGH THE REAL TICK, the memory in a map and the wake ledger as a string: at agent-org#713 and #736 two holders sat idle on red pull
+ * requests for hours at `nudged`, never released. THE CONTROL FOR EACH STEP IS THE ONE BEFORE IT: the third nudge is a release only because the second is a nudge, and
+ * a commit resets the count only because the same tick without it carries it on.
+ */
+const RED_ROLLUP = [{ name: "gate", status: "COMPLETED", conclusion: "FAILURE", startedAt: "2026-09-25T14:00:00Z", completedAt: "2026-09-25T14:10:00Z" }];
+const GREEN_ROLLUP = [{ ...RED_ROLLUP[0], conclusion: "SUCCESS" }];
+const prWith = (rollup: object[]) => ({ ...OPEN_PR, createdAt: iso(ago(300)), statusCheckRollup: rollup, labels: [{ name: "session:worker-7" }] });
+
+test("#743 the tick: red + `waiting-review` is nudged naming the check and green + `waiting-review` is not; three nudges move nothing, and the third is followed by the release", () => {
+  const dir = mkdtempSync(join(tmpdir(), "claim-stalled-red-"));
+  writeDeclaration(`${dir}/${WORKER_STATE_DIR}`, { session: "worker-7", at: ago(30), state: "waiting-review", pr: { number: 9 } });
+  try {
+    const comments = [claim(600)];
+    const idleSince = ago(11);
+    const green = tickWith({ commit: null }, comments, { agents: IDLE_HOLDER, memory: { 2407: { session: "worker-7", idleSince } }, prs: [prWith(GREEN_ROLLUP)], stateDir: dir });
+    assert.deepEqual(green.orders, [], "NEGATIVE CONTROL: the declared holder with green checks is excused");
+
+    const memory: Record<string, unknown> = { 2407: { session: "worker-7", idleSince } };
+    const prs = [prWith(RED_ROLLUP)];
+    let ledger = "";
+    const at = (minutes: number, world: World = { commit: null }) => tickWith(world, comments, { agents: IDLE_HOLDER, memory, prs, stateDir: dir, ledger, now: NOW + minutes * MIN });
+    const delivered = (nudgedAtMinutes: number) => { ledger += nudgeDelivered(NOW + nudgedAtMinutes * MIN, NOW + (nudgedAtMinutes + 1) * MIN); };
+    const entry = () => memory["2407"] as { nudgedAt?: number; nudges?: number; idleSince?: number };
+
+    const one = at(0);
+    assert.equal(one.orders.length, 1, "POSITIVE CONTROL: the same holder, red, is nudged on the first tick past M");
+    assert.match(one.orders[0].prompt, /PULL REQUEST IS RED: #9 \(`gate`\)/);
+    assert.match(one.orders[0].prompt, /NUDGE 1 OF 3/);
+    assert.deepEqual([entry().nudgedAt, entry().nudges], [NOW, undefined]);
+    delivered(0);
+    assert.deepEqual(at(2).orders, [], "delivered, and the holder is not idle again for a full period yet");
+    const two = at(12);
+    assert.deepEqual(two.orders.map((o) => o.release), [undefined], "ONE unanswered nudge: the second nudge, not a release");
+    assert.match(two.orders[0].prompt, /NUDGE 2 OF 3/);
+    assert.notEqual(two.orders[0].causeKey, one.orders[0].causeKey);
+    assert.deepEqual([entry().nudgedAt, entry().nudges], [NOW + 12 * MIN, 2]);
+    delivered(12);
+    assert.deepEqual(at(14).orders, []);
+
+    const afterTwo = JSON.parse(JSON.stringify(memory));
+    const three = at(24);
+    assert.match(three.orders[0].prompt, /NUDGE 3 OF 3/);
+    assert.equal(three.orders[0].release, undefined, "TWO unanswered: still a nudge");
+    delivered(24);
+    assert.deepEqual(at(26).orders, []);
+    const last = at(36);
+    assert.equal(last.orders.length, 1);
+    assert.equal(last.orders[0].release!.why, "stalled", "THREE unanswered, a pull request open: released");
+    assert.equal(last.orders[0].release!.row, 2407);
+    assert.equal(last.orders[0].release!.session, "worker-7");
+    assert.equal(last.orders[0].release!.openPrs, undefined, "the open pull request is not what the row is held for: it goes back to the pool as every stall release did");
+    assert.equal(last.orders[0].release!.answer, undefined);
+    assert.equal(entry().nudges, 3, "and the release not yet performed is read as a release again next tick");
+    assert.equal(at(37).orders[0]?.release?.why, "stalled");
+
+    // THE RESET: from the memory after the second nudge, a commit AFTER it ends the stall -- the next reading is a first nudge again, numbered 1.
+    for (const k of Object.keys(memory)) delete memory[k];
+    Object.assign(memory, afterTwo);
+    const reset = at(24, { commit: 5 });
+    assert.equal(reset.orders.length, 1);
+    assert.match(reset.orders[0].prompt, /NUDGE 1 OF 3/);
+    assert.equal(entry().nudges, undefined, "a nudge answered by a new commit resets the count");
+    assert.equal(entry().nudgedAt, NOW + 24 * MIN);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#743 the tick: a holder with NO pull request is released exactly as before -- one nudge, then N after its delivery -- and never counted", () => {
+  const memory: Record<string, unknown> = {};
+  const comments = [claim(N_MIN * 3)];
+  const first = tickWith({ commit: null }, comments, { memory });
+  assert.equal(first.orders.length, 1);
+  assert.doesNotMatch(first.orders[0].prompt, /NUDGE \d OF 3/);
+  const nudgedAt = (memory["2407"] as { nudgedAt: number }).nudgedAt;
+  const delivered = nudgeDelivered(nudgedAt, NOW + 5 * MIN);
+  const later = NOW + 5 * MIN + STALL_INTERVAL_MS;
+  const second = tickWith({ commit: null }, comments, { memory: { ...memory }, now: later, ledger: delivered });
+  assert.equal(second.orders[0].release!.why, "stalled");
+  assert.equal((memory["2407"] as { nudges?: number }).nudges, undefined, "no count is kept for a holder the counted path does not apply to");
+});
