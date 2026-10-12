@@ -2,7 +2,7 @@ The other-tracker un-park pass (#5177, reopened) names a refused read instead of
 
 Why the live pass did not fire (#905's shape): the unit logic is not the miss. Test (10), #905's shape with `Waiting-for: closed #902` and `Waits-on-done-when: 902.1`, is un-parked on `origin/main`, so it is kept as a control. The live miss that remains is that the flag is OFF on the host, where `machinery-canary.json` has `flags: {}`.
 
-Acceptance: `bash -c 'cd /home/agent/repos/agent-org-wt-5177 && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/rows-unpark.test.ts'`
+Acceptance: `AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/rows-unpark.test.ts`
 
 Mutation: test (11) is the one that fails before the change. The `origin/main` version of `src/unpark-satisfied.ts` was copied over the change, the file was run against the new test file, and the change was restored from a copy and verified with `cmp`: `VERDICT fail: 1 of 12 tests failed in 1 file`, and the failure is (11). The restored file was run again and passes.
 
