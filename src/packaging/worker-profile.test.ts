@@ -9,6 +9,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
+import { workGateSource } from "../lib/work-gate-source.ts";
 import { readLoadedRules } from "./rules-files.ts";
 import { PROFILES, EFFORTS, MODELS, profileFor, agentArgs, AUTOCOMPACT_WINDOW_TOKENS,
   AUTO_COMPACT_TRIGGER_MARGIN_TOKENS, MEASURED_FRESH_WORKER_BASE_TOKENS, PER_ROW_DISALLOWED_TOOLS,
@@ -27,14 +28,15 @@ const PRACTICES = readLoadedRules();
 // review-blocked, merge conflict, awaiting-evidence). Left off this list the scan reads nine causes fewer than the
 // gate emits and this test goes RED -- the loud direction; the quiet one is a guard that greps the old file for text
 // now in the new module and passes by absence, which is why the control below names a cause that lives ONLY there.
-const GATE = ["work-gate.ts", "work-gate/pr-orders.ts", "work-gate/lab-job-orders.ts", "trunk-red.ts", "claim-stall.ts",
+// a11ign#5152: the gate is a MODULE SET (`work-gate.ts` + `work-gate/**`), read through the helper, so a cause moved between its modules stays in this population.
+const GATE = [workGateSource(), ...["work-gate/pr-orders.ts", "work-gate/lab-job-orders.ts", "trunk-red.ts", "claim-stall.ts",
   "repeating-lines.ts", // #2848: the repeating-line order is built beside the journal reading, not in the gate
   "org-health.ts", // #2936: the org-health order beside its four readings
   "org-retro.ts", // #2938: and the daily retrospective's beside the numbers it carries
   "work-gate/row-call-count-orders.ts", // #2898: and `row-call-count-signal`'s order, moved out of the gate with its readings
   "pr-hold-state.ts", // #4970: and the hold-holder wake and decision, built beside the hold reading they are about
   "work-tick-health.ts"] // #3567: and `tick-overran`'s, which the TICK builds about itself and no gate ever sees
-  .map((f) => readFileSync(new URL(`../${f}`, import.meta.url), "utf8")).join("\n");
+  .map((f) => readFileSync(new URL(`../${f}`, import.meta.url), "utf8"))].join("\n");
 
 /** The two shapes `profileFor` and `spawnInvocation` return, and narrowing that ASSERTS rather than casts. */
 type Profile = { kind: string; model: string; effort: string; why: string };

@@ -152,6 +152,9 @@ const GIT_IS_DATA_NOT_A_SPAWN: Record<string, string> = {
     'passes the string "git" to `onlyResolves()`, a local predicate standing in for the injected '
     + "`commandExists` seam -- the file imports node:test, node:assert/strict and the module under test, "
     + "and has no node:child_process import at all (a11ign/a11ign#446, trunk red 2026-09-08T08:00:30Z)",
+  "src/work-gate/causes/pr-reviews.ts":
+    '`readWorktreeStamps(run = defaultSpawn)` passes `"git"` to an INJECTED `run`; the default is `defaultSpawn` from `../reads.ts`, which spawns with `sandboxGitEnv()` '
+    + "-- the file imports no node:child_process, so nothing here can spawn (a11ign#5152, split out of work-gate.ts together with the helper it was classified through)",
   "src/wake-review-recheckout.test.ts":
     'its `git` is an injected fake seam (`checkout: { git, exists, link, root, repoRoot }`) that records each call '
     + "and answers from a map of tree heads -- the file imports node:test, node:assert/strict, node:fs/os/path and "
