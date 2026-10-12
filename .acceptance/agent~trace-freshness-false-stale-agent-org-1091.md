@@ -10,6 +10,4 @@ Not covered, and named: `main()` itself (the spawn of `trace.ts`) is not run by 
 
 Closes a11ign/agent-org#1091
 
-Outside-Region: .changeset/trace-freshness-reads-the-clock-before-the-ingest.md — the entry CI's `changeset` job requires for shipped code.
-
 platform: n/a (an ordering inside the unit's own script; no platform feature reads a clock for it)
