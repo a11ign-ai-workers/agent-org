@@ -1109,25 +1109,40 @@ function readOpenRows({ repo, read }: { repo: string; read: (args: string[]) => 
  * `walked`, `used` and `fullReads` belong to THIS tick: a key walked already reads no page, a key touched is kept, and a repository read in full is named in the line.
  */
 type MergedMark = { updatedAt: string; rows: Record<string, unknown>[]; };
+/**
+ * `keep` is set by `readRetroReads` (the daily pass only) and writes the memory as it is read (agent-org#1089): a cut gate leaves what it read for the next tick.
+ * `budget` is the class being read this tick, set by `readRetroClasses` and never by a manual run (`ClassBudget`).
+ */
 export type RetroReads = {
   marks: Record<string, MergedMark>; contents: Record<string, string>; unreadable: boolean;
-  walked: Set<string>; used: Set<string>; fullReads: string[];
+  walked: Set<string>; used: Set<string>; fullReads: string[]; keep?: () => void; budget?: ClassBudget;
 };
 export const RETRO_READS_FILE = "retro-reads-cache.json";
+
+/**
+ * A class's own budget this tick (agent-org#1089): `past()` is true once the tick has spent `RETRO_TICK_BUDGET_MS`. Each item the class reaches
+ * (`acceptanceOf`, `readNamingPrs`) counts in `items`; an item it reaches past the budget is not read, counts in `refused`, and reads as `null` (`unknown`).
+ */
+export type ClassBudget = { past: () => boolean; items: number; refused: number; };
 
 /** An empty memory: a manual run's (which writes nothing), a test's, and the one a tick starts from when the state entry is missing or unreadable. */
 export function freshRetroReads(unreadable = false): RetroReads {
   return { marks: {}, contents: {}, unreadable, walked: new Set(), used: new Set(), fullReads: [] };
 }
 
-/** The memory the state entry holds, or an empty one that says it is `unreadable` (a missing file is unreadable too: the first tick reads in full). */
+/**
+ * The memory the state entry holds, or an empty one that says it is `unreadable` (a missing file is unreadable too: the first tick reads in full). The
+ * returned memory writes itself as it is read (`keep`), so the daily pass's reads are kept whether or not the tick finishes.
+ */
 export function readRetroReads(stateDir: string): RetroReads {
   const kept = attemptDora(() => JSON.parse(readFileSync(join(stateDir, RETRO_READS_FILE), "utf8")));
   const usable = kept !== null && typeof kept === "object" && kept.marks !== null && typeof kept.marks === "object" && kept.contents !== null && typeof kept.contents === "object";
-  return usable ? { ...freshRetroReads(), marks: kept.marks, contents: kept.contents } : freshRetroReads(true);
+  const memory = usable ? { ...freshRetroReads(), marks: kept.marks, contents: kept.contents } : freshRetroReads(true);
+  memory.keep = () => keepRetroReads(stateDir, memory);
+  return memory;
 }
 
-/** Writes what THIS tick used, and nothing else: a repository or file no longer read is dropped, so the state entry is bounded by the window. Only the daily pass calls it. */
+/** Writes what THIS tick has used so far, and nothing else: a repository or file no longer read is dropped, so the state entry is bounded by the window. Only the daily pass calls it (through `keep`). */
 export function keepRetroReads(stateDir: string, memory: RetroReads) {
   const usedOnly = <T>(entries: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(entries).filter(([key]) => memory.used.has(key)));
   keepReadings(join(stateDir, RETRO_READS_FILE), { marks: usedOnly(memory.marks), contents: usedOnly(memory.contents) });
@@ -1177,6 +1192,7 @@ function readMergedPrs({ repo, since, read, select, memory }: { repo: string; si
     const newest = fresh.reduce((max, row) => (String(row.updatedAt) > max ? String(row.updatedAt) : max), "");
     memory.marks[key] = { updatedAt: newest || (marked ? mark.updatedAt : new Date(since).toISOString()), rows: rows as Record<string, unknown>[] };
     memory.walked.add(key);
+    memory.keep?.(); // a cut gate keeps this mark for the next tick (agent-org#1089)
     return rows;
   } catch {
     return null; // a refused read, or a window the pages did not hold, is `unknown`
@@ -1193,6 +1209,7 @@ const INERT_SELECT = "number body mergeCommit{oid} files(first:100){nodes{path}}
  * `readIdleClaimedHours` reads the open list only, for its labels, so the merged list is read for its refusal and nothing else.
  */
 function readNamingPrs({ repo, since, read, memory }: { repo: string; since: number; read: (args: string[]) => any[] | null; memory: RetroReads; }): { merged: NamingPr[]; open: (NamingPr & { labels?: any[]; })[]; } | null {
+  if (!admitItem(memory)) return null;
   const merged = readMergedPrs({ repo, since, read, select: NAMING_SELECT, memory });
   const open = listRead(read, ["pr", "list", "-R", repo, "--state", "open", "--limit", String(LIST_LIMIT), "--json", "number,body,headRefName,labels"]);
   if (merged === null || open === null) return null;
@@ -1232,10 +1249,28 @@ function readFileAt({ repo, path, oid, readFile }: { repo: string; path: string;
 function acceptanceOf({ repo, path, oid, readFile, readAcceptance, memory }: { repo: string; path: string; oid: unknown; readFile: (repo: string, path: string, ref?: string) => string | null; readAcceptance: typeof readFileAt; memory: RetroReads; }): string | null {
   const key = `${repo}|${path}|${String(oid)}`;
   memory.used.add(key);
-  if (memory.contents[key] !== undefined) return memory.contents[key];
+  const cached = memory.contents[key];
+  if (!admitItem(memory, cached !== undefined)) return null; // a text the memory holds costs no budget; a read past the budget is `unknown`
+  if (cached !== undefined) return cached;
   const text = readAcceptance({ repo, path, oid, readFile });
-  if (text !== null) memory.contents[key] = text;
+  if (text !== null) {
+    memory.contents[key] = text;
+    memory.keep?.(); // kept as it is read: a gate cut before the next file keeps this one (agent-org#1089)
+  }
   return text;
+}
+
+/**
+ * ONE ITEM OF THE CLASS BEING READ (agent-org#1089): `false` once this tick's budget has passed, and the item is counted as refused. `cached` items are counted and admitted,
+ * since a kept text is no read. Outside `readRetroClasses` there is no budget and every item is admitted.
+ */
+function admitItem(memory: RetroReads, cached = false): boolean {
+  const budget = memory.budget;
+  if (budget === undefined) return true;
+  budget.items += 1;
+  if (cached || !budget.past()) return true;
+  budget.refused += 1;
+  return false;
 }
 
 /**
@@ -1386,11 +1421,12 @@ function keptClasses(path: string, date: string): { classes: Record<string, any>
 }
 
 /** What a budgeted tick left: the class it stopped before, the classes read so far (of this day), and the seconds this tick spent. */
-export type ClassPending = { stopped: string; read: number; of: number; elapsedMs: number; };
+export type ClassPending = { stopped: string; read: number; of: number; elapsedMs: number; /** Set when the class stopped INSIDE itself: the items it read of all it reached. */ files?: { read: number; of: number; }; };
 
 /**
  * THE RETRO'S READ, CUT INTO TICKS (agent-org#1089). Each class is read in order, and a class is not started once `budgetMs` has passed in this tick (at
- * least ONE class is read per tick whatever the budget). Each class's fields are kept in the day's file as they are read, so the next tick resumes at the first unread one; the
+ * least ONE class is read per tick whatever the budget). A class that reaches an item past the budget stops INSIDE itself (`ClassBudget`): its reading is not kept as
+ * read, so the next tick reads it again, and the memory answers the items this tick already read. Each class's fields are kept in the day's file as they are read, so the next tick resumes at the first unread one; the
  * memory's used keys are kept with them, so the state entry keeps the marks the earlier ticks read. The full report is offered only when EVERY class is read: until then the answer is
  * `{ classPending }`. `budgetMs` and `clock` are the seams a test supplies.
  */
@@ -1410,7 +1446,21 @@ export function readRetroClasses(where: Parameters<typeof retroClasses>[0], { bu
       keepRetroReads(where.stateDir, memory);
       return { classPending: { stopped: cls.name, read: classes.filter((other) => Object.hasOwn(kept.classes, other.name)).length, of: classes.length, elapsedMs: clock() - began } };
     }
-    kept.classes[cls.name] = cls.read();
+    const budget: ClassBudget = { past: () => clock() - began >= budgetMs, items: 0, refused: 0 };
+    memory.budget = budget;
+    let reading: ReturnType<typeof cls.read>;
+    try {
+      reading = cls.read();
+    } finally {
+      memory.budget = undefined;
+    }
+    if (budget.refused > 0) {
+      keepReadings(path, { date, classes: kept.classes, used: [...memory.used] });
+      keepRetroReads(where.stateDir, memory);
+      const files = { read: budget.items - budget.refused, of: budget.items };
+      return { classPending: { stopped: cls.name, read: classes.filter((other) => Object.hasOwn(kept.classes, other.name)).length, of: classes.length, elapsedMs: clock() - began, files } };
+    }
+    kept.classes[cls.name] = reading;
     readThisTick += 1;
   }
   return Object.assign({}, ...classes.map((cls) => kept.classes[cls.name])) as Parameters<typeof buildReport>[0];
@@ -1502,7 +1552,9 @@ function dailyRetrospective({ now, stateDir, log, read, readLedger, record }: {
       return [];
     }
     if ("classPending" in inputs) {
-      log(`org-retro: read stopped at ${inputs.classPending.stopped} after ${Math.round(inputs.classPending.elapsedMs / MS_PER_SECOND)} s (${inputs.classPending.read} of ${inputs.classPending.of} classes read); no org-retrospective order until every class is read.\n`);
+      const { stopped, files, read, of, elapsedMs } = inputs.classPending;
+      if (files) log(`org-retro: ${stopped} stopped after ${files.read} of ${files.of} files; no org-retrospective order until every class is read.\n`);
+      else log(`org-retro: read stopped at ${stopped} after ${Math.round(elapsedMs / MS_PER_SECOND)} s (${read} of ${of} classes read); no org-retrospective order until every class is read.\n`);
       return [];
     }
     log(`${retroReadsLine(memory)}\n`);
