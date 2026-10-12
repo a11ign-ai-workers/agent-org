@@ -3,7 +3,7 @@ The gate's pinning tests read its source through one helper, `workGateSource()`,
 **What changes.**
 - `src/lib/work-gate-source.ts` (new): `workGateSource(srcDir?)`. The entry, then each non-test `.ts` under `work-gate/` (recursive, sorted by code point), joined with `\n`. Test files are excluded because a count or an absence pinned on the gate would otherwise see the pin's own text; `no-search-reads.test.ts` walks the directory with the same filter.
 - `src/packaging/work-gate-source.test.ts` (new): positive control (a fixture holding seven files, one nested, written out of order, returns the entry then all of them sorted), a nested-file control, a negative control (a neighbour of the entry, an unrelated file, the helper itself and a `.test.ts` under `work-gate/` are not read), the real tree, and a guard that no test reads the gate's entry directly (its pattern is checked against each shape the 32 readers had, and one reader put back is named).
-- 32 test files (the Region's list) call it in place of `readFileSync` on `src/work-gate.ts` (and, in two of them, on `src/work-gate/org-health.ts`), and drop the imports the call left unused.
+- 33 test files (the Region's 32, and `src/release-failure-alarm.test.ts`, which merged to `main` from agent-org#1071 after this branch was cut and read `src/work-gate.ts` the same way; the guard below caught it in the merge queue) call it in place of `readFileSync` on `src/work-gate.ts` (and, in two of them, on `src/work-gate/org-health.ts`), and drop the imports the call left unused.
 - Nothing in `src/work-gate.ts` or `src/work-gate/` changes.
 
 **Every pin held.** No pin had to be moved, loosened or named as not holding on the helper's text.
