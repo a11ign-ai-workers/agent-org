@@ -17,7 +17,7 @@
 // through `declaredWait`, never a second copy), the pull-request kinds are facts on the `pr list` payload and the herdr listing.
 import { listingIsComplete } from "./herdr-agents.ts";
 import { ANSWER_PREFIX, NEEDS_CHAIRMAN_LABEL } from "./project-vocabulary.ts";
-import { reviewerSeat } from "./review-attribution.ts";
+import { reviewerSeat, subjectMention } from "./review-attribution.ts";
 import type { DeclarationReading } from "./worker-state.ts";
 
 const MINUTE_MS = 60_000;
@@ -101,11 +101,19 @@ export const WAIT_FIELDS: Readonly<Record<string, { on: "row" | "pr"; spelling: 
   "pr-held": { on: "pr", spelling: `\`pnpm run pr:hold <n> --until "merged #<m>"\` (the \`${HOLD_LABEL_PREFIX}<session>\` label and its \`Waiting-for:\`, which the gate lifts)` },
 });
 
+/**
+ * (agent-org#743, a11ign#4437) HOW MANY NUDGES A HOLDER WITH A PULL REQUEST OPEN MAY LEAVE UNANSWERED BEFORE ITS CLAIM IS RELEASED. A nudge is unanswered when its
+ * holder was idle for a full idle period after it was delivered and the branch gained no commit, no pull request opened and no head moved (`claim-stall.ts`'s
+ * `unansweredNudges`). THE THIRD UNANSWERED NUDGE RELEASES; the second is followed by a third. It is the count `MAX_CONTINUATIONS` is not: that one caps gate ORDERS,
+ * which reroute to `orchestrator`, and a holder with an open pull request was never released at all.
+ */
+export const MAX_UNANSWERED_NUDGES = 3;
+
 export type Agent = { label: string, status: string };
 /**
  * a `gh pr list --json` object, as `readPrs` returns it, plus `checksPending`, which THE GATE derives: the rollup is read only where `stillRunning` and `newestPerName` live, so this leaf neither re-decides what a running check is nor reads a rollup unnarrowed
  */
-export type IdlePr = { number?: number, repoKey?: string, reviewDecision?: string | null, labels?: ({ name?: string } | string)[], checksPending?: boolean };
+export type IdlePr = { number?: number, repoKey?: string, reviewDecision?: string | null, labels?: ({ name?: string } | string)[], checksPending?: boolean, failingChecks?: string[] };
 
 /** @param {IdlePr} pr @returns {string[]} */
 const labelNames = (pr: IdlePr): string[] => (pr.labels ?? []).map((l) => String(typeof l === "string" ? l : l?.name));
@@ -130,6 +138,25 @@ function prWaitKinds(pr: IdlePr, agents: Agent[]): string[] {
   return kinds;
 }
 
+export type RedPr = { number?: number, repoKey?: string, checks: string[] };
+
+/**
+ * (agent-org#743) THE HOLDER'S OWN PULL REQUESTS THAT ARE RED, with the names of the failing checks, as the caller derived them into `failingChecks`. The decider is
+ * `red-pr.ts`'s `brokenChecks` (the one the gate's `pr-checks-failing` order and the retrospective ask, and `org-health.test.ts` pins it as the only one): the NEWEST
+ * run of each name decides, and the two jobs a `hold:` label turns red by design are left out. THIS LEAF CANNOT ASK IT: `red-pr.ts` imports `pr-hold-state.ts`, which
+ * imports `IDLE_STATUSES` from this file, so an import is a module cycle (`Cannot access 'ANSWER_PREFIX' before initialization`, the review of #1151) and a
+ * restated list is a second decider. `claim-stall.ts`'s `withRedChecks` fills `failingChecks`; a caller that does not (`org-health.ts`, `idle-claim-incident.ts`) reads
+ * a pull request as not red, as it did before. It does not know which checks are REQUIRED (that is a `gh` read): `gate` is the one required job and `needs` every
+ * other, so a red job is a red `gate`.
+ * @param {IdlePr[] | undefined} prs @returns {RedPr[]}
+ */
+export function redOwnPrs(prs: IdlePr[] | undefined): RedPr[] {
+  return (prs ?? []).flatMap((pr) => {
+    const checks = [...new Set(pr?.failingChecks ?? [])];
+    return checks.length === 0 ? [] : [{ number: pr?.number, repoKey: pr?.repoKey, checks }];
+  });
+}
+
 /**
  * IS THIS HOLDER ONE THE STOPPED CLOCK APPLIES TO: its claim names a git object (`built`: a `Claimed-nothing:` claim is a host act or a reading, which
  * is idle at its prompt by design) and it holds NO open pull request. A holder with a pull request is waiting on the org's review or checks, and
@@ -151,13 +178,22 @@ export type IdleReading = { kind: "unknown", why: string } | { kind: "not-idle",
 export const INFERRED_PR_KINDS = Object.freeze(["review-requested", "checks-pending", "review-approved"]);
 
 /**
- * THE IDLE PERIOD THAT APPLIES TO ONE HOLDER, in ms: M for a holder under the declaration regime or one that stopped with no pull request, N otherwise.
+ * (agent-org#743) A DECLARATION THAT A RED CHECK VOIDS: `waiting-ci` and `waiting-review` say the holder waits on something that is not its own to move, which is
+ * not true of a check that has FAILED -- the failure is the holder's to fix and nothing it waits for will fix it. `done` and `blocked` are other claims: `done`
+ * lapses on its own facts (`worker-state.ts`), and `blocked` is also a row field (`answer:`), which is read as one.
+ */
+const RED_VOIDS = Object.freeze(["waiting-ci", "waiting-review"]);
+
+/**
+ * THE IDLE PERIOD THAT APPLIES TO ONE HOLDER, in ms: M for a holder under the declaration regime, one that stopped with no pull request, or one whose own
+ * pull request is RED (agent-org#743: a red check is told within M whatever was declared), N otherwise.
  * ONE DEFINITION, because the reading and the "idle again after its nudge" incident (`claim-stall.ts`) both ask how long a period is.
  * @param {{ built?: boolean, prs?: IdlePr[], declared?: DeclarationReading }} facts @returns {number}
  */
 export function idleLimitMs(facts: { built?: boolean; prs?: IdlePr[]; declared?: DeclarationReading; }): number {
   const regime = facts.declared !== undefined && facts.built === true;
-  return regime || isStoppedHolder({ built: facts.built, prs: facts.prs }) ? STOPPED_CLAIMANT_MS : IDLE_CLAIMANT_MS;
+  const red = facts.built === true && redOwnPrs(facts.prs).length > 0;
+  return regime || red || isStoppedHolder({ built: facts.built, prs: facts.prs }) ? STOPPED_CLAIMANT_MS : IDLE_CLAIMANT_MS;
 }
 
 /**
@@ -185,8 +221,11 @@ export function idleClaimantReading(facts: { session: string | null; waitKinds?:
   const status = agents.find((a) => a.label === facts.session)?.status ?? null;
   if (status === null || !IDLE_STATUSES.includes(status)) return { kind: "not-idle", status };
   const regime = facts.declared !== undefined && facts.built === true;
-  if (regime && facts.declared?.kind === "excused") return { kind: "waiting", fields: [`declared:${facts.declared.state}`] };
-  const prKinds = (facts.prs ?? []).flatMap((pr) => prWaitKinds(pr, agents)).filter((kind) => !regime || !INFERRED_PR_KINDS.includes(kind));
+  // (agent-org#743) A RED CHECK OF THE HOLDER'S OWN IS NOT EXCUSED BY WHAT IT DECLARED NOR BY A PENDING CHECK, A REVIEWER OR AN APPROVAL: those are inferences about a
+  // wait, and the failure is not one. The FIELDS stay: a row's wait (`waitKinds`) and a pull request's own `awaiting-evidence` / `hold:` label are the holder saying so.
+  const red = facts.built === true && redOwnPrs(facts.prs).length > 0;
+  if (regime && facts.declared?.kind === "excused" && !(red && RED_VOIDS.includes(facts.declared.state))) return { kind: "waiting", fields: [`declared:${facts.declared.state}`] };
+  const prKinds = (facts.prs ?? []).flatMap((pr) => prWaitKinds(pr, agents)).filter((kind) => !(regime || red) || !INFERRED_PR_KINDS.includes(kind));
   const fields = [...(facts.waitKinds ?? []), ...prKinds];
   if (fields.length > 0) return { kind: "waiting", fields: [...new Set(fields)] };
   const since = ctx.idleSince ?? ctx.now;
@@ -263,4 +302,36 @@ export function declareNudgePrompt({ row, branch, idleMinutes, releaseMinutes, c
     + (canRelease
       ? `${releaseMinutes} MINUTES AFTER THIS REACHES YOU with nothing moved and nothing declared, the claim is RELEASED; worktree and unpushed work are KEPT.`
       : "You hold an open pull request, so nothing is released unless the claim changes hands or you go quiet again.");
+}
+
+/** @param {RedPr[]} red @returns {string} `#41 (gate, ts)`, one per pull request, the repository's key in front of a number from another tracked repository */
+function redSummary(red: RedPr[]): string {
+  return red.map((pr) => `${subjectMention({ repoKey: pr.repoKey, number: Number(pr.number) })} (${pr.checks.map((name) => `\`${name}\``).join(", ")})`).join("; ");
+}
+
+/**
+ * (agent-org#743) THE NOTE EVERY NUDGE TO A HOLDER WITH A PULL REQUEST OPEN CARRIES: how many it has had and what releases it. The three prompts above are
+ * pinned by tests outside this change and say "nothing is released" for such a holder, which was true when nothing counted nudges; this is said beside them.
+ * What answers a nudge is a MOVE OF THE BRANCH (a commit, a new pull request, a moved head): a comment or a changed file does not. A wait NAMED AS A FIELD still
+ * ends the stall, because the holder is then not idle with no wait the org can read.
+ * @param {number} nudge which nudge this is, from 1 @returns {string}
+ */
+export function unansweredNudgeNote(nudge: number): string {
+  return `THIS IS NUDGE ${nudge} OF ${MAX_UNANSWERED_NUDGES}: if ${MAX_UNANSWERED_NUDGES} reach you and the branch gains no commit, no pull request opens and no head moves after any of them, `
+    + "the claim is RELEASED and the row offered again. Your pull request is left open as it is; worktree and unpushed work are KEPT. A comment or a changed file is not a move.";
+}
+
+/**
+ * THE ORDER TO A HOLDER IDLE ON A RED PULL REQUEST OF ITS OWN (agent-org#743, a11ign#4437): it names the failing checks and says to fix and push. It is sent
+ * whatever the holder declared with `worker:state`: `waiting-ci` and `waiting-review` excuse a holder only while its pull request's checks are not red, and
+ * `idle-claimant.test.ts` pins both halves. Nothing here is a wait to NAME: the one thing that clears it is a push that moves the head.
+ *
+ * @param {{ row: number, branch: string | null, idleMinutes: number, red: RedPr[], nudge: number }} what
+ * @returns {string}
+ */
+export function redCheckNudgePrompt({ row, branch, idleMinutes, red, nudge }: { row: number; branch: string | null; idleMinutes: number; red: RedPr[]; nudge: number; }): string {
+  return `#${row} IS YOURS, YOU HAVE BEEN IDLE FOR ${idleMinutes} MINUTES AND ITS PULL REQUEST IS RED: ${redSummary(red)}.\n`
+    + `FIX THE RED CHECK NOW. Read the failing run, fix the cause, commit and push \`${branch ?? "your branch"}\`. Run what CI runs before you push. `
+    + "`waiting-ci` and `waiting-review` do NOT excuse you while a check is red: a failed check is yours to fix and nothing you wait for will fix it.\n"
+    + unansweredNudgeNote(nudge);
 }
