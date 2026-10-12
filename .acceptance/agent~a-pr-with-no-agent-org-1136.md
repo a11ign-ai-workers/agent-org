@@ -1,7 +1,7 @@
 A PR with no label on a branch naming an open unheld row is owned by `product-manager` (`owner-gone`), not recorded `owner-unresolved` (a11ign/a11ign#5201, the tenth occurrence).
 
 **What changes.**
-- `pr-owners.ts`: `withClosingRowOwners` calls `rowsNobodyHolds` for any PR no row rung answered, labelled or not. `closingRowsNone` is set only for an ENDED label on a PR that closes no row, so an unlabelled PR that names no row (`Closes: none`, no suffix) still falls to `ceo` and is recorded.
+- `pr-owners.ts`: `withClosingRowOwners` calls `rowsNobodyHolds` for any PR no row rung answered, labelled or not. `closingRowsNone` is set only for an ENDED label on a PR that closes no row, so an unlabelled PR that names no row (no closing reference, no suffix) still falls to `ceo` and is recorded.
 - `pr-orders.ts`: the owner-gone order says `it carries no session: label, and the row it names is open and no session holds it` for an unlabelled PR, never `ENDED`.
 - `pr-owner-gone.test.ts`: #5201 positive case, held-row control, no-row control and order-wording test.
 - `pr-owner-total.test.ts`: outside the listed Region. The grid oracle pinned the old rule, so an unlabelled PR with a named row that nobody holds is now `product-manager` in the grid too.
