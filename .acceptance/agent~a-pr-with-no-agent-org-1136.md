@@ -27,3 +27,7 @@ Revert: revert this PR
 platform: n/a (routing in the work gate's owner ladder; no platform feature)
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Outside-Region: src/packaging/pr-owner-total.test.ts — the grid oracle pins the old unlabelled rule (an unlabelled PR naming an unheld row was `ceo`); it now asserts the new rule
+Outside-Region: src/work-gate-unlabelled-pr-owner.test.ts — pinned unlabelled PRs naming an unheld row to `ceo`; those now go to `product-manager`, the no-row and unread-rows controls stay `ceo`
+Outside-Region: src/work-gate-cross-repo-pr-owner.test.ts — same pins as above for the cross-repo fixtures (agent-org#436, #437)
