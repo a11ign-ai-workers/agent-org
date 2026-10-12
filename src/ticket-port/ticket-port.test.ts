@@ -17,6 +17,7 @@ import { githubTicketAdapter, labelOfFlag, OPEN_ITEMS_QUERY } from "./github-ada
 import type { ItemRef, PortEvent } from "./port.ts";
 import { PROJECT_NUMBER } from "../board-snapshot-scope.ts";
 import { readRowsOffBoard } from "../work-gate.ts";
+import { workGateSource } from "../lib/work-gate-source.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const SCOPE = "a11ign/agent-org";
@@ -335,7 +336,7 @@ test("#484 consumer: readRowsOffBoard reads the tracker only through the port, a
 });
 
 test("#484 consumer: work-gate.ts no longer names the off-board query or its paging; it asks through the port", () => {
-  const source = readFileSync(join(HERE, "..", "work-gate.ts"), "utf8");
+  const source = workGateSource();
   const start = source.indexOf("export function readRowsOffBoard(");
   assert.ok(start > 0, "the function is still exported from work-gate.ts, where its callers import it");
   const body = source.slice(start, source.indexOf("\n}\n", start));

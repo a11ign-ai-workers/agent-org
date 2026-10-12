@@ -15,6 +15,7 @@ import { MUTEX_LABELS } from "./ready-label-audit.ts";
 import { sandboxGitEnv } from "./lib/git-env.ts";
 import * as unpark from "./unpark-satisfied.ts";
 import { COMMENT_MARKER, NOT_PICKABLE_BESIDE_READY, PARKED, commentFor, githubIo, ineligibility, mergedClosersOf, readSatisfaction, reportUnpark, unparkSatisfied, unparkingWaits } from "./unpark-satisfied.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 const NOW = Date.parse("2026-10-11T00:05:00Z");
 const PASSED = "2026-10-11T00:00:00Z";
@@ -228,7 +229,7 @@ test("the comment says why, in each shape", () => {
 
 test("pins: the parked label is the gate's, and the gate wires the pass into the wait read", () => {
   assert.equal(PARKED, PARKED_LABEL);
-  assert.match(readFileSync(new URL("./work-gate.ts", import.meta.url), "utf8"), /readWaits: unparkingWaits\(waitTickFacts, \{ run: defaultRun \}\)/, "the call site that makes the pass run every tick");
+  assert.match(workGateSource(), /readWaits: unparkingWaits\(waitTickFacts, \{ run: defaultRun \}\)/, "the call site that makes the pass run every tick");
 });
 
 test("pin: the labels that block a ready row are the audit's own, one by one", () => {

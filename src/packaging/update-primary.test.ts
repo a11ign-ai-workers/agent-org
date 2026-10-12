@@ -15,6 +15,7 @@ import { updatePrimary, lockfileMoved, readPrimaryDrift } from "../update-primar
 import { changedFiles } from "../lib/changed-files.ts";
 import { withGitSandbox } from "@a11ign/toolchain/lib/git-sandbox";
 import { UPDATE_PRIMARY_VERBS } from "./update-primary-argv.ts";
+import { workGateSource } from "../lib/work-gate-source.ts";
 
 /**
  * MOVING THE PRIMARY MOVES EVERY WORKTREE'S `dist`, AND NOTHING ELSE DOES.
@@ -398,7 +399,7 @@ test("#2781 the CLI `--drift` only READS: from a worktree it answers asked:false
 test("#2781 done-when 3: the `-` on ExecStartPre may stay ONLY while the gate reads the primary and has a cause for it", () => {
   const unit = readFileSync(fileURLToPath(new URL("../../host/work-tick.service.in", import.meta.url)), "utf8");
   const silent = /^ExecStartPre=-.*primary:update/m.test(unit);
-  const gate = readFileSync(fileURLToPath(new URL("../work-gate.ts", import.meta.url)), "utf8");
+  const gate = workGateSource();
   assert.ok(/^ExecStartPre=.*primary:update/m.test(unit), "control: the unit still runs the update, so this test is asking about something");
   if (silent) {
     assert.match(gate, /readPrimaryDriftNow\(\)/, "a silent update with no reader is the 22 hours");

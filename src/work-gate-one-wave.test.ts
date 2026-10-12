@@ -15,10 +15,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { homeProjectDeclaration } from "./project-config.ts";
 import { readLanesAfterOutageCheck, readOtherScopes, readTrackerLanes, scopesOf } from "./work-gate.ts";
 import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 type Lane = ReturnType<typeof readOtherScopes>[number];
 type Call = { args: string[], repo: string | undefined };
@@ -91,7 +91,7 @@ test("a refused repository is that lane's null beside the answers of the others 
 });
 
 test("`main` asks through this reader AFTER the outage check, and asks neither reader on its own", () => {
-  const source = readFileSync(new URL("./work-gate.ts", import.meta.url), "utf8");
+  const source = workGateSource();
   const main = source.slice(source.indexOf("\nfunction main() {"));
   const outageAt = main.indexOf("EXIT.CANNOT_ASK");
   const waveAt = main.indexOf("readLanesAfterOutageCheck(");

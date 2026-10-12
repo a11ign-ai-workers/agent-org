@@ -78,6 +78,7 @@ import { primaryLaunchRefusal, launchCheckoutOf }
 // without one is dropped, and the gate would read every PR as having no checks at all.
 import { closesUnresolvedOrders, closesUnresolvedPrs, primaryStaleOrders, withStalePrimaryNotice } from "../work-gate.ts";
 import { tmpDir } from "../lib/tmp-fixture.ts";
+import { workGateSource } from "../lib/work-gate-source.ts";
 // #5050: the gate's label lists are GraphQL connections, not `issue list`, so a fake answers them in the connection's shape (`rows-by-label-fixtures.ts`).
 import { connectionOf, readsClosedAnswerRows, closedAnswerConnection, readsRecentlyClosed, recentlyClosedConnection, readsRowsByLabel,
   type FakeRow } from "./rows-by-label-fixtures.ts";
@@ -2302,7 +2303,7 @@ test("a REFUSED open-rows read reaches the switch as null, and the switch says i
  * would not match, which is the mistake this row was filed to prevent.
  */
 test("main hands the switch the UN-COALESCED read, not the `?? []` one", () => {
-  const source = readFileSync(new URL("../work-gate.ts", import.meta.url), "utf8");
+  const source = workGateSource();
   // EVERY `deadMansSwitch({...})` IN THE FILE, then the one that names `openRows` -- the declaration
   // spells the same parameter and would otherwise match first and report nothing.
   const calls = [...source.matchAll(/deadMansSwitch\(\{[^}]*\}\)/g)].map(([text]) => text);
@@ -3463,7 +3464,7 @@ test("#2161: decide() hands the cause the pull requests it already read", () => 
 
 test("#2161: the narrowing spends no `gh` call -- it reads what `draftOrder` already has", () => {
   assert.equal(GH_READS.unconditional.length, 14, "#2161 adds no unconditional read (8 since #2202, 9 since #2075, 10 since #2641, 11 since #2936, 12 since #4001, 13 since #4126, 14 since #4405)");
-  const gate = readFileSync(new URL("../work-gate.ts", import.meta.url), "utf8");
+  const gate = workGateSource();
   const body = gate.slice(gate.indexOf("function rowsWithOpenPr"), gate.indexOf("export function blockerClearedOrders"));
   assert.ok(body.length > 0 && !/\brun\(|spawnSync|defaultRun/.test(body),
     "the helper is pure: no seam, no subprocess, so no binary for a budget to be charged against");
@@ -4187,8 +4188,7 @@ test("#2110: the claimed-row read is ONE call, filtered server-side, and refuses
 });
 
 test("#2110: main pays for it only when something is actually claimed", () => {
-  const gate = readFileSync(fileURLToPath(new URL("../work-gate.ts", import.meta.url)),
-    "utf8");
+  const gate = workGateSource();
   // The `decide` jsdoc spells the same call shape when it says where `claimedComments` comes from, so
   // prose is excluded by its backtick rather than by counting matches -- `cannotAskReport`'s own pin one
   // test down makes the identical exclusion for the identical reason.
@@ -4366,7 +4366,7 @@ test("#2003: an unreadable probe reports UNREADABLE and never invents a pool", (
 });
 
 test("#2003: the pool reading has ONE definition, and the gate pays for it only when refusing", () => {
-  const gate = readFileSync(new URL("../work-gate.ts", import.meta.url), "utf8");
+  const gate = workGateSource();
 
   // THE COST IS ON THE REFUSAL PATH OR IT IS NOT FREE. `cannotAskReport` is the only caller of
   // `poolDiagnosis`, and its own only call site must sit inside the both-lanes-refused branch -- otherwise
@@ -4474,7 +4474,7 @@ test("#2005: the OFFER path and the PROMOTION path now answer from one reader, s
 
   // THE LOCAL FILTER IS GONE, and this is the assertion that keeps it gone: a second spelling of the
   // prefix inside `readPromotableRows` is how the two paths drifted, so the source must not hold one.
-  const gate = readFileSync(fileURLToPath(new URL("../work-gate.ts", import.meta.url)), "utf8");
+  const gate = workGateSource();
   const body = /export function readPromotableRows\([\s\S]*?\n\}/.exec(gate)?.[0] ?? "";
   assert.ok(body.length > 0, "readPromotableRows must still be found, or this guard reads nothing");
   assert.ok(!/withAnswerLabel|ANSWER_PREFIX/.test(body),
@@ -5690,7 +5690,7 @@ test("#2202: readClosedAnswerRows refuses rather than reporting nobody owes anyt
 });
 
 test("#2202: main feeds the closed-row read into `answerOwed` beside the open one, through the helper that SAYS a refusal", () => {
-  const source = readFileSync(new URL("../work-gate.ts", import.meta.url), "utf8");
+  const source = workGateSource();
   assert.match(source, /answerOwed: rowsOwingAnswers\(\{ openRows: allOpen, openPrs, closedRows: closedAnswerRows\(closedRows\) \}\)/,
     "a closed row owing an answer must reach `decide` -- the open read alone is the defect");
   assert.match(source, /closedRows: readClosedAnswerRows\(read\),/, "the closed-row read is still made, as one of the follow-ups asked together (#3566)");
@@ -5769,7 +5769,7 @@ test("#2609: `endedSessionLabels` reads a teardown's record, and a label that ST
 });
 
 test("#2609: `closedAnswerRows` runs the ended-session filter on what `readClosedAnswerRows` returned", () => {
-  const source = readFileSync(new URL("../work-gate.ts", import.meta.url), "utf8");
+  const source = workGateSource();
   assert.match(source, /function closedAnswerRows\(rows[^)]*\)[^{]* \{[^]*?return withoutEndedAnswerSessions\(rows\);/);
 });
 
@@ -5824,7 +5824,7 @@ test("#3093: a caller that names no source is not answered by this host -- withP
 });
 
 test("#3093: `main` hands withPrOwners the LIVE herdr and ledger readers", () => {
-  const source = readFileSync(new URL("../work-gate.ts", import.meta.url), "utf8");
+  const source = workGateSource();
   assert.match(source, /withPrOwners\([^\n]*stampLookup\(\), \{ agents: liveWorkspaceLabels, ended: endedSessionLabels \}\)/);
 });
 

@@ -12,7 +12,6 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import {
@@ -21,6 +20,7 @@ import {
 } from "../org-health.ts";
 import { EXIT_NOTHING_SENT, machineryDeclarationProblems, machineryFilesIn, machineryRefusal, main } from "../pr-open.ts";
 import { deferredWakeCount, incidentSuppressions, machineryCanaryNow } from "../work-gate.ts";
+import { workGateSource } from "../lib/work-gate-source.ts";
 
 const MINUTE = 60_000;
 const T0 = Date.parse("2026-10-11T12:00:00Z");
@@ -316,7 +316,7 @@ test("#5100 THE FLAG IS OFF UNTIL SOMEBODY TURNS IT ON: an absent record reads o
 });
 
 test("#5100 THE TICK CALLS IT: the gate's `main` puts `machineryCanaryNow`'s orders among its own, once, after the hold holders (a SOURCE pin: `main` is not driven whole by any test, and says so)", () => {
-  const source = readFileSync(fileURLToPath(new URL("../work-gate.ts", import.meta.url)), "utf8");
+  const source = workGateSource();
   const pushes = source.match(/orders\.push\(\.\.\.machineryCanaryNow\(/g) ?? [];
   assert.equal(pushes.length, 1, "one call per tick: a second would sample twice and double every count");
   assert.ok(source.indexOf("holdHolderOrdersNow({") < source.indexOf("orders.push(...machineryCanaryNow("), "after the hold holders, before the dead man's switch");

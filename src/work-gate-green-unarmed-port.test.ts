@@ -8,10 +8,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { GREEN_UNARMED_SWITCH_ENV, greenUnarmedOrders, readArming, readArmingOf, readUnarmed, settleUnarmedPrs, type ArmingPort } from "./work-gate.ts";
 import type { ChangeRef, Decision, ItemRef } from "./ticket-port/port.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 const HOME = "a11ign/a11ign";
 const NOW = Date.parse("2026-10-10T12:00:00Z");
@@ -98,7 +97,7 @@ test("the arming call goes through the code-host port, a fake port records it, a
   assert.deepEqual(scopesAsked, [HOME], "asked of the repository the pull requests are in");
   // THE SOURCE OF THE FUNCTIONS, because nothing in the call can show a spawn that was not made: neither names a spawn, a `gh` runner or an arming command.
   // (`armingPortOf`, below them, is the adapter: it is where `runArmPr` is called and so the one place the tracker's CLI is reached.)
-  const source = readFileSync(fileURLToPath(new URL("./work-gate.ts", import.meta.url)), "utf8");
+  const source = workGateSource();
   for (const head of ["export function settleUnarmedPrs(", "function armOne("]) {
     const start = source.indexOf(head);
     const end = source.indexOf("\n}\n", start);

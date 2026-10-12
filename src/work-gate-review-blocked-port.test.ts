@@ -11,11 +11,10 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { REVIEW_BLOCKED_SWITCH_ENV, reviewBlocked, staleRefusalOf, withStaleRefusals, type StaleRefusalPort } from "./work-gate.ts";
 import { perPullRequestOrders, reviewBlockedOrders } from "./work-gate/pr-orders.ts";
 import type { Decision, ItemRef } from "./ticket-port/port.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 const HOME = "a11ign/agent-org";
 const NOW = Date.parse("2026-10-10T17:00:00Z");
@@ -159,7 +158,7 @@ test("the reviewer is still asked: the older-head refusal's pull request earns `
 });
 
 test("the writer reaches a tracker only through the port, and the stale reading is pure", () => {
-  const source = readFileSync(fileURLToPath(new URL("./work-gate.ts", import.meta.url)), "utf8");
+  const source = workGateSource();
   for (const head of ["export function withStaleRefusals(", "export function staleRefusalOf("]) {
     const start = source.indexOf(head);
     const end = source.indexOf("\n}\n", start);

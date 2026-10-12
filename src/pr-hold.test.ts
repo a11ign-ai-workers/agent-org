@@ -8,13 +8,13 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { fileURLToPath } from "node:url";
 import {
   declarationExcusesHold, escalationSeatFor, holdHolderKey, holderOrdersOf, holderStep, HOLD_HOLDER_CAUSE, HOLDER_ESCALATE_MINUTES, HOLDER_IDLE_MINUTES,
   type HolderDeclaration, type HolderMemory,
 } from "./pr-hold-state.ts";
 import { WAIT_MARKER } from "./wait-condition.ts";
 import { HOLD_HOLDERS_FILE, holdHolderOrdersNow } from "./work-gate.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 const MINUTE = 60_000;
 const HELD_AT = Date.parse("2026-10-11T08:00:00Z");
@@ -228,7 +228,7 @@ test("`holdHolderOrdersNow` forgets a released hold's memory in the file, and to
 });
 
 test("the tick calls it: `main()` in work-gate.ts spreads `holdHolderOrdersNow` into the orders, over the pull requests it already read", () => {
-  const gate = readFileSync(fileURLToPath(new URL("./work-gate.ts", import.meta.url)), "utf8");
+  const gate = workGateSource();
   const calls = gate.match(/\.\.\.holdHolderOrdersNow\(\{ prs: prs === null \? null : \[\.\.\.prs, \.\.\.pullRequestsOfOthers\(otherScopes\)\] \}\)/g) ?? [];
   assert.equal(calls.length, 1, "exactly one call in the tick, so a deleted wiring is a red test and not a silent gate");
 });

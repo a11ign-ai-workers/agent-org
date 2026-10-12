@@ -21,6 +21,7 @@ import { readElsewherePrs } from "./work-gate.ts";
 import { claimRow } from "./row-claim.ts";
 import { instanceCacheRead } from "./wake.ts";
 import { LIVE_TRANSCRIPT_HORIZON_MS, liveClaudeTurns } from "./work-gate/row-call-count-orders.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 const SRC = fileURLToPath(new URL(".", import.meta.url));
 const PRELOAD = join(SRC, "lib", "crash-exit.ts");
@@ -356,7 +357,7 @@ test("#3566: an open list the tick already read is not read again by `readElsewh
 });
 
 test("#3566: `main` hands the lanes `readOtherScopes` read to the claim-stall read, so no other repository's open list is asked twice", () => {
-  const source = readFileSync(join(SRC, "work-gate.ts"), "utf8");
+  const source = workGateSource();
   assert.match(source, /claimStallsWithFacts\(openRowsRead, claimedComments, prs, otherScopes\)/);
   assert.match(source, /elsewhere: \(\) => readElsewherePrs\(undefined, undefined, otherScopes\)/);
 });

@@ -20,6 +20,7 @@ import { chairmanAskOrders, chairmanAskRefusal, askOf, withoutDeclaration, MARKE
 import { parseWaits, conditionHolds, versionAtLeast, waitItemOf } from "../wait-condition.ts";
 import { requestEvent } from "../messaging/sources/requests.ts";
 import { readFileSync } from "node:fs";
+import { workGateSource } from "../lib/work-gate-source.ts";
 
 const NOW = Date.parse("2026-10-07T21:00:00Z");
 const FLEET = "@a11ign/screenreader-fleet";
@@ -213,7 +214,7 @@ test("row-file refuses a declaration that could never ask him, and files a sound
 });
 
 test("the gate's tick calls the ask step with the open rows it read", () => {
-  const source = readFileSync(new URL("../work-gate.ts", import.meta.url), "utf8");
+  const source = workGateSource();
   assert.match(source, /\.\.\.chairmanAsksNow\(openRowsRead\)/);
   assert.match(source, /chairmanAskOrders\(\{ rows: openRowsRead, now: Date\.now\(\) \},\s*\{ run: defaultRun, repo: repoNow, readItemFacts: readWaitFacts/);
 });

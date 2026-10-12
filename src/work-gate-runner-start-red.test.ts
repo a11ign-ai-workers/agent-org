@@ -15,8 +15,8 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
 import { decide, holdForGithubIncident, githubIncidentOf, orgHealthNow, withPrOwners } from "./work-gate.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 type Order = { session: string, cause: string, subject: string, causeKey: string };
 type Incident = ReturnType<typeof githubIncidentOf>;
@@ -97,7 +97,7 @@ test("DONE-WHEN 4: a red the gate cannot classify is NOT excused -- an unreadabl
 });
 
 test("the gate's `main` hands orgHealthNow the hold's own `held`, so the chain above is the one that runs", () => {
-  const source = readFileSync(new URL("./work-gate.ts", import.meta.url), "utf8");
+  const source = workGateSource();
   const call = /orgHealthNow\(\{[^}]*\}/.exec(source)?.[0] ?? "";
   assert.match(call, /\bheld: incident\.held\b/, "main must pass the held orders; without it a held red trips the red-PR signal again");
 });

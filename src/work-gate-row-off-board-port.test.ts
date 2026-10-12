@@ -11,10 +11,9 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { readFileSync } from "node:fs";
-import { fileURLToPath } from "node:url";
 import { ROW_OFF_BOARD_SWITCH_ENV, rowOffBoardOrders, settleOffBoardRows, type BoardFacts } from "./work-gate.ts";
 import type { Decision, ItemRef, StateChange, TicketPort } from "./ticket-port/port.ts";
+import { workGateSource } from "./lib/work-gate-source.ts";
 
 const HOME = "a11ign/a11ign";
 const NOW = Date.parse("2026-10-10T12:00:00Z");
@@ -100,7 +99,7 @@ test("the board write goes through a fake port, not a direct gh spawn", () => {
   assert.ok(scopesAsked.every((scope) => scope === HOME), "asked of the gate's own repository");
   // THE SOURCE OF THE FUNCTION, because nothing in the call can show a spawn that was not made: it names no spawn, no `gh` runner and no `item-add`.
   // (`boardingPortOf`, below it, is the adapter's `moveStatus` hook and IS where `item-add` is: the port's adapter is the one place that names the tracker's CLI.)
-  const source = readFileSync(fileURLToPath(new URL("./work-gate.ts", import.meta.url)), "utf8");
+  const source = workGateSource();
   const start = source.indexOf("export function settleOffBoardRows(");
   const end = source.indexOf("\n}\n", start);
   assert.ok(start > 0 && end > start, "the function is found");
