@@ -1,4 +1,4 @@
-// COPIED FROM `packages/guards/src/git-env.ts` at cc4dd7e09 (#2658, child 3g of #69; ADR 0040, decision 4): the tool's own copy, so `agent-org` imports nothing outside
+// COPIED FROM `packages/guards/src/git-env.ts` at 3418d7313 (#2658, child 3g of #69; ADR 0040, decision 4): the tool's own copy, so `agent-org` imports nothing outside
 // its package. The product keeps its original and the two can drift, with no cross-repository pin: `copies-drifted` in `src/org-health.ts` reads them.
 // CHANGED FROM THE ORIGINAL: NOTHING but this header.
 // ==== end of copy header ====
@@ -22,7 +22,7 @@
 // package -- a published tarball does not carry this repo's top-level `scripts/`. the fleet's
 // `src/git-safe-env.mjs` is therefore a DELIBERATE, disclosed duplicate of this file for that one package,
 // pinned equal to it by the fleet's `src/git-safe-env.test.ts`. Every other caller (this repo's
-// own top-level scripts, and `a11ign/lab`/`packages/control`, both `"private": true` and never
+// own top-level scripts, and `a11ign/lab`/`a11ign/control`, both `"private": true` and never
 // published) imports this file directly.
 
 /**
