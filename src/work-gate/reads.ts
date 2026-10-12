@@ -1,5 +1,6 @@
 import { execFileSync } from "node:child_process";
-import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
+import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync, realpathSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { dirname, join } from "node:path";
 import { READY_LABEL, CLAIM_LABEL } from "../claim-labels.ts";
 import { waitingOn, todayIso } from "../waiting-condition.ts";
@@ -7,7 +8,7 @@ import { newestPerName } from "../newest-check-run.ts";
 import { LS_REMOTE_ARGS, rowBranchesInListing } from "../row-claim/row-branch-rule.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
 import { DEFAULT_RECONCILE_MINUTES, homeHostConfig, stateEntryPath } from "../host-config.ts";
-import { type Budget, GATE_VALIDATORS_DIR, conditionalGate, meteredBatch, meteredRun, partitionUnchanged, restConditionalOn, seenOf } from "../gh-conditional.ts";
+import { type Budget, GATE_VALIDATORS_DIR, conditionalGate, graphqlReadOf, meteredBatch, meteredRun, partitionUnchanged, restConditionalOn, seenOf } from "../gh-conditional.ts";
 import { type Ask, parseReply, readValidators, saveValidators } from "../trace/publish.ts";
 import { narrowedPrList, readPrList, writePrList } from "../pr-list-memory.ts";
 import { readTickScopes } from "../tick-scopes.ts";
@@ -132,8 +133,109 @@ export function holdTickBudget(budget: Budget | null): void {
 const metered = (run: (args: string[], repo?: string) => string) => (args: string[], repo?: string) =>
   (heldBudget === null ? run(args, repo) : meteredRun(run, heldBudget)(args, repo));
 
+/**
+ * agent-org#1095: AN IDENTICAL READ IS ASKED ONCE A TICK. The gate's readers each ask for the lists they need and several ask for the same one: 567 to 745
+ * `gh` calls a tick, `pr list --state merged --limit 100` eight times and `pr list --state open --limit 20` seven, until the tick's 300 s ran out
+ * (`GATE OUT OF BUDGET`, 30 times in 3 h) and a release it had decided was refused for the primary rate limit it had spent on its own repeats. `host/gh`
+ * answers an identical read from disk for 20 s, which is shorter than the tick, so the repeat went to GitHub.
+ *
+ * WHAT IS REMEMBERED is the successful answer to a read-only call, by repository and argv (`readOnlyGh`). A refusal is never kept, so a read that failed is
+ * asked again as it was. ANY OTHER CALL FORGETS EVERYTHING, before its answer is used and whether it threw or not, so a read after a write is fresh; a
+ * write by another process is not seen from here, which is why the memo is held by the gate alone (`isGateProcess`) and never by a CLI that imports
+ * this file (`row-claim` writes and then reads back through `runBatch`). A process the tick ends is the memo's end: nothing is written to disk.
+ */
+const readMemo = { on: false, answers: new Map<string, string>(), bytes: 0, hits: 0 };
+
+/** The most the memo holds (a `gh` body may be 32 MiB): past it an answer is returned and not kept, which is a repeat call, never a wrong answer. */
+export const READ_MEMO_MAX_BYTES = 64 * 1024 * 1024;
+
+/** `gh` verbs that only read, beside `pr|issue list|view` and `api`, which `readOnlyGh` tells by their flags. A verb that is not named here is a write. */
+const READ_VERBS = new Set(["run list", "run view", "label list", "pr checks", "pr diff", "repo view"]);
+
+/** The `--method` an `api` call names, in any of `--method M`, `--method=M`, `-X M` and `-XM`; `undefined` when it names none. */
+function methodOf(args: string[]): string | undefined {
+  for (const [at, arg] of args.entries()) {
+    if (arg === "--method" || arg === "-X") return args[at + 1];
+    const joined = /^(?:--method=|-X)(.+)$/.exec(arg);
+    if (joined !== null) return joined[1];
+  }
+  return undefined;
+}
+
+/**
+ * Does this `gh` call only READ? Anything that cannot be shown to is a write: the cost of a wrong "write" is one repeated read, and of a wrong "read" a stale
+ * answer after a change. A GraphQL query is a read and a mutation is not (`graphqlReadOf`); a REST call is a read when it is a GET, and `gh api` makes it a
+ * POST by itself when it is given a field or a body without a method.
+ */
+export function readOnlyGh(args: string[]): boolean {
+  if (graphqlReadOf(args)) return true;
+  const [head, verb] = args;
+  if (head !== "api") return READ_VERBS.has(`${head} ${verb}`);
+  if (verb === "graphql") return false;
+  const method = methodOf(args);
+  if (method !== undefined) return method.toUpperCase() === "GET";
+  return !args.some((arg) => /^(-[fF]|--field|--raw-field|--input)/.test(arg));
+}
+
+/** Is this process the gate (`work-gate.ts`)? The same test `tick.ts` makes (`runningAsGate`) and `work-gate.ts` makes of itself: importing this file is not running a tick. */
+function isGateProcess(): boolean {
+  if (process.argv[1] === undefined) return false;
+  try {
+    return pathToFileURL(realpathSync(process.argv[1])).href === new URL("../work-gate.ts", import.meta.url).href;
+  } catch {
+    return false; // "cannot tell" (`node -e`, a REPL) is never the gate
+  }
+}
+
+/** Turn the memo on or off, emptied either way. The gate holds it for its own process (below); a test holds it for the one it makes. */
+export function holdReadMemo(on: boolean): void {
+  readMemo.on = on;
+  readMemo.answers.clear();
+  readMemo.bytes = 0;
+  readMemo.hits = 0;
+}
+
+/** @returns how many calls the memo answered and how many answers it holds: what the gate prints at the end of a tick, so the next reading of reads per tick can be taken */
+export const readMemoReading = () => ({ hits: readMemo.hits, held: readMemo.answers.size });
+
+const forgetReads = () => { readMemo.answers.clear(); readMemo.bytes = 0; };
+
+function rememberRead(key: string, answer: string): void {
+  if (readMemo.bytes + answer.length > READ_MEMO_MAX_BYTES) return;
+  readMemo.answers.set(key, answer);
+  readMemo.bytes += answer.length;
+}
+
+/**
+ * `run`, answering a read it has answered before from memory. Outside `metered` on purpose: an answer from memory is not a GraphQL read and spends no point of the
+ * tick's budget. The key resolves the repository as `ghWithin` does (`repo = activeRepo`), so one argv aimed at two repositories is two reads.
+ */
+const memoised = (run: (args: string[], repo?: string) => string) => (args: string[], repo?: string): string => {
+  if (!readMemo.on) return run(args, repo);
+  if (!readOnlyGh(args)) {
+    try { return run(args, repo); } finally { forgetReads(); }
+  }
+  const key = callKey(args, repo ?? activeRepo);
+  const held = readMemo.answers.get(key);
+  if (held !== undefined) {
+    readMemo.hits += 1;
+    return held;
+  }
+  const answer = run(args, repo);
+  if (typeof answer === "string") rememberRead(key, answer);
+  return answer;
+};
+
+holdReadMemo(isGateProcess());
+if (readMemo.on) {
+  process.on("exit", () => {
+    const { hits, held } = readMemoReading();
+    process.stderr.write(`read memo: ${hits} identical read(s) answered from memory, ${held} distinct answer(s) held at the end of the tick.\n`);
+  });
+}
+
 /** @param [repo] the repository to aim at; the ambient one when omitted */
-export const defaultRun = metered(ghWithin(GH_READ_TIMEOUT_MS));
+export const defaultRun = memoised(metered(ghWithin(GH_READ_TIMEOUT_MS)));
 
 /**
  * a11ign#5169 (the reviewer's finding on agent-org#1108): WHICH `run` STANDS FOR `gh`. The conditional reads are for the gate's own `gh`, and a test's `run` must
@@ -179,7 +281,7 @@ const ghOptions = (repo: string | undefined): import("node:child_process").ExecF
   ({ encoding: "utf8", maxBuffer: 32 * 1024 * 1024, ...(repo === undefined ? {} : { env: { ...process.env, GH_REPO: repo } }) });
 
 /** `defaultRun` with `gh`'s stderr CAPTURED on the error instead of inherited: for a read whose refusal is an answer the caller handles (#3724). */
-const capturedRun = metered(ghWithin(GH_READ_TIMEOUT_MS, { stdio: "pipe" }));
+const capturedRun = memoised(metered(ghWithin(GH_READ_TIMEOUT_MS, { stdio: "pipe" })));
 
 /**
  * The reader a refusal-handling read asks through: the default one is swapped for the capturing one, and a test's `run` stands for `gh` as it is.
@@ -227,7 +329,44 @@ Promise.all(JSON.parse(process.argv[1]).map(one)).then((answers) => process.stdo
  * @returns one answer per call, in order
  */
 export function runBatch(calls: { args: string[]; repo: string | undefined; }[], env: NodeJS.ProcessEnv = process.env, callMs: number = GH_READ_TIMEOUT_MS): ({ stdout: string; } | { failed: true; stdout: string; stderr: string; status: number | null; code?: string; })[] {
-  return meteredBatch(calls, heldBudget, (sent) => runUnmetered(sent, env, callMs), (stderr) => ({ failed: true, stdout: "", stderr, status: null }));
+  const send = (sent: typeof calls) => meteredBatch(sent, heldBudget, (live) => runUnmetered(live, env, callMs), (stderr) => ({ failed: true as const, stdout: "", stderr, status: null }));
+  return readMemo.on ? memoisedBatch(calls, send) : send(calls);
+}
+
+/**
+ * `send`, without the reads the memo holds and without a read asked twice in the batch: each is sent once and answered to every asker. The batch's answers
+ * are kept as `defaultRun`'s are -- except that a batch holding a write forgets instead, because its calls run together and a read beside a write is not
+ * known to have come first. The key is the call's own repository, as `runUnmetered` aims it (the callers resolve the ambient one themselves).
+ */
+function memoisedBatch<A extends { stdout: string; } | { failed: true; stdout: string; }>(calls: { args: string[]; repo: string | undefined; }[], send: (sent: typeof calls) => A[]): A[] {
+  const keys = calls.map(({ args, repo }) => (readOnlyGh(args) ? callKey(args, repo) : null));
+  const answers: (A | undefined)[] = calls.map(() => undefined);
+  const sentAt = new Map<string, number>();
+  const toSend: number[] = [];
+  keys.forEach((key, at) => {
+    const held = key === null ? undefined : readMemo.answers.get(key);
+    if (held !== undefined) {
+      answers[at] = { stdout: held } as A;
+      readMemo.hits += 1;
+    } else if (key === null || !sentAt.has(key)) {
+      if (key !== null) sentAt.set(key, at);
+      toSend.push(at);
+    }
+  });
+  const sent = toSend.length === 0 ? [] : send(toSend.map((at) => calls[at]));
+  toSend.forEach((at, order) => { answers[at] = sent[order]; });
+  const wrote = toSend.some((at) => keys[at] === null);
+  keys.forEach((key, at) => {
+    if (answers[at] !== undefined || key === null) return;
+    answers[at] = answers[sentAt.get(key) as number];
+    readMemo.hits += 1;
+  });
+  if (wrote) forgetReads();
+  else for (const at of toSend) {
+    const answer = answers[at] as A;
+    if (!("failed" in answer)) rememberRead(keys[at] as string, answer.stdout);
+  }
+  return answers as A[];
 }
 
 /** `runBatch` without the budget: the calls it is handed are sent. */

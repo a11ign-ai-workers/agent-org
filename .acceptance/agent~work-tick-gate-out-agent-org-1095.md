@@ -1,0 +1,15 @@
+The work gate answers an identical read-only `gh` call from memory within one tick (`src/work-gate/reads.ts`): `defaultRun` and `capturedRun` share one memo keyed by repository and argv, `runBatch` serves from it and fills it, a refused read is never kept, any call `readOnlyGh` cannot show to be a read forgets every answer, and the memo is held only by the gate process (`isGateProcess`), so a CLI that imports the reads (`row-claim` writes, then reads back through `runBatch`) is unchanged. A hit is outside `metered`, so it spends none of the tick's GraphQL budget. The tick ends with a `read memo: N identical read(s) answered from memory` line for the re-measure.
+
+Acceptance: `bash -c 'AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json node --import=./src/lib/crash-exit.ts --test src/work-gate-read-memo.test.ts'`
+
+Mutation: six mutations of `src/work-gate/reads.ts`, each restored from a copy and `diff`ed byte-identical after its run. The hit path made unreachable (`if (held !== undefined)` made `if (false && ...)`) failed 7 of 14: the same-argv, other-repository, write-between, refusal, shared-memo, batch and gate-process tests. The write path made to answer from memory (`if (!readOnlyGh(args))` made `if (false && ...)`) failed 2 of 14, the write-between test and the refused-write test. A key that ignores the repository failed 1 of 14, the other-repository test. A write that does not forget (the `finally { forgetReads() }` removed) failed the same 2 of 14. `holdReadMemo(isGateProcess())` made `holdReadMemo(false)` failed the gate-process test alone, and made `holdReadMemo(true)` failed the not-the-gate control alone.
+
+Measured: the acceptance command prints `ℹ pass 14` and `ℹ fail 0`; `pnpm run typecheck` exits 0; `pnpm test --changed=origin/main` printed `VERDICT fail: 2 of 6732 tests failed in 388 files`, and both failures (`src/work-gate-other-scopes-concurrent.test.ts`, 14 calls against 16 expected, and `src/worker-stop-hook.test.ts`, a child with `AGENT_ORG_HOST` unset) fail identically on `HEAD` with `src/work-gate/reads.ts` restored from `git show HEAD:`, so neither is this change's.
+
+Not here, and named: the row's live reading (`GATE OUT OF BUDGET` over a 3 h window, 30 today, and one tick's read log with no argv twice) needs the release of this change and a window after it; it is the row's Done-when 2 and is not claimed here. I could not read the journal from this session (`journalctl --user -u a11ign-work-tick` printed nothing), so the 30 is the row's number, not mine. A write made by ANOTHER process in the tick (`org-health.ts` runs `pr-hold --release` as a child) is not seen by the memo; see the filed row.
+
+Closes a11ign/agent-org#1095
+
+platform: `host/gh` already answers an identical read from disk for 20 s and drops it on a write by the account; the tick outlasts that, which is why the repeat reached GitHub. The memo is the same rule held for the length of the process, in the one function the gate's reads go through.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
