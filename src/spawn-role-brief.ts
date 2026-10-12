@@ -7,7 +7,8 @@
  *
  * ONE LANE ROUTES THROUGH THIS, BEHIND A FLAG THAT IS OFF (#832): with `workers.orchestratorOneShot` on, a ready `lane:orchestrator`
  * row's order carries `briefRole: "orchestrator"` (`orchestrator-one-shot.ts`) and `promptTarget` hands it to `addressed`. With it
- * off no order carries a role and every caller gets the engineer's, as before. `SPAWN_CAUSES` is untouched: the one-shot cause is
+ * off no order carries a role and every caller gets the engineer's, as before. THE CEO'S LANE ROUTES THROUGH IT THE SAME WAY (#914,
+ * `ceo-one-shot.ts`: `briefRole: "ceo"`, behind `workers.ceoOneShot`). `SPAWN_CAUSES` is untouched: the one-shot cause is
  * its sibling, and the one-run-at-a-time guard while a fleet or lab command is in the Acceptance is that module's.
  *
  * AN UNKNOWN ROLE IS REFUSED BY NAME, never defaulted to the engineer's: a seat briefed for the wrong role is told the wrong
@@ -19,12 +20,13 @@ import { HOME_CHECKOUT } from "./project-config.ts";
 import { roleBriefPath } from "./project-roles.ts";
 
 /** The briefs a spawned seat can be sent to, by role name (the brief is `<role>.md` in the project's roles directory). */
-export const SPAWN_BRIEF_ROLES: readonly string[] = Object.freeze(["engineer", "orchestrator"]);
+export const SPAWN_BRIEF_ROLES: readonly string[] = Object.freeze(["engineer", "orchestrator", "ceo"]);
 
 /** What each role's brief holds, as the sentence says it; the engineer's text is `wake.ts`'s original, byte for byte. */
 const BRIEF_CONTENTS: Readonly<Record<string, string>> = Object.freeze({
   engineer: "the resource ban, the acceptance standard and the habits every engineer is held to",
   orchestrator: "what the role owns, the judgements that cannot be delegated and the habits every orchestrator is held to",
+  ceo: "what the role owns, how it decides and the standing rules it enforces",
 });
 
 /**
