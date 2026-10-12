@@ -12,7 +12,15 @@ Migration, in order (done live on the host, 2026-10-12, as the ceo's ruling aske
 3. Point the mount: `tailscale serve --bg --https=8443 http://127.0.0.1:8788`.
 4. Check: the Acceptance command above prints `true`; `https://agents.tail15a8bb.ts.net:8443/` answers 200 with the index byte-identical to `index.html`; POST answers 405; `a11ign-event-tunnel.service` is `active` (not restarted).
 
-Region: the row's Region lists three files. This change also touches `src/host-units.ts`, `src/host-config.ts`, `host/trace-publish-serve.service.in` (the unit `host:install` ships, which condition (2) of the ruling requires), and the three pinned tests above. Those files are outside the Region, so `product-manager` must amend it before this PR can be opened.
+Root act: none was needed. Steps 2 and 3 were run as `agent`, the operator, and tailscaled accepted both; that matches the row's premise (the `off` config sent has no path handler once the one handler is the thing being removed). This is INFERRED from the migration having completed as `agent` and the Acceptance printing `true`, not from a recorded refusal that was then retried with sudo.
+
+Until `host:install` runs: the server is the transient user unit `trace-publish-serve-transient.service`, started from this worktree, so it stops being the right unit once the worktree is pruned. `host:install` ships `a11ign-trace-publish-serve.service` (in `LONG_RUNNING_TEMPLATES`, so `host:check` asks of it the same enabled/active questions it asks of `otel-receiver`); stop the transient unit when the installed one is up. Port 8788 is taken by whichever runs, so the two cannot both serve.
+
+Ruling conditions (ceo, 2026-10-12 11:32Z) and where each is shown: (1) `serve` not `funnel`, 127.0.0.1 only, one directory, GET/HEAD only, no listing, no escape by `..` or symlink: `src/trace-publish-serve.test.ts`, 10 tests, and the mutations above. (2) a unit, restarting on failure: `host/trace-publish-serve.service.in` (`Restart=on-failure`), pinned by `host-units.test.ts` and `host-project-paths.test.ts`. (3) the migration order and the root question: above. (4) the Open-check, run on the host at this head (2026-10-12): `tailscale serve status --json | jq -e '[.Web[]?.Handlers[]? | select(has("Path"))] | length == 0'` printed `true`, exit 0; the 8443 mount reads `{"/":{"Proxy":"http://127.0.0.1:8788"}}`; `curl http://127.0.0.1:8788/` answered 200 and a POST 405; `a11ign-event-tunnel.service` is `active`.
+
+Re-run at this head by the instance that opened the PR: `src/trace-publish-serve.test.ts` and the three packaging files together `VERDICT pass: 204 tests in 4 files`; `pnpm run typecheck` exit 0; `node -e "import('./src/trace-publish-serve.ts')"` imports. `pnpm run lint` is not a script of this package.
+
+Region: amended by `product-manager` on the row (2026-10-12) to the nine paths this diff touches.
 
 Closes a11ign/agent-org#1159
 
