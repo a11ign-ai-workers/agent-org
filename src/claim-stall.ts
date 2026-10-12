@@ -38,6 +38,9 @@ import { listingIsComplete } from "./herdr-agents.ts";
 import { idleClaimantReading, idleLimitMs, idleNudgePrompt, stoppedNudgePrompt, declareNudgePrompt, isStoppedHolder, redOwnPrs, redCheckNudgePrompt,
   unansweredNudgeNote, MAX_UNANSWERED_NUDGES, type IdleReading } from "./idle-claimant.ts";
 import type { DeclarationReading } from "./worker-state.ts";
+// (agent-org#743) THE ONE DECIDER OF RED (`org-health.test.ts` #2956 pins it): `idle-claimant.ts` cannot import it (`red-pr.ts` -> `pr-hold-state.ts` -> `idle-claimant.ts`
+// is a cycle), so this file asks it and hands the leaf the answer, as the gate hands it `checksPending`.
+import { brokenChecks } from "./red-pr.ts";
 // #458: the failure ledger is a leaf of its own (`node:fs` only), so a recorder here keeps this file one.
 import { recordFailures, type FailureEvent, type RecordResult } from "./failure-ledger.ts";
 // #3445: WHETHER A PULL REQUEST IS THE CLAIMANT'S, for the open lookup and the merged one alike: a sibling leaf, so this file stays one.
@@ -481,6 +484,15 @@ function latest(times: (number | null)[]): number | null {
 }
 
 /**
+ * (agent-org#743) A HOLDER'S OWN PULL REQUESTS, each with `failingChecks`: the names `red-pr.ts`'s `brokenChecks` finds on its rollup (the newest run of each name, a
+ * `hold:`'s own two jobs left out). `idleClaimantReading`, `idleLimitMs` and `redOwnPrs` read that field and nothing of the rollup.
+ * @param {any[] | undefined} prs @returns {any[]}
+ */
+export function withRedChecks<T extends object>(prs: T[] | undefined): (T & { failingChecks: string[] })[] {
+  return (prs ?? []).map((pr) => ({ ...pr, failingChecks: [...new Set(brokenChecks(pr as never).map((check) => check.name))] }));
+}
+
+/**
  * The reading of one claim, or why it is left alone: {@link clockReading}'s, and then -- for a claim it called `pr-owned` or `moving` -- the
  * IDLE-CLAIMANT overlay (#2999). Those two are the only readings that never asked what the holder is waiting for: every other reading
  * (a nudge, a release, a declared wait, a hold, a vacating session) has already decided.
@@ -511,11 +523,11 @@ function overlayReading(facts: ClaimFacts, ctx: {
   // #460: `declared` is what the worker's last turn ended on, read by the gate for a claim that names a branch. Its presence turns the DECLARATION REGIME on, in
   // which an idle holder with no fresh and still-true declaration is stalled at M, a young pull request of its own no excuse (it should have declared `waiting-ci`).
   const regime = facts.declared !== undefined && facts.nothing !== true;
-  const idle = idleClaimantReading({ session: facts.session, prs: facts.ownPrs ?? [], built: facts.nothing !== true,
+  const idle = idleClaimantReading({ session: facts.session, prs: withRedChecks(facts.ownPrs), built: facts.nothing !== true,
     ...(regime ? { declared: facts.declared } : {}),
     waitKinds: [...(facts.waitKind ? [facts.waitKind] : []), ...(facts.blockedBy.length > 0 ? ["blocked-by"] : [])] }, ctx);
   // (agent-org#743) A RED PULL REQUEST OF ITS OWN IS NO YOUNG ONE'S GRACE: that grace is the review the org owes, and nobody owes a review to a red check.
-  const red = facts.nothing !== true && redOwnPrs(facts.ownPrs).length > 0;
+  const red = facts.nothing !== true && redOwnPrs(withRedChecks(facts.ownPrs)).length > 0;
   if (idle.kind === "waiting" || (!regime && !red && ownPrStillYoung(facts, ctx))) return base;
   // (agent-org#743) A HOLDER WITH A PULL REQUEST OPEN IS COUNTED, one without it is the second reading's (below): the two paths do not meet.
   const counted = facts.openPrs > 0 && facts.nothing !== true;
@@ -539,7 +551,7 @@ function overlayReading(facts: ClaimFacts, ctx: {
  */
 function idleAgainReading(held: Reading & { kind: "nudged"; }, idle: IdleReading, facts: ClaimFacts, ctx: Parameters<typeof claimReading>[1]): Reading {
   if (idle.kind !== "watching" && idle.kind !== "stall") return held;
-  const limit = idleLimitMs({ built: facts.nothing !== true, prs: facts.ownPrs ?? [],
+  const limit = idleLimitMs({ built: facts.nothing !== true, prs: withRedChecks(facts.ownPrs),
     ...(facts.declared !== undefined && facts.nothing !== true ? { declared: facts.declared } : {}) });
   const runStart = held.deliveredAt === null ? idle.since : Math.max(idle.since, held.deliveredAt);
   const again = held.deliveredAt !== null && ctx.now - runStart >= limit;
@@ -1131,7 +1143,7 @@ function idleNudgeOrder(facts: ClaimFacts, nudgedAt: number, idleMs: number, nud
   const built = facts.nothing !== true;
   // (agent-org#743) a holder idle on a RED pull request of its own is told which checks and to fix them, whatever it declared; any other holder with a pull request
   // open is told the count beside the text it always had (those three are pinned, and their "nothing is released" sentence is the one the count amends)
-  const red = built ? redOwnPrs(facts.ownPrs) : [];
+  const red = built ? redOwnPrs(withRedChecks(facts.ownPrs)) : [];
   const counted = built && facts.openPrs > 0;
   return {
     session: facts.session, cause: "claim-stalled", subject: `row-${facts.row}`, discriminator: `idle-nudge-${nudgedAt}`,
@@ -1274,7 +1286,7 @@ export function claimStalledOrders(readings: { facts: ClaimFacts; reading: Readi
     // OFFERED UNTIL DELIVERED, and then never again: the ledger holds a delivered key for one wake window only, so an offer that outlived the
     // delivery would send it a second time.
     else if (reading.kind === "nudged" && reading.deliveredAt === null) {
-      const floor = idleLimitMs({ built: facts.nothing !== true, prs: facts.ownPrs ?? [], ...(facts.declared !== undefined ? { declared: facts.declared } : {}) });
+      const floor = idleLimitMs({ built: facts.nothing !== true, prs: withRedChecks(facts.ownPrs), ...(facts.declared !== undefined ? { declared: facts.declared } : {}) });
       orders.push(reading.idle ? idleNudgeOrder(facts, reading.nudgedAt, floor, reading.count) : nudgeOrder(facts, reading.nudgedAt, reading.lastMoveAt));
     } else if (reading.kind === "release") orders.push(releaseOrder(facts, reading));
   }

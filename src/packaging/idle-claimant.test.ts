@@ -15,12 +15,11 @@ import { WORKER_STATE_DIR, writeDeclaration, type Declaration } from "../worker-
 import {
   idleClaimantReading, idleNudgePrompt, WAIT_FIELDS, IDLE_CLAIMANT_MINUTES, IDLE_CLAIMANT_MS, IDLE_STATUSES, EVIDENCE_LABEL, HOLD_LABEL_PREFIX,
   redOwnPrs, redCheckNudgePrompt, unansweredNudgeNote, idleLimitMs, stoppedNudgePrompt, MAX_UNANSWERED_NUDGES, STOPPED_CLAIMANT_MS,
-  RED_CHECK_CONCLUSIONS, HOLD_OWN_CHECK_JOBS,
 } from "../idle-claimant.ts";
 import { HOLD_PREFIX } from "../pr-hold-state.ts";
-import { brokenChecks, RED_CONCLUSIONS, HOLD_OWN_JOBS } from "../red-pr.ts";
+import { brokenChecks } from "../red-pr.ts";
 import {
-  claimReading, claimStalledOrders, nextStallState, nudgeKey, claimFactsFrom, stalledNudgeEvents,
+  claimReading, claimStalledOrders, nextStallState, nudgeKey, claimFactsFrom, stalledNudgeEvents, withRedChecks,
 } from "../claim-stall.ts";
 import { claimRecordComment } from "../row-claim.ts";
 import { AWAITING_EVIDENCE_LABEL, claimStallTick } from "../work-gate.ts";
@@ -259,9 +258,9 @@ test("#743 (1) the clock for a red pull request is M (10 minutes) with or withou
   // no declaration read at all (the gate could not ask): the older N was 30
   assert.equal(claimReading(onPr(redPr()), ctx({ idleSince: ago(11) })).kind, "nudge", "red: told at 11 minutes");
   assert.equal(claimReading(onPr(redPr(GREEN)), ctx({ idleSince: ago(11) })).kind, "idle-watch", "CONTROL: the same holder green is still on N");
-  assert.equal(idleLimitMs({ built: true, prs: [redPr()] as never }), STOPPED_CLAIMANT_MS);
-  assert.equal(idleLimitMs({ built: true, prs: [redPr(GREEN)] as never }), IDLE_CLAIMANT_MS);
-  assert.equal(idleLimitMs({ prs: [redPr()] as never }), IDLE_CLAIMANT_MS, "a caller that does not say `built` keeps N, as for the stopped clock");
+  assert.equal(idleLimitMs({ built: true, prs: withRedChecks([redPr()]) as never }), STOPPED_CLAIMANT_MS);
+  assert.equal(idleLimitMs({ built: true, prs: withRedChecks([redPr(GREEN)]) as never }), IDLE_CLAIMANT_MS);
+  assert.equal(idleLimitMs({ prs: withRedChecks([redPr()]) as never }), IDLE_CLAIMANT_MS, "a caller that does not say `built` keeps N, as for the stopped clock");
   const young = { createdAt: new Date(ago(5)).toISOString() };
   assert.equal(claimReading(onPr(redPr(RED, young)), ctx({ idleSince: ago(11) })).kind, "nudge", "a red pull request opened 5 minutes ago is no review the org owes");
   assert.equal(claimReading(onPr(redPr(GREEN, young)), ctx({ idleSince: ago(50) })).kind, "pr-owned", "CONTROL: a young GREEN one is, as #4017 ruled");
@@ -272,31 +271,33 @@ test("#743 (1) what a red check does NOT void: a pull request's own `awaiting-ev
   assert.equal(claimReading(onPr(evidence), ctx({ idleSince: ago(50) })).kind, "pr-owned", "the holder named a wait as a field on the pull request itself");
   assert.equal(claimReading(onPr(redPr(), { waitKind: "not-before" }), ctx({ idleSince: ago(50) })).kind, "pr-owned", "and a row's field");
   const held = redPr(RED, { labels: [{ name: `${HOLD_LABEL_PREFIX}worker-9` }] });
-  assert.deepEqual(redOwnPrs([held] as never), [], "`gate` red under a hold is the hold speaking (red-pr.ts)");
-  assert.deepEqual(redOwnPrs([redPr(RED_TS, { labels: held.labels })] as never), [{ number: 2968, repoKey: undefined, checks: ["ts"] }], "CONTROL: `ts` red under the same hold is a breakage");
-  assert.deepEqual(redOwnPrs([redPr(GREEN)] as never), []);
-  assert.deepEqual(redOwnPrs([{ number: 1 }, undefined as never]), [], "no rollup on the pull request is not red");
+  assert.deepEqual(redOwnPrs(withRedChecks([held]) as never), [], "`gate` red under a hold is the hold speaking (red-pr.ts)");
+  assert.deepEqual(redOwnPrs(withRedChecks([redPr(RED_TS, { labels: held.labels })]) as never), [{ number: 2968, repoKey: undefined, checks: ["ts"] }], "CONTROL: `ts` red under the same hold is a breakage");
+  assert.deepEqual(redOwnPrs(withRedChecks([redPr(GREEN)]) as never), []);
+  assert.deepEqual(redOwnPrs(withRedChecks([{ number: 1 }, undefined as never])), [], "no rollup on the pull request is not red");
 });
 
-test("#743 (1) THE RED DECIDER IS A LEAF, AND AGREES WITH `red-pr.ts`: no import of `red-pr.ts` (a module cycle through `pr-hold-state.ts`), the two lists equal, and the same answer over the same pull requests", () => {
-  // the reviewer of #1151: `idle-claimant.ts` -> `red-pr.ts` -> `pr-hold-state.ts` -> `idle-claimant.ts` failed at the top of the file under `rstest`
+test("#743 (1) ONE DECIDER, NO CYCLE: `idle-claimant.ts` imports neither `red-pr.ts` nor `pr-hold-state.ts`, and the red it reads is `brokenChecks`' answer, derived by `claim-stall.ts`", () => {
+  // the review of #1151: `idle-claimant.ts` -> `red-pr.ts` -> `pr-hold-state.ts` -> `idle-claimant.ts` failed at the top of the file under `rstest`; and
+  // `org-health.test.ts` (#2956) fails a second list of red conclusions in this file, so the answer is handed in, as `checksPending` is.
   const source = readFileSync(new URL("../idle-claimant.ts", import.meta.url), "utf8");
   const imports = [...source.matchAll(/^import\s[^;]*?from\s+"([^"]+)"/gm)].map((m) => m[1]);
   for (const reaching of ["./red-pr.ts", "./pr-hold-state.ts"]) assert.ok(!imports.includes(reaching), `idle-claimant.ts must not import ${reaching}`);
-  assert.deepEqual([...RED_CHECK_CONCLUSIONS].sort(), [...RED_CONCLUSIONS].sort());
-  assert.deepEqual([...HOLD_OWN_CHECK_JOBS].sort(), [...HOLD_OWN_JOBS].sort());
-  assert.equal(HOLD_LABEL_PREFIX, HOLD_PREFIX);
   const running = [...RED_TS, { name: "docs", status: "IN_PROGRESS", ...CHECK, completedAt: "0001-01-01T00:00:00Z" }];
   const rerun = [...RED_TS, { name: "ts", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-10-02T11:20:00Z", completedAt: "2026-10-02T11:30:00Z" }];
   const timedOut = [{ name: "lint", status: "COMPLETED", conclusion: "TIMED_OUT", ...CHECK }, { name: "gate", status: "COMPLETED", conclusion: "CANCELLED", ...CHECK }];
   const hold = [{ name: `${HOLD_PREFIX}worker-9` }];
   const prs = [redPr(RED), redPr(RED_TS), redPr(GREEN), redPr(running), redPr(rerun), redPr(timedOut), redPr(RED_TS, { labels: hold }), redPr(RED, { labels: [`${HOLD_PREFIX}worker-9`] }), redPr(timedOut, { labels: hold })];
-  for (const pr of prs) {
+  const answers = prs.map((pr) => {
     const expected = [...new Set(brokenChecks(pr as never).map((c) => c.name))];
-    const got = redOwnPrs([pr] as never).flatMap((r) => r.checks);
-    assert.deepEqual(got, expected, `the same red checks as red-pr.ts's brokenChecks for ${JSON.stringify(pr.statusCheckRollup.map((c: any) => `${c.name}:${c.conclusion}`))} ${JSON.stringify(pr.labels)}`);
-  }
-  assert.ok(prs.some((pr) => redOwnPrs([pr] as never).length > 0) && prs.some((pr) => redOwnPrs([pr] as never).length === 0), "CONTROL: the fixtures are not all one answer");
+    assert.deepEqual(withRedChecks([pr])[0].failingChecks, expected, `the names red-pr.ts's brokenChecks finds, for ${JSON.stringify(pr.statusCheckRollup.map((c: any) => `${c.name}:${c.conclusion}`))} ${JSON.stringify(pr.labels)}`);
+    assert.deepEqual(redOwnPrs(withRedChecks([pr]) as never).flatMap((r) => r.checks), expected);
+    return expected.length;
+  });
+  assert.ok(answers.some((n) => n > 0) && answers.some((n) => n === 0), "CONTROL: the fixtures are not all one answer");
+  // a caller that hands over no `failingChecks` (`org-health.ts`, `idle-claim-incident.ts`) reads the pull request as not red, as it did before #743
+  assert.deepEqual(redOwnPrs([redPr(RED)] as never), []);
+  assert.equal(idleLimitMs({ built: true, prs: [redPr(RED)] as never }), IDLE_CLAIMANT_MS);
 });
 
 test("#743 (1) with NO declaration read, a red check is not excused by a reviewer's pane, an approval or a check still running either -- and green is, as #2999 ruled", () => {
