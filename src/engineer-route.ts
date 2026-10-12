@@ -438,13 +438,11 @@ const TOKENS_PER_K = 1_000;
 // --- HAIKU BY DEFAULT, SONNET ON EVIDENCE (a11ign#5110, the chairman's direction of 2026-10-11) ---
 //
 // THE SPEC DECIDES MORE THAN THE MODEL (the chairman's notes: Haiku 0/15 without a written spec, 7/9 with one; 3/12 one-shot to 11/12 with a suite it may run), so a row that carries a test
-// is Haiku's by default and the provider becomes a VETO: Sonnet only when it picks a Sonnet route at P >= {@link SONNET_VETO_MIN_P}. This inverts `cheaperMinP`/`dearerMinP`, where
+// is Haiku's by default and the provider becomes a VETO: Sonnet only when it picks a Sonnet route at P >= `routing.sonnetVetoMinP` (the project's bar, 0.7 when absent). This inverts `cheaperMinP`/`dearerMinP`, where
 // Haiku needed 0.5 against a fallback and only 16 of 70 picks reached it. The move UP is not here: it is a fresh Sonnet start on evidence (`wake.ts`, {@link HAIKU_DEFAULT_CI_FAILURES}).
 // Behind `routing.haikuDefault` in `.agent-org/decisions.json`, so the revert is that key off.
 /** The key in `.agent-org/decisions.json` that makes a Tests-first row Haiku's unless the provider vetoes. */
 export const HAIKU_DEFAULT_SWITCH = "routing.haikuDefault";
-/** A Sonnet pick must reach this to veto Haiku on a Tests-first row (the row's own number: "P >= 0.7"). */
-export const SONNET_VETO_MIN_P = 0.7;
 /** A Haiku worker is moved to a fresh Sonnet session after this many distinct red heads of its pull request ("tests still failing after 3 fix attempts"); `engineer-escalation.ts`'s own cap is 2. */
 export const HAIKU_DEFAULT_CI_FAILURES = 3;
 
@@ -722,18 +720,18 @@ function takeVerdict(verdict: Verdict, fallback: Route, row: RouteRow, deps: Rou
 }
 
 /**
- * THE VETO, PURE (a11ign#5110): on a Tests-first row Haiku is the route unless the provider picked a CONFIGURED Sonnet route at P >= {@link SONNET_VETO_MIN_P}. A pick that is Haiku, a
+ * THE VETO, PURE (a11ign#5110): on a Tests-first row Haiku is the route unless the provider picked a CONFIGURED Sonnet route at P >= `routing.sonnetVetoMinP`. A pick that is Haiku, a
  * Sonnet pick under the bar, and no pick at all are each Haiku, and each says which. `null` is a project that did not configure Haiku: it has nothing to default to.
  */
-export function haikuDefaultVerdict(answer: Answer | null, routing: Pick<RoutingDeclaration, "routes">): Verdict | null {
+export function haikuDefaultVerdict(answer: Answer | null, routing: Pick<RoutingDeclaration, "routes" | "sonnetVetoMinP">): Verdict | null {
   if (!routing.routes.includes("haiku/high")) return null;
   const pick = answer?.confidence === undefined ? null : String(answer.value) as Route;
   const p = pick === null || answer?.probabilities === undefined ? null : Number((answer.probabilities[pick] ?? 0).toFixed(PROBABILITY_PLACES));
-  if (pick !== null && p !== null && pick !== "haiku/high" && routing.routes.includes(pick) && p >= SONNET_VETO_MIN_P) {
-    return { route: pick, via: "jev", because: "jev", why: `the provider vetoed Haiku: it picked ${pick} at P=${showP3(p)} (a veto needs P >= ${SONNET_VETO_MIN_P})` };
+  if (pick !== null && p !== null && pick !== "haiku/high" && routing.routes.includes(pick) && p >= routing.sonnetVetoMinP) {
+    return { route: pick, via: "jev", because: "jev", why: `the provider vetoed Haiku: it picked ${pick} at P=${showP3(p)} (a veto needs P >= ${routing.sonnetVetoMinP})` };
   }
   const said = pick === null ? "the provider gave no usable pick" : `the provider picked ${pick}${p === null ? " with no probabilities" : ` at P=${showP3(p)}`}`;
-  return { route: "haiku/high", via: "jev", because: "haiku-default", why: `a Tests-first row is Haiku's unless the provider picks Sonnet at P >= ${SONNET_VETO_MIN_P}; ${said}` };
+  return { route: "haiku/high", via: "jev", because: "haiku-default", why: `a Tests-first row is Haiku's unless the provider picks Sonnet at P >= ${routing.sonnetVetoMinP}; ${said}` };
 }
 
 async function routeByChoice(row: RouteRow, routing: RoutingDeclaration, deps: RouteDeps): Promise<Chosen> {

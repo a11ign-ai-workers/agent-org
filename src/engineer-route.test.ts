@@ -1213,6 +1213,13 @@ test("#5110 DONE-WHEN 1: a Tests-first row with P(sonnet/high)=0.6 routes Haiku,
   assert.equal((await chooseDefaulting(TESTS_FIRST(), routeReply(at("sonnet/medium", 0.8)))).routed.route, "sonnet/medium", "any Sonnet route vetoes, not only the dearest");
 });
 
+test("#5208: the veto bar is the project's `routing.sonnetVetoMinP` -- at 0.85 a Sonnet pick at P 0.8 does not veto Haiku, at 0.85 it does, and absent it is 0.7", async () => {
+  const strict = { ...CHOICE, sonnetVetoMinP: 0.85 };
+  assert.equal((await chooseDefaulting(TESTS_FIRST(), routeReply(at("sonnet/high", 0.8)), { routing: strict })).routed.route, "haiku/high", "0.8 is under a 0.85 bar");
+  assert.equal((await chooseDefaulting(TESTS_FIRST(), routeReply(at("sonnet/high", 0.85)), { routing: strict })).routed.route, "sonnet/high", "the boundary: 0.85 vetoes");
+  assert.equal((await chooseDefaulting(TESTS_FIRST(), routeReply(at("sonnet/high", 0.8)))).routed.route, "sonnet/high", "the control: absent the key, 0.8 clears 0.7");
+});
+
 test("#5110 DONE-WHEN 1: a Tests-first row with no usable pick routes Haiku -- the provider failed, answered off-list, or gave no probabilities", async () => {
   const failed = rig({ triage: JEV, switches: DEFAULTING, throws: true });
   assert.equal((await routeEngineer(TESTS_FIRST(), { ...failed.deps, routing: CHOICE })).route, "haiku/high");
