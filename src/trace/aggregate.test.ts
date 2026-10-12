@@ -9,9 +9,9 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
-import { aggregate, compareWeeks, DEFINITIONS, MOVES, dearestPhase, nearestRank, NOT_DERIVABLE, NOT_HELD, phaseShares, renderAggregate, weekStart, Move } from "./aggregate.ts";
+import { aggregate, compareWeeks, DEFINITIONS, MOVES, dearestPhase, nearestRank, NOT_DERIVABLE, NOT_HELD, phaseShares, renderAggregate, weekStart, type Move, type TrackerClass } from "./aggregate.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
-import { eventsOfTranscript, PRICES, TraceEvent } from "./store.ts";
+import { eventsOfTranscript, PRICES, type TraceEvent } from "./store.ts";
 import { parseMergePaths, readMergePaths, readMoves } from "./trace.ts";
 import { waterfall } from "./waterfall.ts";
 
@@ -781,4 +781,59 @@ test("readMoves: the closing time of each move's row, null (never a guess) when 
   const spent = readMoves({ rowRepo: ROW_REPO, gh: () => { throw Object.assign(new Error("budget"), { code: "GH_CALLS_SPENT" }); } });
   assert.deepEqual(spent.map((move) => move.at), [null, null]);
   assert.throws(() => readMoves({ rowRepo: ROW_REPO, gh: () => { throw new Error("HTTP 404"); } }), { message: /could not read when the move closed/ });
+});
+
+// The Region of each merged row, as `readTrackers` reads it: 101 and 201 product, 102 org, 202 unclassified (its Region named no tracker). Row 301 is open, so it has no Region read.
+const TRACKERS = new Map<number, TrackerClass>([[101, "product"], [102, "org"], [201, "product"], [202, "unclassified"]]);
+
+test("TRACKER SPLIT: a merged row's turns go to its tracker, the standing seats sit in overhead and in no class, and every turn is in exactly one part", () => {
+  const week = weekOf(report({ trackerOf: TRACKERS }), WEEK_A);
+  assert.deepEqual(week.mergedBy, { product: 1, org: 1, unclassified: 0 });
+  assert.equal(week.spend.byTracker.product.turns, 3); near(week.spend.byTracker.product.dollars, 3.5);
+  assert.equal(week.spend.byTracker.org.turns, 2); near(week.spend.byTracker.org.dollars, 5);
+  assert.equal(week.spend.byTracker.org.unpriced, 1, "worker-102's synthetic turn is unpriced, so the org dollars are a floor");
+  assert.equal(week.spend.byTracker.unclassified.turns, 0);
+  assert.equal(week.spend.overhead.standingSeats.turns, 2); near(week.spend.overhead.standingSeats.dollars, 6);
+  assert.equal(week.spend.overhead.otherNoRow.turns, 0);
+  const parts = [week.spend.byTracker.product, week.spend.byTracker.org, week.spend.byTracker.unclassified, week.spend.unmeasured, week.spend.unplaced, week.spend.overhead];
+  assert.equal(parts.reduce((sum, part) => sum + part.turns, 0), week.spend.turns, "product + org + unclassified + UNMEASURED + UNPLACED + overhead is every turn of the week");
+});
+
+test("TRACKER SPLIT: week B's open row 301 has no Region read, so its turn is UNCLASSIFIED with row 202's, and the standing seats are four turns", () => {
+  const week = weekOf(report({ trackerOf: TRACKERS }), WEEK_B);
+  assert.deepEqual(week.mergedBy, { product: 1, org: 0, unclassified: 1 });
+  assert.equal(week.spend.byTracker.product.turns, 3); near(week.spend.byTracker.product.dollars, 10);
+  assert.equal(week.spend.byTracker.org.turns, 0);
+  assert.equal(week.spend.byTracker.unclassified.turns, 3); near(week.spend.byTracker.unclassified.dollars, 120);
+  assert.equal(week.spend.overhead.standingSeats.turns, 4); near(week.spend.overhead.standingSeats.dollars, 0.724);
+});
+
+test("TRACKER SPLIT, positive control against a ratio split: the standing seats are not shared out, so product is its own $3.5 and not $3.5 plus its ratio of the $6", () => {
+  const { product } = weekOf(report({ trackerOf: TRACKERS }), WEEK_A).spend.byTracker;
+  const ratioShare = 3.5 + 6 * 3.5 / 8.5; // what a ratio split over the rowed dollars would give product: about $6.07
+  assert.ok(Math.abs(product.dollars - ratioShare) > 1, `product is ${product.dollars}, the ratio split's ${ratioShare}`);
+  near(product.dollars, 3.5);
+});
+
+test("TRACKER SPLIT, partial: a merged row whose Region is not read makes its week PARTIAL and its turns UNCLASSIFIED, never guessed", () => {
+  const withoutRegion201 = new Map([...TRACKERS].filter(([row]) => row !== 201));
+  const week = weekOf(report({ trackerOf: withoutRegion201 }), WEEK_B);
+  assert.match(String(week.partial), /the Region of 1 of its merged rows is not read/);
+  assert.equal(week.spend.byTracker.product.turns, 0, "worker-201's turns are not put with product on a guess");
+  assert.equal(week.spend.byTracker.unclassified.turns, 6);
+  assert.doesNotMatch(String(weekOf(report({ trackerOf: withoutRegion201 }), WEEK_A).partial), /Region/, "week A's rows all have a Region");
+});
+
+test("TRACKER SPLIT: a run that does not read Regions (trackerOf not given) puts every merged row UNCLASSIFIED and names no Region gap", () => {
+  const week = weekOf(report(), WEEK_A);
+  assert.deepEqual(week.mergedBy, { product: 0, org: 0, unclassified: 2 });
+  assert.doesNotMatch(String(week.partial), /Region/);
+});
+
+test("TRACKER SPLIT RENDER: the by-tracker lines, the standing-seats line for each week, and the identity line print", () => {
+  const text = renderAggregate(report({ trackerOf: TRACKERS }));
+  assert.match(text, /by tracker \(a merged row's Region/);
+  assert.match(text, /standing seats, not attributed: 2 turns/);
+  assert.match(text, /standing seats, not attributed: 4 turns/);
+  assert.match(text, /every turn of the week = product \+ org \+ unclassified \+ UNMEASURED \+ UNPLACED \+ overhead/);
 });

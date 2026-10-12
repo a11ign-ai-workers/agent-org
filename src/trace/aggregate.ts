@@ -147,17 +147,31 @@ function prRowsOf(pulls: PullRequest[], rowRepo: string): Map<string, number[]> 
 
 type Placed = { turn: TraceEvent; kind: "rowed" | "unplaced" | "unmeasured" | "overhead"; rows?: number[]; };
 
-function spendOf(turns: Placed[]) {
+/** A merged row's tracker by its Region (`row-tracker.ts`): `product` or `org`; `unclassified` when the Region was not read, or read as unreadable. */
+export type TrackerClass = "product" | "org" | "unclassified";
+
+/** The one tracker of a turn's rows, or `unclassified` when they are of both (or a row's Region is not read). */
+function classOfRows(rows: number[], trackerOf: Map<number, TrackerClass>): TrackerClass {
+  const classes = new Set(rows.map((row) => trackerOf.get(row) ?? "unclassified"));
+  return classes.size === 1 ? [...classes][0] : "unclassified";
+}
+
+function spendOf(turns: Placed[], trackerOf: Map<number, TrackerClass>) {
   const all = emptyTally();
   const kinds = { rowed: emptyTally(), unplaced: emptyTally(), unmeasured: emptyTally(), overhead: emptyTally() };
+  const byTracker: Record<TrackerClass, Tally> = { product: emptyTally(), org: emptyTally(), unclassified: emptyTally() };
+  const standingSeats = emptyTally(); // the no-row turns of a standing lead: INSIDE overhead, never split by a ratio (the brief's "standing seats, not attributed")
+  const otherOverhead = emptyTally(); // the no-row turns that are not a standing lead's: overhead less the standing seats
   const standing: Map<string, Tally & { onRows: Tally; }> = new Map();
   const input = { cacheRead: 0, side: 0 };
   const unpricedModels: Map<string, number> = new Map();
   const unpricedCodex = emptyTally(); // a Codex model PRICES has no row for (#4055): these turns are in no dollar figure, so they are counted on their own line and not inside a total
   const pricedCodex = emptyTally(); // the Codex turns that DO have a sourced rate (#4076): inside the dollar totals, and shown again on a line of their own so the Claude part can be read off
-  for (const { turn, kind } of turns) {
+  for (const { turn, kind, rows } of turns) {
     addTurn(all, turn);
     addTurn(kinds[kind], turn);
+    if (kind === "rowed") addTurn(byTracker[classOfRows(rows ?? [], trackerOf)], turn);
+    if (kind === "overhead") addTurn(isStanding(turn.session) ? standingSeats : otherOverhead, turn);
     if (typeof turn.costUsd !== "number") unpricedModels.set(String(turn.model), (unpricedModels.get(String(turn.model)) ?? 0) + 1);
     if (turn.harness === "codex") addTurn(typeof turn.costUsd === "number" ? pricedCodex : unpricedCodex, turn);
     if (turn.tokens) {
@@ -170,7 +184,7 @@ function spendOf(turns: Placed[]) {
       standing.set(turn.session, own);
     }
   }
-  return { all, ...kinds, standing, input, unpricedModels, unpricedCodex, pricedCodex };
+  return { all, ...kinds, byTracker, standingSeats, otherOverhead, standing, input, unpricedModels, unpricedCodex, pricedCodex };
 }
 
 /** A standing lead: not a spawned worker or reviewer, which belong to one row or pull request. */
@@ -185,7 +199,8 @@ function spendFigures(spend: ReturnType<typeof spendOf>, unreadable: string[]) {
   const standing = [...spend.standing].filter(([, own]) => own.turns > 0).sort(([a], [b]) => a.localeCompare(b));
   return {
     turns: spend.all.turns, dollars: spend.all.dollars, unpriced: spend.all.unpriced, tokens: spend.all.tokens,
-    overhead: { ...spend.overhead, share: shareOf(spend.overhead, spend.all), bySession: standing.map(([session, own]) => ({ session, ...own, onRows: own.onRows })) },
+    byTracker: spend.byTracker,
+    overhead: { ...spend.overhead, share: shareOf(spend.overhead, spend.all), standingSeats: spend.standingSeats, otherNoRow: spend.otherOverhead, bySession: standing.map(([session, own]) => ({ session, ...own, onRows: own.onRows })) },
     unmeasured: { ...spend.unmeasured, unreadableTranscripts: unreadable },
     unplaced: spend.unplaced,
     unpricedCodex: { turns: spend.unpricedCodex.turns, tokens: spend.unpricedCodex.tokens },
@@ -708,10 +723,11 @@ function indexes({ events, keys }: { events: TraceEvent[]; keys: Keys; }) {
 /**
  * Why the week is partial, or `null` when the store holds all of it.
  */
-function partialReason({ start, now, held, unread }: { start: number; now: number; held: { from: number | null; basis: string; }; unread: number; }): string | null {
+function partialReason({ start, now, held, unread, regionsUnread }: { start: number; now: number; held: { from: number | null; basis: string; }; unread: number; regionsUnread: number; }): string | null {
   const reasons = [];
   if (start + WEEK_MS > now) reasons.push("the week is not over");
   if (unread > 0) reasons.push(`GitHub's events are not yet read for ${unread} of its merged rows (a second run continues; the claims, reviews, queue entries and CI runs of those rows are missing)`);
+  if (regionsUnread > 0) reasons.push(`the Region of ${regionsUnread} of its merged rows is not read (their turns are UNCLASSIFIED, so the product and org split is not whole)`);
   if (held.from === null) reasons.push(`the store's window is unknown (${held.basis})`);
   else if (start < held.from) reasons.push(`the store holds transcripts only from ${new Date(held.from).toISOString()} (${held.basis})`);
   return reasons.length === 0 ? null : reasons.join("; ");
@@ -721,10 +737,13 @@ function partialReason({ start, now, held, unread }: { start: number; now: numbe
  * The report. `readings` is wakes-per-row's `measure` result for each week by its start (`null` for a week it was not run for).
  * `moves` are the packages that left the primary repository (`MOVES`, each with its closing time) and `pullPaths` the paths each pull request of the primary repository changed, by `<repo>#<number>`.
  * `openRows` are the rows GitHub says are open at the reading (`null` when not asked: none is then called open). `unreadRows` are the merged rows whose GitHub events the run did not get to: a week holding one is PARTIAL.
+ * `trackerOf` is each merged row's tracker by its Region, as the run read it (`null` when the run did not read Regions: every row is then UNCLASSIFIED and no week is marked for it). A merged row
+ * missing from a map that was read is a Region the run did not get to: its week is PARTIAL.
  */
-export function aggregate({ events: stored, pulls, rowRepo, now, since, held, readings = new Map(), unreadable = [], unreadRows = [], openRows = null, moves = [], pullPaths = new Map() }: {
+export function aggregate({ events: stored, pulls, rowRepo, now, since, held, readings = new Map(), unreadable = [], unreadRows = [], openRows = null, moves = [], pullPaths = new Map(), trackerOf = null }: {
         events: TraceEvent[]; pulls: PullRequest[]; rowRepo: string; now: number; since: number; held: { from: number | null; basis: string; };
         readings?: Map<number, RowReading[]>; unreadable?: string[]; unreadRows?: number[]; openRows?: number[] | null; moves?: Move[]; pullPaths?: Map<string, string[]>;
+        trackerOf?: Map<number, TrackerClass> | null;
     }) {
   const events = repriceEvents(stored); // every dollar below, the waterfalls' included, is at PRICES now and not at the price the turn was stored with (#3638)
   const keys = { rowRepo, org: rowRepo.split("/")[0], prRows: prRowsOf(pulls, rowRepo) };
@@ -736,18 +755,22 @@ export function aggregate({ events: stored, pulls, rowRepo, now, since, held, re
   const wakeCounts = storeWakeCounts({ events, keys, pulls });
   const traceEvents = events.filter((event) => event.kind !== "gh_call");
   const weeks = [];
+  const trackerOfRow = (row: number): TrackerClass => trackerOf?.get(row) ?? "unclassified";
   for (let start = weekStart(since); start <= weekStart(now); start += WEEK_MS) {
     const merged = everyMerge.filter((entry) => entry.mergedAt >= start && entry.mergedAt < start + WEEK_MS);
     const rows = merged.map((entry) => rowFigures(entry, { byRow, claims }));
     const githubUnread = merged.filter((entry) => unreadSet.has(entry.row)).length;
+    const regionsUnread = trackerOf === null ? 0 : merged.filter((entry) => !trackerOf.has(entry.row)).length;
+    const mergedBy: Record<TrackerClass, number> = { product: 0, org: 0, unclassified: 0 };
+    for (const entry of merged) mergedBy[trackerOfRow(entry.row)] += 1;
     const classes = repeatClasses({ events, turns, keys, at: start, claimed: new Set(), turnsOf });
     const waterfalls = new Map(merged.map((entry) => [entry.row, waterfall({ events: eventsForRow(traceEvents, { rows: [entry.row], prs: entry.pulls }), now })]));
     const drawn = [...waterfalls.values()].filter((wf) => wf.start !== null);
     weeks.push({
-      start, end: start + WEEK_MS, githubUnread, partial: partialReason({ start, now, held, unread: githubUnread }), rows: rows.sort((a, b) => a.row - b.row), perRow: perRowSpread(rows),
+      start, end: start + WEEK_MS, githubUnread, partial: partialReason({ start, now, held, unread: githubUnread, regionsUnread }), rows: rows.sort((a, b) => a.row - b.row), perRow: perRowSpread(rows), mergedBy,
       dearest: dearest(rows).map((row) => ({ ...row, phase: dearestPhase((waterfalls.get(row.row) as Waterfall)) })),
       phases: { ...phaseShares(drawn), noRecord: merged.length - drawn.length },
-      spend: spendFigures(spendOf(placed.filter((entry) => inWeek(entry.turn, start))), unreadable), repeats: { classes, total: repeatTotal(classes) },
+      spend: spendFigures(spendOf(placed.filter((entry) => inWeek(entry.turn, start)), trackerOf ?? new Map()), unreadable), repeats: { classes, total: repeatTotal(classes) },
       wakes: compareWakes({ merged, readings: readings.get(start) ?? null, wakeCounts, claims, heldFrom: held.from }),
       byRepo: byRepository(rows, cutHeld), moves: moves.map((move) => moveOfWeek({ move, start, rows, merged, rowRepo, pullPaths, held: cutHeld })),
     });
@@ -842,11 +865,28 @@ function weekLines(week: ReturnType<typeof aggregate>["weeks"][number]) {
     `    CODEX turns not priced (no rate sourced; in no dollar figure above): ${spend.unpricedCodex.turns} turns, ${count(spend.unpricedCodex.tokens)} tokens`,
     `  overhead (no row): ${dollars(spend.overhead.dollars, spend.overhead.unpriced > 0)} = ${percent(spend.overhead.share.dollars)} of the priced dollars (${spend.overhead.unpriced} of its ${spend.overhead.turns} turns unpriced), ${count(spend.overhead.tokens)} tokens = ${percent(spend.overhead.share.tokens)} of tokens`);
   for (const own of spend.overhead.bySession) lines.push(`    ${own.session.padEnd(24)} ${String(own.turns).padStart(5)} turns  ${dollars(own.dollars, own.unpriced > 0)}  ${count(own.tokens)} tokens  (${own.unpriced} unpriced; on a row: ${own.onRows.turns} turns ${dollars(own.onRows.dollars, own.onRows.unpriced > 0)})`);
+  lines.push(...trackerLines(week));
   lines.push(`  UNMEASURED (not overhead): ${spend.unmeasured.turns} turns, ${dollars(spend.unmeasured.dollars)}; transcripts the ingest could not read: ${spend.unmeasured.unreadableTranscripts.length}${spend.unmeasured.unreadableTranscripts.map((file) => `\n    ${file}`).join("")}`,
     `  UNPLACED (a pull request closing no merged row): ${spend.unplaced.turns} turns, ${dollars(spend.unplaced.dollars)}`,
     `  cache-read share of input: ${percent(spend.cacheRead.share)} (${count(spend.cacheRead.cacheRead)} of ${count(spend.cacheRead.inputSide)} input-side tokens)`,
     `  REPEAT WASTE ${dollars(week.repeats.total.dollars, week.repeats.total.floor)} (${count(week.repeats.total.tokens)} tokens), by class:`, ...week.repeats.classes.flatMap((entry) => [classLine(entry, week.githubUnread), ...causeLines(entry)]));
   return [...lines, ...byRepoLines(week), ...phaseLines(week), ...dearestLines(week), ...wakeLines(week)];
+}
+
+/**
+ * The week's turns by the tracker of their row. The identity is printed, not left for the reader to add up: product + org + unclassified + UNMEASURED + UNPLACED + overhead is every
+ * turn of the week, and the standing seats are INSIDE overhead (their own line, not a term of the sum).
+ */
+function trackerLines(week: ReturnType<typeof aggregate>["weeks"][number]) {
+  const { spend, mergedBy } = week;
+  const line = (name: string, tally: Tally, mergedRows: number) => `    ${name.padEnd(14)} ${String(mergedRows).padStart(5)} merged rows  ${String(tally.turns).padStart(5)} turns  ${dollars(tally.dollars, tally.unpriced > 0)}, ${count(tally.tokens)} tokens`;
+  const standing = spend.overhead.standingSeats;
+  return [
+    "  by tracker (a merged row's Region; a turn whose rows are of both trackers, or whose row's Region is not read, is UNCLASSIFIED):",
+    line("product", spend.byTracker.product, mergedBy.product), line("org", spend.byTracker.org, mergedBy.org), line("unclassified", spend.byTracker.unclassified, mergedBy.unclassified),
+    `    standing seats, not attributed: ${standing.turns} turns, ${dollars(standing.dollars, standing.unpriced > 0)}, ${count(standing.tokens)} tokens (no-row turns of a standing lead, inside overhead; split by no ratio)`,
+    `    every turn of the week = product + org + unclassified + UNMEASURED + UNPLACED + overhead (${spend.turns} turns)`,
+  ];
 }
 
 function dearestLines(week: ReturnType<typeof aggregate>["weeks"][number]) {

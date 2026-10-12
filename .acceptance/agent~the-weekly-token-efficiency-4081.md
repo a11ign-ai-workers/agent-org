@@ -1,0 +1,17 @@
+`agent-org trace -- --aggregate` shows a "by tracker" block for each complete week: merged rows, turns and dollars for product and for org, and a line for unclassified. A merged row is classified by its Region, read with `declaredRegionFiles` and `rowTracker` in `src/trace/trace.ts` (one `gh` read per merged row, run last so event reads cannot be starved). A turn whose rows are of both trackers, or whose row's Region was not read, is UNCLASSIFIED and never guessed. A standing lead's no-row turns are printed inside overhead as "standing seats, not attributed", and are not split by any ratio. Every week also prints the identity "every turn of the week = product + org + unclassified + UNMEASURED + UNPLACED + overhead", so the parts can be checked against the total. A week whose Region reads were cut by the budget is PARTIAL, and its unread rows are named.
+
+Acceptance: `bash -c 'cd /home/agent/repos/wt-4081-agent-org && node --import=./src/lib/crash-exit.ts --test src/trace/aggregate.test.ts'`
+
+Mutation: a mutation of `classOfRows` failed 4 tests. The six `TRACKER SPLIT` controls fail against HEAD's `aggregate.ts` (6 of 6). `aggregate.ts` was restored byte-identical after each run (`cmp` against a copy).
+
+Measured: the acceptance file passes 54 of 54, exit 0. `pnpm run typecheck` exits 0. Last week's figures (week 2026-10-05, complete), re-cut before and after with `trace.ts --aggregate --since 2026-10-05T00:00:00Z`. The week's total is `>= $2534.0512` over 133,069 turns (133,041 priced and 28 with an unpriced model). After this change the parts are: product 198 merged rows, 18,552 turns, `>= $335.0913`; org 541 merged rows, 46,366 turns, `>= $835.1367`; unclassified 14 merged rows, 23,464 turns, `>= $577.3999`; UNMEASURED 50 turns, `$1.0828`; UNPLACED 16,418 turns, `$93.9497`; overhead 28,219 turns, `>= $691.3908`. Turns sum to 133,069 and dollars sum to `$2534.0512`, both exact. Standing seats (17,376 turns, `>= $446.7051`) sit inside the overhead figure and are not added a second time. The two readings were taken five minutes apart, and the complete week's lines are identical in both; the partial week moved, as it should.
+
+Not here, and named: tokens do not close in the printed lines. The week's `10,511,033,338` tokens cover priced turns only, and the UNPLACED and UNMEASURED token counts are not printed, so the token identity is not checked. Rows filed in agent-org are not in `everyMerge` (`rowsClosedBy` counts only a11ign/a11ign rows), so their turns show as no-row until read. A turn on a row merged outside the window, or on a row whose Region was not read, is UNCLASSIFIED. `pnpm run lint` is not run, because this repo has no lint script and no ESLint config. The next Monday's post on #928 (Done-when item 3) is not done here.
+
+Outside-Region: src/trace/trace.ts — the `--aggregate` wiring: `readSources` reads each merged row's Region (`readTrackers`, `trackerClassOf`) and passes `trackerOf` to `aggregate`, so the command the Done-when runs prints the by-tracker lines; the Region names only the aggregate module, which cannot be run without this.
+
+Closes a11ign/a11ign#4081
+
+platform: the Region read is `gh api repos/<row repo>/issues/<n>`, budgeted and stopping on `BUDGET_SPENT`; the tracker is decided by `rowTracker` from the home project's declared trackers, so no repository name is hardcoded beyond `ORG_TRACKER_REPO`.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
