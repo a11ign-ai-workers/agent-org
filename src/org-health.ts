@@ -730,6 +730,97 @@ export function flagSwitchReading({ day, ledger }: { day: string; ledger: FlagLe
 }
 
 /**
+ * agent-org#1168 (a11ign#928, "fix the class, not the three PRs"): THE THREE READINGS BEHIND `health.approvedDirty`, SHIPPED OFF. Each is a pure function of facts the caller read once, and
+ * `orgHealthReadings` asks for them only when the switch is decided on, so OFF is NO reading and not a clear one.
+ *
+ * THE CLASSES ARE NOT IN `SIGNALS`: `work-gate/org-health-suppression.ts` declares every class an order can carry and its test pins `SIGNALS` to that table, a file outside this row's Region.
+ * They are registered there in their own row before the switch is set. Until then an order of these classes falls to that table's default, which pages.
+ */
+export const APPROVED_DIRTY_FLAG = "health.approvedDirty";
+/** How long an approved pull request may stay DIRTY with no push to its head before it is a finding (the row's figure). */
+export const APPROVED_DIRTY_MINUTES = 30;
+/** How many `hold:` labels one pull request may carry at once before the reading names it (a judgment; the chairman's figure is not in the row). */
+export const HOLDS_PER_PR = 3;
+export const APPROVED_DIRTY_SIGNAL = "approved-pr-dirty";
+export const HOLDS_PER_PR_SIGNAL = "holds-per-pr";
+export const SAME_WAY_RERUN_SIGNAL = "rerun-failed-the-same-way";
+
+/**
+ * One open pull request as the approved-DIRTY reading needs it. `dirtySince` is when the caller FIRST SAW it DIRTY, kept across ticks by the caller, because GitHub gives no time for a merge state;
+ * `null` when no tick has seen it DIRTY. `headPushedAt` is the push time of its head commit, `null` when that is not known.
+ */
+export type DirtyPr = { number: number | string, approved: boolean, mergeStateStatus: string, dirtySince: number | null, headPushedAt: number | null };
+/** `holds` is the count of `hold:` labels on one open pull request now. */
+export type HoldCount = { number: number | string, holds: number };
+/** `attempts` is the failing job names of each run on one head, oldest first; an empty list is a run that passed. */
+export type RerunPr = { number: number | string, attempts: string[][] };
+/** What `orgHealthReadings` is given for the three readings: `enabled` is the switch's decision, and each list is `null` for a refused read. */
+export type ApprovedDirtyFacts = { enabled: boolean, prs: DirtyPr[] | null, holds: HoldCount[] | null, reruns: RerunPr[] | null };
+
+const DIRTY_WINDOW_MS = APPROVED_DIRTY_MINUTES * MS_PER_MINUTE;
+
+/**
+ * An approved pull request that has been DIRTY for MORE than the window, with no push to its head inside that window: a push inside it is a rebase in progress, and the reading waits for it.
+ */
+function isApprovedDirty(pr: DirtyPr): boolean {
+  return pr.approved && pr.mergeStateStatus === "DIRTY";
+}
+function dirtyFinding(pr: DirtyPr, now: number): boolean {
+  if (!isApprovedDirty(pr) || pr.dirtySince === null || now - pr.dirtySince <= DIRTY_WINDOW_MS) return false;
+  return pr.headPushedAt === null || pr.headPushedAt <= now - DIRTY_WINDOW_MS;
+}
+
+/** SIGNAL A: AN APPROVED PULL REQUEST IS DIRTY AND NOBODY IS REBASING IT. `org-health` never read the merge state, so #1130 and #1131 sat approved and DIRTY behind a red PR and no signal named them. */
+export function approvedDirtyReading({ now, prs }: { now: number; prs: DirtyPr[] | null; }): Reading {
+  const signal = APPROVED_DIRTY_SIGNAL;
+  if (prs === null) return unknown(signal, "the open pull requests could not be read");
+  const tripped = prs.filter((pr) => dirtyFinding(pr, now)).sort((a, b) => (a.dirtySince as number) - (b.dirtySince as number));
+  if (tripped.length === 0) {
+    const undated = prs.filter((pr) => isApprovedDirty(pr) && pr.dirtySince === null);
+    return undated.length === 0 ? clear(signal) : unknown(signal, `${undated.length} approved PR(s) are DIRTY and no tick has seen when they went DIRTY, so how long they have been DIRTY is not known`);
+  }
+  const first = (tripped[0].dirtySince as number) + DIRTY_WINDOW_MS;
+  const named = tripped.slice(0, MAX_NAMED).map((pr) => `#${pr.number} (DIRTY ${ageText(pr.dirtySince as number, now)})`);
+  const more = tripped.length > MAX_NAMED ? `, and ${tripped.length - MAX_NAMED} more` : "";
+  return { signal, status: "tripped", firstTrippedAt: first, discriminator: `${signal}@${hourOf(first)}`,
+    detail: `${tripped.length} approved PR(s) DIRTY over ${APPROVED_DIRTY_MINUTES} min with no push to their head since: ${named.join("; ")}${more}` };
+}
+
+/** SIGNAL B: A PULL REQUEST CARRYING `HOLDS_PER_PR` OR MORE HOLDS AT ONCE. Each hold is someone's stop on it, and a pile of them is a PR nobody is moving. */
+export function holdsPerPrReading({ holds }: { holds: HoldCount[] | null; }): Reading {
+  const signal = HOLDS_PER_PR_SIGNAL;
+  if (holds === null) return unknown(signal, "the pull requests' hold labels could not be read");
+  const tripped = holds.filter((pr) => pr.holds >= HOLDS_PER_PR);
+  if (tripped.length === 0) return clear(signal);
+  const named = tripped.slice(0, MAX_NAMED).map((pr) => `#${pr.number} (${pr.holds} holds)`);
+  const more = tripped.length > MAX_NAMED ? `, and ${tripped.length - MAX_NAMED} more` : "";
+  return { signal, status: "tripped", firstTrippedAt: null, discriminator: `${signal}:${tripped.map((pr) => pr.number).sort().join(",")}`,
+    detail: `${tripped.length} PR(s) carry ${HOLDS_PER_PR} or more holds at once: ${named.join("; ")}${more}` };
+}
+
+/** SIGNAL C: THE LAST TWO RUNS ON A HEAD FAILED THE SAME JOBS. A rerun that fails the way the last one did is the code's failure, not a flake, so another rerun answers nothing. */
+export function sameWayRerunReading({ reruns }: { reruns: RerunPr[] | null; }): Reading {
+  const signal = SAME_WAY_RERUN_SIGNAL;
+  if (reruns === null) return unknown(signal, "the runs on the pull requests' heads could not be read");
+  const jobsKey = (jobs: string[]) => [...jobs].sort().join("\n");
+  const tripped = reruns.flatMap((pr) => {
+    const last = pr.attempts.slice(-2);
+    return last.length === 2 && last[0].length > 0 && jobsKey(last[0]) === jobsKey(last[1]) ? [{ pr, jobs: [...last[1]].sort() }] : [];
+  });
+  if (tripped.length === 0) return clear(signal);
+  const named = tripped.slice(0, MAX_NAMED).map(({ pr, jobs }) => `#${pr.number} (${jobs.join(", ")})`);
+  const more = tripped.length > MAX_NAMED ? `, and ${tripped.length - MAX_NAMED} more` : "";
+  return { signal, status: "tripped", firstTrippedAt: null, discriminator: `${signal}:${tripped.map(({ pr }) => pr.number).sort().join(",")}`,
+    detail: `${tripped.length} PR(s) whose last two runs on the head failed the same jobs: ${named.join("; ")}${more}` };
+}
+
+/** The three readings when the switch is decided on; NONE when it is OFF or undecided here, which is what makes the shipped-OFF change a no-op. */
+export function approvedDirtyReadings({ now, enabled, prs, holds, reruns }: ApprovedDirtyFacts & { now: number; }): Reading[] {
+  if (!enabled) return [];
+  return [approvedDirtyReading({ now, prs }), holdsPerPrReading({ holds }), sameWayRerunReading({ reruns })];
+}
+
+/**
  * SIGNAL 11: A POOL IS BELOW `POOL_LOW_FRACTION` OF ITS LIMIT (#3448). A session that meets an exhausted pool sleeps on the reset, and three standing seats did at
  * once on 2026-10-04 with nothing in the org knowing why its inbox was three orders deep. The reading names the account, the pool and the reset, because "low"
  * with no window is not a measurement. `pools` is `null` when no pool was read this tick.
@@ -1813,6 +1904,8 @@ export function orgHealthReadings(facts: {
          * a default read of the project's declarations put a signal into 25 tests that assert the exact orders of a tick (the shape of agent-org#1073), so the live gate hands it over (`work-gate.ts`).
          */
         flagSwitches?: FlagLedger | null;
+        /** agent-org#1168: the approved-DIRTY readings. `enabled` is `health.approvedDirty`'s decision; OFF gives no reading, so the caller may always pass it. */
+        approvedDirty?: ApprovedDirtyFacts;
     }): Reading[] {
   const readings = [noMergeReading(facts), redPrReading(facts), refusedRowReading(facts),
     primaryReading({ now: facts.now, drift: facts.drift, since: facts.primarySince })];
@@ -1841,6 +1934,7 @@ export function orgHealthReadings(facts: {
   if (facts.milestoneClock !== undefined) readings.push(milestoneClockReading({ now: facts.now, fact: facts.milestoneClock === null ? null : { ...facts.milestoneClock, endedAt: facts.lastMergedAt } }));
   if (facts.claimRefusals !== undefined) readings.push(claimRefusalStormReading({ now: facts.now, refusals: facts.claimRefusals }));
   if (facts.flagSwitches !== undefined) readings.push(flagSwitchReading({ day: isoOf(facts.now).slice(0, 10), ledger: facts.flagSwitches }));
+  if (facts.approvedDirty !== undefined) readings.push(...approvedDirtyReadings({ now: facts.now, ...facts.approvedDirty }));
   return readings;
 }
 
@@ -1944,6 +2038,13 @@ const REMEDY = (Object.freeze({
     + "The chairman's rule (a11ign#928, 2026-10-12) is that a flagged change ships with its a11ign switch row, filed at the same time. For each key, file that row `" + READY_LABEL + "` WITH AN OWNER in this turn "
     + "(or find the one already filed and say so on it), naming the declaration file that carries the key and the value to set. `false` counts as decided, so a flag the org means to leave off is set to `false`, "
     + "not left absent. A flag switched by `machinery:flag` is not counted (`FLAGS_WITH_ANOTHER_HOME`); one that is, and should not be, is a change to that map and not to a declaration.",
+  [APPROVED_DIRTY_SIGNAL]: "An approved pull request has been DIRTY (it conflicts with main) for more than " + APPROVED_DIRTY_MINUTES + " minutes and nobody has pushed to its head inside that window, so it cannot land and nothing is rebasing it. "
+    + "The named PRs are above. Rebase each one onto main, or if its author is away, say so on the PR and name who takes it; a push to the head clears the finding, and so does a merge. "
+    + "Do not clear it by approving again, which changes nothing about the conflict.",
+  [HOLDS_PER_PR_SIGNAL]: "A pull request carries " + HOLDS_PER_PR + " or more `hold:` labels at once, so each hold is someone's stop on it and nobody is moving it. "
+    + "For each named PR, read the holds, drop the ones that are no longer true, and name in a comment the one that still stops it and who lifts it.",
+  [SAME_WAY_RERUN_SIGNAL]: "The last two runs on a pull request's head failed the same jobs, so another rerun repeats the same failure and answers nothing. "
+    + "Read the failing job's log and fix the cause on the branch; do not rerun the job again until a push changes the code.",
 }) as Readonly<Record<string, string>>);
 
 /** @returns who is ordered: the signal's first reader if it has one, then `ceo`, who takes every signal */
