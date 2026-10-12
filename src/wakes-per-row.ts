@@ -306,12 +306,13 @@ export type RowReading = { row: number, key?: string, repo: string, measured: bo
 
 /**
  * @param {{ window: { from: number, to: number }, pulls: PullRequest[], transcripts: Transcript[], ledger: LedgerEntry[], instances: Instance[],
- *   claimedAt: Map<RowRef, number | null>, rowRepo: string, trackers?: TrackerRef[], unreadClaims?: UnreadClaims[], codexRollouts?: number }} input
+ *   claimedAt: Map<RowRef, number | null>, rowRepo: string, trackers?: TrackerRef[], unreadClaims?: UnreadClaims[], codexRollouts?: number, unreadInstances?: number }} input
  * `trackers` (#4080) are every declared tracker; without it the one tracker at `rowRepo` is read, as before. `unreadClaims` are the trackers whose claim records could not be read.
+ * `unreadInstances` is the count of `spare-cycles` lines `readInstances` skipped (agent-org#1122), named in the reading.
  */
 export function measure(input: {
         window: { from: number; to: number; }; pulls: PullRequest[]; transcripts: Transcript[]; ledger: LedgerEntry[]; instances: Instance[];
-        claimedAt: Map<RowRef, number | null>; rowRepo: string; trackers?: TrackerRef[]; unreadClaims?: UnreadClaims[]; codexRollouts?: number;
+        claimedAt: Map<RowRef, number | null>; rowRepo: string; trackers?: TrackerRef[]; unreadClaims?: UnreadClaims[]; codexRollouts?: number; unreadInstances?: number;
     }) {
   const { window, pulls, transcripts, ledger, claimedAt, rowRepo } = input;
   const trackers = input.trackers ?? [{ key: "", repo: rowRepo }];
@@ -329,7 +330,7 @@ export function measure(input: {
       else if (wake.at >= window.from && wake.at < window.to) remainder.push({ wake, reason: "reason" in placed ? placed.reason : "on-a-row-not-merged-in-the-window" });
     }
   }
-  return report({ window, readings: [...readings.values()], remainder, transcripts, bySession, codexRollouts: input.codexRollouts ?? null, unreadClaims: input.unreadClaims ?? [] });
+  return report({ window, readings: [...readings.values()], remainder, transcripts, bySession, codexRollouts: input.codexRollouts ?? null, unreadClaims: input.unreadClaims ?? [], unreadInstances: input.unreadInstances ?? 0 });
 }
 
 /**
@@ -436,11 +437,11 @@ export function median(values: number[]) {
 
 /**
  * @param {{ window: { from: number, to: number }, readings: RowReading[], remainder: { wake: SessionWake, reason: string }[], transcripts: Transcript[],
- *   bySession: { ledgerOnly: number }, codexRollouts: number | null, unreadClaims: UnreadClaims[] }} input
+ *   bySession: { ledgerOnly: number }, codexRollouts: number | null, unreadClaims: UnreadClaims[], unreadInstances: number }} input
  */
 function report(input: {
         window: { from: number; to: number; }; readings: RowReading[]; remainder: { wake: SessionWake; reason: string; }[]; transcripts: Transcript[];
-        bySession: { ledgerOnly: number; }; codexRollouts: number | null; unreadClaims: UnreadClaims[];
+        bySession: { ledgerOnly: number; }; codexRollouts: number | null; unreadClaims: UnreadClaims[]; unreadInstances: number;
     }) {
   const measured = input.readings.filter((reading) => reading.measured);
   const wakes = measured.map((reading) => reading.wakes);
@@ -474,6 +475,8 @@ function report(input: {
     codexRollouts: input.codexRollouts,
     // Only when a claim record could not be read, so a reading in which every one was read is the one it always was (#4080).
     ...(input.unreadClaims.length > 0 ? { unreadClaims: input.unreadClaims } : {}),
+    // Only when a spare-cycles line was skipped, for the same reason: a reading with none is the one it always was (agent-org#1122).
+    ...(input.unreadInstances > 0 ? { unreadInstances: input.unreadInstances } : {}),
   };
 }
 
@@ -533,6 +536,7 @@ export function renderReading(reading: ReturnType<typeof measure>) {
   ];
   for (const entry of reading.unmeasured) lines.push(`UNMEASURED row ${rowName(entry.key ?? "", entry.row)}: ${entry.reason}`);
   for (const entry of reading.unreadClaims ?? []) lines.push(`UNREAD claim records of tracker ${entry.tracker}: ${entry.reason}`);
+  if (reading.unreadInstances) lines.push(`UNREADABLE spare-cycles lines: ${reading.unreadInstances} skipped, not read as instances`);
   for (const entry of reading.unreadableTranscripts) lines.push(`UNREADABLE transcript ${entry.file} (${entry.session ?? "session unknown"}): ${entry.reason}`);
   return lines.join("\n");
 }
@@ -634,12 +638,21 @@ function readOneTranscript(file: string): Transcript {
 /**
  * Instances from the two org records: `spare-cycles` (one line per ending) and `spare-instances.json` (the live ones).
  * @param {string} cache
- * @returns {Instance[]} `rows` are what the org recorded: bare numbers of the project's own tracker today, and `key#n` for a keyed one the day it records them
+ * A `spare-cycles` line that does not parse (a torn or concurrent append leaves a run of NUL bytes, agent-org#1122) is SKIPPED and COUNTED in `skipped`, so one bad line
+ * does not abort the whole aggregate; the reading names the count.
+ * @returns {{ instances: Instance[], skipped: number }} `rows` are what the org recorded: bare numbers of the project's own tracker today, and `key#n` for a keyed one the day it records them
  */
-export function readInstances(cache: string): Instance[] {
+export function readInstances(cache: string): { instances: Instance[], skipped: number } {
   const instances: Instance[] = [];
+  let skipped = 0;
   for (const line of readFileSync(join(cache, "spare-cycles"), "utf8").split("\n").filter(Boolean)) {
-    const ended = JSON.parse(line);
+    let ended;
+    try {
+      ended = JSON.parse(line);
+    } catch {
+      skipped += 1;
+      continue;
+    }
     const rows = ended.rows ?? (ended.row ? [ended.row] : []);
     instances.push({ session: ended.role, rows, spawnedAt: null, endedAt: ended.at });
   }
@@ -647,7 +660,7 @@ export function readInstances(cache: string): Instance[] {
   for (const [session, instance] of Object.entries((live as Record<string, { spawnedAt: number, rows: RowRef[] }>))) {
     instances.push({ session, rows: instance.rows, spawnedAt: instance.spawnedAt, endedAt: null });
   }
-  return instances;
+  return { instances, skipped };
 }
 
 /**
@@ -690,11 +703,12 @@ async function main() {
   const cache = join(homedir(), ".cache", "a11ign");
   const pulls = (await Promise.all(repos.map((repo) => readMergedPulls(repo, window)))).flat();
   const { claimedAt, unreadClaims } = readClaims(mergedTrackerRows(pulls, window, trackers), trackers);
+  const { instances, skipped } = readInstances(cache);
   const reading = measure({
     window, pulls, claimedAt, rowRepo, trackers, unreadClaims,
     transcripts: readTranscripts(join(homedir(), ".claude", "projects"), window.from),
     ledger: parseLedger(readFileSync(join(cache, "wake-ledger"), "utf8")),
-    instances: readInstances(cache),
+    instances, unreadInstances: skipped,
     codexRollouts: countCodexRollouts(join(homedir(), ".codex", "sessions"), window),
   });
   console.log(json ? JSON.stringify(reading, null, 2) : renderReading(reading));
