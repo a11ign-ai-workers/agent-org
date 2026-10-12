@@ -82,7 +82,7 @@
 // refused) and it does not touch the window at all.
 export const ACTIVITY_WINDOW_MS = 10 * 60 * 1000; // 10 minutes: survives a stash-then-checkout gap; still sweeps
                                             // a truly abandoned tree well within an hour of prune runs
-import { execFileSync, spawnSync } from "node:child_process";
+import { execFileSync } from "node:child_process";
 import { createHash } from "node:crypto";
 import { existsSync, lstatSync, readdirSync, readFileSync, statSync } from "node:fs";
 import { basename, join, relative } from "node:path";
@@ -90,9 +90,11 @@ import { sandboxGitEnv } from "./lib/git-env.ts";
 // RELATIVE for the same reason as `cli-flags.ts` below (#1373): `row-claim.ts` imports this file before
 // `pnpm install`, where a package specifier dies.
 import { worktreeOwner } from "./worktree-owner.ts";
-import { claimRefusal, recordRemoval, rowsClosed, type Gh } from "./worktree-removal.ts";
+import { claimRefusal, defaultGh, recordRemoval, rowsClosed, type Gh } from "./worktree-removal.ts";
+import { readOpenPullHeads, type OpenPullHeads } from "./ticket-port/open-pull-heads.ts";
 import { SESSION_PREFIX } from "./project-vocabulary.ts";
 import { REPO } from "./project-identity.ts";
+import { stateEntryPath } from "./host-config.ts";
 
 /**
  * #3850: HOW LONG A TREE WHOSE ROW HAS CLOSED MUST BE UNTOUCHED BEFORE ITS STAMP STOPS HOLDING IT. `heldByOwner` reads `.a11y-owner`,
@@ -1319,34 +1321,17 @@ export const OPEN_PR_HOLD_FLAG = "prune.holdOpenPr";
 /** How many open PRs one listing reads. A listing that fills the limit may be short, so it is refused rather than trusted. */
 export const PULL_LIST_LIMIT = 1000;
 
-export type OpenPull = { number: number, url: string, headRefName: string, labels: string[] };
 /** `read: false` carries the reason; a failed listing is never an empty list, because "could not read" is not "nobody has a PR open". */
-export type OpenPulls = { read: true, pulls: OpenPull[] } | { read: false, reason: string };
-
-/** A LITERAL `spawnSync("gh", ...)`, for the same SPAWNS_GH reason as `defaultGh` in worktree-removal.ts. */
-function defaultPullGh(args: string[]): string {
-  const ran = spawnSync("gh", args, { encoding: "utf8" });
-  if (ran.error) throw ran.error;
-  if (ran.status !== 0) throw new Error((ran.stderr || `gh exited ${ran.status}`).trim());
-  return ran.stdout;
-}
+export type OpenPulls = OpenPullHeads;
 
 /**
- * Every open PR of the repo, or the reason they could not be read.
+ * Every open PR of the repo, or the reason they could not be read. The read is `readOpenPullHeads` (ticket-port); the runner is
+ * `defaultGh`, whose spawn lives in worktree-removal.ts with the other removal reads.
  * @param {{ gh?: Gh }} [deps]
  * @returns {OpenPulls}
  */
-export function listOpenPulls({ gh = defaultPullGh }: { gh?: Gh; } = {}): OpenPulls {
-  let parsed: unknown;
-  try {
-    parsed = JSON.parse(gh(["pr", "list", "--repo", REPO, "--state", "open", "--limit", String(PULL_LIST_LIMIT), "--json", "number,url,headRefName,labels"]));
-  } catch (error) {
-    return { read: false, reason: `gh pr list failed: ${String((error as Error).message).split("\n")[0]}` };
-  }
-  if (!Array.isArray(parsed)) return { read: false, reason: "gh pr list did not return a list" };
-  if (parsed.length >= PULL_LIST_LIMIT) return { read: false, reason: `there are ${PULL_LIST_LIMIT} or more open pull requests, the listing limit` };
-  const rows = parsed as { number: number, url: string, headRefName: string, labels?: { name: string; }[] }[];
-  return { read: true, pulls: rows.map((row) => ({ number: row.number, url: row.url, headRefName: row.headRefName, labels: (row.labels ?? []).map((label) => label.name) })) };
+export function listOpenPulls({ gh = defaultGh }: { gh?: Gh; } = {}): OpenPulls {
+  return readOpenPullHeads(REPO, gh, PULL_LIST_LIMIT);
 }
 
 /**
@@ -1371,21 +1356,34 @@ function openPrHold(entry: WorktreeEntry, listing: OpenPulls): string | null {
 
 /**
  * #1167: whether `prune.holdOpenPr` is ON in the canary state. Read in `main()` and nowhere else. An absent state file is the
- * empty state (flag OFF); an unreadable one is OFF too, with a line saying so. Dynamic imports keep org-health's large import
- * graph out of this module's load, since the row-claim path imports this file. `dir` is for tests.
+ * empty state (flag OFF); an unreadable one is OFF too, with a line saying so. `dir` is for tests.
  * @param {string} [dir]
  * @returns {Promise<boolean>}
  */
 export async function openPrHoldOn(dir?: string): Promise<boolean> {
-  const { CANARY_STATE_FILE, machineryFlagOn, parseCanaryState } = await import("./org-health.ts");
-  const stateDir = dir ?? (await import("./work-gate/vocabulary.ts")).REVIEWER_STATE_DIR;
-  const path = `${stateDir}/${CANARY_STATE_FILE}`;
+  // Inside the try: a host with no declaration cannot name the state dir, and that must read the flag OFF, not stop the prune.
   try {
-    return machineryFlagOn(parseCanaryState(existsSync(path) ? readFileSync(path, "utf8") : null), OPEN_PR_HOLD_FLAG);
+    const path = `${dir ?? stateEntryPath("")}/${CANARY_FILE}`;
+    return flagOnIn(existsSync(path) ? readFileSync(path, "utf8") : null, OPEN_PR_HOLD_FLAG);
   } catch (error) {
-    process.stderr.write(`${OPEN_PR_HOLD_FLAG}: ${CANARY_STATE_FILE} is unreadable (${String((error as Error).message).split("\n")[0]}); the flag reads OFF.\n`);
+    process.stderr.write(`${OPEN_PR_HOLD_FLAG}: ${CANARY_FILE} is unreadable (${String((error as Error).message).split("\n")[0]}); the flag reads OFF.\n`);
     return false;
   }
+}
+
+/** The canary state file's name: `CANARY_STATE_FILE` in org-health.ts. The open-PR test writes that name and reads it back through `openPrHoldOn`. */
+const CANARY_FILE = "machinery-canary.json";
+
+/**
+ * `machineryFlagOn(parseCanaryState(text), name)` from org-health.ts, written out here: org-health is a hub whose import graph reaches `gh`,
+ * and the prune must not reach it for one flag (`host-units.ts`'s `ghSpawnReachedFrom` walks the closure). The test holds the two equal over
+ * the same texts. Absent or empty is OFF; a text that is not `{ flags, samples, memo }` throws; a flag is ON only when its record says `on: true`.
+ */
+function flagOnIn(text: string | null, name: string): boolean {
+  if (text === null || text.trim() === "") return false;
+  const raw = JSON.parse(text) as { flags?: Record<string, { on?: boolean; } | undefined>; samples?: unknown; };
+  if (typeof raw !== "object" || raw === null || typeof raw.flags !== "object" || !Array.isArray(raw.samples)) throw new Error(`${CANARY_FILE} is not { flags, samples, memo }`);
+  return raw.flags?.[name]?.on === true;
 }
 
 export type PruneContext = { repoRoot: string, run: typeof defaultRun, now: number, dryRun: boolean, primaryPath: string | null, mainLine: Set<string> | null, report: PruneReport, hash?: (file: string) => string, rowsClosed: typeof rowsClosed, pause: () => void, remove: (path: string, deps: { run: typeof defaultRun }) => void, claim?: typeof claimRefusal, record?: typeof recordRemoval, removeByRef: boolean, openPulls: OpenPulls | null, };

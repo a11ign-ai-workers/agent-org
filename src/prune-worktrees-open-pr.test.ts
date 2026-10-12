@@ -1,4 +1,4 @@
-// no-token: gh -- every open-PR listing here is injected (`openPulls` or `listOpenPulls({ gh })`), and the one place the real `gh` could run is `defaultPullGh`, which no test calls; proven by running this file with `gh` shimmed to exit 4.
+// no-token: gh -- every open-PR listing here is injected (`openPulls` or `listOpenPulls({ gh })`), and the one place the real `gh` could run is `defaultGh` in worktree-removal.ts, which no test calls; proven by running this file with `gh` shimmed to exit 4.
 /**
  * a11ign/agent-org#1167: AN OPEN PR OF A TREE'S BRANCH, OR OF ITS SESSION'S LABEL, HOLDS THE TREE -- BEHIND `prune.holdOpenPr`.
  *
@@ -217,7 +217,7 @@ test("listOpenPulls refuses a listing that fills the limit, since a full page ma
 
 test("listOpenPulls reports a failed gh call as unreadable, with its message", () => {
   const listing = listOpenPulls({ gh: () => { throw new Error("gh: authentication required\nmore"); } });
-  assert.deepEqual(listing, { read: false, reason: "gh pr list failed: gh: authentication required" });
+  assert.deepEqual(listing, { read: false, reason: "the open pull request listing failed: gh: authentication required" });
 });
 
 test(`${OPEN_PR_HOLD_FLAG}: ON only when the canary state says so; absent or unreadable state is OFF`, async () => {
@@ -242,4 +242,33 @@ test(`${OPEN_PR_HOLD_FLAG}: ON only when the canary state says so; absent or unr
     (process.stderr as { write: unknown }).write = write;
   }
   assert.match(stderr.join(""), new RegExp(`${OPEN_PR_HOLD_FLAG}: machinery-canary\\.json is unreadable`));
+});
+
+test("the flag read agrees with org-health's parseCanaryState + machineryFlagOn on every shape, and reads the same file name", async () => {
+  const { CANARY_STATE_FILE, machineryFlagOn, parseCanaryState } = await import("./org-health.ts");
+  const texts: (string | null)[] = [
+    null, "", "null", "{ not json", "{}", '{"flags":{}}', '{"flags":{},"samples":[]}',
+    `{"flags":{"${OPEN_PR_HOLD_FLAG}":{"on":true}},"samples":[],"memo":{}}`,
+    `{"flags":{"${OPEN_PR_HOLD_FLAG}":{"on":false}},"samples":[],"memo":{}}`,
+    `{"flags":{"${OPEN_PR_HOLD_FLAG}":{"on":"true"}},"samples":[]}`,
+  ];
+  const stderr: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  (process.stderr as { write: unknown }).write = (chunk: string) => { stderr.push(String(chunk)); return true; };
+  try {
+    for (const [i, text] of texts.entries()) {
+      const dir = join(BASE, `parity-${i}`);
+      mkdirSync(dir);
+      if (text !== null) writeFileSync(join(dir, CANARY_STATE_FILE), text);
+      let reference: boolean;
+      try {
+        reference = machineryFlagOn(parseCanaryState(text), OPEN_PR_HOLD_FLAG);
+      } catch {
+        reference = false; // org-health THROWS on a shape it does not read; the open-PR read is OFF on any unreadable state
+      }
+      assert.equal(await openPrHoldOn(dir), reference, `shape ${i}: ${JSON.stringify(text)}`);
+    }
+  } finally {
+    (process.stderr as { write: unknown }).write = write;
+  }
 });
