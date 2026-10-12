@@ -70,7 +70,7 @@ test("THE CUT: a class that starts past the budget waits for the next tick, noth
   const first = tickWith(stateDir, NOW, { budgetMs: retro.RETRO_TICK_BUDGET_MS, clock });
   assert.equal(first.orders.length, 0);
   const stop = first.said.find((line) => line.startsWith("org-retro: read stopped at "));
-  assert.equal(stop, "org-retro: read stopped at open pull requests after 70 s (1 of 14 classes read); no org-retrospective order until every class is read.\n");
+  assert.equal(stop, "org-retro: read stopped at open pull requests after 70 s (1 of 15 classes read); no org-retrospective order until every class is read.\n");
   assert.equal(existsSync(join(stateDir, retro.RETRO_CLASSES_FILE)), true);
 });
 
