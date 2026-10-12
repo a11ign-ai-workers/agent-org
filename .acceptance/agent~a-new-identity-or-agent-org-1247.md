@@ -10,6 +10,8 @@ Evidence: `src/host-identity-canary.test.ts` 8 of 8; `src/app-role-silent.test.t
 
 Acceptance: `bash -c 'cd ~/repos/agent-org && node --test src/host-identity-canary.test.ts'`
 
+History: full
+
 Closes a11ign/a11ign#1247 for the gate and its pins. Left open as rows: the wrapper's repository scope (Done-when 1's "canary only" in the rendered file), the tick call, the widening flag, and the GitHub reviewDecision reader.
 
 Outside-Region: .changeset/identity-canary-widens-on-proof.md — the entry a project that pins a tag reads.
