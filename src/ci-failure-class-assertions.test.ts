@@ -1,5 +1,5 @@
 // #1166: a red check's class is read from its FAILING ASSERTIONS, and a same-head re-fail reaches the owner. A fake `fakeGh` and a fake decision state only: no network, no real key, no corpus.
-// no-token: fakeGh -- every `fakeGh` here is a stub that answers the reads `readCiFailure` makes; nothing reaches the real one
+// no-token: gh -- every `fakeGh` here is a stub that answers the reads `readCiFailure` makes; nothing reaches the real `gh`
 import assert from "node:assert/strict";
 import { test } from "node:test";
 import { CI_CLASS, classifyCiFailure, readCiFailure, rateLimitOrLostRunner, routeFor } from "./ci-failure-class.ts";
