@@ -1,6 +1,6 @@
 The daily retrospective's reads walk the merged pull requests only above a per-repository mark kept in the retro state entry, and cache the `.acceptance/` contents by merge commit there; a tick logs a `RETRO READS` line with its pages, lists and acceptance reads and their seconds. A first tick reads in full and writes the mark and the cache; a second tick over the same fixture makes no acceptance read and one top page per merged list; a missing or unreadable state entry is read in full and named in the line.
 
-Acceptance: `bash -c 'cd /home/agent/repos/wt-1081 && npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/org-retro-read-cost.test.ts'`
+Acceptance: `bash -c 'cd /home/agent/repos/wt-agent-org-1081 && npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/org-retro-read-cost.test.ts'`
 
 Mutation: the cache lookup removed from `acceptanceOf` in `src/org-retro.ts` failed 2 of 5 tests (the first tick's single acceptance read, and the second tick's zero-read check). `src/org-retro.ts` restored byte-identical (`diff` against a copy).
 
