@@ -7,6 +7,7 @@
 //
 // WHAT A RUN MAY NEVER ANSWER: a question asking for a ruling, a rule change, an admin write or a chairman decision. The role excerpt says so, and so does code: such an
 // item's question allows only `escalate` and `actionsFor` yields nothing for any other answer, because a prompt that is the only guard is a guard the run can talk past.
+import { homeProjectDeclaration } from "../../project-config.ts";
 import type { ItemRef } from "../../ticket-port/port.ts";
 import type { BriefQuestion } from "../brief.ts";
 import type { DecisionAction, DecisionClass, DecisionOrder } from "../registry.ts";
@@ -53,8 +54,8 @@ const SCHEMA = {
  */
 export const RULING_PATTERN = /\b(rulings?|rule change|change the rule|amend(?:ment)?|admin|chairman|branch protection|settings?|secrets?|permissions?)\b/i;
 
-/** The repository each tracker key of an order's subject (`row-7`, `row-agent-org#7`) names. An unknown key is no item, and so no action. */
-export const SCOPES: Readonly<Record<string, string>> = { "": "a11ign/a11ign", "agent-org": "a11ign/agent-org" };
+/** The repository a tracker key of an order's subject (`row-7`, `row-agent-org#7`) names, from the project's declaration (#2616). An undeclared key is `null`: no item, and so no action. */
+const scopeOf = (key: string): string | null => homeProjectDeclaration().tracker.find((tracker) => tracker.key === key)?.repo ?? null;
 
 /** What `buildQuestion` learned about an order, for `actionsFor`, which is not given the item. Keyed by the order, overwritten each time it is asked. */
 type Read = Readonly<{ ref: ItemRef | null; flagHeld: boolean; ruling: boolean }>;
@@ -62,8 +63,8 @@ const read = new Map<string, Read>();
 
 export function itemOf(order: Pick<DecisionOrder, "causeKey">): ItemRef | null {
   const found = /(?:^|\/)row-(?:([a-z0-9-]+)#)?(\d+)$/.exec(order.causeKey);
-  const scope = found === null ? undefined : SCOPES[found[1] ?? ""];
-  return found === null || scope === undefined ? null : { tracker: "github", scope, id: Number(found[2]) };
+  const scope = found === null ? null : scopeOf(found[1] ?? "");
+  return found === null || scope === null ? null : { tracker: "github", scope, id: Number(found[2]) };
 }
 
 const flagOf = (order: DecisionOrder): `answer-owed:${string}` | null =>
