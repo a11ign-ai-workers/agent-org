@@ -132,6 +132,7 @@ import { anyBlockerClearingCandidate, blockerClearedReading, boardingPortOf, cla
   rowsOffBoardOrSay, settleCitedRepeatingLines, settleOffBoardRows, settleOverdueLists, unreadLanes, withClosedClaims, withEjections,
   withStaleRefusals } from "./work-gate/tick.ts";
 import { REVIEWER_STATE_DIR, type Scope, comparablePrFiles, labelsOf, scopesOf } from "./work-gate/vocabulary.ts";
+import { endGateSpan } from "./lib/spawn-census.ts";
 export { openRowState, workingClaims, waitingBreakdown, stalledOrder, performActions } from "./work-gate/orders.ts";
 export { CHAIN_WAIT_FLAG, CHAIN_WAIT_FILE, CHAIN_WAIT_MINUTES, CHAIN_WAIT_ESCALATION_SESSION, blockedReasonOf, chainWaitsOf, advanceChainWaits,
   chainWaitWakeText, chainWaitEscalationText, chainWaitOrder, chainWaitOrders } from "./work-gate/causes/org-health-chain-wait.ts";
@@ -507,13 +508,13 @@ export function readOpenRowFollowUps(allOpen: any[], run: (args: string[], repo?
 
 function main() {
   refuseUnknownFlags([], { entry: import.meta.url, command: "node packages/agent-org/src/work-gate.ts" });
-  const githubStatus = startGithubStatus(); // #3723: FIRST, so its wall overlaps the reads below and never adds to them
+  const githubStatus = endGateSpan("startup", startGithubStatus()); // #3723: FIRST, so its wall overlaps the reads below and never adds to them
   // READ BEFORE ANY GITHUB CALL (#2163), because it is the one reading a `CANNOT_ASK` exit must not hide: a tick
   // that cannot reach GitHub delivers nothing, so on that path the stderr line is the only thing that says the
   // disk is full. Its ORDER is put in front of the others further down.
-  const diskOrders = diskHeadroomTick(); ghQueueTickOrSay(); // #4898: BEFORE any read, which it does not wait on; `main` is at its line limit
-  const prs = readPrs();
-  const readyRows = readReadyRows();
+  const diskOrders = endGateSpan("diskHeadroom", diskHeadroomTick()); endGateSpan("ghQueue", ghQueueTickOrSay()); // #4898: BEFORE any read, which it does not wait on; `main` is at its line limit
+  const prs = endGateSpan("readPrs", readPrs());
+  const readyRows = endGateSpan("readReadyRows", readReadyRows());
 
   // BOTH LANES REFUSED IS `CANNOT_ASK`; ONE IS `PARTIAL`. Nothing here may report a refused read as quiet.
   if (prs === null && readyRows === null) {
@@ -523,36 +524,36 @@ function main() {
 
   // The third read is only needed to size the refill, and a refused one must not read as an empty shelf.
   // #3566: this one, `needs:chairman` and the open rows (`openRowsRead`) are asked TOGETHER, and with the other repositories' lists (slice 6).
-  const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
-  const unreadChairmanRows = chairmanReadsRefused(chairmanBlocked ?? []); // #3390: said, not skipped -- an unread row is not an unanswered one
+  const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); endGateSpan("readLanes"); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
+  const unreadChairmanRows = endGateSpan("chairmanReads", chairmanReadsRefused(chairmanBlocked ?? [])); // #3390: said, not skipped -- an unread row is not an unanswered one
   if (unreadChairmanRows.length > 0) process.stderr.write(`chairman-answered: could not read the timeline of ${unreadChairmanRows.map((n) => `#${n}`).join(", ")}; those rows are NOT checked this tick\n`);
   // ONE COALESCE PER REFUSED LANE, NAMED. `prs ?? []` was written three times and `readyRows ?? []` twice;
   // each repetition is a branch `complexity` counts, and the names say what an empty list MEANS here --
   // a lane that could not be read, already reported as PARTIAL below, never a lane that is empty.
   const openPrs = prs ?? [];
   const rows = readyRows ?? [];
-  const prFiles = comparablePrFiles([...openPrs, ...pullRequestsOfOthers(otherScopes)]);
+  const prFiles = endGateSpan("prFiles", comparablePrFiles([...openPrs, ...pullRequestsOfOthers(otherScopes)]));
   const drain = draining();
   // ONE READ, THREE CAUSES -- and the refusal is kept BESIDE the coalesced list rather than instead of
   // it. `decide`'s label-derived causes want a list to filter, and an empty one is the right degradation
   // there; the dead man's switch needs to tell "refused" from "empty", so it is handed the raw result.
   // Both names exist so neither reader has to infer which of the two it was given (#1938).
-  const allOpen = promotedWhenUnblocked(openRowsRead ?? []); // #4064: BEFORE any cause reads the rows, so a row promoted here is not offered to `product-manager` as unpromoted
-  const { claimedComments, closedRows, closings, closedClaims, closedClaimLabels, agents: herdrListing } = readOpenRowFollowUps(allOpen); // #3566: asked together, each still conditional on the rows in hand
-  const strippedClosedClaims = stripClosedClaims(closedClaimLabels); // #3883: the closed rows whose holder herdr does not list lose their claim labels, in the tick that read them
-  recordRouteOutcomesOnHost(closedClaimLabels !== null, { gh: defaultRun }); // agent-org#752: the outcome of each closed routed row, written here because the log is on this host and the close script runs on a runner
+  const allOpen = endGateSpan("promoted", promotedWhenUnblocked(openRowsRead ?? [])); // #4064: BEFORE any cause reads the rows, so a row promoted here is not offered to `product-manager` as unpromoted
+  const { claimedComments, closedRows, closings, closedClaims, closedClaimLabels, agents: herdrListing } = readOpenRowFollowUps(allOpen); endGateSpan("followUps"); // #3566: asked together, each still conditional on the rows in hand
+  const strippedClosedClaims = stripClosedClaims(closedClaimLabels); endGateSpan("stripClosedClaims"); // #3883: the closed rows whose holder herdr does not list lose their claim labels, in the tick that read them
+  recordRouteOutcomesOnHost(closedClaimLabels !== null, { gh: defaultRun }); endGateSpan("routeOutcomes"); // agent-org#752: the outcome of each closed routed row, written here because the log is on this host and the close script runs on a runner
   // #2031: A LOCAL git CALL, NOT AN API ONE -- it adds nothing to `GH_READS` and cannot be refused by an
   // exhausted pool, which is the whole reason the detection can exist. `GIT_READS` counts it.
-  const offerHierarchy = offerHierarchyNow(rows, allOpen); // #4524: who the chairman's rows are, from the tracker's history, and the declared milestone ranking
-  const rowBranches = readRowBranches(), branchPrs = readBranchPrsOfUnclaimed(rows, rowBranches); // #3892: one `pr list` per branch of an unclaimed row, none when there is none
+  const offerHierarchy = endGateSpan("offerHierarchy", offerHierarchyNow(rows, allOpen)); // #4524: who the chairman's rows are, from the tracker's history, and the declared milestone ranking
+  const rowBranches = endGateSpan("rowBranches", readRowBranches()), branchPrs = endGateSpan("branchPrs", readBranchPrsOfUnclaimed(rows, rowBranches)); // #3892: one `pr list` per branch of an unclaimed row, none when there is none
   const pools: import("./org-health.ts").PoolReading[] = []; // #3448: the GraphQL budget the off-board read names, handed to the org-health tick
-  const offBoard = rowsOffBoardOrSay(undefined, pools), primaryDrift = readPrimaryDriftNow(); // #2781: local git, once; it feeds `decide` and banners its orders
+  const offBoard = rowsOffBoardOrSay(undefined, pools), primaryDrift = readPrimaryDriftNow(); endGateSpan("offBoard+primaryDrift"); // #2781: local git, once; it feeds `decide` and banners its orders
   // #1969: NAMED RATHER THAN CALLED TWICE. `shouldBeMerging` needs the same answer `decide` does, and
   // `requiredWhenNeeded` makes a `gh` call when anything is red -- calling it inline in both places would
   // pay for it twice on exactly the red tick this row is about.
-  const required = requiredWhenNeeded(openPrs);
-  const baseTip = baseTipWhenRed(openPrs), armingSplit = readArmingOf(openPrs, required); // #3019: BEFORE the arguments -- ejected PRs are stamped onto `prs` and leave `unarmed`; agent-org#488: the gate arms a lone unarmed one here
-  const decideArgs = { primaryDrift, prs: withStaleRefusals(withVerifyStamps(withEjections(withWaitingEdges(withPrOwners(withEvidenceLabelAges(withPatchIds(openPrs, defaultRun, required)), allOpen, stampLookup(), { agents: liveWorkspaceLabels, ended: endedSessionLabels }), allOpen, { dir: REVIEWER_STATE_DIR }), armingSplit?.ejections), { checkout: verifyCheckoutOf("") }), required), readyRows: rows, promotableRows: promotableRows ?? [],
+  const required = endGateSpan("required", requiredWhenNeeded(openPrs));
+  const baseTip = endGateSpan("baseTip", baseTipWhenRed(openPrs)), armingSplit = endGateSpan("arming", readArmingOf(openPrs, required)); // #3019: BEFORE the arguments -- ejected PRs are stamped onto `prs` and leave `unarmed`; agent-org#488: the gate arms a lone unarmed one here
+  const decideArgs = { primaryDrift, prs: endGateSpan("withStaleRefusals", withStaleRefusals(endGateSpan("withVerifyStamps", withVerifyStamps(endGateSpan("withEjections", withEjections(endGateSpan("withWaitingEdges", withWaitingEdges(endGateSpan("withPrOwners", withPrOwners(endGateSpan("withEvidenceLabelAges", withEvidenceLabelAges(endGateSpan("withPatchIds", withPatchIds(openPrs, defaultRun, required)))), allOpen, stampLookup(), { agents: liveWorkspaceLabels, ended: endedSessionLabels })), allOpen, { dir: REVIEWER_STATE_DIR })), armingSplit?.ejections)), { checkout: verifyCheckoutOf("") })), required)), readyRows: rows, promotableRows: promotableRows ?? [],
     chairmanBlocked: chairmanBlocked ?? [], prFiles, drain, required, baseTip,
     epics: epicRowsOf(allOpen),
     answerOwed: rowsOwingAnswers({ openRows: allOpen, openPrs, closedRows: closedAnswerRows(closedRows) }),
@@ -562,60 +563,61 @@ function main() {
     // nothing in progress pays nothing; a busy one pays exactly one, whatever the size of the queue.
     claimedComments: claimedComments ?? [],
     // #2470: the SAME comments, read once, and the raw `null` kept for the reader that must tell "refused" from "none".
-    ...withClosedClaims(claimStallsWithFacts(openRowsRead, claimedComments, prs, otherScopes), closedClaims), // #3451: the orders AND the facts they were built from
+    ...endGateSpan("claimStalls", withClosedClaims(claimStallsWithFacts(openRowsRead, claimedComments, prs, otherScopes), closedClaims)), // #3451: the orders AND the facts they were built from
     // #1969: CONDITIONAL, and the condition is answered for free from the list already in hand.
     // `shouldBeMerging` reads `openPrs`; only if it finds a green, unheld, non-draft PR is the
     // merge-queue call made at all.
-    unarmed: armingSplit === null ? null : armingSplit.unarmed, rowBranches, branchPrs, claimRefusals: offeredRefusalStreaks(rows, prFiles, { rowBranches, branchPrs, openRows: allOpen, chairmanRows: offerHierarchy.chairmanRows }), offerHierarchy,
+    unarmed: armingSplit === null ? null : armingSplit.unarmed, rowBranches, branchPrs, claimRefusals: endGateSpan("claimRefusals", offeredRefusalStreaks(rows, prFiles, { rowBranches, branchPrs, openRows: allOpen, chairmanRows: offerHierarchy.chairmanRows })), offerHierarchy,
     // #2174: A LOCAL READ, NOT AN API ONE -- a `readdir`, some `readFileSync` and one `systemctl` spawn
     // per shipped timer. It adds nothing to `GH_READS` and cannot be refused by an exhausted pool, which
     // is what lets the detection exist at all.
-    hostDrift: readHostDrift(),
+    hostDrift: endGateSpan("hostDrift", readHostDrift()),
     // #2286: CONDITIONAL, and the condition is answered for free from the list already in hand.
     closings,
     // #2356: `null` for a refused read or a green `main`, and the two need no telling apart HERE -- both
     // emit nothing, and a refused read is not reported as health because nothing else reads "trunk is fine".
-    trunkRed: readTrunkRed(),
+    trunkRed: endGateSpan("trunkRed", readTrunkRed()),
     // #2075: ONE GRAPHQL CALL, READ PER ISSUE. `null` (refused) emits nothing and is said on stderr below. agent-org#490: `settleOffBoardRows` boards the rows whose label names a Status first.
     // #2691's `callCountSignals` is beside it, costing no `GH_READS`; `claimedComments` (#2710's window anchor) is the SAME read made above.
-    offBoard: settleOffBoardRows(offBoard, { openRows: allOpen, portFor: boardingPortOf }), callCountSignals: rowCallCountSignals(allOpen, liveClaudeTurns(), claimedComments, { waitClearedAt: readWaitClearedAt }), bareAnswerLabels: bareAnswerLabelOrders(withAnswerLabel([...allOpen, ...openPrs]), defaultRun, Date.now()), answerGiven: answerGivenOrders(allOpen), labJobs: labJobRecordsOrSay(), ...engineerShareReads(allOpen) }; const decided = withStalePrimaryNotice(decideAndTap(decideArgs), primaryDrift); // #2711, #2729, #3632; `main` is at its 90-line limit
-  const others = otherScopeTicks(drain, otherScopes, openPrs, homeRowsOf(allOpen)); // #4386: `homeRowsOf` -- so an agent-org pull request is owned by the worker its branch names. #2618: the OTHER declared repositories -- none for one project, whose orders are what they were
-  recordTickFailures({ trunkRed: decideArgs.trunkRed, keyedTrunkReds: others.map((tick) => ({ repo: tick.repo, red: tick.trunkRed })), prs: decideArgs.prs });
-  fileResolverDefects([...resolverDefectsOf(decideArgs.prs, allOpen), ...others.flatMap((tick) => tick.defects)]); // #4386: a fallback order for a PR that named a live claimant files its own defect, once per PR
+    offBoard: endGateSpan("settleOffBoard", settleOffBoardRows(offBoard, { openRows: allOpen, portFor: boardingPortOf })), callCountSignals: endGateSpan("callCountSignals", rowCallCountSignals(allOpen, liveClaudeTurns(), claimedComments, { waitClearedAt: readWaitClearedAt })), bareAnswerLabels: endGateSpan("bareAnswerLabels", bareAnswerLabelOrders(withAnswerLabel([...allOpen, ...openPrs]), defaultRun, Date.now())), answerGiven: endGateSpan("answerGiven", answerGivenOrders(allOpen)), labJobs: endGateSpan("labJobs", labJobRecordsOrSay()), ...endGateSpan("engineerShare", engineerShareReads(allOpen)) }; const decided = endGateSpan("decide", withStalePrimaryNotice(decideAndTap(decideArgs), primaryDrift)); // #2711, #2729, #3632; `main` is at its 90-line limit
+  const others = endGateSpan("otherScopes", otherScopeTicks(drain, otherScopes, openPrs, homeRowsOf(allOpen))); // #4386: `homeRowsOf` -- so an agent-org pull request is owned by the worker its branch names. #2618: the OTHER declared repositories -- none for one project, whose orders are what they were
+  endGateSpan("tickFailures", recordTickFailures({ trunkRed: decideArgs.trunkRed, keyedTrunkReds: others.map((tick) => ({ repo: tick.repo, red: tick.trunkRed })), prs: decideArgs.prs }));
+  endGateSpan("resolverDefects", fileResolverDefects([...resolverDefectsOf(decideArgs.prs, allOpen), ...others.flatMap((tick) => tick.defects)])); // #4386: a fallback order for a PR that named a live claimant files its own defect, once per PR
   const outageNow = outageThisTick({ prs, readyRows, promotableRows, chairmanBlocked, openRows: openRowsRead, claimedComments, offBoard, others });
-  const incident = holdForIncidentNow(githubStatus, [...decided, ...others.flatMap((tick) => tick.orders)], { prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], required });
-  const { delivered: orders, performed: performedOnPrs } = performActions(markOutageReads(incident.orders, outageNow));
+  const incident = endGateSpan("incident", holdForIncidentNow(githubStatus, [...decided, ...others.flatMap((tick) => tick.orders)], { prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], required }));
+  const { delivered: orders, performed: performedOnPrs } = endGateSpan("performActions", performActions(markOutageReads(incident.orders, outageNow)));
   const performed = performedOnPrs + strippedClosedClaims; // #3883: a tick that took labels off a closed row did something, and must not read as an idle org
   orders.push(...incident.signal);
   // #4602: THE SAME `blocked` THE TICK REPORTS AS WITHHELD (below), counted per holder and over time -- computed once, so the count and the report cannot disagree.
   const shelvedHere = partitionUnclaimed(rows, prFiles, { rowBranches, branchPrs, openRows: allOpen, chairmanRows: offerHierarchy.chairmanRows }).blocked;
   const keyedTrackers = otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [[scope.tracker.repo, read.openRows ?? []] as const])); // agent-org#695: each keyed tracker's rows by repository, which its shelvings' bare numbers are among
   const shelvedElsewhere = others.flatMap((tick, at) => tick.blocked.map((row) => ({ ...row, repo: otherScopes[at].scope.tracker?.repo })));
-  orders.push(...blockingImpactOrders({ shelved: [...shelvedHere, ...shelvedElsewhere], openRows: allOpen, trackers: Object.fromEntries(keyedTrackers), prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], stateDir: REVIEWER_STATE_DIR }));
-  orders.push(...chainWaitOrders({ prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], rows: allOpen, stateDir: REVIEWER_STATE_DIR, state: readReenqueueState(), now: Date.now(), log: (line) => process.stderr.write(line) })); // a11ign#5126: flag `queue.chainWaitWake`, OFF by default
-  orders.push(...closedUnderHalfOrders({ prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], homeRepo: repoNow(), stateDir: REVIEWER_STATE_DIR, state: readReenqueueState(), log: (line) => process.stderr.write(line),
-    trackers: [{ repo: repoNow(), rows: openRowsRead }, ...otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }]))] })); // a11ign#5125: a row closed under an open half is said once; `null` rows are a refused read and say nothing
+  orders.push(...endGateSpan("blockingImpact", blockingImpactOrders({ shelved: [...shelvedHere, ...shelvedElsewhere], openRows: allOpen, trackers: Object.fromEntries(keyedTrackers), prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], stateDir: REVIEWER_STATE_DIR })));
+  orders.push(...endGateSpan("chainWait", chainWaitOrders({ prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], rows: allOpen, stateDir: REVIEWER_STATE_DIR, state: readReenqueueState(), now: Date.now(), log: (line) => process.stderr.write(line) }))); // a11ign#5126: flag `queue.chainWaitWake`, OFF by default
+  orders.push(...endGateSpan("closedUnderHalf", closedUnderHalfOrders({ prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], homeRepo: repoNow(), stateDir: REVIEWER_STATE_DIR, state: readReenqueueState(), log: (line) => process.stderr.write(line),
+    trackers: [{ repo: repoNow(), rows: openRowsRead }, ...otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }]))] }))); // a11ign#5125: a row closed under an open half is said once; `null` rows are a refused read and say nothing
   const releaseSeen: { runs?: ReleaseRuns | null } = {}; // a11ign#5100: the release read `orgHealthNow` makes, kept for the canary, so it costs no second call
-  orders.push(...reviewerAuthTick({ orders }), ...repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) }), ...orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => (releaseSeen.runs = readReleaseRuns(defaultRun, repoNow())),
+  orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => (releaseSeen.runs = readReleaseRuns(defaultRun, repoNow())),
     readReleaseFailures: () => readReleaseFailures(defaultRun, releaseRepositories(), { known: { [repoNow()]: releaseSeen.runs } }), // agent-org#887: every repository the org releases; the project's runs are the ones read just above
     raiseReleaseIncidents: (reads) => { fileReleaseIncidents(reads, { run: defaultRun, tracker: repoNow() }); },
-    readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) }),
-    ...rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() }), ...chairmanAsksNow(openRowsRead),
+    readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(waitTickFacts, { run: defaultRun }) })),
+    ...endGateSpan("rulingOrders", rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() })), ...chairmanAsksNow(openRowsRead),
     ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
-  orders.push(...machineryCanaryNow({ unread: unreadLanes({ prs, readyRows, others }), unarmed: armingSplit === null ? null : armingSplit.unarmed, releaseRuns: releaseSeen.runs ?? null, suppressions: incident.suppressions, stranded: armingSplit?.stranded ?? [] })); // a11ign#5100, a11ign#5125
-  approvedUnqueuedNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)], repos: homeProjectDeclaration().tracker.map((t) => t.repo), repo: repoNow(), stateDir: REVIEWER_STATE_DIR, run: defaultRun }); // agent-org#893: the daily reading on #928; never throws, adds no order
+  endGateSpan("chairmanAsks+holdHolders");
+  orders.push(...machineryCanaryNow({ unread: unreadLanes({ prs, readyRows, others }), unarmed: armingSplit === null ? null : armingSplit.unarmed, releaseRuns: releaseSeen.runs ?? null, suppressions: incident.suppressions, stranded: armingSplit?.stranded ?? [] })); endGateSpan("machineryCanary"); // a11ign#5100, a11ign#5125
+  endGateSpan("approvedUnqueued", approvedUnqueuedNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)], repos: homeProjectDeclaration().tracker.map((t) => t.repo), repo: repoNow(), stateDir: REVIEWER_STATE_DIR, run: defaultRun })); // agent-org#893: the daily reading on #928; never throws, adds no order
   // FIRST OF ALL, AND ON PURPOSE (#2163): `wake` delivers in this order and records each delivery with a write, so
   // on a full disk the tick can end partway. The order that says the disk is full must not be the one behind it.
   orders.unshift(...diskOrders);
-  orders.push(...deadMansSwitch({ orders, drain, performed, openRows: openRowsRead, agents: herdrListing }), ...retrospectiveTick()); // #2938: AFTER the switch, which reads `orders` -- a once-a-day offer must not mask a stall
+  orders.push(...deadMansSwitch({ orders, drain, performed, openRows: openRowsRead, agents: herdrListing }), ...retrospectiveTick()); endGateSpan("deadMansSwitch+retrospective"); // #2938: AFTER the switch, which reads `orders` -- a once-a-day offer must not mask a stall
   // #4065: LAST, and AFTER the switch above: a stuck org that found something is not a quiet org, even when `ceo` is not woken for it. Only the `org-health` orders to `ceo` are held, and the digest rides the first order `ceo` still gets.
-  const emitted = quietOrgHealth(settleOverdueLists(orders, { portFor: portOf }), { dir: REVIEWER_STATE_DIR }); // agent-org#491: the `overdue` list is a row write, not an order
+  const emitted = quietOrgHealth(settleOverdueLists(orders, { portFor: portOf }), { dir: REVIEWER_STATE_DIR }); endGateSpan("settleOrders"); // agent-org#491: the `overdue` list is a row write, not an order
   for (const order of emitted) process.stdout.write(`${JSON.stringify(order)}\n`);
 
   // BOTH SHELVES ON ONE LINE-SHAPE. The engineer pool's B4/declared-wait shelvings and the fleet batch's
   // (#2027) are the same fact -- work the gate can see and is deliberately not offering -- and a row that
   // leaves a set silently is the defect both filters exist to fix.
-  reportWithheld({ drain, blocked: [...shelvedHere, ...partitionFleetBatch(allOpen).waiting, ...others.flatMap((tick) => tick.blocked)] });
+  endGateSpan("reportWithheld", reportWithheld({ drain, blocked: [...shelvedHere, ...partitionFleetBatch(allOpen).waiting, ...others.flatMap((tick) => tick.blocked)] }));
 
   const unread = unreadLanes({ prs, readyRows, others });
   if (unread.length > 0) exitPartial(unread, emitted.length);

@@ -292,4 +292,91 @@ export function summariseCensus(records: { cmd: string; line: string; ms: number
   return { commands, ghRepos, subcommands: summariseNamed(records, bySubcommand), phaseCalls: summarisePhases(records), slowest, hottest };
 }
 
+// ---- THE GATE'S OWN SPANS (agent-org#1050) -------------------------------------------------------------------------------------------------------
+// The census above names every process the gate starts and cannot say which of the gate's reads started it: 534 `gh` calls and 181 s of a 300 s gate
+// were `other`, and the read it was killed in was a `node -e` with no name. The gate says where it is instead. `main` ends a span at each step with
+// `endGateSpan(name, value)`, so the spans PARTITION the gate's wall from process start to the last step and sum to the call, and nothing between two
+// steps is unattributed.
+
+/** Where the tick names the file the gate appends its spans to, in the gate's environment only. Unset (the gate run by hand), the gate writes nothing. */
+export const GATE_SPANS_ENV = "AGENT_ORG_GATE_SPANS";
+
+/** How many spans the cost line keeps, largest wall first: the row asks for the five largest. */
+export const GATE_SPANS_KEPT = 5;
+
+/** `cpuMs` is the gate's own CPU plus its children's, `null` when `/proc` was unreadable; `ghCalls` is the `gh` calls the census saw start in the span, `null` with no census to count. */
+export type GateSpan = { name: string; wallMs: number; cpuMs: number | null; ghCalls: number | null };
+
+/** `gh` calls the census file holds so far, by their `"cmd":"gh"` field (a record's `line` escapes its quotes, so it cannot match); `null` when it cannot be read. */
+function ghCallsSeen(): number | null {
+  const path = process.env[CENSUS_ENV];
+  if (!path) return null;
+  try {
+    return (readFileSync(path, "utf8").match(/"cmd":"gh"/g) ?? []).length;
+  } catch (error) {
+    return (error as any)?.code === "ENOENT" ? 0 : null; // no file yet is no call yet; any other failure is not a count
+  }
+}
+
+/**
+ * Where the last span ended, on the clocks the next one is measured from. Wall and CPU begin at the process's start, which is zero on both. The census
+ * file is the whole TICK's, so the count of `gh` calls begins at what the file already holds when the gate loads this module: the tick's earlier phases are not the gate's.
+ */
+const spanEnd: { wallMs: number; cpuMs: number | null; ghCalls: number | null } = { wallMs: 0, cpuMs: 0, ghCalls: process.env[GATE_SPANS_ENV] ? ghCallsSeen() : null };
+
+/** `later - earlier`, or `null` when either was not read: an unknown is never a difference of zero. */
+const between = (later: number | null, earlier: number | null): number | null => (later === null || earlier === null ? null : later - earlier);
+
+/**
+ * Ends the span that began where the last one ended and RETURNS `value` untouched, so it wraps an expression in place (or stands alone as a statement, where a test pins the text of the one before it). It appends one line to the
+ * file `GATE_SPANS_ENV` names and does nothing when none is named. It never throws and never writes to stdout, which is the gate's orders.
+ */
+export function endGateSpan<T = undefined>(name: string, value?: T): T {
+  const path = process.env[GATE_SPANS_ENV];
+  if (!path) return value as T;
+  try {
+    const usage = process.cpuUsage();
+    const children = childrenCpuMs();
+    const now = { wallMs: performance.now(), cpuMs: Number.isNaN(children) ? null : (usage.user + usage.system) / MS_PER_SECOND + children, ghCalls: ghCallsSeen() };
+    const cpuMs = between(now.cpuMs, spanEnd.cpuMs);
+    const span: GateSpan = { name, wallMs: Math.round(now.wallMs - spanEnd.wallMs), cpuMs: cpuMs === null ? null : Math.round(cpuMs), ghCalls: between(now.ghCalls, spanEnd.ghCalls) };
+    Object.assign(spanEnd, now);
+    appendFileSync(path, `${JSON.stringify(span)}\n`);
+  } catch (error) {
+    process.stderr.write(`GATE SPAN NOT RECORDED at ${path}: ${String((error as any)?.message ?? error)}\n`);
+  }
+  return value as T;
+}
+
+/**
+ * The spans a gate left, in the order it ended them. A line that is not a span (a name and a wall in ms) is skipped, never fatal. `null` when the
+ * file is missing, unreadable or holds no span: a gate that did not report is not a gate that was free, and `[]` would say it was.
+ */
+export function readGateSpans(path: string): GateSpan[] | null {
+  let text;
+  try {
+    text = readFileSync(path, "utf8");
+  } catch {
+    return null;
+  }
+  const spans = text.split("\n").flatMap((line) => {
+    try {
+      const { name, wallMs, cpuMs, ghCalls } = JSON.parse(line);
+      if (typeof name !== "string" || typeof wallMs !== "number" || !Number.isFinite(wallMs)) return [];
+      const count = (value: unknown) => (typeof value === "number" && Number.isFinite(value) ? value : null);
+      return [{ name, wallMs, cpuMs: count(cpuMs), ghCalls: count(ghCalls) }];
+    } catch {
+      return [];
+    }
+  });
+  return spans.length === 0 ? null : spans;
+}
+
+/** The `GATE_SPANS_KEPT` largest by wall (CPU breaks a tie, then the order the gate ended them in), which are what the cost line carries. */
+export function largestSpans(spans: GateSpan[]): GateSpan[] {
+  return spans.map((span, at) => ({ span, at }))
+    .sort((a, b) => b.span.wallMs - a.span.wallMs || (b.span.cpuMs ?? 0) - (a.span.cpuMs ?? 0) || a.at - b.at)
+    .slice(0, GATE_SPANS_KEPT).map(({ span }) => span);
+}
+
 if (process.env[CENSUS_ENV]) installSpawnCensus(process.env[CENSUS_ENV]);
