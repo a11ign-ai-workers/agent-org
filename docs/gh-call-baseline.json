@@ -1,5 +1,11 @@
 {
   "about": "The most `gh` call sites each file outside src/ticket-port/ may hold, written once from docs/gh-call-inventory.json (agent-org#826). It only goes DOWN: lower an entry by hand when a file sheds calls. A rise is refused by src/packaging/gh-call-ratchet.test.ts, and new code goes through the ticket port or the code-host port (ADR 0046).",
+  "phases": {
+    "org-health": {
+      "about": "The `gh` spawns of one org-health pass on the org-health fixture with a stub gh (agent-org#1225, src/packaging/tick-budget.test.ts). It only goes DOWN: lower it by hand when the phase sheds a read. A rise is refused by that test.",
+      "spawns": 7
+    }
+  },
   "files": {
     "src/api-pool.ts": {
       "spawns": 0,

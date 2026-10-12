@@ -39,7 +39,7 @@ import { ANSWER_PREFIX } from "./waiting-condition.ts";
 import { declaredClosedRows } from "./row-claim/file-overlap-rule.ts";
 import { declaredGhAccount } from "./gh-identity.ts";
 import { repeatingLinesTick } from "./repeating-lines.ts";
-import { readToolAgreement, readReleaseRuns, readReleaseFailures, fileReleaseIncidents, readFleetBuildIncidents, type ReleaseRuns, type CanaryState } from "./org-health.ts";
+import { readToolAgreement, fileReleaseIncidents, type ReleaseRuns, type CanaryState } from "./org-health.ts";
 import { stateEntryPath } from "./host-config.ts";
 import { TICK_COST_FILE, TICK_RECORD_FILE, readTickRecordState, tickHealthOf, type TickHealth } from "./work-tick-health.ts"; // agent-org#1208: the tick's own record, read by the gate for its `org-health` lines
 import { readFlagLedger } from "./flag-switch-ledger.ts"; // agent-org#1135: the gate is the one caller that reads the project's declarations; `orgHealthNow` otherwise does not ask
@@ -60,7 +60,7 @@ export { redOnlyBySupersededRun, mergeConflictOrders, greenUnarmedOrders, review
   stallReasonOf, stallOrderOf, stalledPrOrders, STALL_REASON, STALL_REASONS_WITHOUT_A_CAUSE, ownerOfPr,
   awaitingEvidenceStaleOrders } from "./work-gate/pr-orders.ts";
 
-import { orgHealthNow, rulingOrdersNow, boardTruthNow, waitTickFacts, releaseRepositories } from "./work-gate/org-health.ts";
+import { orgHealthTogether, rulingOrdersNow, waitTickFacts } from "./work-gate/org-health.ts";
 import { approvedUnqueuedNow } from "./approved-unqueued.ts";
 import { recordRouteOutcomesOnHost } from "./work-gate/route-outcome-pass.ts";
 import { quietOrgHealth } from "./work-gate/org-health-suppression.ts";
@@ -635,10 +635,11 @@ function main() {
     trackers: [{ repo: repoNow(), rows: openRowsRead }, ...otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }]))] }))); // a11ign#5125: a row closed under an open half is said once; `null` rows are a refused read and say nothing
   orders.push(...endGateSpan("queueEntryNoRun", queueEntryNoRunOrders({ prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], scope: repoNow(), run: defaultRun, state: readReenqueueState(), stateDir: REVIEWER_STATE_DIR, now: Date.now(), log: (line) => process.stderr.write(line) }))); // agent-org#1195: flag `queue.queueEntryNoRun`, OFF by default; reads and writes nothing while it is
   const releaseSeen: { runs?: ReleaseRuns | null } = {}; // a11ign#5100: the release read `orgHealthNow` makes, kept for the canary, so it costs no second call
-  orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => (releaseSeen.runs = readReleaseRuns(defaultRun, repoNow())),
-    readReleaseFailures: () => readReleaseFailures(defaultRun, releaseRepositories(), { known: { [repoNow()]: releaseSeen.runs } }), // agent-org#887: every repository the org releases; the project's runs are the ones read just above
-    raiseReleaseIncidents: (reads) => { fileReleaseIncidents(reads, { run: defaultRun, tracker: repoNow() }); },
-    readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readFlagSwitches: () => readFlagLedger(), readTickRecord: () => readTickRecordState(stateEntryPath(TICK_RECORD_FILE)), readTickHealth: tickHealthNow, readWaits: unparkingWaits(() => waitReads, { run: defaultRun }) })),
+  orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", orgHealthTogether({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips,
+    raiseReleaseIncidents: (reads) => { fileReleaseIncidents(reads, { run: defaultRun, tracker: repoNow() }); }, // agent-org#887: every repository the org releases; the project's runs are read in the wave below
+    readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readFlagSwitches: () => readFlagLedger(), readTickRecord: () => readTickRecordState(stateEntryPath(TICK_RECORD_FILE)), readTickHealth: tickHealthNow, readWaits: unparkingWaits(() => waitReads, { run: defaultRun }) },
+    // agent-org#1225: the org's gh reads asked together (the wave), then the effects above, in their order, on the data the wave read
+    { repo: repoNow(), openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), now: Date.now(), onReleaseRuns: (runs) => { releaseSeen.runs = runs; } })),
     ...endGateSpan("rulingOrders", rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() })), ...chairmanAsksNow(openRowsRead),
     ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
   endGateSpan("chairmanAsks+holdHolders");
