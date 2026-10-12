@@ -1,3 +1,4 @@
+// no-token: gh -- claimOrdersIn reads the file it is handed and never reaches `gh`; the import of wake.ts reaches `defaultGh`'s spawn, which this file never calls
 // #1065: A NUL RUN IN THE CLAIM-ORDERS RECORD IS TORN-WRITE PADDING, NOT CONTENT. A power loss or fs crash leaves NUL bytes in front of (or in place of) an
 // entry, and the work-tick warned about every such line on every tick (49+), tripping the repeating-line detector. The real line 1378 is a 353-byte NUL run
 // in front of a COMPLETE `arm` record, so the record itself is intact and must be read, not only skipped: case 1 is that shape, case 2 the pure-padding
