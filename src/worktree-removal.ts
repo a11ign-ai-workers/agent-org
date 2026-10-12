@@ -86,7 +86,7 @@ export type Gh = (args: string[]) => string;
 /**
  * @type {Gh}
  */
-const defaultGh: Gh = (args) => {
+export const defaultGh: Gh = (args) => {
   const ran = spawnSync("gh", args, { encoding: "utf8" });
   if (ran.status !== 0) throw new Error(`gh ${args.slice(0, 3).join(" ")} exited ${ran.status}: ${(ran.stderr ?? "").trim()}`);
   return ran.stdout;
