@@ -635,7 +635,7 @@ test("#1050: the gate's orders reach `wake` byte-identical with and without the 
 
 test("#1050: a span counts the `gh` calls that started inside it and not the tick's earlier ones, and its CPU is the gate's own plus its children's", () => {
   const before = `import { execFileSync } from "node:child_process";\n`
-    + `const reads = () => { for (let i = 0; i < 3; i += 1) { try { execFileSync("gh", ["pr", "list"]); } catch {} } };\n`
+    + `const reads = () => { for (let i = 0; i < 3; i += 1) { try { execFileSync("/nowhere/gh", ["pr", "list"]); } catch {} } };\n`
     + `endGateSpan("startup", 0);\nreads();\nendGateSpan("reads", 0);\n`;
   const gate = `import { endGateSpan } from "./lib/spawn-census.ts";\n${before}`
     + `import { execFileSync as run } from "node:child_process";\nrun(process.execPath, ["-e", ${JSON.stringify(burnCpu(150))}]);\nendGateSpan("burn", 0);\nendGateSpan("empty", 0);\nprocess.exit(0);\n`;
