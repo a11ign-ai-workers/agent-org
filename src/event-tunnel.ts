@@ -8,6 +8,11 @@
 // THE UNIT is `host/event-tunnel.service.in` (owned by `host-units.ts`, shipped for `events.tunnel: "tailscale-funnel"`) and runs `up` and `down`; the receiver is `event-receiver.ts`.
 // `up` and `down` touch ONE path on port 443 and never `reset` or an unscoped `off`: the node's other serve mounts (the trace pages, tailnet-only on 8443) are not this file's.
 //
+// BOTH READ FIRST (`tailscale serve status --json`, which needs no root) and change nothing when the path is already in the state asked for, and both READ AFTER and fail when it is not.
+// Why: tailscaled refuses a non-root change to the serve config whenever the config being sent holds a FILE-PATH handler anywhere in it, new or not (`ipn/localapi/serve.go`,
+// `HasPathHandler`), and the node's trace pages are exactly one. A mount applied once by root therefore stays, and a oneshot that re-ran `tailscale funnel` at every login would fail
+// against a path that is already correctly served. The read-after is the other half: a `down` that was refused must not leave the unit `inactive` over a path that is still public.
+//
 // THE SECRET is generated once into the file the receiver reads (`events.receiver.secretPath`, mode 600 in a 700 directory) and is NEVER REPLACED by this file: a second `register` that
 // rotated it would break every delivery until the App's copy caught up, and the file is the one place both halves read it from. It appears in no output, argument or error here.
 //
@@ -111,6 +116,30 @@ export function funnelArguments({ publicUrl, port }: { publicUrl: string, port: 
   };
 }
 
+type Mount = { publicUrl: string, port: number };
+
+/** Whether `tailscale serve status --json` shows the receiver's loopback port proxied at the funnel path AND the host's port 443 open to the internet (`AllowFunnel` is per host:port, not per path). */
+export function pathIsServed(status: unknown, { publicUrl, port }: Mount): boolean {
+  const { hostname, pathname } = new URL(publicUrl);
+  const hostPort = `${hostname}:${FUNNEL_PORT}`;
+  const { Web: web, AllowFunnel: funnel } = (status ?? {}) as { Web?: Record<string, { Handlers?: Record<string, { Proxy?: string }> }>, AllowFunnel?: Record<string, boolean> };
+  const proxy = web?.[hostPort]?.Handlers?.[pathname]?.Proxy;
+  return funnel?.[hostPort] === true && proxy?.replace(/\/$/, "") === `http://127.0.0.1:${port}`;
+}
+
+/** Moves the path to the state `command` names, or says it is already there. Throws when the state afterwards is not the one asked for, so a refused change is never reported as done. */
+export function changeFunnel(command: "up" | "down", mount: Mount, deps: { out: (line: string) => unknown, run: (args: string[]) => void, readStatus: () => unknown }): void {
+  const { out, run, readStatus } = deps;
+  const wanted = command === "up";
+  if (pathIsServed(readStatus(), mount) === wanted) return void out(`${new URL(mount.publicUrl).pathname} is already ${wanted ? "served" : "off"}: nothing to change`);
+  const args = funnelArguments(mount)[command];
+  out(`tailscale ${args.join(" ")}`);
+  run(args);
+  if (pathIsServed(readStatus(), mount) !== wanted) {
+    throw new EventTunnelFailure(`\`tailscale ${args.slice(0, 1)}\` returned and ${new URL(mount.publicUrl).pathname} is still ${wanted ? "NOT served" : "served"}: \`tailscale serve status --json\` says so`);
+  }
+}
+
 type Declared = { app: App, publicUrl: string, secretPath: string };
 
 /** The scheduler App, the public URL and the secret path, from the host's declaration -- or a refusal naming the field that is missing. */
@@ -139,8 +168,17 @@ export function funnelFacts(host: Parameters<typeof declaredTunnel>[0]): { publi
 
 const realRun = (args: string[]) => { execFileSync("tailscale", args, { stdio: "inherit", timeout: REQUEST_TIMEOUT_MS * 2 }); };
 
-export async function main(argv: string[], deps: { out?: (line: string) => unknown, fetch?: Fetch, now?: () => number, run?: (args: string[]) => void } = {}): Promise<number> {
-  const { out = (line: string) => process.stdout.write(`${line}\n`), fetch = realFetch, now = () => Math.floor(Date.now() / 1000), run = realRun } = deps;
+const realReadStatus = (): unknown => {
+  const text = execFileSync("tailscale", ["serve", "status", "--json"], { encoding: "utf8", timeout: REQUEST_TIMEOUT_MS }).trim();
+  try {
+    return text === "" ? {} : JSON.parse(text);
+  } catch (cause) {
+    throw new EventTunnelFailure("`tailscale serve status --json` did not answer JSON", { cause });
+  }
+};
+
+export async function main(argv: string[], deps: { out?: (line: string) => unknown, fetch?: Fetch, now?: () => number, run?: (args: string[]) => void, readStatus?: () => unknown } = {}): Promise<number> {
+  const { out = (line: string) => process.stdout.write(`${line}\n`), fetch = realFetch, now = () => Math.floor(Date.now() / 1000), run = realRun, readStatus = realReadStatus } = deps;
   const [command] = argv;
   if (command !== "register" && command !== "deliveries" && command !== "up" && command !== "down") {
     out("usage: node src/event-tunnel.ts <up|down|register|deliveries>");
@@ -150,10 +188,7 @@ export async function main(argv: string[], deps: { out?: (line: string) => unkno
     const { homeHostConfig } = await import("./host-config.ts");
     const host = homeHostConfig() as Parameters<typeof declaredTunnel>[0];
     if (command === "up" || command === "down") {
-      const { publicUrl, port } = funnelFacts(host);
-      const args = funnelArguments({ publicUrl, port })[command];
-      out(`tailscale ${args.join(" ")}`);
-      run(args);
+      changeFunnel(command, funnelFacts(host), { out, run, readStatus });
       return 0;
     }
     const { app, publicUrl, secretPath } = declaredTunnel(host);
