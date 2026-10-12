@@ -146,7 +146,7 @@ export function blockerClearedReading(rows: any[], today: string = todayIso(), n
     const session = sessionOf(row);
     const cleared = declaredBlockers(row);
     if (!session || !labelsOf(row).includes(CLAIM_LABEL) || cleared === null) continue;
-    if (resumed.has(Number(row.number))) continue;
+    if (resumed(row)) continue;
     // THE LINE THAT MAKES `cleared` MEAN CLEARED. `waitingOn` reports an OPEN `blockedBy` node before
     // anything else, so passing here is what proves every number above is closed -- and it covers the
     // other conditions in the same breath, which is why `declaredBlockers` does not re-ask.

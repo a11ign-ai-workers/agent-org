@@ -297,7 +297,7 @@ test("#3706 (4) an EMPTY listing, a refused read and a list that bounds nothing 
 
 // --- agent-org#805: THE POPULATION. Every order the gate can type for a HELD row, with the holder's pull request OPEN, in either tracker -------------------------
 // The population is what the gate ACTUALLY types: `claimStallTick` every five minutes for four hours (claim-stalled, and a release of it) and `blockerClearedReading`
-// (blocker-cleared, which `tick.ts` gives the home tracker's rows alone). Three placements of the pull request: in the home repository, in another tracked repository
+// (blocker-cleared: the home tracker's rows with the claim facts, and the other tracker's rows with their own pull requests and no claim facts, as `scopeTick` asks them). Three placements of the pull request: in the home repository, in another tracked repository
 // with the row in the home tracker, and a row of the other tracker with its pull request in its own repository. THE TWIN is the same placement with NO pull request.
 // The holder is IDLE at its prompt with the standing panes present (a listing without them reads `unknown`, which is no stall), and the nudge memory is carried between
 // ticks as the state file carries it (an idle run is counted from its first tick, so a memory that is dropped each tick never stalls).
@@ -325,7 +325,8 @@ function populationOf(placement: Placement, withPr: boolean, red = false): { cau
   const row = otherRow ? POP_OTHER_ROW : POP_ROW;
   const prExtra = red ? { statusCheckRollup: POP_RED } as Partial<Pr> : {};
   const homeOpen = withPr && placement === "home" ? [popPr(row, prExtra)] : [];
-  const elsewhereOpen = withPr && placement !== "home" ? [popPr(row, { ...prExtra, repoKey: "agent-org" })] : [];
+  // The other tracker's pull request closes its row BY THE TRACKER'S REFERENCE (agent-org#1162): a closing reference is what makes it the holder's work.
+  const elsewhereOpen = withPr && placement !== "home" ? [popPr(row, otherRow ? { ...prExtra, repoKey: "agent-org", repo: "a11ign/agent-org", body: `Closes a11ign/agent-org#${row}` } as Partial<Pr> : { ...prExtra, repoKey: "agent-org" })] : [];
   const memory: Record<string, unknown> = {};
   const typed: { cause: string; causeKey: string; }[] = [];
   let claimFacts: Facts = undefined as never;
@@ -338,10 +339,11 @@ function populationOf(placement: Placement, withPr: boolean, red = false): { cau
       onFacts: (f: unknown) => { if (minutes === 0) claimFacts = f as Facts; } } as never) as unknown as { cause: string; causeKey: string; }[];
     typed.push(...tick.map((o) => ({ cause: o.cause, causeKey: o.causeKey })));
   }
-  if (!otherRow) {
-    const reading = blockerClearedReading([popRow(row)], TODAY, T("12:00:00"), { openPrs: homeOpen, closings: new Map([[3384, CLEARED]]), claimFacts });
-    typed.push(...reading.orders.map((o) => ({ cause: "blocker-cleared", causeKey: o.causeKey })));
-  }
+  // `tick.ts` asks blockerClearedOrders of the other tracker's rows with ITS pull requests and no claim facts (`scopeTick`), so that is the reading made here.
+  const reading = otherRow
+    ? blockerClearedReading([{ ...popRow(row), repoKey: "agent-org", repo: "a11ign/agent-org" }], TODAY, T("12:00:00"), { openPrs: elsewhereOpen, closings: new Map([[3384, CLEARED]]) })
+    : blockerClearedReading([popRow(row)], TODAY, T("12:00:00"), { openPrs: homeOpen, closings: new Map([[3384, CLEARED]]), claimFacts });
+  typed.push(...reading.orders.map((o) => ({ cause: "blocker-cleared", causeKey: o.causeKey })));
   return typed;
 }
 
@@ -361,6 +363,21 @@ test("agent-org#805 POSITIVE CONTROL: the same rows with NO pull request ARE typ
   for (const placement of ["home", "elsewhere", "other-tracker"] as const) {
     const typed = populationOf(placement, false);
     assert.ok(typed.some((o) => o.cause === "claim-stalled"), `${placement}: claim-stalled is typed without the pull request`);
-    if (placement !== "other-tracker") assert.ok(typed.some((o) => o.cause === "blocker-cleared"), `${placement}: blocker-cleared is typed without the pull request`);
+    assert.ok(typed.some((o) => o.cause === "blocker-cleared"), `${placement}: blocker-cleared is typed without the pull request`);
   }
+});
+
+// agent-org#1162: AN OTHER TRACKER'S ROW IS RESUMED BY ITS OWN PULL REQUEST. A closing reference is read against the tracker it names: `a11ign/agent-org#806` in
+// any repository, `#806` in the repository the pull request is in. The gate read every reference against the PRIMARY tracker, so the holder's open pull request
+// resumed nothing and blocker-cleared asked the holder to pick the row up again while its work was under review.
+const otherRowOf = (number: number) => ({ ...popRow(number), repoKey: "agent-org", repo: "a11ign/agent-org" });
+const otherPrOf = (body: string, extra: Record<string, unknown> = {}) => ({ number: 906, headRefName: "agent/x-806", title: "row 806", createdAt: "2026-10-04T10:45:00Z",
+  body, labels: [], statusCheckRollup: [], repoKey: "agent-org", repo: "a11ign/agent-org", ...extra });
+const clearedFor = (pr: Record<string, unknown>) => blockerClearedReading([otherRowOf(806)], TODAY, T("12:00:00"), { openPrs: [pr], closings: new Map([[3384, CLEARED]]) }).orders;
+
+test("agent-org#1162 an other-tracker row whose open pull request closes it is NOT re-offered, however the reference is written", () => {
+  assert.equal(clearedFor(otherPrOf("Closes a11ign/agent-org#806")).length, 0, "the tracker-qualified reference resumes the row");
+  assert.equal(clearedFor(otherPrOf("Closes #806")).length, 0, "a bare reference in the tracker's own repository is the same row");
+  assert.equal(clearedFor(otherPrOf("Closes #806", { repo: "a11ign/a11ign" })).length, 1, "CONTROL: a bare #806 in ANOTHER repository closes that repository's #806, not this row");
+  assert.equal(clearedFor(otherPrOf("Closes a11ign/agent-org#807")).length, 1, "POSITIVE CONTROL: a pull request that closes another row resumes nothing");
 });
