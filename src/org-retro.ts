@@ -33,7 +33,7 @@ import { gatherChanges, readLedger as readHandFixLedger, ledgerLine as handFixLi
 import { claudeTurns, codexTurns, transcriptFiles } from "./token-audit.ts";
 import { refuseUnknownFlags, flagValue } from "./lib/cli-flags.ts";
 // THE DORA BLOCK (a11ign/a11ign#3135): measured from the registry and GitHub, per declared repository, by its own leaf module.
-import { EMERGENCY_PRIORITY_NOT_HONOURED_KIND, EMERGENCY_PRIORITY_USED_KIND, FAILURE_LEDGER_FILE, SPEC_LINT_REFUSED_KIND, parseFailureLedger, recordFailures, type FailureEntry } from "./failure-ledger.ts";
+import { EMERGENCY_PRIORITY_NOT_HONOURED_KIND, EMERGENCY_PRIORITY_USED_KIND, FAILURE_LEDGER_FILE, SPEC_LINT_REFUSED_KIND, parseFailureLedger, recordFailures, type FailureEntry, type FailureEvent } from "./failure-ledger.ts";
 // THE IDLE-CLAIM INCIDENTS (#4642): the pure detector, and the two things its live read borrows -- the gate's idle memory and the herdr listing.
 import { IDLE_CLAIM_INCIDENT_MINUTES, idleClaimIncidents, idleClaimedHours, incidentEvents, incidentSummary, type ClaimedRow, type HolderState, type IdleClaim, type IdleClaimIncident } from "./idle-claim-incident.ts";
 import { WORKER_STATE_DIR, lastDeliveredTo, readDeclarations } from "./worker-state.ts";
@@ -60,6 +60,8 @@ import { HAIKU_TIER_LABEL } from "./worker-profile.ts";
 import { UNNAMED_FIELD, underspecifiedLines, underspecifiedReading, underspecifiedStops, type UnderspecifiedReading } from "./spec-lint.ts";
 import { commentsSince } from "./ticket-port/comments-since.ts";
 import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: the claimed rows and the merged list are connections, never a search
+// THE SHARED-FAILURE LABEL (agent-org#997): the gate's own constant, so the closed rows the retro counts are the rows the gate files.
+import { SHARED_FAILURE_LABEL } from "./ci-failure-class.ts";
 import { asListJson, readMergedPullRequests, readRowsSince, type SinceRead, SINCE_PAGE_SIZE, WindowCutShort } from "./ticket-port/rows-since.ts";
 
 /** The cause this file feeds (`cause-declaration.ts` declares it), addressed to `ceo`. */
@@ -263,6 +265,72 @@ export function releaseStats(lines: { at: number; message: string; }[]): { voide
   return { voided, byReason: Object.fromEntries(byReason), otherReleases: Object.fromEntries(otherReleases) };
 }
 
+/** The gate's `ci-shared-failure: holding N red order(s) of a shared failure: <subjects>` line (`ci-failure-class.ts`), whose subjects are space-separated. */
+const SHARED_HOLD = /^ci-shared-failure: holding \d+ red order\(s\) of a shared failure:((?: \S+)*)$/;
+/** The gate's `ci-shared-failure: released N red order(s), their hold is over: <subject> (<why>)...` line. */
+const SHARED_RELEASE = /^ci-shared-failure: released \d+ red order\(s\), their hold is over:((?: \S+ \((?:closed|expired|unrecorded)\))*)$/;
+const RELEASED_SUBJECT = /(\S+) \((?:closed|expired|unrecorded)\)/g;
+/** The failure-ledger class keys of the two shared-failure counts (agent-org#997). Not in `FAILURE_KINDS`, for the reason `CHAIRMAN_LABEL_NOT_CHAIRMAN_KIND` (`failure-ledger.ts`) states. */
+export const SHARED_FAILURE_HELD_KIND = "shared-failure-held-then-released";
+export const SHARED_FAILURE_NOT_SAME_KIND = "shared-failure-not-same";
+
+/** One red PR the gate held for a shared-failure incident and then released, at the release line's time. */
+export type SharedFailureWake = { subject: string; at: number };
+/** One shared-failure incident row closed as "not the same failure", at its closing time. */
+export type NotSameFailureClosure = { number: number; closedAt: number };
+
+/**
+ * THE RED-PR WAKES HELD THEN RELEASED (agent-org#997, split from #5098): a red PR the gate HELD for a shared-failure incident and later RELEASED, read from the gate's own
+ * log lines, which `ci-failure-class.ts` writes as the hold happens. The journal is the record of what the gate SAID, so the count is what the org did.
+ * A PR is counted ONCE per window, however many holds it had: a PR held, released and held again is one red PR. A release with no hold before it inside the
+ * window is not counted, because its hold began before the window and this window did not see it held.
+ * @param {{ at: number, message: string }[]} lines @returns {SharedFailureWake[]} in the order they were released
+ */
+export function sharedFailureWakes(lines: { at: number; message: string; }[]): SharedFailureWake[] {
+  const held = new Set<string>();
+  const counted = new Set<string>();
+  const wakes: SharedFailureWake[] = [];
+  for (const { at, message } of lines) {
+    const hold = SHARED_HOLD.exec(message);
+    if (hold !== null) for (const subject of hold[1].split(" ").filter(Boolean)) held.add(subject);
+    const release = SHARED_RELEASE.exec(message);
+    if (release === null) continue;
+    for (const [, subject] of release[1].matchAll(RELEASED_SUBJECT)) {
+      if (!held.has(subject)) continue;
+      held.delete(subject);
+      if (!counted.has(subject)) { counted.add(subject); wakes.push({ subject, at }); }
+    }
+  }
+  return wakes;
+}
+
+/**
+ * THE SHARED-FAILURE INCIDENTS CLOSED AS "NOT THE SAME FAILURE" (agent-org#997): a closed `ci-shared-failure` row whose closing comment says so, closed inside the window.
+ * NOTHING IN THE CODE WRITES THAT SENTENCE: the closer writes it by hand, so the match is on its words, case-blind. A row with no readable closing time is not counted.
+ * @param {{ number: number, closedAt?: string | null, comments?: { body?: string }[] }[]} rows the closed rows, each with its comments
+ * @param {{ since: number, until: number }} window @returns {NotSameFailureClosure[]}
+ */
+export function notSameFailureClosures(rows: { number: number; closedAt?: string | null; comments?: { body?: string; }[]; }[], { since, until }: { since: number; until: number; }): NotSameFailureClosure[] {
+  const closures: NotSameFailureClosure[] = [];
+  for (const row of rows) {
+    const closedAt = Date.parse(row.closedAt ?? "");
+    if (!(closedAt >= since && closedAt <= until)) continue; // NaN, an unreadable time, is outside every window
+    if ((row.comments ?? []).some((comment) => /not the same failure/i.test(comment.body ?? ""))) closures.push({ number: row.number, closedAt });
+  }
+  return closures;
+}
+
+/** The two counts the report prints. `null` is a read nobody could make (`unknown`, never 0). */
+export type SharedFailures = { wakes: SharedFailureWake[] | null; notSameFailure: NotSameFailureClosure[] | null };
+
+/** The ledger events of the two counts: one per wake (a PR and the day it was released) and one per closure (the row), so each is one incident. */
+export function sharedFailureEvents({ wakes, notSameFailure }: SharedFailures): FailureEvent[] {
+  return [
+    ...(wakes ?? []).map(({ subject, at }) => ({ classKey: SHARED_FAILURE_HELD_KIND, ref: `${subject} ${utcDate(at)}` })),
+    ...(notSameFailure ?? []).map(({ number }) => ({ classKey: SHARED_FAILURE_NOT_SAME_KIND, ref: `#${number}` })),
+  ];
+}
+
 /**
  * What the wake ledger says was DELIVERED in the window: `<epochMs>\t<causeKey>[\t...]`, with the three marker lines
  * (`RESET`, `ESCALATED`, `VOIDED`) carrying their key second. THE LEDGER'S FORMAT IS `wake.ts`'s, which this leaf cannot
@@ -425,10 +493,11 @@ export function buildReport(reads: {
         merged: any[] | null; mergedRepositories?: ReturnType<typeof readMerged> | null; openPrs: any[] | null; journal: string | null; ledger: string | null;
         turns: any[] | null; handFixes: ReturnType<typeof readHandFixLedger> | null; readings?: Readings; dora?: ReturnType<typeof readDora> | null;
         unwaited?: ReturnType<typeof unwaitedStockRows> | null; untiered?: ReturnType<typeof untieredReadyRows> | null; failureLedger?: string | null; blockingRecord?: string | null; idleClaims?: IdleClaimIncident[] | null; idleClaimedHours?: IdleClaimedHours | null; mergedRowOpen?: MergedRowOpenIncident[] | null; inertOptions?: InertOptionReading | null; safetyDenials?: SafetyCheckDenialReading | null;
-        underspecified?: UnderspecifiedReading | null;
+        underspecified?: UnderspecifiedReading | null; closedSharedRows?: any[] | null;
     }, now: number) {
   const window = { since: now - WINDOW_MS, until: now };
   const lines = reads.journal === null ? null : journalLines(reads.journal, window);
+  const closed = reads.closedSharedRows ?? null;
   const across = reads.mergedRepositories === undefined ? undefined : mergedAcross(reads.mergedRepositories ?? [], window);
   const report = {
     date: utcDate(now),
@@ -452,6 +521,7 @@ export function buildReport(reads: {
     mergedRowOpen: mergedRowOpenSummary(reads.mergedRowOpen),
     inertOptions: inertOptionSummary(reads.inertOptions),
     safetyDenials: safetyCheckDenialSummary(reads.safetyDenials),
+    sharedFailures: { wakes: lines === null ? null : sharedFailureWakes(lines), notSameFailure: closed === null ? null : notSameFailureClosures(closed, window) } satisfies SharedFailures,
     underspecified: reads.underspecified ?? null, // a read nobody made or that was refused is `unknown` in the report, never `none`
     specLintRefused: specLintRefusalsOf(parsedFailureLedger(reads.failureLedger), window),
     emergencyPriority: emergencyPriorityOf(parsedFailureLedger(reads.failureLedger), window),
@@ -798,6 +868,27 @@ function safetyDenialLines(summary: ReturnType<typeof safetyCheckDenialSummary>)
   return [`${label}: ${summary.denials} in ${summary.count} session-days${first}${unread}`];
 }
 
+/** How many refs the shared-failure lines name, as the safety-denial line does. */
+const SHARED_FIRST_REFS = 3;
+
+/**
+ * THE SHARED-FAILURE COUNTS (agent-org#997): red PRs the gate held for a shared-failure incident and then released, and incident rows closed as "not the same failure",
+ * each with its first refs. `null` in either is a read nobody made or that was refused, and says `unknown`, never 0.
+ * @param {SharedFailures} shared @returns {string[]}
+ */
+function sharedFailureLines(shared: SharedFailures): string[] {
+  const wakes = "- Red PRs a shared-failure incident held and then released (24h)";
+  const closed = "- Shared-failure incidents closed as \"not the same failure\" (24h)";
+  const line = (label: string, items: string[] | null, unknownWhy: string) => {
+    if (items === null) return `${label}: ${UNKNOWN} (${unknownWhy})`;
+    return `${label}: ${items.length}${items.length === 0 ? "" : `; first: ${items.slice(0, SHARED_FIRST_REFS).join(", ")}`}`;
+  };
+  return [
+    line(wakes, shared.wakes?.map(({ subject }) => subject) ?? null, "the journal could not be read"),
+    line(closed, shared.notSameFailure?.map(({ number }) => `#${number}`) ?? null, "the closed shared-failure rows could not be read"),
+  ];
+}
+
 /**
  * The report as the text `ceo` is handed and posts on #928.
  * @param {ReturnType<typeof buildReport>} report @returns {string}
@@ -806,7 +897,7 @@ export function renderReport(report: ReturnType<typeof buildReport>): string {
   const from = new Date(report.window.since).toISOString();
   const to = new Date(report.window.until).toISOString();
   return [`ORG RETROSPECTIVE ${report.date} -- the 24 hours ${from} to ${to}`, "",
-    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...circularWaitLines(report.circularWaits), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...underspecifiedLines(report.underspecified), ...specLintRefusedLines(report.specLintRefused), ...emergencyPriorityLines(report.emergencyPriority), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
+    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...circularWaitLines(report.circularWaits), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...sharedFailureLines(report.sharedFailures), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...underspecifiedLines(report.underspecified), ...specLintRefusedLines(report.specLintRefused), ...emergencyPriorityLines(report.emergencyPriority), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
 }
 
 /**
@@ -929,6 +1020,39 @@ function attemptDora<T>(read: () => T): T | null {
 
 /** @param {number} now @returns {ReturnType<typeof readDora>} every repository the project declares, through the real readers */
 const readDeclaredDora = (now: number): ReturnType<typeof readDora> => readDora({ repositories: homeProjectDeclaration().dora, now });
+
+/** Rows at or past this many are a list that may have been cut short, so it is refused, never a count quietly too low (`LIST_LIMIT`'s reason). */
+const CLOSED_SHARED_ROWS_LIMIT = 500;
+
+/**
+ * The closed shared-failure rows as read, or `null` when they cannot be counted whole (agent-org#997). A row whose comments run past the first page has a closing
+ * comment this read may not have seen, so the list is refused rather than counted as 0 for that row; so is a list at its ceiling.
+ * @param {Record<string, unknown>[]} raw the rows as `readRowsByLabel` returned them, comments still in their connection shape
+ * @returns {any[] | null}
+ */
+export function readableClosedSharedRows(raw: Record<string, unknown>[]): any[] | null {
+  if (raw.length >= CLOSED_SHARED_ROWS_LIMIT) return null;
+  const whole = raw.every((row) => {
+    const comments = row.comments as { totalCount?: unknown; nodes?: unknown[]; } | null | undefined;
+    return typeof comments?.totalCount === "number" && (comments.nodes?.length ?? 0) >= comments.totalCount;
+  });
+  return whole ? raw.map(asListJson) : null;
+}
+
+/**
+ * THE CLOSED SHARED-FAILURE ROWS, each with its comments, for the "not the same failure" count (agent-org#997). `null` when the read is refused, or when the rows
+ * cannot be read whole (`readableClosedSharedRows`). A refusal is `unknown` in the report, not 0.
+ * @returns {any[] | null}
+ */
+const readClosedSharedRows = (): any[] | null => {
+  try {
+    const raw = readRowsByLabel({ label: SHARED_FAILURE_LABEL, state: "CLOSED", repo: homeProjectDeclaration().repo,
+      select: "number closedAt comments(first:100){totalCount nodes{body}}", run: runThrough(ghJson) });
+    return readableClosedSharedRows(raw);
+  } catch {
+    return null; // a refused read is `unknown`, as `ghJson` says
+  }
+};
 
 /** The day's DORA reading, kept so that a retrospective offered tick after tick (until the wake delivers it) reads the registry and GitHub ONCE. */
 export const DORA_CACHE_FILE = "dora-reading.json";
@@ -1395,12 +1519,13 @@ function retroClasses({ now, stateDir, unit = "a11ign-work-tick.service", memory
   readDoraReport = readDeclaredDora, readAgentListing = () => readAgents(), readIdleHours = (at) => attemptDora(() => readIdleClaimedHours({ now: at, stateDir, memory })), readOpenRowIncidents = (at) => attemptDora(() => readMergedRowOpen({ now: at, memory })),
   readInertOptionReading = (at, recorded) => attemptDora(() => readInertOptions({ now: at, recorded, memory })),
   readDenials = (at) => readSafetyCheckDenials({ since: at - WINDOW_MS }),
-  readUnderspecifiedStops = (at) => attemptDora(() => readUnderspecified({ now: at })) }: {
+  readUnderspecifiedStops = (at) => attemptDora(() => readUnderspecified({ now: at })),
+  readSharedRows = readClosedSharedRows }: {
         now: number; stateDir: string; unit?: string; memory?: RetroReads; readHandFixes?: (now: number) => ReturnType<typeof readHandFixLedger>;
         readDoraReport?: (now: number) => ReturnType<typeof readDora> | null; readUnwaited?: (now: number) => ReturnType<typeof unwaitedStockRows>; readUntiered?: () => ReturnType<typeof untieredReadyRows>; readMergedRepositories?: (now: number) => ReturnType<typeof readMerged>;
         readAgentListing?: () => Agent[] | null; readIdleHours?: (now: number) => IdleClaimedHours | null; readOpenRowIncidents?: (now: number) => MergedRowOpenIncident[] | null;
         readInertOptionReading?: (now: number, recorded: string[]) => InertOptionReading | null; readDenials?: (now: number) => SafetyCheckDenialReading | null;
-        readUnderspecifiedStops?: (now: number) => UnderspecifiedReading | null;
+        readUnderspecifiedStops?: (now: number) => UnderspecifiedReading | null; readSharedRows?: () => any[] | null;
     }) {
   const since = now - WINDOW_MS;
   return [
@@ -1419,6 +1544,7 @@ function retroClasses({ now, stateDir, unit = "a11ign-work-tick.service", memory
       return { failureLedger, inertOptions: readInertOptionReading(now, recordedRefs(failureLedger, CLOSED_ON_MERGE_NOT_OUTCOME)) };
     } },
     { name: "safety denials", read: () => ({ safetyDenials: readDenials(now) }) },
+    { name: "closed shared-failure rows", read: () => ({ closedSharedRows: readSharedRows() }) },
     { name: "underspecified stops", read: () => ({ underspecified: readUnderspecifiedStops(now) }) },
     { name: "journal", read: () => ({ journal: readJournal(unit) }) },
     { name: "transcripts", read: () => ({ turns: readTurns(since) }) },
@@ -1603,6 +1729,7 @@ function dailyRetrospective({ now, stateDir, log, read, readLedger, record }: {
     recordFailures({ logPath: join(stateDir, FAILURE_LEDGER_FILE), events: mergedRowOpenEvents(inputs.mergedRowOpen ?? []), now, report: (line) => log(`${line}\n`) });
     recordFailures({ logPath: join(stateDir, FAILURE_LEDGER_FILE), events: inertOptionEvents(inputs.inertOptions?.incidents ?? []), now, report: (line) => log(`${line}\n`) });
     recordFailures({ logPath: join(stateDir, FAILURE_LEDGER_FILE), events: safetyCheckDenialEvents(inputs.safetyDenials?.incidents ?? []), now, report: (line) => log(`${line}\n`) });
+    recordFailures({ logPath: join(stateDir, FAILURE_LEDGER_FILE), events: sharedFailureEvents(report.sharedFailures), now, report: (line) => log(`${line}\n`) });
     keepReading(record, { stateDir, date, numbers: report.numbers, mergedRepositories: report.mergedRepositories?.map((r) => r.repo) }, log);
     return [retrospectiveOrder(date, text)];
   } catch (err: any) {
