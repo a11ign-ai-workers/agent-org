@@ -90,7 +90,11 @@ import { sandboxGitEnv } from "./lib/git-env.ts";
 // RELATIVE for the same reason as `cli-flags.ts` below (#1373): `row-claim.ts` imports this file before
 // `pnpm install`, where a package specifier dies.
 import { worktreeOwner } from "./worktree-owner.ts";
-import { claimRefusal, recordRemoval, rowsClosed } from "./worktree-removal.ts";
+import { claimRefusal, defaultGh, recordRemoval, rowsClosed, type Gh } from "./worktree-removal.ts";
+import { readOpenPullHeads, type OpenPullHeads } from "./ticket-port/open-pull-heads.ts";
+import { SESSION_PREFIX } from "./project-vocabulary.ts";
+import { REPO } from "./project-identity.ts";
+import { stateEntryPath } from "./host-config.ts";
 
 /**
  * #3850: HOW LONG A TREE WHOSE ROW HAS CLOSED MUST BE UNTOUCHED BEFORE ITS STAMP STOPS HOLDING IT. `heldByOwner` reads `.a11y-owner`,
@@ -1308,7 +1312,81 @@ function heldUnlessReleased(entry: WorktreeEntry, ctx: PruneContext): { refused:
   return row.closed ? { refused: false } : { refused: true, reason: `${held.reason}. ${row.reason}` };
 }
 
-export type PruneContext = { repoRoot: string, run: typeof defaultRun, now: number, dryRun: boolean, primaryPath: string | null, mainLine: Set<string> | null, report: PruneReport, hash?: (file: string) => string, rowsClosed: typeof rowsClosed, pause: () => void, remove: (path: string, deps: { run: typeof defaultRun }) => void, claim?: typeof claimRefusal, record?: typeof recordRemoval, removeByRef: boolean, };
+/**
+ * #1167: the flag that holds a removable tree while an OPEN PR of its branch, or of its session's label, exists. Shipped OFF:
+ * with it off the prune is exactly what it was. `main()` reads it (`openPrHoldOn`); `pruneWorktrees` takes it as a dep.
+ */
+export const OPEN_PR_HOLD_FLAG = "prune.holdOpenPr";
+
+/** How many open PRs one listing reads. A listing that fills the limit may be short, so it is refused rather than trusted. */
+export const PULL_LIST_LIMIT = 1000;
+
+/** `read: false` carries the reason; a failed listing is never an empty list, because "could not read" is not "nobody has a PR open". */
+export type OpenPulls = OpenPullHeads;
+
+/**
+ * Every open PR of the repo, or the reason they could not be read. The read is `readOpenPullHeads` (ticket-port); the runner is
+ * `defaultGh`, whose spawn lives in worktree-removal.ts with the other removal reads.
+ * @param {{ gh?: Gh }} [deps]
+ * @returns {OpenPulls}
+ */
+export function listOpenPulls({ gh = defaultGh }: { gh?: Gh; } = {}): OpenPulls {
+  return readOpenPullHeads(REPO, gh, PULL_LIST_LIMIT);
+}
+
+/**
+ * #1167: why an OPEN PR holds this tree, or null when none does. A PR holds it when the PR's head branch is the tree's branch,
+ * or when the PR carries the tree's session label (the name in its `.a11y-owner` stamp). A listing that could not be read holds
+ * EVERY tree: the prune cannot say that no PR is open, so it removes nothing.
+ * @param {WorktreeEntry} entry @param {OpenPulls} listing
+ * @returns {string | null}
+ */
+function openPrHold(entry: WorktreeEntry, listing: OpenPulls): string | null {
+  if (!listing.read) return `${entry.path} is kept: the open pull requests could not be listed (${listing.reason}), so no PR can be ruled out`;
+  const owner = worktreeOwner(entry.path);
+  const label = owner === null ? null : `${SESSION_PREFIX}${owner}`;
+  for (const pull of listing.pulls) {
+    const onBranch = entry.branch !== null && pull.headRefName === entry.branch;
+    const onLabel = label !== null && pull.labels.includes(label);
+    if (onBranch) return `${entry.path} is kept: open pull request #${pull.number} (${pull.url}) has head branch ${entry.branch}`;
+    if (onLabel) return `${entry.path} is kept: open pull request #${pull.number} (${pull.url}) carries ${label}`;
+  }
+  return null;
+}
+
+/**
+ * #1167: whether `prune.holdOpenPr` is ON in the canary state. Read in `main()` and nowhere else. An absent state file is the
+ * empty state (flag OFF); an unreadable one is OFF too, with a line saying so. `dir` is for tests.
+ * @param {string} [dir]
+ * @returns {Promise<boolean>}
+ */
+export async function openPrHoldOn(dir?: string): Promise<boolean> {
+  // Inside the try: a host with no declaration cannot name the state dir, and that must read the flag OFF, not stop the prune.
+  try {
+    const path = `${dir ?? stateEntryPath("")}/${CANARY_FILE}`;
+    return flagOnIn(existsSync(path) ? readFileSync(path, "utf8") : null, OPEN_PR_HOLD_FLAG);
+  } catch (error) {
+    process.stderr.write(`${OPEN_PR_HOLD_FLAG}: ${CANARY_FILE} is unreadable (${String((error as Error).message).split("\n")[0]}); the flag reads OFF.\n`);
+    return false;
+  }
+}
+
+/** The canary state file's name: `CANARY_STATE_FILE` in org-health.ts. The open-PR test writes that name and reads it back through `openPrHoldOn`. */
+const CANARY_FILE = "machinery-canary.json";
+
+/**
+ * `machineryFlagOn(parseCanaryState(text), name)` from org-health.ts, written out here: org-health is a hub whose import graph reaches `gh`,
+ * and the prune must not reach it for one flag (`host-units.ts`'s `ghSpawnReachedFrom` walks the closure). The test holds the two equal over
+ * the same texts. Absent or empty is OFF; a text that is not `{ flags, samples, memo }` throws; a flag is ON only when its record says `on: true`.
+ */
+function flagOnIn(text: string | null, name: string): boolean {
+  if (text === null || text.trim() === "") return false;
+  const raw = JSON.parse(text) as { flags?: Record<string, { on?: boolean; } | undefined>; samples?: unknown; };
+  if (typeof raw !== "object" || raw === null || typeof raw.flags !== "object" || !Array.isArray(raw.samples)) throw new Error(`${CANARY_FILE} is not { flags, samples, memo }`);
+  return raw.flags?.[name]?.on === true;
+}
+
+export type PruneContext = { repoRoot: string, run: typeof defaultRun, now: number, dryRun: boolean, primaryPath: string | null, mainLine: Set<string> | null, report: PruneReport, hash?: (file: string) => string, rowsClosed: typeof rowsClosed, pause: () => void, remove: (path: string, deps: { run: typeof defaultRun }) => void, claim?: typeof claimRefusal, record?: typeof recordRemoval, removeByRef: boolean, openPulls: OpenPulls | null, };
 
 /**
  * One non-primary tree: assess it, then put it in exactly one bucket of `ctx.report`, removing it when nothing refuses.
@@ -1336,6 +1414,14 @@ function pruneEntry(entry: WorktreeEntry, ctx: PruneContext) {
     return;
   }
   const ignorable = recovery !== null ? recovery.ignorable : assessment.ignorable;
+  // #1167: an open PR of this tree's branch, or carrying its session, keeps it whatever git says about the work. `null` is the flag OFF.
+  if (ctx.openPulls !== null) {
+    const pr = openPrHold(entry, ctx.openPulls);
+    if (pr !== null) {
+      report.held.push({ ...reported, reason: pr });
+      return;
+    }
+  }
   // #2020 BEFORE #1373, and only because it is the cheaper question and the more actionable answer --
   // a tree that is both held and holding records reports the owner who is standing in it. Either
   // refusal removes nothing, so the order decides which reason is printed and nothing else.
@@ -1387,16 +1473,17 @@ function recoveryNote(recovery: Recovery | null, salvaged: string[] | undefined,
  *   be) and counts the trees it did not reach in `unexamined`; it defaults to no limit, because the limit is
  *   a property of a RUN and `main()` is the run. `pauseMs` is the wait between removals, also `main()`'s. `removeByRef`
  *   (#4620) lets a DIRTY tree go once its work is a ref read back (see the file header); it is the run's policy for the same
- *   reason, and a caller that does not name it keeps today's reading of every dirty tree.
+ *   reason, and a caller that does not name it keeps today's reading of every dirty tree. `holdOpenPr` (#1167) holds a
+ *   removable tree while an open PR names it; `openPulls` reads the open PRs, once per run, and only when that is on.
  * @returns {PruneReport}
  */
 export function pruneWorktrees(repoRoot: string, deps: {
     run?: typeof defaultRun; remove?: (path: string, deps: { run: typeof defaultRun; }) => void;
     now?: number; dryRun?: boolean; hash?: (file: string) => string; claim?: typeof claimRefusal;
     record?: typeof recordRemoval; rowsClosed?: typeof rowsClosed; maxRemovals?: number; pauseMs?: number;
-    pause?: (ms: number) => void; removeByRef?: boolean;
+    pause?: (ms: number) => void; removeByRef?: boolean; holdOpenPr?: boolean; openPulls?: () => OpenPulls;
 } = {}): PruneReport {
-  const { run = defaultRun, remove, now = Date.now(), maxRemovals = Infinity, pauseMs = 0, pause = sleep, removeByRef = false } = deps;
+  const { run = defaultRun, remove, now = Date.now(), maxRemovals = Infinity, pauseMs = 0, pause = sleep, removeByRef = false, holdOpenPr = false } = deps;
   const porcelain = run("git", ["worktree", "list", "--porcelain"], { cwd: repoRoot });
   const entries = parseWorktreeList(porcelain);
   const primaryPath = entries.find((entry) => isPrimaryWorktree(entry.path))?.path ?? null;
@@ -1410,6 +1497,8 @@ export function pruneWorktrees(repoRoot: string, deps: {
     // #2020: one walk for the whole run, not one per worktree -- it is the same answer for every tree.
     mainLine: mainLineCommits(repoRoot, { run }),
     remove: remove ?? ((path, { run: r }) => { r("git", ["worktree", "remove", path], { cwd: repoRoot }); }),
+    // #1167: the listing is read once, and only when the flag is on; a flag-off run never asks GitHub anything.
+    openPulls: holdOpenPr ? (deps.openPulls ?? (() => listOpenPulls()))() : null,
   };
   for (const entry of entries) {
     if (isPrimaryWorktree(entry.path)) report.skippedPrimary = entry.path;
@@ -1523,7 +1612,7 @@ async function main() {
   const positional = process.argv.slice(2).find((a) => !a.startsWith("--"));
   const repoRoot = positional ?? process.cwd();
   const root = statSync(repoRoot).isDirectory() ? repoRoot : process.cwd();
-  const report = pruneWorktrees(root, { dryRun, maxRemovals: MAX_REMOVALS_PER_RUN, pauseMs: PAUSE_BETWEEN_REMOVALS_MS, removeByRef: true });
+  const report = pruneWorktrees(root, { dryRun, maxRemovals: MAX_REMOVALS_PER_RUN, pauseMs: PAUSE_BETWEEN_REMOVALS_MS, removeByRef: true, holdOpenPr: await openPrHoldOn() });
   process.stdout.write(formatReport(report, dryRun) + "\n");
   // #933: PRINTED ON EVERY RUN, INCLUDING `--apply`, and after the removals rather than instead of them.
   // The prune already refuses a dirty worktree; the gap this closes is that nobody hears the refusal, so
