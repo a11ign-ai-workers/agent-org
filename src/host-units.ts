@@ -37,6 +37,7 @@ import { readdirSync, readFileSync, mkdirSync, rmSync, existsSync, realpathSync,
 import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
+import type { AppIdentity } from "./app-token.ts";
 import { refuseUnknownFlags } from "./lib/cli-flags.ts";
 import { LATEST } from "./lib/release-tag.ts";
 import { installPendingFindings } from "./update-tool.ts";
@@ -2151,6 +2152,86 @@ export function tickRerenderGhWrapper({ err = (l) => process.stderr.write(l), ..
     err(`could not re-render the gh wrapper: ${String((cause as Error)?.message ?? cause).split("\n")[0]}\n`);
     return [];
   }
+}
+
+// --- agent-org#1247: A NEW IDENTITY GOES LIVE ON THE CANARY REPOSITORY FIRST, AND WIDENS ONLY ON A PROOF READING ------------------------------
+//
+// A `github-apps` role the host declares is installed for the canary repository and no wider until a proof reading says its effect was there. A proof is ONE reading, written
+// once and never rewritten: who, repository, PR, reviewDecision before and after the approval, and the time. It counts only when the approval MOVED the PR to APPROVED, by the
+// role's own machine identity, on the canary repository. A reading that ends at REVIEW_REQUIRED does not count, and neither does a grant read from a permission field: the
+// thing proven is the effect on the PR, not the permission.
+
+/** One reading of a canary's effect. `reviewDecisionBefore` and `reviewDecisionAfter` are the PR's `reviewDecision` either side of the approval. */
+export type IdentityProofReading = { who: string; repository: string; pr: number; reviewDecisionBefore: string | null;
+  reviewDecisionAfter: string | null; at: string; };
+
+/** Where the readings are kept on this host: one file, a map from role to its readings in the order they were written. */
+export function identityProofFile(where: { host?: HostConfig; home?: string; env?: Record<string, string | undefined>; } = {}): string {
+  return stateEntryPath("identity-canary-proofs.json", where);
+}
+
+/**
+ * The readings on record. A file that is missing is an EMPTY record: nothing has been proven. A file that is present and does not parse is a REFUSAL, not an empty
+ * record, because writing over it would lose every reading it holds.
+ * @param {string} file @param {typeof readFileSync} [read] @returns {Partial<Record<GithubRole, IdentityProofReading[]>>}
+ */
+export function identityProofs(file: string, read: typeof readFileSync = readFileSync): Partial<Record<GithubRole, IdentityProofReading[]>> {
+  const text = textOf(file, read);
+  if (text === null) return {};
+  try {
+    const parsed = JSON.parse(text);
+    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
+  } catch { /* refused below: the message names the file */ }
+  throw new HostConfigRefusal("identity-canary-proofs", "the proof file is present and does not parse as a map of role to readings, so it is refused rather than overwritten", file);
+}
+
+/**
+ * Whether ONE reading proves the identity's effect on the canary: a real PR on the canary repository, `who` the role's own `[bot]` (its slug when the host names one),
+ * and a move from not-APPROVED to APPROVED. Anything else is a reading of the record, not a proof.
+ * @param {IdentityProofReading} reading @param {{ canary: string, identity: Readonly<AppIdentity> }} where @returns {boolean}
+ */
+export function countsAsProof(reading: IdentityProofReading, { canary, identity }: { canary: string; identity: Readonly<AppIdentity>; }): boolean {
+  const bot = identity.slug === undefined ? /\[bot\]$/i.test(reading.who) : reading.who.toLowerCase() === `${identity.slug}[bot]`.toLowerCase();
+  return reading.repository === canary && Number.isInteger(reading.pr) && reading.pr > 0 && bot
+    && reading.reviewDecisionBefore !== "APPROVED" && reading.reviewDecisionAfter === "APPROVED";
+}
+
+/** Either the role may widen, or it stays on `scope` and `missing` names the proof it lacks. */
+export type WideningDecision = { widen: true; } | { widen: false; scope: string; missing: string; };
+
+/**
+ * WHETHER A ROLE'S IDENTITY MAY WIDEN, and where it stays until it may. A `user-accounts` role is not a new identity and widens as it always has. A `github-apps` role stays
+ * on the canary repository, and widens only when a reading on record for THAT role counts. The refusal names the proof it lacks, so the one who reads it knows what to produce.
+ * @param {GithubRole} role @param {{ host: HostConfig, canary: string, file: string, read?: typeof readFileSync }} deps @returns {WideningDecision}
+ */
+export function widenIdentity(role: GithubRole, { host, canary, file, read = readFileSync }: { host: HostConfig; canary: string; file: string; read?: typeof readFileSync; }): WideningDecision {
+  const identity = roleIdentity(host, role);
+  if (identity.mode === "user-accounts") return { widen: true };
+  const readings = identityProofs(file, read)[role] ?? [];
+  if (readings.some((reading) => countsAsProof(reading, { canary, identity }))) return { widen: true };
+  const why = readings.length === 0 ? `none is on record in ${file}`
+    : `${readings.length} on record in ${file}, and none moved the PR from not-APPROVED to APPROVED by ${identity.slug ?? "the role's app"}[bot] on ${canary}`;
+  return { widen: false, scope: canary, missing: `refused: github.identity.${role} stays on ${canary} until a proof reading counts for it; ${why}` };
+}
+
+/**
+ * Write one reading for a role, ATOMICALLY, as the file's next entry. Written ONCE: the same reading (same PR, time and bot) already on record is refused rather than written
+ * again. A reading that does not count is still recorded: it is the record of what happened, and it does not widen anything.
+ * @param {GithubRole} role @param {IdentityProofReading} reading
+ * @param {{ file: string, read?: typeof readFileSync, mkdir?: typeof mkdirSync, write?: typeof writeFileSync, chmod?: typeof chmodSync, rename?: typeof renameSync }} deps
+ * @returns {string} the file written
+ */
+export function recordIdentityProof(role: GithubRole, reading: IdentityProofReading, { file, read = readFileSync, mkdir = mkdirSync, write = writeFileSync,
+  chmod = chmodSync, rename = renameSync }: { file: string; read?: typeof readFileSync; mkdir?: typeof mkdirSync; write?: typeof writeFileSync;
+  chmod?: typeof chmodSync; rename?: typeof renameSync; }): string {
+  const proofs = identityProofs(file, read);
+  const held = proofs[role] ?? [];
+  if (held.some((on) => on.pr === reading.pr && on.at === reading.at && on.who === reading.who)) {
+    throw new HostConfigRefusal(`github.identity.${role}`, `the reading for PR ${reading.pr} at ${reading.at} is already on record, and a proof is written once`, file);
+  }
+  const text = `${JSON.stringify({ ...proofs, [role]: [...held, reading] }, null, 2)}\n`;
+  writeOwnedFile({ target: file, mode: 0o644, text, mkdir, write, chmod, rename });
+  return file;
 }
 
 /**
