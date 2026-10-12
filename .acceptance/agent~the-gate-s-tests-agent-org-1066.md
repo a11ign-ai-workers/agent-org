@@ -19,7 +19,11 @@ The gate's pinning tests read its source through one helper, `workGateSource()`,
 
 **Open-check at this head.** `git grep -l -E "readFileSync\([^)]*work-gate(\.ts)?" -- src scripts` now names two files, the helper and its own test, which read the entry on purpose; no other test does.
 
-Acceptance: `test "$(git grep -L "work-gate-source" -- src/board-truth-audit.test.ts src/pr-hold.test.ts src/row-tracker.test.ts src/unpark-satisfied.test.ts src/work-tick-cost.test.ts src/packaging/work-gate.test.ts | wc -l)" = 0 && npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/work-gate-source.test.ts src/packaging/work-gate.test.ts src/work-gate-lane-reads.test.ts`
+Acceptance: `test "$(git grep -L "work-gate-source" -- src/board-truth-audit.test.ts src/pr-hold.test.ts src/row-tracker.test.ts src/unpark-satisfied.test.ts src/work-tick-cost.test.ts src/packaging/work-gate.test.ts | wc -l)" = 0 && npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/work-gate-source.test.ts src/work-gate-lane-reads.test.ts`
+
+The row's own command also names `src/packaging/work-gate.test.ts`, which the acceptance job cannot run (it imports `history`, which that job has no token for); it passes locally, 432 tests in the three files, run exactly as the row wrote it.
+
+Mutation: `.sort` removed, every `.ts` under `src/` read, the `.test.ts` filter removed, `recursive` dropped, and the entry placed last each turn the helper's own controls red (1, 3, 2, 1 and 4 failing); each restore byte-identical.
 
 Closes a11ign/agent-org#1066.
 
