@@ -6,7 +6,7 @@ Two tests that failed from a clean worktree depended on the host, and each now c
 
 **Cause, measured and not inferred.** CI runs the suite in-project (`.github/workflows/ci.yml`, `working-directory: project`), so neither failure reproduces there; both are layout and host state. Reproduced at c7cf5286 with the row's command: `ℹ pass 18`, `ℹ fail 2`.
 
-Mutation (each run with the row's `AGENT_ORG_HOST`, restored with `cp` and `diff -q`, byte-identical):
+Mutation: four, each run with the row's `AGENT_ORG_HOST` and restored with `cp` and `diff -q`, byte-identical:
 - the `process.env[SHADOW_STATE_DIR_ENV] = STATE;` line removed: 2 red, the POSITIVE CONTROL (`actual: '/home/agent/.cache/a11ign'`) and `each other repository's \`main\` is asked in the same wave` (`actual: 14, expected: 16`, the row's original failure);
 - an `absent` marker for `a11ign/agent-org` planted in the file's own directory: 1 red, the `main` wave (`actual: 14`), the POSITIVE CONTROL still green, which shows the marker is the mechanism and the file's directory is the one read;
 - `AGENT_ORG_HOST: HOST_FILE` removed from the child's env: 1 red, `the program itself, run as the hook is` (`[1, ...ProjectDeclarationRefusal...]` for `[0, '']`);
