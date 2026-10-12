@@ -896,6 +896,59 @@ export function approvedDirtyReadings({ now, enabled, prs, holds, reruns }: Appr
 }
 
 /**
+ * agent-org#1248 (a11ign#928, the chairman's direction of 2026-10-12): AN APPROVED PULL REQUEST HELD AT `REVIEW_REQUIRED` IS A HEALTH FINDING. The reviewer switchover left approvals that did
+ * not count toward `main`'s merge rule (a11ign#5303, #5302, agent-org#1241 and control#75 sat approved for 90 minutes), and no reading named them. SHIPPED OFF, like the approved-DIRTY readings:
+ * OFF is NO reading, and the live gate does not pass the flag yet.
+ *
+ * THE CLASS IS NOT IN `SIGNALS`, for the reason `APPROVED_DIRTY_FLAG` gives: an order of an unregistered class falls to the suppression table's default, which pages.
+ */
+export const APPROVED_REQUIRED_FLAG = "health.approvedRequired";
+/** How long an approved pull request may stay held at `REVIEW_REQUIRED` before it is a finding (the row's figure). */
+export const APPROVED_REQUIRED_MINUTES = 10;
+export const APPROVED_REQUIRED_SIGNAL = "approved-pr-review-required";
+
+/**
+ * One open pull request as the approved-REVIEW_REQUIRED reading needs it. `approvers` are the identities whose APPROVED review is on `head`, and `reviewDecision` is GitHub's, as read.
+ * `heldSince` is when a tick FIRST SAW it approved and `REVIEW_REQUIRED`, kept across ticks by the caller, and `heldHead` is the head that stamp was taken on. A stamp taken on an older head
+ * is not this head's age: a new head restarts the clock, so it clears the finding and is not a finding until it has been held on that head. `null` is a stamp no tick has taken.
+ */
+export type ApprovedRequiredPr = { number: number | string, open: boolean, reviewDecision: string | null, head: string, approvers: string[], heldHead: string | null, heldSince: number | null };
+/** What `orgHealthReadings` is given for the reading: `enabled` is `health.approvedRequired`'s decision, and `prs` is `null` for a refused read. */
+export type ApprovedRequiredFacts = { enabled: boolean, prs: ApprovedRequiredPr[] | null };
+
+const APPROVED_REQUIRED_WINDOW_MS = APPROVED_REQUIRED_MINUTES * MS_PER_MINUTE;
+
+/** Approved on its head and held at `REVIEW_REQUIRED`: the state that is a finding once it has stood past the window. A closed or merged pull request is not held. */
+function isApprovedRequired(pr: ApprovedRequiredPr): boolean {
+  return pr.open && pr.reviewDecision === "REVIEW_REQUIRED" && pr.approvers.length > 0;
+}
+function heldFinding(pr: ApprovedRequiredPr, now: number): boolean {
+  return isApprovedRequired(pr) && pr.heldSince !== null && pr.heldHead === pr.head && now - pr.heldSince > APPROVED_REQUIRED_WINDOW_MS;
+}
+
+/** SIGNAL D: AN APPROVED PULL REQUEST IS HELD AT `REVIEW_REQUIRED` PAST THE WINDOW. The approval is on the head and is not counting, which is a permission or a rule excluding the approver, not a red check. */
+export function approvedRequiredReading({ now, prs }: { now: number; prs: ApprovedRequiredPr[] | null; }): Reading {
+  const signal = APPROVED_REQUIRED_SIGNAL;
+  if (prs === null) return unknown(signal, "the open pull requests' review decisions could not be read");
+  const tripped = prs.filter((pr) => heldFinding(pr, now)).sort((a, b) => (a.heldSince as number) - (b.heldSince as number));
+  if (tripped.length === 0) {
+    const undated = prs.filter((pr) => isApprovedRequired(pr) && pr.heldSince === null);
+    return undated.length === 0 ? clear(signal) : unknown(signal, `${undated.length} approved PR(s) are held at REVIEW_REQUIRED and no tick has seen when they started to be held, so how long they have been held is not known`);
+  }
+  const first = (tripped[0].heldSince as number) + APPROVED_REQUIRED_WINDOW_MS;
+  const named = tripped.slice(0, MAX_NAMED).map((pr) => `#${pr.number} (approved by ${pr.approvers.join(", ")}, held ${ageText(pr.heldSince as number, now)})`);
+  const more = tripped.length > MAX_NAMED ? `, and ${tripped.length - MAX_NAMED} more` : "";
+  return { signal, status: "tripped", firstTrippedAt: first, discriminator: `${signal}@${hourOf(first)}`,
+    detail: `${tripped.length} approved PR(s) held at REVIEW_REQUIRED over ${APPROVED_REQUIRED_MINUTES} min with an approval on their head that does not count toward the merge rule: ${named.join("; ")}${more}` };
+}
+
+/** The reading when the switch is decided on; NONE when it is OFF, which is what makes the shipped-OFF change a no-op. */
+export function approvedRequiredReadings({ now, enabled, prs }: ApprovedRequiredFacts & { now: number; }): Reading[] {
+  if (!enabled) return [];
+  return [approvedRequiredReading({ now, prs })];
+}
+
+/**
  * SIGNAL 11: A POOL IS BELOW `POOL_LOW_FRACTION` OF ITS LIMIT (#3448). A session that meets an exhausted pool sleeps on the reset, and three standing seats did at
  * once on 2026-10-04 with nothing in the org knowing why its inbox was three orders deep. The reading names the account, the pool and the reset, because "low"
  * with no window is not a measurement. `pools` is `null` when no pool was read this tick.
@@ -1985,6 +2038,8 @@ export function orgHealthReadings(facts: {
         tickHealth?: TickHealth | null;
         /** agent-org#1168: the approved-DIRTY readings. `enabled` is `health.approvedDirty`'s decision; OFF gives no reading, so the caller may always pass it. */
         approvedDirty?: ApprovedDirtyFacts;
+        /** agent-org#1248: the approved-REVIEW_REQUIRED reading. `enabled` is `health.approvedRequired`'s decision; OFF gives no reading, so the caller may always pass it. */
+        approvedRequired?: ApprovedRequiredFacts;
     }): Reading[] {
   const readings = [noMergeReading(facts), redPrReading(facts), refusedRowReading(facts),
     primaryReading({ now: facts.now, drift: facts.drift, since: facts.primarySince })];
@@ -2016,6 +2071,7 @@ export function orgHealthReadings(facts: {
   if (facts.tickRecord !== undefined) readings.push(tickRecordReading({ now: facts.now, state: facts.tickRecord }));
   if (facts.tickHealth !== undefined) readings.push(tickWallReading({ day: isoOf(facts.now).slice(0, 10), health: facts.tickHealth }));
   if (facts.approvedDirty !== undefined) readings.push(...approvedDirtyReadings({ now: facts.now, ...facts.approvedDirty }));
+  if (facts.approvedRequired !== undefined) readings.push(...approvedRequiredReadings({ now: facts.now, ...facts.approvedRequired }));
   return readings;
 }
 
@@ -2140,6 +2196,9 @@ const REMEDY = (Object.freeze({
     + "For each named PR, read the holds, drop the ones that are no longer true, and name in a comment the one that still stops it and who lifts it.",
   [SAME_WAY_RERUN_SIGNAL]: "The last two runs on a pull request's head failed the same jobs, so another rerun repeats the same failure and answers nothing. "
     + "Read the failing job's log and fix the cause on the branch; do not rerun the job again until a push changes the code.",
+  [APPROVED_REQUIRED_SIGNAL]: "An approved pull request has been held at REVIEW_REQUIRED for more than " + APPROVED_REQUIRED_MINUTES + " minutes, so it cannot land. The approval on its head does not count toward "
+    + "the merge rule: usually a permission or a rule that excludes the approving identity, not a failing check. The named PRs are above. Read which rule or permission excludes the approver, say it on each PR, "
+    + "and fix that setting (not the PR). A new head, a merge or a close clears the finding. Do not approve again, which changes nothing about the rule.",
 }) as Readonly<Record<string, string>>);
 
 /** @returns who is ordered: the signal's first reader if it has one, then `ceo`, who takes every signal */
