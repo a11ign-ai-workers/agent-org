@@ -1,0 +1,31 @@
+[Unit]
+# THE DAILY MANAGER-SPEND READING, POSTED -- a11ign/a11ign#4505 (Move 2/3), agent-org#912. `manager-spend-post.sh` runs `trace manager-spend`
+# for yesterday (UTC), posts the table on the project's record issue, and EXITS NON-ZERO when the store, the reading or the post fails. The timer is the clock.
+Description=Run and post the daily manager-spend reading (#4505)
+
+[Service]
+Type=oneshot
+
+# The checkout the repository-relative ExecStart resolves against, as the other units that run a script from this repository do.
+WorkingDirectory=@@checkout@@
+
+# PATH IS DECLARED because a systemd unit does not get a login shell's. The script calls a bare `gh`, `node` and `agent-org`, all in @@binDir@@.
+Environment=PATH=@@binDir@@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+
+# `gh` needs a home to find credentials under, and `trace` reads the store under it (`~/.cache/a11ign/trace`). Stated rather than assumed.
+Environment=HOME=@@home@@
+
+# V8's compile cache goes under the home, not /tmp (#2458), as the weekly report's unit states.
+Environment=NODE_COMPILE_CACHE=%h/.cache/node-compile-cache
+
+# WHICH ACCOUNT THE POST SPENDS, DECLARED: the org's own (`a11ign-ai-workers`), never the person's, as trace-weekly.service states for the same reason.
+Environment=GH_CONFIG_DIR=@@workersDir@@/gh
+
+# A reading is one call and one comment; a run that has not finished in fifteen minutes has hung, and must fail rather than hold the next day's slot.
+TimeoutStartSec=900
+
+# `/usr/bin/bash <repository-relative path>`: the tree copy IS the program, not copied anywhere.
+ExecStart=/usr/bin/bash packages/agent-org/host/manager-spend-post.sh
+
+# NO [Install] SECTION, and its absence is load-bearing: `WantedBy=default.target` would run this oneshot, and post a reading, at every boot.
+# The timer is the only thing that may start it.

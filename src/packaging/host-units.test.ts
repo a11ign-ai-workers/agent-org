@@ -1014,7 +1014,7 @@ test("#1974: every shipped unit that spawns `gh` declares which account -- over 
   // units it names are the assertion that it did: a floor is a bound on the count, and these are the
   // members.
   assert.deepEqual(spending.map((u) => u.unit).sort(),
-    ["a11ign-board-report.service", "a11ign-confidence-post.service", "a11ign-corpus-release-nightly.service", "a11ign-kernel-reboot.service", "a11ign-tmp-prune.service", "a11ign-trace-ingest.service", "a11ign-trace-publish.service", "a11ign-trace-weekly.service", "a11ign-work-tick.service",
+    ["a11ign-board-report.service", "a11ign-confidence-post.service", "a11ign-corpus-release-nightly.service", "a11ign-kernel-reboot.service", "a11ign-manager-spend-post.service", "a11ign-tmp-prune.service", "a11ign-trace-ingest.service", "a11ign-trace-publish.service", "a11ign-trace-weekly.service", "a11ign-work-tick.service",
       "a11ign-worktree-prune.service"],
     "every shipped .service that can reach `gh` -- the project's own, which reaches it only through the script it spawns, "
     + "and the dispatcher's, which was charged on UNKNOWN until its script was shipped");
@@ -1499,6 +1499,8 @@ test("#2000: which shipped timers run their service at `host:install`, and which
     "a11ign-confidence-post.timer",
     // a11ign/a11ign#4053: the kernel reboot's timer. Its service REBOOTS THE HOST, so a start at `host:install` would reboot it at an operator's keystroke; the hour is the clock's alone.
     "a11ign-kernel-reboot.timer",
+    // agent-org#912: the daily manager-spend reading's timer, on the weekly report's side for its reason: the service POSTS a reading, so a start at install posts one at an operator's keystroke.
+    "a11ign-manager-spend-post.timer",
     // a11ign/a11ign#3627: the weekly token-efficiency post, on the board edition's side for the board edition's reason: it POSTS A REPORT.
     "a11ign-trace-weekly.timer",
   ], "THE CONTROL, and a measured one rather than a fixture: at the 2026-09-22 21:03Z `host:install` the "
@@ -3120,6 +3122,16 @@ test("#3627: installed as the tool, the weekly report's service runs the script 
   assert.match(installed, /^WorkingDirectory=\/tool$/m);
   assert.match(installed, /^Environment=AGENT_ORG_PROJECT=\/project\/\.agent-org\/project\.json$/m);
   assert.match(installed, /^ExecStart=\/usr\/bin\/bash host\/trace-weekly-post\.sh$/m);
+});
+
+// agent-org#912: the daily reading, installed the same way as the weekly report above, so the two cannot drift apart unnoticed.
+test("#912: installed as the tool, the daily manager-spend service runs the script from the tool and is told where the project's declaration is", () => {
+  const rendered = readFileSync(join(SHIPPED_DIR, "manager-spend-post.service.in"), "utf8")
+    .replaceAll("@@checkout@@", "/p").replaceAll("@@binDir@@", "/b").replaceAll("@@home@@", "/h").replaceAll("@@workersDir@@", "/w");
+  const installed = toolForm("manager-spend-post.service.in", rendered, { tool: "/tool", checkout: "/project", beforeTicks: [] });
+  assert.match(installed, /^WorkingDirectory=\/tool$/m);
+  assert.match(installed, /^Environment=AGENT_ORG_PROJECT=\/project\/\.agent-org\/project\.json$/m);
+  assert.match(installed, /^ExecStart=\/usr\/bin\/bash host\/manager-spend-post\.sh$/m);
 });
 
 test("#3515: installed as the tool, the trace pages' service runs publish.ts from the tool and is told where the host's declaration is", () => {
