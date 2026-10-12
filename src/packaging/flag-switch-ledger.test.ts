@@ -65,12 +65,13 @@ test("(1) POSITIVE CONTROL: the registry finds the nine keys of the rows' open-c
   const found = discoverFlags();
   assert.ok(found !== null, "src/ of this tool can be listed");
   const keys = found.map((flag) => flag.key);
-  for (const key of ["workers.haikuBrief", "workers.orchestratorOneShot", "rows.specLint", "rows.autoUnpark", "queue.chainWaitWake", "queue.reenqueueEjected", "rows.closedUnderOpenHalf", "queue.queueEntryNoRun", "holds.recheck"]) {
+  for (const key of ["workers.haikuBrief", "workers.orchestratorOneShot", "rows.specLint", "rows.autoUnpark", "queue.chainWaitWake", "queue.reenqueueEjected", "rows.closedUnderOpenHalf", "queue.queueEntryNoRun", "holds.recheck", "prune.holdOpenPr"]) {
     assert.ok(keys.includes(key), `${key} is found (found: ${keys.join(", ")})`);
   }
   assert.equal(found.find((flag) => flag.key === "rows.autoUnpark")?.name, "AUTO_UNPARK_FLAG");
   assert.equal(found.find((flag) => flag.key === "rows.autoUnpark")?.file, "src/unpark-satisfied.ts");
   assert.equal(found.find((flag) => flag.key === "holds.recheck")?.name, "RECHECK_FLAG", "agent-org#1187: the flag the digest listed as flag-without-a-switch is found by its constant");
+  assert.equal(found.find((flag) => flag.key === "prune.holdOpenPr")?.name, "OPEN_PR_HOLD_FLAG", "agent-org#1221: the flag the digest listed as flag-without-a-switch is found by its constant");
   assert.ok(!keys.some((key) => key.startsWith("--")), "a CLI flag constant (`--decision`) is not a switch");
 });
 
@@ -97,6 +98,7 @@ test("(2) the three directions: absent is reported, the same key set `false` is 
   assert.deepEqual(keysOf([]), ["workers.haikuBrief"], "no declaration at all: still only the one without another home");
   assert.deepEqual(unsetFlags({ shipped: [FLAG("AUTO_UNPARK_FLAG", "rows.autoUnpark")], declarations: [] }), [], "rows.autoUnpark is switched by `machinery:flag`, so nothing declared does not count it (agent-org#1161)");
   assert.deepEqual(unsetFlags({ shipped: [FLAG("RECHECK_FLAG", "holds.recheck")], declarations: [] }), [], "agent-org#1187: holds.recheck is switched by `machinery:flag`, so the digest does not list it as flag-without-a-switch");
+  assert.deepEqual(unsetFlags({ shipped: [FLAG("OPEN_PR_HOLD_FLAG", "prune.holdOpenPr")], declarations: [] }), [], "agent-org#1221: prune.holdOpenPr is switched by `machinery:flag`, so the digest does not list it as flag-without-a-switch");
   assert.deepEqual(unsetFlags({ shipped: [FLAG("CHAIN_WAIT_FLAG", "queue.chainWaitWake")], declarations: [] }), [], "a key in FLAGS_WITH_ANOTHER_HOME is not reported with nothing declared");
   assert.deepEqual(unsetFlags({ shipped: [FLAG("CHAIN_WAIT_FLAG", "queue.chainWaitWake")], declarations: [], anotherHome: {} }).map((flag) => flag.key), ["queue.chainWaitWake"],
     "and the map is what excuses it: without the entry the same flag is reported (the exemption is not a hard-coded name)");
