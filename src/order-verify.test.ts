@@ -80,6 +80,9 @@ function memoryRecord(filed: string[]): typeof recordFailures {
   };
 }
 
+/** A failure ledger that cannot be written: nothing is filed, and `recordFailures` reports the refusal instead of throwing. */
+const refusingRecord: typeof recordFailures = () => ({ appended: 0, skipped: 0, refused: "EACCES: permission denied" });
+
 test("the detector is off unless its switch is on: a repeat files nothing and wakes nobody", () => {
   const raw = ledgerLine(AT, KEY, SESSION) + ledgerLine(LATER, KEY, SESSION);
   const filed: string[] = [];
@@ -102,4 +105,14 @@ test("switch on: a repeat files ONE failure entry and wakes orchestrator once, h
   assert.deepEqual(filed, [`${SESSION}/${KEY}`]);
   assert.deepEqual(tick(), [], "the next tick finds the pair already filed, so orchestrator is not woken again");
   assert.deepEqual(filed, [`${SESSION}/${KEY}`], "still one failure entry");
+});
+
+test("a repeat whose failure entry was REFUSED wakes nobody, so the order is not sent for a filing that never happened", () => {
+  const raw = ledgerLine(AT, KEY, SESSION) + ledgerLine(LATER, KEY, SESSION);
+  const switches = { [ORDERS_VERIFIABLE_USE]: true };
+  const refused = repeatedOrdersNow({ ledgerPath: "/state/wake-ledger", switches, now: LATER, read: () => raw, record: refusingRecord });
+  assert.deepEqual(refused, [], "a refused write files nothing, so orchestrator is not woken");
+  const filed: string[] = [];
+  const retried = repeatedOrdersNow({ ledgerPath: "/state/wake-ledger", switches, now: LATER, read: () => raw, record: memoryRecord(filed) });
+  assert.equal(retried.length, 1, "the control: the next tick, with a writable ledger, files it and wakes orchestrator once");
 });

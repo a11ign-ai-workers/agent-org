@@ -90,8 +90,8 @@ export function repeatedOrdersNow({ ledgerPath, switches, now, read = (path) => 
   if (switches[ORDERS_VERIFIABLE_USE] !== true) return [];
   const logPath = join(dirname(ledgerPath), FAILURE_LEDGER_FILE);
   return repeatedOrdersIn(read(ledgerPath)).flatMap(({ session, causeKey, deliveredAt }) => {
-    const { skipped } = record({ logPath, events: [{ classKey: ORDER_REPEATED_CLASS, ref: `${session}/${causeKey}` }], now });
-    if (skipped > 0) return [];
+    const { skipped, refused } = record({ logPath, events: [{ classKey: ORDER_REPEATED_CLASS, ref: `${session}/${causeKey}` }], now });
+    if (skipped > 0 || refused !== null) return [];
     return [{
       session: "orchestrator",
       causeKey: `orchestrator/${ORDER_REPEATED_CLASS}/${session}/${causeKey}`,
