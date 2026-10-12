@@ -196,3 +196,28 @@ test("(9) the reviewer's path: a non-home row's `Waiting-for: merged #1116` is r
   assert.ok(!gh.labels[904].includes(PARKED), "the satisfied wait lets the row be un-parked in its own repository");
   assert.equal(readSatisfaction(waiting, facts!.facts, NOW)!.verdict, "satisfied", "the same row is satisfied once the reference is read against its own repository");
 });
+
+const CLOSED_902 = JSON.stringify({ state: "closed", closed_at: "2026-10-08T05:00:00Z", updated_at: "2026-10-08T05:00:00Z", merged_at: null, labels: [] });
+
+test("(10) #905's shape: a parked agent-org row whose one native edge has closed, with `Waiting-for: closed #902` and `Waits-on-done-when: 902.1`, is un-parked through the full read", () => {
+  const row = tickRow(905, ["parked", "lane:any"], { body: `${COMPLETE}\nWaiting-for: closed #902\nWaits-on-done-when: 902.1\n`, repoKey: OTHER, repo: OTHER, blockedBy: { nodes: [edge(902, "CLOSED")] } });
+  const otherScopes = [{ scope: { tracker: { repo: OTHER } }, read: { openRows: [row] } }];
+  const run = (args: string[]): string => {
+    if (args[1] === `repos/${OTHER}/issues/902`) return CLOSED_902;
+    throw new Error(`the fake has no answer for: ${args.join(" ")}`);
+  };
+  const facts = waitTickFacts({ prsRead: [], openRowsRead: withTrackerRows([], otherScopes, canary(true)), now: NOW, run, readers: NO_RELEASES });
+  assert.equal(readSatisfaction(row, facts!.facts, NOW, () => CLOSED_AT)!.verdict, "satisfied", "the reference is read against agent-org, and `Waits-on-done-when` is not a standing wait");
+
+  const gh = ghFor(OTHER, { 905: ["parked", "lane:any"] });
+  unparkOtherTrackers({ state: canary(true), scopes: [{ repo: OTHER, rows: [row] }], facts: facts!.facts, now: NOW, run: gh.run, log: () => undefined });
+  assert.ok(!gh.labels[905].includes(PARKED), "parked is lifted in agent-org");
+});
+
+test("(11) a refused other-tracker read (`openRows: null`, which `readLanes` gives for a failed `gh` list) is NAMED in the log and skipped; it is not dropped silently", () => {
+  const gh = ghFor(OTHER, { 905: ["parked"] });
+  const log: string[] = [];
+  unparkOtherTrackers({ state: canary(true), scopes: [{ repo: OTHER, rows: null }], facts: NO_FACTS, now: NOW, run: gh.run, log: (line) => log.push(line) });
+  assert.deepEqual(gh.calls.filter((args) => args[0] === "api" && args[2] === "PUT"), []);
+  assert.match(log.join(""), /agent-org rows were not read/, "a null read names the tracker, as the pass's own doc promises");
+});
