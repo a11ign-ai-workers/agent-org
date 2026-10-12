@@ -60,7 +60,7 @@ import { HAIKU_TIER_LABEL } from "./worker-profile.ts";
 import { UNNAMED_FIELD, underspecifiedLines, underspecifiedReading, underspecifiedStops, type UnderspecifiedReading } from "./spec-lint.ts";
 import { commentsSince } from "./ticket-port/comments-since.ts";
 import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: the claimed rows and the merged list are connections, never a search
-import { asListJson, readMergedPullRequests, SINCE_PAGE_SIZE, WindowCutShort } from "./ticket-port/rows-since.ts";
+import { asListJson, readMergedPullRequests, readMergedUpdatedSince, SINCE_PAGE_SIZE, WindowCutShort } from "./ticket-port/rows-since.ts";
 
 /** The cause this file feeds (`cause-declaration.ts` declares it), addressed to `ceo`. */
 export const RETRO_CAUSE = "org-retrospective";
@@ -850,13 +850,34 @@ export function untieredSweepOrder(rows: UntieredRow[]) {
 // ---------------------------------------------------------------------------------------------------------------------
 // The READS. Each returns `null` for a refused one and never throws; everything above is pure.
 
+/**
+ * THE RETRO READS (agent-org#1081): how many reads of each class this process made, and the seconds they took, for the one line each due tick prints. Counted where the
+ * reads are MADE (`ghJson` for `pages` and `lists`, `readFileAt` for `contents`), so a test's fake is not counted. `resetRetroTally` starts a tick's count.
+ */
+type ReadClass = "pages" | "lists" | "contents";
+const RETRO_TALLY: Record<ReadClass, { n: number; ms: number; }> = { pages: { n: 0, ms: 0 }, lists: { n: 0, ms: 0 }, contents: { n: 0, ms: 0 } };
+export function resetRetroTally() {
+  for (const kind of Object.keys(RETRO_TALLY) as ReadClass[]) RETRO_TALLY[kind] = { n: 0, ms: 0 };
+}
+function tallied<T>(kind: ReadClass, read: () => T): T {
+  const began = performance.now();
+  try {
+    return read();
+  } finally {
+    RETRO_TALLY[kind].n += 1;
+    RETRO_TALLY[kind].ms += performance.now() - began;
+  }
+}
+
 /** @param {string[]} args @returns {any[] | null} */
 function ghJson(args: string[]): any[] | null {
-  try {
-    return JSON.parse(execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"], timeout: READ_TIMEOUT_MS }));
-  } catch {
-    return null; // a refused read is `unknown` in the report, which says so; the cause is not narrated per read, and a hung one is refused at the bound (#3736)
-  }
+  return tallied(args[0] === "api" && args[1] === "graphql" ? "pages" : "lists", () => {
+    try {
+      return JSON.parse(execFileSync("gh", args, { encoding: "utf8", maxBuffer: 64 * 1024 * 1024, stdio: ["ignore", "pipe", "ignore"], timeout: READ_TIMEOUT_MS }));
+    } catch {
+      return null; // a refused read is `unknown` in the report, which says so; the cause is not narrated per read, and a hung one is refused at the bound (#3736)
+    }
+  });
 }
 
 /** The refs of one kind a ledger text already holds; a ledger that is absent or does not parse holds none (`recordFailures` still skips a pair it can read). */
@@ -1081,20 +1102,87 @@ function readOpenRows({ repo, read }: { repo: string; read: (args: string[]) => 
     ...(claims.has(row.number) ? { claimedAt: claimedAtOf(claims.get(row.number)!) } : {}) }));
 }
 
-/** One code repository's pull requests merged since `since`, with the files each touched (agent-org#839 reads the `.acceptance/` one): the ONE call site of that list. `null` when refused. */
-function readMergedPrs({ repo, since, read }: { repo: string; since: number; read: (args: string[]) => any[] | null; }): any[] | null {
+/**
+ * THE RETRO'S MEMORY OF ITS MERGED READS AND ACCEPTANCE FILES (agent-org#1081), kept in the state entry (`RETRO_READS_FILE`) by the gate's daily pass only.
+ * `marks`: per `repo|select`, the merged rows the last walk left and the newest `updatedAt` it saw; a later walk reads only the pages above that mark.
+ * `contents`: per `repo|path|oid`, an acceptance file's text AT ITS MERGE COMMIT, which cannot change, so it is read once. Open pull requests are never cached.
+ * `walked`, `used` and `fullReads` belong to THIS tick: a key walked already reads no page, a key touched is kept, and a repository read in full is named in the line.
+ */
+type MergedMark = { updatedAt: string; rows: Record<string, unknown>[]; };
+export type RetroReads = {
+  marks: Record<string, MergedMark>; contents: Record<string, string>; unreadable: boolean;
+  walked: Set<string>; used: Set<string>; fullReads: string[];
+};
+export const RETRO_READS_FILE = "retro-reads-cache.json";
+
+/** An empty memory: a manual run's (which writes nothing), a test's, and the one a tick starts from when the state entry is missing or unreadable. */
+export function freshRetroReads(unreadable = false): RetroReads {
+  return { marks: {}, contents: {}, unreadable, walked: new Set(), used: new Set(), fullReads: [] };
+}
+
+/** The memory the state entry holds, or an empty one that says it is `unreadable` (a missing file is unreadable too: the first tick reads in full). */
+export function readRetroReads(stateDir: string): RetroReads {
+  const kept = attemptDora(() => JSON.parse(readFileSync(join(stateDir, RETRO_READS_FILE), "utf8")));
+  const usable = kept !== null && typeof kept === "object" && kept.marks !== null && typeof kept.marks === "object" && kept.contents !== null && typeof kept.contents === "object";
+  return usable ? { ...freshRetroReads(), marks: kept.marks, contents: kept.contents } : freshRetroReads(true);
+}
+
+/** Writes what THIS tick used, and nothing else: a repository or file no longer read is dropped, so the state entry is bounded by the window. Only the daily pass calls it. */
+export function keepRetroReads(stateDir: string, memory: RetroReads) {
+  const usedOnly = <T>(entries: Record<string, T>): Record<string, T> => Object.fromEntries(Object.entries(entries).filter(([key]) => memory.used.has(key)));
+  keepReadings(join(stateDir, RETRO_READS_FILE), { marks: usedOnly(memory.marks), contents: usedOnly(memory.contents) });
+}
+
+/**
+ * One code repository's pull requests merged since `since`, with the fields `select` asks, WALKED ONLY ABOVE ITS MARK when there is one (agent-org#1081). The rows
+ * a walk reads are merged into the mark's rows by number, so a row the walk saw again replaces its old self. A mark that is missing, unusable, or whose walk was longer than
+ * its pages is read IN FULL, and the repository is named in `fullReads`. `null` when refused: then the mark does not move.
+ */
+function readMergedPrs({ repo, since, read, select, memory }: { repo: string; since: number; read: (args: string[]) => any[] | null; select: string; memory: RetroReads; }): any[] | null {
+  const key = `${repo}|${select}`;
+  memory.used.add(key);
+  const mark = memory.marks[key];
+  const marked = mark !== undefined && Number.isFinite(Date.parse(mark.updatedAt)) && Array.isArray(mark.rows);
+  const walk = (from: string) => readMergedUpdatedSince({ repo, select, run: runThrough(read), since: from, maxPages: LIST_LIMIT / SINCE_PAGE_SIZE }); // #5076: a connection read, not `--search merged:>=` (a GitHub SEARCH)
   try {
-    const rows = readMergedPullRequests({ repo, select: "number body headRefName mergeCommit{oid} files(first:100){nodes{path}}", run: runThrough(read),
-      window: { since: new Date(since).toISOString(), maxPages: LIST_LIMIT / SINCE_PAGE_SIZE } }); // #5076: a connection read, not `--search merged:>=` (a GitHub SEARCH)
-    return rows.length >= LIST_LIMIT ? null : rows;
+    if (marked && memory.walked.has(key)) return mark.rows.filter((row) => Date.parse(String(row.mergedAt)) >= since);
+    let fresh: Record<string, unknown>[] | null = null;
+    let base: Record<string, unknown>[] = [];
+    if (marked) {
+      try {
+        fresh = walk(mark.updatedAt);
+        base = mark.rows;
+      } catch {
+        fresh = null; // the walk above the mark was longer than its pages: read in full, as a missing mark is
+      }
+    }
+    if (fresh === null) {
+      memory.fullReads.push(repo);
+      fresh = walk(new Date(since).toISOString());
+    }
+    const byNumber = new Map([...base, ...fresh].map((row) => [row.number, row]));
+    const rows = [...byNumber.values()].filter((row) => Date.parse(String(row.mergedAt)) >= since);
+    if (rows.length >= LIST_LIMIT) return null;
+    const newest = fresh.reduce((max, row) => (String(row.updatedAt) > max ? String(row.updatedAt) : max), "");
+    memory.marks[key] = { updatedAt: newest || (marked ? mark.updatedAt : new Date(since).toISOString()), rows: rows as Record<string, unknown>[] };
+    memory.walked.add(key);
+    return rows;
   } catch {
     return null; // a refused read, or a window the pages did not hold, is `unknown`
   }
 }
 
-/** One code repository's merged (since the look-back) and open pull requests, tagged with the repository. `null` when either list was refused. */
-function readNamingPrs({ repo, since, read }: { repo: string; since: number; read: (args: string[]) => any[] | null; }): { merged: NamingPr[]; open: (NamingPr & { labels?: any[]; })[]; } | null {
-  const merged = readMergedPrs({ repo, since, read });
+/** The GraphQL selection each merged-pull-request reader asks for: the naming read's (`readMergedRowOpen`) and the inert-option read's (`readInertOptions`: the files whose acceptance it reads, the commit they are read at, and the body it reads the switch row of). */
+const NAMING_SELECT = "number body headRefName";
+const INERT_SELECT = "number body mergeCommit{oid} files(first:100){nodes{path}}";
+
+/**
+ * One code repository's merged (since the look-back) and open pull requests, tagged with the repository. `null` when either list was refused.
+ * THE MERGED SELECT IS `number body headRefName`: the one caller that reads it (`readMergedRowOpen`) reads the body and the branch, and no field else (#1081).
+ * `readIdleClaimedHours` reads the open list only, for its labels, so the merged list is read for its refusal and nothing else.
+ */
+function readNamingPrs({ repo, since, read, memory }: { repo: string; since: number; read: (args: string[]) => any[] | null; memory: RetroReads; }): { merged: NamingPr[]; open: (NamingPr & { labels?: any[]; })[]; } | null {
+  const merged = readMergedPrs({ repo, since, read, select: NAMING_SELECT, memory });
   const open = listRead(read, ["pr", "list", "-R", repo, "--state", "open", "--limit", String(LIST_LIMIT), "--json", "number,body,headRefName,labels"]);
   if (merged === null || open === null) return null;
   return { merged: merged.map((pr) => ({ ...pr, repo })), open: open.map((pr) => ({ ...pr, repo })) };
@@ -1106,9 +1194,9 @@ function readNamingPrs({ repo, since, read }: { repo: string; since: number; rea
  * The pure decision is `merged-row-open-incident.ts`'s. `read` is the seam (`ghJson` by default).
  * @param {{ now: number, declaration?: ReturnType<typeof homeProjectDeclaration>, read?: (args: string[]) => any[] | null }} reads
  */
-export function readMergedRowOpen({ now, declaration = homeProjectDeclaration(), read = ghJson }: { now: number; declaration?: ReturnType<typeof homeProjectDeclaration>; read?: (args: string[]) => any[] | null; }): MergedRowOpenIncident[] | null {
+export function readMergedRowOpen({ now, declaration = homeProjectDeclaration(), read = ghJson, memory = freshRetroReads() }: { now: number; declaration?: ReturnType<typeof homeProjectDeclaration>; read?: (args: string[]) => any[] | null; memory?: RetroReads; }): MergedRowOpenIncident[] | null {
   const rowLists = declaration.tracker.map(({ repo }) => readOpenRows({ repo, read }));
-  const prLists = declaration.code.map(({ repo }) => readNamingPrs({ repo, since: now - MERGED_ROW_OPEN_LOOKBACK_MS, read }));
+  const prLists = declaration.code.map(({ repo }) => readNamingPrs({ repo, since: now - MERGED_ROW_OPEN_LOOKBACK_MS, read, memory }));
   if (rowLists.includes(null) || prLists.includes(null)) return null;
   const prs = prLists as NonNullable<ReturnType<typeof readNamingPrs>>[];
   return mergedRowOpenIncidents({ rows: (rowLists as OpenRow[][]).flat(), mergedPrs: prs.flatMap((p) => p.merged), openPrs: prs.flatMap((p) => p.open), now });
@@ -1123,7 +1211,20 @@ const COMMIT_OID = /^[0-9a-f]{40}$/;
  * (agent-org#938 review). It is `lookupConsumerFile`'s optional `ref`, so it adds no `gh` call site. `null` when the commit is absent or malformed, or the file could not be read.
  */
 function readFileAt({ repo, path, oid, readFile }: { repo: string; path: string; oid: unknown; readFile: (repo: string, path: string, ref?: string) => string | null; }): string | null {
-  return typeof oid === "string" && COMMIT_OID.test(oid) ? readFile(repo, path, oid) : null;
+  return typeof oid === "string" && COMMIT_OID.test(oid) ? tallied("contents", () => readFile(repo, path, oid)) : null;
+}
+
+/**
+ * ONE acceptance file of a merged pull request, from the memory when this merge commit's text is kept (agent-org#1081). A text is kept only when it was read, never a
+ * refusal, so an unreadable file is read again next tick. The key is the merge commit, so a later pull request cannot change what is kept.
+ */
+function acceptanceOf({ repo, path, oid, readFile, readAcceptance, memory }: { repo: string; path: string; oid: unknown; readFile: (repo: string, path: string, ref?: string) => string | null; readAcceptance: typeof readFileAt; memory: RetroReads; }): string | null {
+  const key = `${repo}|${path}|${String(oid)}`;
+  memory.used.add(key);
+  if (memory.contents[key] !== undefined) return memory.contents[key];
+  const text = readAcceptance({ repo, path, oid, readFile });
+  if (text !== null) memory.contents[key] = text;
+  return text;
 }
 
 /**
@@ -1133,15 +1234,15 @@ function readFileAt({ repo, path, oid, readFile }: { repo: string; path: string;
  * `lookupConsumerFile`, which is the one reader of a file's text the refusal already uses, so this adds no `gh` call site). `recorded` are the refs the ledger already holds.
  * @param {{ now: number, declaration?: ReturnType<typeof homeProjectDeclaration>, read?: (args: string[]) => any[] | null, readFile?: (repo: string, path: string) => string | null, recorded?: Iterable<string> }} reads
  */
-export function readInertOptions({ now, declaration = homeProjectDeclaration(), read = ghJson, readFile = lookupConsumerFile, readAcceptance = readFileAt, recorded = [] }: {
-  now: number; declaration?: ReturnType<typeof homeProjectDeclaration>; read?: (args: string[]) => any[] | null; readFile?: (repo: string, path: string, ref?: string) => string | null; readAcceptance?: typeof readFileAt; recorded?: Iterable<string>;
+export function readInertOptions({ now, declaration = homeProjectDeclaration(), read = ghJson, readFile = lookupConsumerFile, readAcceptance = readFileAt, recorded = [], memory = freshRetroReads() }: {
+  now: number; declaration?: ReturnType<typeof homeProjectDeclaration>; read?: (args: string[]) => any[] | null; readFile?: (repo: string, path: string, ref?: string) => string | null; readAcceptance?: typeof readFileAt; recorded?: Iterable<string>; memory?: RetroReads;
 }): InertOptionReading | null {
-  const lists = declaration.code.map(({ repo }) => ({ repo, merged: readMergedPrs({ repo, since: now - MERGED_ROW_OPEN_LOOKBACK_MS, read }) }));
+  const lists = declaration.code.map(({ repo }) => ({ repo, merged: readMergedPrs({ repo, since: now - MERGED_ROW_OPEN_LOOKBACK_MS, read, select: INERT_SELECT, memory }) }));
   if (lists.some(({ merged }) => merged === null)) return null;
   const mergedPrs: MergedOptionPr[] = lists.flatMap(({ repo, merged }) => (merged as any[]).flatMap((pr): MergedOptionPr[] => {
     const paths: string[] = (pr.files ?? []).map((file: any) => String(file?.path)).filter((path: string) => ACCEPTANCE_FILE.test(path));
     if (paths.length === 0) return []; // no acceptance file added: nothing it declared can be read, and none is not unknown
-    const texts = paths.map((path) => readAcceptance({ repo, path, oid: pr.mergeCommit?.oid, readFile }));
+    const texts = paths.map((path) => acceptanceOf({ repo, path, oid: pr.mergeCommit?.oid, readFile, readAcceptance, memory }));
     return [{ repo, number: pr.number, mergedAt: pr.mergedAt, body: pr.body, acceptanceText: texts.includes(null) ? null : texts.join("\n") }];
   }));
   return inertOptionIncidents({ mergedPrs, readConsumerFile: readFile, now, recorded });
@@ -1162,9 +1263,9 @@ function claimedAtOf(comments: { body?: string; createdAt?: string; }[]): number
  * never 0). The pure decision is `idle-claim-incident.ts`'s `idleClaimedHours`. `read` is the seam (`ghJson` by default).
  * @param {{ now: number, stateDir: string, declaration?: ReturnType<typeof homeProjectDeclaration>, read?: (args: string[]) => any[] | null }} reads
  */
-export function readIdleClaimedHours({ now, stateDir, declaration = homeProjectDeclaration(), read = ghJson }: { now: number; stateDir: string; declaration?: ReturnType<typeof homeProjectDeclaration>; read?: (args: string[]) => any[] | null; }): IdleClaimedHours | null {
+export function readIdleClaimedHours({ now, stateDir, declaration = homeProjectDeclaration(), read = ghJson, memory = freshRetroReads() }: { now: number; stateDir: string; declaration?: ReturnType<typeof homeProjectDeclaration>; read?: (args: string[]) => any[] | null; memory?: RetroReads; }): IdleClaimedHours | null {
   const rowLists = declaration.tracker.map(({ repo }) => readOpenRows({ repo, read }));
-  const prLists = declaration.code.map(({ repo }) => readNamingPrs({ repo, since: now - MERGED_ROW_OPEN_LOOKBACK_MS, read }));
+  const prLists = declaration.code.map(({ repo }) => readNamingPrs({ repo, since: now - MERGED_ROW_OPEN_LOOKBACK_MS, read, memory }));
   const declarations = readDeclarations(join(stateDir, WORKER_STATE_DIR));
   if (rowLists.includes(null) || prLists.includes(null) || declarations === null) return null;
   const sessionsOf = (labels: any[] | undefined): string[] => (labels ?? []).map((l) => (typeof l === "string" ? l : l?.name))
@@ -1203,16 +1304,16 @@ export function readUnderspecified({ now, declaration = homeProjectDeclaration()
  *   readDoraReport?: (now: number) => ReturnType<typeof readDora> | null, readUnwaited?: (now: number) => ReturnType<typeof unwaitedStockRows>, readUntiered?: () => ReturnType<typeof untieredReadyRows>, readMergedRepositories?: (now: number) => ReturnType<typeof readMerged> }} where
  * MERGED PRS ARE READ FROM EVERY DECLARED REPOSITORY (`readMerged`, #3593), each named with `-R`; `merged` stays the PRIMARY's list, the definition the count had before.
  */
-export function readAll({ now, stateDir, unit = "a11ign-work-tick.service",
+export function readAll({ now, stateDir, unit = "a11ign-work-tick.service", memory = freshRetroReads(),
   readMergedRepositories = (at) => readMerged({ declaration: homeProjectDeclaration(), since: at - WINDOW_MS }),
   readHandFixes = (at) => readHandFixLedger({ read: gatherChanges(), now: new Date(at) }),
   readUnwaited = (at) => unwaitedStockRows({ reader: ghTrackerReader(homeProjectDeclaration().repo), now: at }),
   readUntiered = () => untieredReadyRows({ trackers: homeProjectDeclaration().tracker.map((tracker) => ghReadyReader(tracker)) }),
-  readDoraReport = readDeclaredDora, readAgentListing = () => readAgents(), readIdleHours = (at) => attemptDora(() => readIdleClaimedHours({ now: at, stateDir })), readOpenRowIncidents = (at) => attemptDora(() => readMergedRowOpen({ now: at })),
-  readInertOptionReading = (at, recorded) => attemptDora(() => readInertOptions({ now: at, recorded })),
+  readDoraReport = readDeclaredDora, readAgentListing = () => readAgents(), readIdleHours = (at) => attemptDora(() => readIdleClaimedHours({ now: at, stateDir, memory })), readOpenRowIncidents = (at) => attemptDora(() => readMergedRowOpen({ now: at, memory })),
+  readInertOptionReading = (at, recorded) => attemptDora(() => readInertOptions({ now: at, recorded, memory })),
   readDenials = (at) => readSafetyCheckDenials({ since: at - WINDOW_MS }),
   readUnderspecifiedStops = (at) => attemptDora(() => readUnderspecified({ now: at })) }: {
-        now: number; stateDir: string; unit?: string; readHandFixes?: (now: number) => ReturnType<typeof readHandFixLedger>;
+        now: number; stateDir: string; unit?: string; memory?: RetroReads; readHandFixes?: (now: number) => ReturnType<typeof readHandFixLedger>;
         readDoraReport?: (now: number) => ReturnType<typeof readDora> | null; readUnwaited?: (now: number) => ReturnType<typeof unwaitedStockRows>; readUntiered?: () => ReturnType<typeof untieredReadyRows>; readMergedRepositories?: (now: number) => ReturnType<typeof readMerged>;
         readAgentListing?: () => Agent[] | null; readIdleHours?: (now: number) => IdleClaimedHours | null; readOpenRowIncidents?: (now: number) => MergedRowOpenIncident[] | null;
         readInertOptionReading?: (now: number, recorded: string[]) => InertOptionReading | null; readDenials?: (now: number) => SafetyCheckDenialReading | null;
@@ -1268,7 +1369,7 @@ export function recordReading({ stateDir, date, numbers, mergedRepositories }: {
  * @param {{ now: number, stateDir: string }} where
  * @param {{ dora?: Partial<Parameters<typeof resumableDora>[0]>, readRest?: (where: Parameters<typeof readAll>[0]) => ReturnType<typeof readAll> }} [seams]
  */
-export function readWhenDoraIsRead(where: { now: number; stateDir: string; }, { dora = {}, readRest = readAll }: { dora?: Partial<Parameters<typeof resumableDora>[0]>; readRest?: (where: Parameters<typeof readAll>[0]) => ReturnType<typeof readAll>; } = {}) {
+export function readWhenDoraIsRead(where: { now: number; stateDir: string; memory?: RetroReads; }, { dora = {}, readRest = readAll }: { dora?: Partial<Parameters<typeof resumableDora>[0]>; readRest?: (where: Parameters<typeof readAll>[0]) => ReturnType<typeof readAll>; } = {}) {
   const progress = resumableDora({ stateDir: where.stateDir, now: where.now, ...dora });
   return progress.complete ? readRest({ ...where, readDoraReport: () => progress.report }) : { doraPending: progress };
 }
@@ -1322,13 +1423,17 @@ function dailyRetrospective({ now, stateDir, log, read, readLedger, record }: {
   try {
     const date = retrospectiveDue(now, readLedger(stateDir));
     if (date === null) return [];
-    const inputs = read({ now, stateDir });
+    const memory = readRetroReads(stateDir);
+    resetRetroTally();
+    const inputs = read({ now, stateDir, memory });
     if ("doraPending" in inputs) {
       const { read: done, of, readThisTick, elapsedMs } = inputs.doraPending;
       log(`org-retro: the DORA read has ${done} of ${of} repositories (${readThisTick} read this tick, ${Math.round(elapsedMs / MS_PER_SECOND)} s); no org-retrospective order until every declared repository is read.\n`);
       return [];
     }
+    log(`${retroReadsLine(memory)}\n`);
     const report = buildReport(inputs, now);
+    keepRetroReads(stateDir, memory); // after the build: a tick that fails keeps the memory it started with
     const text = renderReport(report);
     // `recordFailures` never throws and skips an event already logged, so an episode the daily pass sees on two dates is one line (#4642).
     recordFailures({ logPath: join(stateDir, FAILURE_LEDGER_FILE), events: incidentEvents(inputs.idleClaims ?? []), now, report: (line) => log(`${line}\n`) });
@@ -1341,6 +1446,19 @@ function dailyRetrospective({ now, stateDir, log, read, readLedger, record }: {
     log(`org-retro: could not build today's retrospective (${String(err?.message ?? err).split("\n")[0]}) -- no org-retrospective order this tick.\n`);
     return [];
   }
+}
+
+/**
+ * THE RETRO READS LINE (agent-org#1081): the reads a due tick made, by class, with the seconds each class took, and the notes the memory earns: a repository read in
+ * full, and a memory that was missing or unreadable. The journal keeps one per due tick, so the cost before and after the memory is in the record.
+ */
+export function retroReadsLine(memory: RetroReads): string {
+  const part = (kind: ReadClass, label: string) => `${label} ${RETRO_TALLY[kind].n} in ${(RETRO_TALLY[kind].ms / MS_PER_SECOND).toFixed(1)} s`;
+  const notes = [
+    memory.unreadable ? "the state entry is missing or unreadable, so the merged lists and acceptance contents are read in full" : null,
+    memory.fullReads.length > 0 ? `read in full, the mark missing or unreadable: ${[...new Set(memory.fullReads)].join(", ")}` : null,
+  ].filter((note): note is string => note !== null);
+  return `RETRO READS: ${part("pages", "pages")}, ${part("lists", "lists")}, ${part("contents", "acceptance contents")}${notes.map((note) => `; ${note}`).join("")}`;
 }
 
 /** A reading that could not be kept must not stop the offer: the report is still true, and tomorrow's comparison says `no baseline` rather than guessing. */

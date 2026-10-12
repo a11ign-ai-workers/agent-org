@@ -153,3 +153,14 @@ export function readMergedPullRequests({ repo, select, run, window, base }: {
   const from = Date.parse(window.since);
   return readRowsSince({ ask, run }).filter((row) => Date.parse(row.mergedAt) >= from && (base === undefined || row.baseRefName === base)).map(asListJson);
 }
+
+/**
+ * The pull requests MERGED and UPDATED at or after `since`, newest update first, in `gh pr list --json` shape, with NO merge-time filter (#1081). A merged row
+ * is updated when it merges, and again when its body or comments change, so a caller that keeps the rows it has and walks only the pages above its mark (the
+ * newest `updatedAt` it saw) reads what changed, and a body edited after the merge is among those rows. The caller keeps the rows whose own time it means (`mergedAt`).
+ * A window longer than `maxPages` THROWS, as `readRowsSince` does: the caller reads in full instead.
+ */
+export function readMergedUpdatedSince({ repo, select, run, since, maxPages }: { repo: string; select: string; run: Run; since: string; maxPages?: number; }): Record<string, unknown>[] {
+  const ask: SinceRead = { kind: "pullRequests", states: ["MERGED"], orderBy: "UPDATED_AT", repo, select: `${select} mergedAt`, since, ...(maxPages === undefined ? {} : { maxPages }) };
+  return readRowsSince({ ask, run }).map(asListJson);
+}
