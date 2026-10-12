@@ -1345,6 +1345,10 @@ function draftOrder(pr: any, required: string[] | null = null, baseTip: { sha: s
   // and only the REQUEST is withheld. After the rebase the head is new, `reviewHeadsOf` keys a new discriminator, and the review is
   // asked once, at the head that can merge. `UNREAD` is not `CONFLICTING`: an unknown state is never an accusation.
   if (conflictStateOf(pr) === CONFLICT_STATE.CONFLICTING) return null;
+  // #1249: A GREEN PULL REQUEST THE REVIEWER ALREADY APPROVED AT ITS HEAD, THAT GITHUB STILL HOLDS FOR REVIEW, IS NOT ASKED FOR A VERDICT AGAIN.
+  // The reviewer has answered; the question is why the approval does not count, and that belongs to `ceo`, not to a second look.
+  // A DRAFT IS NOT READY, so GitHub holding it for review is its normal state: its approval is no question, and it keeps the reviewer's order.
+  if (wait === "settled" && pr.isDraft !== true && approvalNotCountedOf(pr, heads.all)) return approvalNotCountedOrder(pr, heads.key);
 
   // PULL REQUEST n IS `reviewer-<n>`'S (#2401; the odd/even split it replaced is retired). The name is
   // herdr's, and `wake.ts` starts the instance when none is live. The arithmetic lives in
@@ -1462,7 +1466,8 @@ function deadOwnerFallback(session: string, what: string, remedy: string) {
  * run begun a minute ago on a pull request last touched an hour ago is not a pull request nobody is looking at. Like `isCheckless`, the
  * failure it can have is DELAY, and an unparseable time is never an accusation.
  *
- * FILED UNDER `pr-checks-failing`, as the checkless one is, keyed `unordered` so it collides with neither that nor a red head's. WHEN `required`
+ * FILED UNDER `pr-checks-failing`, as the checkless one is, keyed `unordered` so it collides with neither that nor a red head's. AN APPROVED one is
+ * `pr-approval-not-counted` instead (#1249): the same reach, a different question, and the approval is not a red build. WHEN `required`
  * WAS READ the order names the required checks absent from the rollup; when it was not, it says so rather than guessing which one went missing.
  * NO OWNER IS `product-manager`, the first reader for the queue, and not the `ceo` rung `ownerOfPr` ends on (the row's own words).
  */
@@ -1470,7 +1475,41 @@ export function unorderedPrOrders(unreached: any[], required: string[] | null, n
   return (unreached ?? [])
     .filter((pr) => pr && Number.isFinite(Number(pr.number)) && isUnordered(pr, nowMs))
     .sort((a, b) => Number(a.number) - Number(b.number))
-    .map((pr) => unorderedOrder(pr, required));
+    .map((pr) => (approvalNotCountedOf(pr, equivalentHeads(pr)) ? approvalNotCountedOrder(pr, String(pr.headRefOid).slice(0, 8))
+      : unorderedOrder(pr, required)));
+}
+
+/**
+ * PURE. #1249: A PULL REQUEST THE REVIEWER APPROVED AT ITS HEAD, THAT GITHUB STILL HOLDS AS `REVIEW_REQUIRED`. The approval answers the question
+ * the review was asked, so the reviewer's order is spent, and no red check is what holds it -- a red head never reaches this, its order comes first.
+ * `approvedAtHead` is `null` when the reviews were not read, and a null is never an accusation: only a read approval at one of the head's own
+ * equivalent heads counts. Review state is read from `reviewDecision`, not from the approval alone, so an approval GitHub already counts is not this.
+ */
+function approvalNotCountedOf(pr: any, heads: string[]): boolean {
+  return reviewStateOf(pr).code === REVIEW_STATE.AWAITING_REVIEW && approvedAtHead(pr, heads) === true;
+}
+
+/**
+ * The order for `approvalNotCountedOf` (#1249): ADDRESSED TO `ceo`, the one reader no PR's owner holds, because the question is why GitHub does not
+ * count an approval that is in hand, and the owner's branch cannot answer it. `ceo` is `UNOWNED_PR_SESSION`, the same session `ownerOfPr` ends
+ * on for a PR nobody could name; the brief says this one is not nameless, only misread by the rules. It is filed under its own cause, never
+ * `pr-checks-failing`, because nothing on the head is red and the remedy is not a push.
+ */
+function approvalNotCountedOrder(pr: any, discriminator: string) {
+  const ref = `pr-${subjectRef(pr.repoKey, pr.number)}`;
+  const head8 = String(pr.headRefOid ?? "").slice(0, 8);
+  const what = `${subjectMention(pr)} at \`${head8}\` is APPROVED by a reviewer, and GitHub still holds it for review (\`REVIEW_REQUIRED\`): the approval is not counted. `
+    + "Its checks are not red, so no owner's push fixes this, and the reviewer has already answered. ";
+  return {
+    session: UNOWNED_PR_SESSION,
+    cause: "pr-approval-not-counted",
+    subject: ref,
+    discriminator,
+    prompt: `${what}WORK OUT WHY: read the branch protection on the base and the review list. The reason is one of: a required review from a code owner or a second reviewer is missing; `
+      + "an approval was dismissed or went stale; or the rule asks for a review this approval is not. Then route the PR to whoever can fix it (`" + SESSION_PREFIX + "<name>` on the PR), "
+      + "or ask the reviewer for the missing approval. Do not merge it yourself.",
+    causeKey: `${UNOWNED_PR_SESSION}/pr-approval-not-counted/${ref}/${discriminator}`,
+  };
 }
 
 function isUnordered(pr: any, nowMs: number) {
