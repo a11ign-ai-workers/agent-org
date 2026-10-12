@@ -18,6 +18,7 @@ import { deliver as settlingDeliver } from "./wake.ts";
 import { startedPanes } from "./packaging/started-pane.ts";
 import { leaseItem, leasePath } from "./decision-run/apply.ts";
 import { loadClasses, type DecisionClass } from "./decision-run/registry.ts";
+import { seatModeOf } from "./seat-mode.ts";
 import { causeOfOrder, itemOfKey, serveByRun, serveOrdersByRun, servedByRunPathFrom, type ServeByRunDeps, type ServeOrder } from "./serve-by-run.ts";
 import { servedWakeEvents } from "./trace/trace.ts";
 import type { ItemRef, TicketItem, TicketPort } from "./ticket-port/port.ts";
@@ -414,8 +415,12 @@ test("laneReason, ROUTED_TO, FLEET_LAB_PATTERNS and SPAWN_CAUSES are byte-identi
   assert.ok(/(?:const|function)\s+ROUTED_TO\b/.test("const ROUTED_TO = 1;"), "the marker recognises a declaration it is looking for");
 });
 
-test("the default class registry holds no class, so merging this row changes nothing", async () => {
+test("the default class registry loads, and no class in it is served by a run until a project says so", async () => {
   const { CLASSES_DIR } = await import("./serve-by-run.ts");
-  assert.equal(existsSync(CLASSES_DIR), false, "no class file ships with the seam: a class is a later row, and it is what makes a `run` setting mean something");
-  assert.equal((await loadClasses(CLASSES_DIR)).size, 0);
+  // agent-org#911 landed the first class (`row-off-board`); a class is still a file whose cause is `seat` until a project's seats file says `run`, so merging one changes nothing.
+  const classes = await loadClasses(CLASSES_DIR);
+  assert.deepEqual([...classes.keys()].sort(), ["row-off-board"], "a class that ships is named here, so a new one is a decision of this test's reader");
+  for (const cause of classes.keys()) {
+    assert.equal(seatModeOf(cause, { path: join(fresh(), "no-seats.json"), known: classes }), "seat", cause);
+  }
 });

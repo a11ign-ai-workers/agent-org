@@ -6,7 +6,7 @@ The `row-off-board` class exists (agent-org#911, Move 3 of a11ign/a11ign#4505): 
 
 **Baseline** (measured 2026-10-12T09:34Z by `outcomeSplit` over `readStore` of `~/.cache/a11ign/trace/events.ndjson`, window the 7 days to the read): cause `row-off-board` 46 wakes, 35 wrote (76%), 0 no-op, 0 escalated, 11 null, 0 unsettled; all causes 6,171 wakes, 5,076 wrote.
 
-Measured at this head: `src/decision-run/classes/row-off-board.test.ts` 14 of 14; `src/decision-run` and `src/serve-by-run.test.ts` pass; `tsc --noEmit` clean.
+Measured at this head: `src/decision-run/classes/row-off-board.test.ts` 14 of 14; `src/decision-run` and `src/serve-by-run.test.ts` pass (77 tests in 6 files; the one that failed before the tripwire edit was that tripwire); `tsc --noEmit` clean.
 
 Mutation: each run and reverted byte-identical (copy in the scratchpad, `diff`): (1) the allowed-answer check removed -- only the outside-`allowed` NEGATIVE CONTROL fails; (2) `gapOpen` always true -- only the gap-gone NEGATIVE CONTROL fails; (3) `gapOpen` always false -- the POSITIVE CONTROLs fail (5) and no NEGATIVE CONTROL; (4) the `ready` startable check removed and (5) the `parked` condition check removed -- each fails only the ready/parked NEGATIVE CONTROL.
 
@@ -18,5 +18,9 @@ git grep -q "NEGATIVE CONTROL" -- src/decision-run/classes/row-off-board.test.ts
 npx rstest run --config scripts/rstest/rstest.config.ts src/decision-run/classes/row-off-board.test.ts
 
 Closes: a11ign/agent-org#911
+
+Outside-Region: src/serve-by-run.test.ts — its tripwire `the default class registry holds no class` asserts the directory is absent, which is false the moment any class lands; it now asserts the registry loads, holds exactly `row-off-board`, and that class is `seat` with no seats file. Left alone it is a red test on main.
+
+Outside-Region: src/packaging/project-vocabulary.test.ts — one `DECLARED_NON_VOCABULARY_HITS` entry for the class file's five hits, which are the port's own state and flag names (the same declaration `ticket-port/port.ts` has), so the ratchet does not read them as labels.
 
 platform: n/a (a class module over the ticket port; nothing is built that GitHub, pnpm, systemd or git does)
