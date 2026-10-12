@@ -1,4 +1,4 @@
-A new identity goes live on the canary repository first and widens only on a proof reading (a11ign/a11ign#1247). The gate is `widenIdentity`, `countsAsProof` and `recordIdentityProof` in `src/host-units.ts`.
+A new identity goes live on the canary repository first and widens only on a proof reading (a11ign/agent-org#1247). The gate is `widenIdentity`, `countsAsProof` and `recordIdentityProof` in `src/host-units.ts`.
 
 **What changes.**
 - `src/host-units.ts`: an identity-canary section next to the re-render. A `github-apps` role is installed for the canary repository, and `widenIdentity` refuses widening with the proof it lacks named. A proof is ONE reading (who, repository, PR, `reviewDecision` before and after, time), written once by `recordIdentityProof` into `identity-canary-proofs.json` under the state directory. It counts only when the PR moved from not-APPROVED to APPROVED by the role's own `[bot]` on the canary repository. REVIEW_REQUIRED after the approval does not count.
@@ -12,7 +12,9 @@ Acceptance: `bash -c 'cd ~/repos/wt-agent-org-1247 && node --test src/host-ident
 
 History: full
 
-Closes a11ign/a11ign#1247 for the gate and its pins. Left open as rows: the wrapper's repository scope (Done-when 1's "canary only" in the rendered file), the tick call, the widening flag, and the GitHub reviewDecision reader.
+The gate and its pins are this row; left open as rows: the wrapper's repository scope (Done-when 1's "canary only" in the rendered file), the tick call, the widening flag, and the GitHub reviewDecision reader.
+
+Closes a11ign/agent-org#1247
 
 Outside-Region: .changeset/identity-canary-widens-on-proof.md — the entry a project that pins a tag reads.
 
