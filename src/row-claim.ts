@@ -368,6 +368,19 @@ function createdTogether(argvs: string[][], batch: typeof runBatch): boolean {
 }
 
 /**
+ * #1246: WHY `gh` refused a read, as a parenthetical for a refusal's first line -- empty when gh said nothing. `execFileSync` (`defaultRun`) puts a failed
+ * child's stderr on the error it throws (`.stderr`), and `recordClaimRefusal` keeps only the first line of a refusal, so a rate limit, a missing issue and a 401
+ * all read "could not read issue" in the ledger. The first non-empty stderr line, bounded, so the ledger line stays one line.
+ * @param {unknown} cause the error a failed `gh` call threw
+ * @returns {string} ` (gh said: …)`, or ""
+ */
+function ghSaid(cause: unknown): string {
+  const stderr = String((cause as { stderr?: unknown })?.stderr ?? "");
+  const line = stderr.split("\n").map((text) => text.trim()).find((text) => text !== "");
+  return line === undefined ? "" : ` (gh said: ${line.slice(0, 200)})`;
+}
+
+/**
  * Reads an issue's CURRENT labels from the real board. Injectable `run`, the same seam
  * `install-git-hooks.mjs` uses, so this is testable without a network call or a real repo.
  *
@@ -388,7 +401,7 @@ export function fetchLabels(issueNumber: number, { run = defaultRun, repo = REPO
       "--json", "number,title,labels,state"]);
   } catch (cause) {
     throw new Error(`row-claim: could not read issue #${issueNumber} from ${repo} -- refusing to guess `
-      + `whether it is claimed. ${(cause as Error).message}`, { cause });
+      + `whether it is claimed${ghSaid(cause)}. ${(cause as Error).message}`, { cause });
   }
   let parsed: unknown;
   try {
@@ -436,7 +449,7 @@ export function fetchClaimComments(issueNumber: number, { run = defaultRun, repo
     raw = run("gh", ["issue", "view", String(issueNumber), "--repo", repo, "--json", "comments"]);
   } catch (cause) {
     throw new Error(`row-claim: could not read issue #${issueNumber}'s comments from ${repo} -- refusing `
-      + `to guess what branch or worktree its claim recorded. ${(cause as Error).message}`,
+      + `to guess what branch or worktree its claim recorded${ghSaid(cause)}. ${(cause as Error).message}`,
     { cause });
   }
   let parsed: unknown;
