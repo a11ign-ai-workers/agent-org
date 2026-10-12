@@ -12,6 +12,7 @@ import assert from "node:assert/strict";
 import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { readFileSync } from "node:fs";
 import { fileURLToPath } from "node:url";
 import { loadClasses, whyNotClass } from "../registry.ts";
 import { serveOrdersByRun, type ServeOrder } from "../../serve-by-run.ts";
@@ -146,4 +147,13 @@ test("the tier question names the count when it is at or past the named threshol
   assert.deepEqual([...q.allowed], ["haiku", "sonnet"]);
   assert.match(q.text, new RegExp(`${CALLS_FOR_LARGER_TIER} calls`));
   assert.doesNotMatch(cls.tierQuestion!(ORDER, portOf(itemOf())).text, /at 143 calls/);
+});
+
+test("NEGATIVE CONTROL: the class imports no module that reaches wake.ts (the tick loads classes from inside its own top-level await, and would never settle)", () => {
+  const source = readFileSync(fileURLToPath(new URL("./row-call-count-signal.ts", import.meta.url)), "utf8");
+  const valueImports = [...source.matchAll(/^import (?!type\b)[^\n]*from "([^"]+)"/gm)].map((m) => m[1]);
+  assert.ok(valueImports.length > 0);
+  for (const spec of valueImports) {
+    assert.doesNotMatch(spec, /work-gate\.ts$|row-call-count-orders\.ts$|wake\.ts$/, `${spec} reaches wake.ts, so the tick's own import of this class would wait on the tick`);
+  }
 });

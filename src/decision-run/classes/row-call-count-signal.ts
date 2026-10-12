@@ -20,7 +20,7 @@
 //   * an order names a SET of rows (`rowCallCountOrders`'s key is `1,2,3`), and `itemOfKey` reads a set as no item: only an order naming ONE row is
 //     served by a run, and the others go to the seat as today.
 import { CLAIM_LABEL } from "../../claim-labels.ts";
-import { formatRowCallCountAssessment } from "../../work-gate/row-call-count-orders.ts";
+import { formatRowCallCountAssessment } from "../../work-gate/row-call-count-assessment.ts";
 import type { ItemRef, TicketFlag, TicketItem, TicketPort } from "../../ticket-port/port.ts";
 import type { BriefQuestion } from "../brief.ts";
 import type { DecisionAction, DecisionClass, DecisionOrder } from "../registry.ts";
