@@ -7,7 +7,7 @@ git grep -q "agent-org#1122" -- src/wakes-per-row.test.ts
 npx rstest run --config scripts/rstest/rstest.config.ts src/wakes-per-row.test.ts
 ```
 
-Closes #1122
+Closes a11ign/agent-org#1122
 
 Measured at this head: the acceptance command printed `VERDICT pass: 48 tests in 1 file` (45 before, plus the 3 `agent-org#1122` tests). Before the change the NUL test failed with `SyntaxError` from `JSON.parse`, the reproduction in the row. Mutations, each run and reverted byte-identical: (1) skip always counted, `skipped + 1` on every read -- the NUL test and its POSITIVE CONTROL both fail (`VERDICT fail: 2 of 48`). Trace suite (`src/trace/*.test.ts` with the wakes-per-row test): `VERDICT pass: 644 tests in 23 files`. `src/packaging/trace-weekly-post.test.ts` and `src/wake-start-fresh.test.ts`: `VERDICT pass: 30 tests in 2 files`. `pnpm run typecheck`: no errors. End to end, `node --experimental-strip-types src/wakes-per-row.ts` with a `spare-cycles` holding a NUL run between two valid lines exits 0 and prints the UNREADABLE line.
 
