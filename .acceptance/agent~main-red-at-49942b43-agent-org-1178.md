@@ -7,7 +7,7 @@
 - The existing test now also asserts `github-status: operational` on stderr, so it fails if the stub did not reach the gate (a stub that never fires is a check that never runs).
 - A sibling test feeds the gate an incident and asserts `GITHUB INCIDENT:` on stderr and that the one `org-health` order left is `github-incident`, keyed `ceo/org-health/github-incident/stubincident01`: a real incident IS offered.
 
-Mutation, each run and restored with `cp` and `diff`, byte-identical:
+Mutation: each run and restored with `cp` and `diff`, byte-identical:
 - first test fed `gateAsAProcess("incident")` (the failure the row names, made deterministic): 1 red, the new `github-status: operational` control (`ℹ pass 33`, `ℹ fail 1`);
 - `NODE_OPTIONS: nodeOptions` dropped from the gate's env, so the live page is read (GitHub's incident 93njd414rpbx was still unresolved at the time of the run): 2 red, the first test (`actual: ...GITHUB INCIDENT: Incident with Actions, Pull Requests and Issues...`, `expected: /github-status: operational/`) and the sibling (`ℹ pass 32`, `ℹ fail 2`). This is the original defect reproduced from the unmodified assertion.
 
