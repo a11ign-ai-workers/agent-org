@@ -9,15 +9,14 @@
  */
 import { after, test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import orgHealth, {
-  ALLOWED, ESCALATE, RECORD_ID, recordItem, ROLE_EXCERPT, ROLE_EXCERPT_CAP_BYTES, TIER_DEFAULT, TIER_LARGER, actionsFor, buildQuestion, itemOf, tierQuestion,
+  ALLOWED, ESCALATE, RECORD_ID, recordItem, recordRepo, ROLE_EXCERPT, ROLE_EXCERPT_CAP_BYTES, TIER_DEFAULT, TIER_LARGER, actionsFor, buildQuestion, itemOf, tierQuestion,
 } from "./org-health.ts";
 import { loadClasses, whyNotClass, type DecisionOrder } from "../registry.ts";
 import { serveByRun, type ServeOrder } from "../../serve-by-run.ts";
-import { TABLE_ROW } from "../../board-truth-audit.ts";
 import type { ItemRef, TicketItem, TicketPort } from "../../ticket-port/port.ts";
 
 const ROOT = mkdtempSync(join(tmpdir(), "org-health-906-"));
@@ -25,6 +24,10 @@ after(() => rmSync(ROOT, { recursive: true, force: true }));
 let made = 0;
 const fresh = (): string => { const dir = join(ROOT, `case-${made += 1}`); mkdirSync(dir, { recursive: true }); return dir; };
 
+// The declaration is a host file this test must not need: the repository is a fixture, and a host that cannot be read is its own case below.
+const declared = recordRepo.read;
+recordRepo.read = () => "fixture-owner/record-repo";
+after(() => { recordRepo.read = declared; });
 const RECORD_ITEM = recordItem() as ItemRef;
 const ORDER: ServeOrder = {
   session: "ceo", cause: "org-health", causeKey: "ceo/org-health/board-disagrees@2026-10-12",
@@ -65,7 +68,9 @@ test("POSITIVE CONTROL: the file is a loadable class, the role excerpt is under 
   assert.ok(Buffer.byteLength(ROLE_EXCERPT, "utf8") <= ROLE_EXCERPT_CAP_BYTES, "under the named cap");
   assert.match(ROLE_EXCERPT, /you never do/);
   assert.deepEqual(tierQuestion(), { text: tierQuestion().text, default: TIER_DEFAULT, allowed: [TIER_DEFAULT, TIER_LARGER] });
-  assert.equal(String(RECORD_ID), TABLE_ROW, "the record issue is the one the gate posts its table on");
+  // Read as text: importing the audit resolves the host's checkout at load, which this file must not need.
+  const tableRow = /export const TABLE_ROW = "(\d+)"/.exec(readFileSync(join(import.meta.dirname, "../../board-truth-audit.ts"), "utf8"))?.[1];
+  assert.equal(String(RECORD_ID), tableRow, "the record issue is the one the gate posts its table on");
   assert.equal(RECORD_ITEM.id, RECORD_ID);
   assert.deepEqual(itemOf(ORDER), RECORD_ITEM);
   assert.equal(itemOf({ causeKey: "ceo/answer-owed/row-12" }), null);
@@ -133,4 +138,25 @@ test("NEGATIVE CONTROL: the tier is Haiku with no provider configured and Sonnet
   assert.equal(await tierOf(async () => ({ use: "model-routing", via: "jev", fellBack: true, answers: { tier: { value: "haiku", fellBack: true, asked: "sonnet", confidence: 0.3 } } })), "sonnet", "low-confidence pick");
   assert.equal(await tierOf(async () => ({ use: "model-routing", via: "jev", fellBack: false, answers: { tier: { value: "sonnet", fellBack: false, confidence: 0.9 } } })), "sonnet", "the provider picks Sonnet");
   assert.equal(await tierOf(async () => ({ use: "model-routing", via: "jev", fellBack: false, answers: { tier: { value: "haiku", fellBack: false, confidence: 0.9 } } })), "haiku");
+});
+
+test("NEGATIVE CONTROL: a project whose declaration cannot be read has no record issue, so no item and no action", () => {
+  const was = recordRepo.read;
+  recordRepo.read = () => null;
+  try {
+    assert.equal(recordItem(), null);
+    assert.equal(itemOf(ORDER), null);
+    assert.deepEqual(buildQuestion(ORDER, portOf(itemWith())).allowed, [ESCALATE]);
+    assert.deepEqual(actionsFor({ answer: "posted", text: TABLE }, ORDER), []);
+  } finally {
+    recordRepo.read = was;
+  }
+  // The real reader never throws: with no host in the environment it answers `null`.
+  const host = process.env.AGENT_ORG_HOST;
+  delete process.env.AGENT_ORG_HOST;
+  try {
+    assert.doesNotThrow(() => declared());
+  } finally {
+    if (host !== undefined) process.env.AGENT_ORG_HOST = host;
+  }
 });

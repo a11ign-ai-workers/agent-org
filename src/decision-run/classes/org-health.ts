@@ -23,10 +23,24 @@ export const ALLOWED = [POSTED, ESCALATE] as const;
 /** The number of the tracker's record issue the day's table is posted on (`board-truth-audit.ts` `TABLE_ROW`, kept equal by the test). */
 export const RECORD_ID = 928;
 
+/**
+ * Where the record issue's repository is read from. A project that declares none, or a host this process cannot read the declaration of, is `null` (could not determine, never a
+ * guessed repository): no item, and so no action. It is an object so a test can hand it a fixture instead of a host file.
+ */
+export const recordRepo: { read: () => string | null } = {
+  read: () => {
+    try {
+      return homeProjectDeclaration().tracker.find((t) => t.key === "")?.repo ?? null;
+    } catch {
+      return null;
+    }
+  },
+};
+
 /** The record issue, in the repository the project declares for its first tracker (`key: ""`). `null` when none is declared: no item, and so no action (#2616). */
 export function recordItem(): ItemRef | null {
-  const repo = homeProjectDeclaration().tracker.find((t) => t.key === "")?.repo;
-  return repo === undefined ? null : { tracker: "github", scope: repo, id: RECORD_ID };
+  const repo = recordRepo.read();
+  return repo === null ? null : { tracker: "github", scope: repo, id: RECORD_ID };
 }
 
 /** Haiku unless the provider's pick or its confidence says otherwise; Sonnet is never a standing seat. `serveByRun` moves to Sonnet on a pick or an answer under the floor. */
