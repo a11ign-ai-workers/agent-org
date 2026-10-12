@@ -379,7 +379,7 @@ function ownershipOf(pr: any, source: string, task: string) {
   }
   if (source === "label") return `It carries your session label, so the ${task} is yours.`;
   if (source === "dependency-bot") return `A dependency bot opened it and no session works such a pull request, so the ${task} is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR), or close it.`;
-  if (source === "owner-gone") return `Its \`${SESSION_PREFIX}\` label names \`${sessionOf(pr)}\`, which has ENDED, and ${deadOwnerRowClause(pr)}, so the ${task} is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR), or close it.`;
+  if (source === "owner-gone") return `${capitalised(deadOwnerBasis(pr))}, so the ${task} is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR), or close it.`;
   if (source === "chairman-author") return `The chairman opened it and no session works it, so the ${task} is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR), or close it.`;
   return `The ${task} is yours: ${notConvincedBasis(pr, source)}.`;
 }
@@ -744,8 +744,20 @@ export const DEAD_OWNER_FALLBACK = "product-manager";
  */
 function deadOwnerRowClause(pr: any) {
   if (pr?.closingRowsNone) return "it closes no row";
+  if (!sessionOf(pr)) return pr?.closingRowsClosed ? "the row it names is closed" : "the row it names is open and no session holds it";
   return pr?.closingRowsClosed ? "the row it closed is closed" : "the row it closes is open and no session holds it";
 }
+
+/**
+ * The `owner-gone` basis in words, lower-case so a sentence can splice it in. A PR with no `session:` label (#5201) carries no label to name, so it says
+ * so, and names the row it closes or its branch names. A PR whose label names an ENDED session says that, as it always did.
+ */
+function deadOwnerBasis(pr: any) {
+  if (!sessionOf(pr)) return `it carries no \`${SESSION_PREFIX}\` label, and ${deadOwnerRowClause(pr)}`;
+  return `its \`${SESSION_PREFIX}\` label names \`${sessionOf(pr)}\`, which has ENDED, and ${deadOwnerRowClause(pr)}`;
+}
+
+const capitalised = (clause: string) => clause.charAt(0).toUpperCase() + clause.slice(1);
 
 /**
  * WHO A PULL REQUEST BELONGS TO, BY A TOTAL FUNCTION (#2941): every pull request has exactly one answer, and the
@@ -816,7 +828,7 @@ function ownershipSentence(pr: any, { blocking, nowMs }: { blocking: any[]; nowM
     "branch-name": `It carries no session label and closes no row you hold, but its branch ${branch} names you, so it is yours to fix.`,
     stamp: `It carries no session label and closes no row you hold, but the worktree its branch ${branch} is checked out in was stamped by you, so it is yours to fix.`,
     "dependency-bot": "A dependency bot opened it and no session works such a pull request, so it is yours to route: re-lane it to a session that should fix it, or close it.",
-    "owner-gone": `Its \`${SESSION_PREFIX}\` label names \`${sessionOf(pr)}\`, which has ENDED, and ${deadOwnerRowClause(pr)}, so it is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR) to a session that can fix it, or close it.`,
+    "owner-gone": `${capitalised(deadOwnerBasis(pr))}, so it is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR) to a session that can fix it, or close it.`,
     "chairman-author": "The chairman opened it and no session works it, so it is yours to route: re-lane it (`" + SESSION_PREFIX + "<name>` on the PR) to a session that should fix it, or close it.",
     ceo: unownedSentence(pr, { blocking, nowMs }),
   };
@@ -1019,7 +1031,7 @@ function notConvincedBasis(pr: any, source: string) {
   if (source === "branch-row") return `its branch \`${pr.headRefName}\` was claimed for row #${pr?.rowOwner?.row}, which is held by you`;
   if (source === "branch-name") return `its branch \`${pr.headRefName}\` names you`;
   if (source === "dependency-bot") return "a dependency bot opened it and no session works such a pull request";
-  if (source === "owner-gone") return `its \`${SESSION_PREFIX}\` label names \`${sessionOf(pr)}\`, which has ENDED, and ${deadOwnerRowClause(pr)}`;
+  if (source === "owner-gone") return deadOwnerBasis(pr);
   if (source === "chairman-author") return "the chairman opened it and no session works it";
   return `the worktree its branch \`${pr.headRefName}\` is checked out in was stamped by you`;
 }

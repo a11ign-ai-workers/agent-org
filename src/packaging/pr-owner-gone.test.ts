@@ -7,7 +7,8 @@
  * failed and the PR landed on `ceo`, recorded as "nobody could be named" when the owner was known.
  *
  * THE FIXTURES ARE #4626 AND #4805. CONTROLS, each the same PR with ONE fact changed: its label alive keeps the label; its row open and CLAIMED keeps
- * `closing-row`; no label at all still falls to `ceo` and IS recorded (so the emptiness asserted for the two is not an emptiness of the recorder); a
+ * `closing-row`; no label naming no row still falls to `ceo` and IS recorded (so the emptiness asserted for the two is not an emptiness of the recorder); a
+ * label-less PR naming an open unheld row is `owner-gone` (#5201, below); a
  * dependency bot's PR still outranks the rung; and an unreadable rows list (empty) is neither "every row closed" nor "unclaimed".
  */
 import { test } from "node:test";
@@ -69,10 +70,42 @@ test("CONTROL: a PR naming one row held by a live session and one open and UNCLA
   assert.equal(ownerOfPr(split).source, "ceo");
 });
 
-test("CONTROL: a PR with no label at all still falls to ceo and IS recorded", () => {
-  const pr = owned(pr4626({ labels: [] }));
+test("CONTROL: a PR with no label that names NO row still falls to ceo and IS recorded", () => {
+  const pr = owned(pr4626({ labels: [], headRefName: "agent/fix-typo", closingIssuesReferences: [] }));
   assert.deepEqual(ownerOfPr(pr), { session: "ceo", source: "ceo" });
   assert.deepEqual(unresolvedOwnerEvents([pr], ownerOfPr, "a11ign/a11ign"), [{ classKey: "owner-unresolved", ref: "a11ign/a11ign#4626" }]);
+});
+
+/**
+ * #5201 (a11ign, the tenth `owner-unresolved` occurrence): a PR with NO label at all, on a branch `agent/<slug>-<n>` naming row n, which is open and held by
+ * nobody. No label can name a dead owner here, so `rowsNobodyHolds` reads the row the branch names and the PR is `owner-gone`. Each CONTROL is the same PR
+ * with ONE fact changed.
+ */
+const pr5201 = (over: Record<string, unknown> = {}) => pr4626({
+  labels: [], headRefName: "agent/the-webhook-last-mile-5197", closingIssuesReferences: [], ...over,
+});
+const OPEN_5197 = [...OPEN, row(5197, "backlog", "lane:any")];
+
+test("#5201: a PR with no label on a branch naming an open unheld row is owned by product-manager, source owner-gone, and is not an owner-unresolved event", () => {
+  const pr = owned(pr5201(), OPEN_5197);
+  assert.equal(pr.closingRowsUnheld, true);
+  assert.equal(pr.closingRowsNone, undefined, "no label means no ENDED label to answer for, and the flag that says so is for a labelled PR only");
+  assert.deepEqual(ownerOfPr(pr), { session: "product-manager", source: "owner-gone" });
+  assert.deepEqual(unresolvedOwnerEvents([pr], ownerOfPr, "a11ign/a11ign"), []);
+});
+
+test("#5201 CONTROL: the same PR whose branch row is HELD by a live session keeps branch-row", () => {
+  const pr = owned(pr5201({ headRefName: "agent/the-webhook-last-mile-4437" }));
+  assert.deepEqual(ownerOfPr(pr), { session: "worker-4437", source: "branch-row" });
+});
+
+test("#5201: the order for an unlabelled PR says it carries no label and the row it names is open and held by nobody, and never says ENDED", () => {
+  const orders = decide({ prs: [owned(pr5201({ isDraft: false }), OPEN_5197)], readyRows: [], openRows: OPEN_5197 } as never);
+  const failing = orders.filter((o: any) => o.cause === "pr-checks-failing");
+  assert.equal(failing.length, 1, "POSITIVE CONTROL: the red pull request is ordered at all");
+  assert.equal(failing[0].session, "product-manager");
+  assert.match(failing[0].prompt, /[Ii]t carries no `session:` label, and the row it names is open and no session holds it/);
+  assert.doesNotMatch(failing[0].prompt, /ENDED|NOBODY COULD BE NAMED/);
 });
 
 test("CONTROL: a rows read that came back empty is neither 'every row closed' nor 'unclaimed'", () => {

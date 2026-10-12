@@ -77,15 +77,16 @@ function expectedOwner({ label, closing, branch, stamp }: Cell): string {
 }
 
 /**
- * A dead owner whose PR names at least one row and NO named row is held (#4644, #4808): the closing row `13` (closed), or -- when it closes none --
+ * A PR whose named rows NOBODY holds is product-manager's (#4644, #4808): the closing row `13` (closed), or -- when it closes none --
  * the number a branch ends in, which `rowsNamedBy` reads as a row whether or not the branch was a row's (`agent/worker-99` names row 99, closed;
- * `agent/some-slug-15` names row 15, open and unclaimed). A split names two HELD rows, so it is nobody's to flag. A plain branch names none, and
- * a PR that closes none with a plain branch is the no-row shape (#5115): its owner is still known and gone, so it is product-manager's too.
- * (A branch ending in `14` names a HELD row, which answers before this is asked.)
+ * `agent/some-slug-15` names row 15, open and unclaimed). That holds with a DEAD label, and with NO label at all (#5201): a label-less PR names its
+ * row by its closing reference or branch, and nobody holds it. A split names two HELD rows, so it is nobody's to flag. A plain branch names none, and
+ * a PR that closes none with a plain branch is the no-row shape: with a dead label it is product-manager's (#5115), with no label it is still `ceo`
+ * (the no-label shape names no row, so nothing says whose it is). (A branch ending in `14` names a HELD row, which answers before this is asked.)
  */
 function deadOwnersPr({ label, closing, branch }: Pick<Cell, "label" | "closing" | "branch">): boolean {
-  if (label !== "ended" || closing === "split" || closing === "live") return false;
-  return closing === "closed" || branch === "sessionRetired" || branch === "suffixReleased" || (closing === "none" && branch === "plain");
+  if (label === "own" || closing === "split" || closing === "live") return false;
+  return closing === "closed" || branch === "sessionRetired" || branch === "suffixReleased" || (label === "ended" && closing === "none" && branch === "plain");
 }
 
 const pullRequestFor = (cell: Cell, over: Fixture = {}) => prOf(BRANCHES[cell.branch], {
@@ -125,7 +126,7 @@ test("the grid: ownerOfPr names a session for EVERY cell, product-manager only f
     assert.equal(rest.length, 0, `${where}: exactly one failing-checks order`);
     assert.equal(order.cause, "pr-checks-failing", where);
     assert.equal(order.session, expectedOwner(cell), where);
-    if (order.session === "product-manager") assert.equal(cell.label, "ended", `${where}: product-manager answers a dead owner's PR and nothing else (#4644)`);
+    if (order.session === "product-manager") assert.notEqual(cell.label, "own", `${where}: a live label is never product-manager's (#4644, #5201)`);
     assert.equal(order.causeKey.startsWith(`${order.session}/pr-checks-failing/`), true, `${where}: the dedupe key moves with the session`);
     reached.add(order.session);
   }
@@ -173,7 +174,8 @@ test("the last rung is `ceo` and says WHICH PR, WHICH check and HOW LONG: the PR
 
 test("a live session HOLDING NO CLAIM is not named by its branch or its stamp: the limit #2912 kept, and the PR falls to ceo", () => {
   // `isLiveSession` is not asked at gate load (#2174), so live means "holds a claim". Both rungs honour the same test.
-  assert.equal(ordersFor(prOf("agent/worker-99"))[0].session, "ceo");
+  // #5201: `agent/worker-99` ends in 99, which `rowsNamedBy` reads as a row; no open row holds it, so the label-less PR is owner-gone, not named by worker-99.
+  assert.equal(ordersFor(prOf("agent/worker-99"))[0].session, "product-manager");
   assert.equal(ordersFor(prOf("agent/some-slug"), "worker-98")[0].session, "ceo");
 });
 
