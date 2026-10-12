@@ -439,7 +439,7 @@ export function ingest({ root, codexRoot = null, since, ledger, rowRepo, store, 
  * state once the events are in. The state is saved even when a file failed, because the files that did not fail were read.
  * `readEvents` is a parameter so a test can count the reads of the store.
  */
-export function ingestTranscripts({ root, codexRoot = null, since, ledger, rowRepo, storePath, ghLedgers = [], deferralLogs = [], promptLogs = [], now = Date.now() }: { root: string; codexRoot?: string | null; since: number; ledger: LedgerEntry[]; rowRepo: string; storePath: string; ghLedgers?: string[]; deferralLogs?: string[]; promptLogs?: string[]; now?: number; }, readEvents: (path: string) => TraceEvent[] = readStore) {
+export function ingestTranscripts({ root, codexRoot = null, since, ledger, rowRepo, storePath, ghLedgers = [], deferralLogs = [], promptLogs = [], servedLogs = [], now = Date.now() }: { root: string; codexRoot?: string | null; since: number; ledger: LedgerEntry[]; rowRepo: string; storePath: string; ghLedgers?: string[]; deferralLogs?: string[]; promptLogs?: string[]; servedLogs?: string[]; now?: number; }, readEvents: (path: string) => TraceEvent[] = readStore) {
   const store = openStore(storePath, readEvents);
   const statePath = stateFileFor(storePath);
   const { state, coldStart } = loadState({ statePath, storePath, now, since });
@@ -447,7 +447,7 @@ export function ingestTranscripts({ root, codexRoot = null, since, ledger, rowRe
   const calls = ghLedgers.length > 0 ? ingestGhCalls({ ledgers: ghLedgers, store, state: afterTranscripts, now }) : null;
   const deferrals = deferralLogs.length > 0 ? ingestDeferrals({ logs: deferralLogs, rowRepo, store, state: calls?.state ?? afterTranscripts, now }) : null;
   // After the ledgers, because a wake's outcome is read from the calls just keyed; before the state is saved, so the one rewrite of the store is stamped with it.
-  const outcomes = ghLedgers.length > 0 ? settleWakeOutcomes({ store, ghLedgers, promptLogs, now }) : null;
+  const outcomes = ghLedgers.length > 0 || servedLogs.length > 0 ? settleWakeOutcomes({ store, ghLedgers, promptLogs, servedLogs, now }) : null;
   saveState(statePath, { ...(deferrals?.state ?? calls?.state ?? afterTranscripts), storeBytes: existsSync(storePath) ? statSync(storePath).size : 0 });
   return { store, report: { ...report, ...(calls ? { ghCalls: calls.report } : {}), ...(deferrals ? { deferrals: deferrals.report } : {}), ...(outcomes ? { outcomes } : {}) } };
 }
@@ -477,12 +477,63 @@ function ledgerCallsPerHour(ledgers: string[]): Map<string, number> {
 }
 
 /**
+ * The wake events of the wakes a run served (agent-org#904): one per line of the `served-by-run` files `serve-by-run.ts` appends to, `servedBy: "run"` with the run's id and the
+ * outcome the run told (`wrote`). The id is `wake:<session>:<at>`, as a seat's is, so a line read twice is the same event and the store holds it once; one the store already
+ * holds (`held`, its id index) is not built again. A line that is not a record is listed in `failed` by file and skipped, and a file that cannot be read is listed and the rest are read.
+ */
+export function servedWakeEvents({ files, held }: { files: string[]; held: ReadonlyMap<string, number>; }): { events: TraceEvent[]; failed: string[]; } {
+  const events: TraceEvent[] = [];
+  const failed: string[] = [];
+  const seen = new Set<string>();
+  for (const file of files) {
+    if (!existsSync(file)) continue;
+    let text: string;
+    try {
+      text = readFileSync(file, "utf8");
+    } catch (error) {
+      failed.push(`${file}: ${(error as Error).message}`);
+      continue;
+    }
+    for (const line of text.split("\n").filter((l) => l.trim() !== "")) {
+      let record: any;
+      try {
+        record = JSON.parse(line);
+      } catch {
+        failed.push(`${file}: a line is not JSON`);
+        continue;
+      }
+      const ok = record?.servedBy === "run" && typeof record.at === "number" && Number.isFinite(record.at) && typeof record.session === "string" && typeof record.causeKey === "string"
+        && typeof record.runId === "string" && record.runId !== "";
+      if (!ok) {
+        failed.push(`${file}: a line is not a served-by-run record`);
+        continue;
+      }
+      const id = `wake:${record.session}:${record.at}`;
+      if (held.has(id) || seen.has(id)) continue;
+      seen.add(id);
+      events.push({
+        id, kind: "wake", source: "wake-ledger", at: record.at, session: record.session, ...subjectOf(record.causeKey), ...subjectsOfKey(record.causeKey),
+        cause: typeof record.cause === "string" ? record.cause : null, causeKey: record.causeKey, wakeId: id, outcome: "wrote", runId: record.runId, servedBy: "run",
+      } as TraceEvent);
+    }
+  }
+  return { events, failed };
+}
+
+/**
  * Put `outcome` and `runId` on the wake events the store has settled (agent-org#487), as ONE write per batch (`appendToStore` supersedes each wake it changes, and a supersede rewrites the
  * store: see {@link SETTLE_AFTER_MS}). A source that cannot be read leaves every wake as it was: a wake is never told from the sources that did read. An unreadable `gh` ledger is the
  * `ghCalls` report's failure and is not counted twice; an unreadable `prompt:session` log is this report's. A host with no ledger file at all writes nothing.
  */
-export function settleWakeOutcomes({ store, ghLedgers, promptLogs, now }: { store: ReturnType<typeof openStore>; ghLedgers: string[]; promptLogs: string[]; now: number; }): OutcomesReport {
+export function settleWakeOutcomes({ store, ghLedgers, promptLogs, servedLogs = [], now }: { store: ReturnType<typeof openStore>; ghLedgers: string[]; promptLogs: string[]; servedLogs?: string[]; now: number; }): OutcomesReport {
   const report: OutcomesReport = { settled: 0, wrote: 0, noOp: 0, escalated: 0, unknown: 0, countedHours: 0, pending: 0, failed: [] };
+  // A WAKE A RUN SERVED HAS NO TRANSCRIPT, so no seat's turns made an event for it: its own record is the event, and its outcome is TOLD (the decision was posted), not inferred.
+  // Written before the sources below are asked, because nothing below can tell it anything: a host with no `gh` ledger still has served wakes.
+  const serving = servedWakeEvents({ files: servedLogs, held: store.at });
+  report.failed.push(...serving.failed);
+  appendToStore(store, serving.events);
+  report.settled += serving.events.length;
+  report.wrote += serving.events.length;
   if (!ghLedgers.some((file) => existsSync(file))) return report; // a host that has had no ledger has nothing to tell from: the wakes stay as they are, absent, and print under `null`
   let sends: ReturnType<typeof sendsOfLogs>;
   let counted: Set<string>;
@@ -505,7 +556,8 @@ export function settleWakeOutcomes({ store, ghLedgers, promptLogs, now }: { stor
   report.countedHours = counted.size;
   report.pending = corrected.length;
   if (corrected.length === 0 || Math.min(...corrected.map((wake) => wake.at)) > now - SETTLE_AFTER_MS) return report;
-  appendToStore(store, corrected);
+  // A wake a seat served says so (agent-org#904), where its outcome is written: a seat's wake settled before this carries no `servedBy`, which says nothing and is counted as neither.
+  appendToStore(store, corrected.map((wake) => ({ ...wake, servedBy: "seat" } as TraceEvent)));
   for (const wake of corrected) {
     report.settled += 1;
     if (wake.outcome === "wrote") report.wrote += 1;
@@ -524,7 +576,7 @@ export function ingestHome({ home = homedir(), since, storePath, rowRepo, ledger
   const cache = join(home, ".cache", "a11ign");
   return ingestTranscripts({
     root: join(home, ".claude", "projects"), codexRoot: join(home, ".codex", "sessions"), since, ledger: ledger ?? parseLedger(readFileSync(join(cache, "wake-ledger"), "utf8")), rowRepo, storePath,
-    ghLedgers: ghLedgerFiles(home), deferralLogs: [join(cache, DEFERRAL_LOG_FILE)], promptLogs: promptLogFiles(cache), now,
+    ghLedgers: ghLedgerFiles(home), deferralLogs: [join(cache, DEFERRAL_LOG_FILE)], promptLogs: promptLogFiles(cache), servedLogs: [join(cache, "served-by-run")], now,
   });
 }
 
