@@ -16,13 +16,15 @@ import { tmpdir } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { HEARTBEAT_COMMENT_ID, writeHeartbeat } from "./work-tick.ts";
-import { SIGNALS, orgHealthOrders, orgHealthReadings, tickRecordReading } from "./org-health.ts";
+import { SIGNALS, orgHealthOrders, orgHealthReadings, tickRecordReading, tickWallReading } from "./org-health.ts";
+import { tickHealthFooter } from "./trace/trace.ts";
+import { createRow } from "./ticket-port/approved-unqueued-reads.ts";
 import { ORG_HEALTH_CLASSES } from "./work-gate/org-health-suppression.ts";
 import { workGateSource } from "./lib/work-gate-source.ts";
 import { TICK_KILLED, TICK_MARKER_FILE, TICK_OVERRAN, TICK_RECORD_FILE, TICK_RECORD_MARKER, TICK_RECORD_TABLE_ROWS, TICK_SLOW_SECONDS, clearOwnMarker,
   deliverTickOrders, isSlowTick, killedTickOrders, parseCostLines, percentile, readKilledTick, readMarker, readTickRecordState, recordSlowTick, renderTickRecord,
-  slowThresholdSeconds, tickMarkerPath, tickRecordOf, tickRecordTargetFrom, tickRecordUnwrittenLine, writeStartMarker, type CostLine,
-  type RecordIo } from "./work-tick-health.ts";
+  slowThresholdSeconds, standingRowFor, tickHealthLine, tickHealthOf, tickMarkerPath, tickRecordOf, tickRecordTargetFrom, tickRecordUnwrittenLine, tickWallIsHigh,
+  overranWakesOf, TICK_RECORD_ROW_TITLE, tickRecordRowBody, writeStartMarker, type CostLine, type RecordIo } from "./work-tick-health.ts";
 
 const SRC = fileURLToPath(new URL(".", import.meta.url));
 const PRELOAD = join(SRC, "lib", "crash-exit.ts");
@@ -180,8 +182,8 @@ test("agent-org#1208: a row the project does not declare is a refused write with
 }));
 
 test("agent-org#1208: org-health's one line names the reason and since when, and there is none while the record is written", () => {
-  assert.equal(tickRecordUnwrittenLine({ commentId: 1, unwritten: null }, NOW), null);
-  const line = tickRecordUnwrittenLine({ commentId: null, unwritten: { since: NOW - 10 * 60_000, why: "gh: HTTP 403" } }, NOW);
+  assert.equal(tickRecordUnwrittenLine({ commentId: 1, row: null, unwritten: null }, NOW), null);
+  const line = tickRecordUnwrittenLine({ commentId: null, row: null, unwritten: { since: NOW - 10 * 60_000, why: "gh: HTTP 403" } }, NOW);
   assert.match(line ?? "", /unwritten since 2026-10-04T22:30:04\.000Z \(10 min\): gh: HTTP 403\. Slow ticks are not being recorded and wake nobody\./);
 });
 
@@ -189,15 +191,18 @@ test("agent-org#1208: an unreadable state file is an unwritten record, never a q
   const path = join(dir, TICK_RECORD_FILE);
   writeFileSync(path, "{not json");
   assert.match(readTickRecordState(path, NOW).unwritten?.why ?? "", /not valid JSON/);
-  assert.deepEqual(readTickRecordState(join(dir, "absent.json"), NOW), { commentId: null, unwritten: null }, "CONTROL: no file is nothing owed");
+  assert.deepEqual(readTickRecordState(join(dir, "absent.json"), NOW), { commentId: null, row: null, unwritten: null }, "CONTROL: no file is nothing owed");
 }));
 
 test("agent-org#1208: the standing row is read from `units.tickRecordIssue` in the FIRST tracker's repository, and an absent or malformed one is a reason", () => {
   const declared = (units: object) => JSON.stringify({ tracker: [{ key: "", repo: "a11ign/a11ign" }, { key: "agent-org", repo: "a11ign/agent-org" }], units });
   assert.deepEqual(tickRecordTargetFrom(declared({ tickRecordIssue: 1208 })), { repo: "a11ign/a11ign", issue: 1208 });
-  for (const bad of [{}, { tickRecordIssue: "1208" }, { tickRecordIssue: 0 }, { tickRecordIssue: 1.5 }]) {
+  for (const bad of [{ tickRecordIssue: "1208" }, { tickRecordIssue: 0 }, { tickRecordIssue: 1.5 }]) {
     assert.match((tickRecordTargetFrom(declared(bad)) as { refusal: string }).refusal, /units\.tickRecordIssue/, JSON.stringify(bad));
   }
+  assert.deepEqual(tickRecordTargetFrom(declared({})), { repo: "a11ign/a11ign", issue: null }, "not declared and none created: nothing named yet, which is the one create");
+  assert.deepEqual(tickRecordTargetFrom(declared({}), 77), { repo: "a11ign/a11ign", issue: 77 }, "the row the tick created before is the one it keeps using");
+  assert.deepEqual(tickRecordTargetFrom(declared({ tickRecordIssue: 1208 }), 77), { repo: "a11ign/a11ign", issue: 1208 }, "a declared row wins over a kept one");
   assert.match((tickRecordTargetFrom("{not json") as { refusal: string }).refusal, /not valid JSON/);
   assert.match((tickRecordTargetFrom(JSON.stringify({ tracker: [], units: { tickRecordIssue: 1 } })) as { refusal: string }).refusal, /no tracker/);
 });
@@ -211,10 +216,10 @@ test("#3567: the limit is overridable only by a positive number, and a bad one f
 // --- ORG-HEALTH CARRIES THE ONE LINE (agent-org#1208) ----------------------------------------------------------------------------------------------
 
 const HEALTH_FACTS = { now: NOW, lastMergedAt: NOW - 600_000, work: null, redPrs: [], refusals: {}, drift: null, primarySince: null };
-const UNWRITTEN = { commentId: null, unwritten: { since: NOW - 30 * 60_000, why: "gh: HTTP 403" } };
+const UNWRITTEN = { commentId: null, row: null, unwritten: { since: NOW - 30 * 60_000, why: "gh: HTTP 403" } };
 
 test("agent-org#1208: the reading is clear while the record is written and trips, with the reason and the first refusal's time, while it is not", () => {
-  assert.equal(tickRecordReading({ now: NOW, state: { commentId: 5, unwritten: null } }).status, "clear");
+  assert.equal(tickRecordReading({ now: NOW, state: { commentId: 5, row: null, unwritten: null } }).status, "clear");
   const tripped = tickRecordReading({ now: NOW, state: UNWRITTEN });
   assert.equal(tripped.status, "tripped");
   assert.match(tripped.detail, /unwritten since .*\(30 min\): gh: HTTP 403/);
@@ -227,7 +232,7 @@ test("agent-org#1208: through `orgHealthReadings` an unwritten record is an orde
   assert.deepEqual(orders.map((order) => order.session), ["ceo"]);
   assert.match(orders[0].prompt, /HTTP 403/);
   assert.doesNotMatch(orders[0].prompt, /undefined/);
-  const quiet = orgHealthOrders(orgHealthReadings({ ...HEALTH_FACTS, tickRecord: { commentId: 1, unwritten: null } } as never)).filter((order) => order.subject === SIGNALS.TICK_RECORD_UNWRITTEN);
+  const quiet = orgHealthOrders(orgHealthReadings({ ...HEALTH_FACTS, tickRecord: { commentId: 1, row: null, unwritten: null } } as never)).filter((order) => order.subject === SIGNALS.TICK_RECORD_UNWRITTEN);
   assert.deepEqual(quiet, [], "CONTROL: a written record orders nothing");
   const unasked = orgHealthOrders(orgHealthReadings(HEALTH_FACTS as never)).filter((order) => order.subject === SIGNALS.TICK_RECORD_UNWRITTEN);
   assert.deepEqual(unasked, []);
@@ -359,7 +364,7 @@ test("#3567 CONTROL, through the tick: an ordinary tick tells nobody, and leaves
   assert.equal(existsSync(tick.marker), false, "a tick that ends by itself clears its marker");
 }));
 
-test("agent-org#1208, through the tick: a tick over the limit wakes NOBODY, says its record is unwritten (no row is declared here), and clears its marker", () => inDir((dir) => {
+test("agent-org#1208, through the tick: a tick over the limit wakes NOBODY, says its record is unwritten (this tick has no `gh` on its PATH, so the row can be neither written nor created), and clears its marker", () => inDir((dir) => {
   const tick = tickIn(dir, `setTimeout(() => process.exit(0), 1300);`);
   const ran = tick.run({ A11Y_TICK_SLOW_SECONDS: "1" });
   assert.equal(ran.status, 0, ran.stderr);
@@ -441,4 +446,98 @@ test("#4080: a refusal on the SECOND tracker is a line naming that repository an
   const first = heartbeatTo([HOME, ORG], [HOME.repo]);
   assert.ok(first.calls.includes(variableOf(ORG.repo)), "the second tracker is written although the first refused");
   assert.equal(first.said.filter((line) => line.includes(HOME.repo)).length, 2, "the variable and the comment each say they were refused, naming the first repository");
+});
+
+// --- THE STANDING ROW IS NAMED OR CREATED ONCE (agent-org#1208 done-when 2) -----------------------------------------------------------------------
+
+const DECLARATION = (units: object) => JSON.stringify({ tracker: [{ key: "", repo: "a11ign/a11ign" }], units });
+
+test("agent-org#1208: with no row declared the tick creates the standing row ONCE, keeps its number, and never creates a second", () => inDir((dir) => {
+  const statePath = join(dir, TICK_RECORD_FILE);
+  const created: string[] = [];
+  const create = (repo: string) => { created.push(repo); return 4242; };
+  const first = standingRowFor({ declarationText: DECLARATION({}), state: readTickRecordState(statePath, NOW), statePath, create });
+  assert.deepEqual(first, { repo: "a11ign/a11ign", issue: 4242 });
+  assert.equal(readTickRecordState(statePath, NOW).row, 4242, "the number is on disk before anything else is done with it");
+  const second = standingRowFor({ declarationText: DECLARATION({}), state: readTickRecordState(statePath, NOW), statePath, create });
+  assert.deepEqual(second, { repo: "a11ign/a11ign", issue: 4242 });
+  assert.deepEqual(created, ["a11ign/a11ign"], "ONE create across two ticks");
+}));
+
+test("agent-org#1208: a declared row is used and nothing is created; a refused create is a reason, retried next tick, never a wake", () => inDir((dir) => {
+  const statePath = join(dir, TICK_RECORD_FILE);
+  const never = () => { throw new Error("must not create"); };
+  assert.deepEqual(standingRowFor({ declarationText: DECLARATION({ tickRecordIssue: 9 }), state: readTickRecordState(statePath, NOW), statePath, create: never }), { repo: "a11ign/a11ign", issue: 9 });
+  const refused = standingRowFor({ declarationText: DECLARATION({}), state: readTickRecordState(statePath, NOW), statePath, create: () => { throw new Error("HTTP 403: label lane:ceo"); } });
+  assert.match((refused as { refusal: string }).refusal, /could not be created in a11ign\/a11ign \(HTTP 403: label lane:ceo\)/);
+  assert.equal(readTickRecordState(statePath, NOW).row, null, "nothing was recorded for a row that does not exist");
+}));
+
+test("agent-org#1208: through recordSlowTick the row is created lazily, only when a write is due, and the comment goes to the row it made", () => inDir((dir) => {
+  const statePath = join(dir, TICK_RECORD_FILE);
+  const asked: string[] = [];
+  const io = () => { asked.push("io"); return { find: () => null, post: () => 1, edit: () => {} } as RecordIo; };
+  assert.equal(recordSlowTick({ line: costLine(60), costText: "", now: NOW, costPath: COST_PATH, statePath, io, say: () => {} }), "not-due");
+  assert.deepEqual(asked, [], "a fast tick with nothing owed does not ask for the row, so it neither reads the declaration nor creates anything");
+  assert.equal(recordSlowTick({ line: costLine(181), costText: "", now: NOW, costPath: COST_PATH, statePath, io, say: () => {} }), "written");
+  assert.deepEqual(asked, ["io"]);
+}));
+
+// --- THE TWO HEALTH SIGNALS, FROM THE ONE RECORD (agent-org#1208 done-when 5) -------------------------------------------------------------------
+
+const HEALTH_NOW = NOW;
+const ledgerLine = (agoMs: number, subject: string, cause = TICK_OVERRAN) => `${HEALTH_NOW - agoMs}\tceo/${cause}/${subject}\tceo`;
+
+test("agent-org#1208: tick-overran wakes per day are counted by case from the ledger, a slow wake reads 0 once none is made, and the window is 24 h", () => {
+  const ledger = [ledgerLine(60_000, `${TICK_KILLED}-1`), ledgerLine(2 * 3_600_000, `${TICK_KILLED}-2`), ledgerLine(25 * 3_600_000, `${TICK_KILLED}-3`),
+    ledgerLine(60_000, "tick-slow-4"), ledgerLine(60_000, "ci-failed-5", "pr-ci"), "garbage", ""].join("\n");
+  assert.deepEqual(overranWakesOf(ledger, { now: HEALTH_NOW }), { slow: 1, killed: 2 }, "the day-old killed wake and the other cause are outside it");
+  assert.deepEqual(overranWakesOf(ledgerLine(60_000, `${TICK_KILLED}-1`), { now: HEALTH_NOW }), { slow: 0, killed: 1 }, "slow reads 0 when no slow wake was made");
+});
+
+test("agent-org#1208: the p50/p95 are read from the record's own cost file, and one line says them with the wakes per day", () => {
+  const lines = [60, 70, 80, 90, 100, 110, 120, 130, 140, 250].map((seconds, index) => JSON.stringify({ ...costLine(seconds), at: HEALTH_NOW - (index + 1) * 60_000 }));
+  const health = tickHealthOf({ costText: lines.join("\n"), ledgerText: ledgerLine(60_000, `${TICK_KILLED}-1`), now: HEALTH_NOW });
+  assert.deepEqual([health.ticks, health.p50Ms, health.p95Ms, health.slow], [10, 100_000, 250_000, 1]);
+  assert.deepEqual(health.wakes, { slow: 0, killed: 1 });
+  assert.equal(tickWallIsHigh(health), true, "p95 250 s is past the 180 s limit");
+  assert.match(tickHealthLine(health), /over 10 ticks in 24 h: p50 100\.0 s, p95 250\.0 s \(limit 180 s; 1 over it, recorded on the standing row and waking nobody\); tick-overran wakes per day: slow 0, killed 1/);
+  const unread = tickHealthOf({ costText: lines.join("\n"), ledgerText: null, now: HEALTH_NOW });
+  assert.equal(unread.wakes, null, "an unreadable ledger is not a zero");
+  assert.match(tickHealthLine(unread), /wakes per day: not read/);
+});
+
+test("agent-org#1208: the org-health wall reading is clear below the limit (and still carries the figures), trips once a day above it, and is a DIGEST", () => {
+  const fast = tickHealthOf({ costText: [60, 70, 80].map((s, i) => JSON.stringify({ ...costLine(s), at: HEALTH_NOW - (i + 1) * 60_000 })).join("\n"), ledgerText: "", now: HEALTH_NOW });
+  const clear = tickWallReading({ day: "2026-10-04", health: fast });
+  assert.equal(clear.status, "clear");
+  assert.match(clear.detail, /p50 70\.0 s, p95 80\.0 s/);
+  const slow = tickHealthOf({ costText: [60, 70, 200, 300].map((s, i) => JSON.stringify({ ...costLine(s), at: HEALTH_NOW - (i + 1) * 60_000 })).join("\n"), ledgerText: "", now: HEALTH_NOW });
+  const tripped = tickWallReading({ day: "2026-10-04", health: slow });
+  assert.equal(tripped.status, "tripped");
+  assert.equal(tripped.discriminator, `${SIGNALS.TICK_WALL_HIGH}@2026-10-04`);
+  assert.equal(tickWallReading({ day: "2026-10-04", health: null }).status, "clear", "no cost file is the tick's own line to say, not this reading's");
+  assert.equal(tickWallReading({ day: "2026-10-04", health: tickHealthOf({ costText: "", ledgerText: "", now: HEALTH_NOW }) }).status, "clear");
+  assert.equal(ORG_HEALTH_CLASSES[SIGNALS.TICK_WALL_HIGH].severity, "digest");
+  const orders = orgHealthOrders(orgHealthReadings({ ...HEALTH_FACTS, tickHealth: slow } as never)).filter((order) => order.subject === SIGNALS.TICK_WALL_HIGH);
+  assert.equal(orders.length, 1);
+  assert.equal(orgHealthOrders(orgHealthReadings({ ...HEALTH_FACTS, tickHealth: fast } as never)).filter((order) => order.subject === SIGNALS.TICK_WALL_HIGH).length, 0);
+});
+
+test("agent-org#1208: the weekly report prints the same two figures from the same files, and says so when the cost file is unreadable", () => inDir((dir) => {
+  writeFileSync(join(dir, "tick-cost.jsonl"), [60, 250].map((s, i) => JSON.stringify({ ...costLine(s), at: HEALTH_NOW - (i + 1) * 60_000 })).join("\n"));
+  writeFileSync(join(dir, "wake-ledger"), `${ledgerLine(60_000, `${TICK_KILLED}-1`)}\n`);
+  const [line] = tickHealthFooter(dir, HEALTH_NOW);
+  assert.match(line, /^TICK HEALTH \(last 24 h, the record's own cost file\): tick wall over 2 ticks in 24 h: p50 60\.0 s, p95 250\.0 s .*tick-overran wakes per day: slow 0, killed 1$/);
+  assert.match(tickHealthFooter(join(dir, "absent"), HEALTH_NOW)[0], /^TICK HEALTH: not read: .*tick-cost\.jsonl could not be read$/);
+}));
+
+test("agent-org#1208: the created row is `lane:ceo` with NO `ready` label, its number is read from the printed URL, and its body names the declaration key", () => {
+  let argv: string[] = [];
+  const number = createRow({ repo: "a11ign/a11ign", title: "t", labels: ["lane:ceo"], body: "b", run: (args) => { argv = args; return "https://github.com/a11ign/a11ign/issues/4321\n"; } });
+  assert.equal(number, 4321);
+  assert.deepEqual(argv.filter((arg, index) => argv[index - 1] === "--label"), ["lane:ceo"], "one label, the lane; `ready` would offer the row as work");
+  assert.throws(() => createRow({ repo: "a/b", title: "t", labels: [], body: "b", run: () => "created" }), /printed no row URL/, "a create with no number is never taken for one");
+  assert.match(tickRecordRowBody(), /units\.tickRecordIssue/);
+  assert.match(TICK_RECORD_ROW_TITLE, /^Tick record/);
 });

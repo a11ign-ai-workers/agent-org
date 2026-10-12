@@ -230,10 +230,70 @@ export function renderTickRecord(record: TickRecord, { now, thresholdSeconds = T
   ].join("\n");
 }
 
+// ---- THE COUNTS (agent-org#1208 done-when 5) --------------------------------------------------------------------------------------------------
+
+/** The cost file beside the wake ledger: one line per tick. `work-tick.ts` writes it and re-exports this name; the readers below take it from here, a leaf. */
+export const TICK_COST_FILE = "tick-cost.jsonl";
+
+/** The subject a `tick-overran` wake carried before the slow case was recorded and not delivered: only the ledger's own old lines still say it. */
+const LEGACY_SLOW_SUBJECT = "tick-slow";
+
+/** `tick-overran` wakes in the window by the case they were for: `slow` reads 0 once the slow case is recorded, `killed` is the one case that still wakes. */
+export type OverranWakes = { slow: number; killed: number };
+
+/** The two figures the chairman named (a11ign#928), over the record's window: the tick wall p50/p95 and `tick-overran` wakes per day. `wakes` is `null` when no ledger was read. */
+export type TickHealth = { windowMs: number; ticks: number; p50Ms: number | null; p95Ms: number | null; slow: number; thresholdSeconds: number; wakes: OverranWakes | null };
+
+/**
+ * `tick-overran` wakes in the window, from the wake ledger's text (`<epoch ms>\t<causeKey>\t...`, the key being `<session>/<cause>/<subject>-<time>`). A line that is not
+ * one is skipped. @param {string} ledgerText @param {{ now: number, windowMs?: number }} window @returns {OverranWakes}
+ */
+export function overranWakesOf(ledgerText: string, { now, windowMs = TICK_RECORD_WINDOW_MS }: { now: number; windowMs?: number; }): OverranWakes {
+  const wakes: OverranWakes = { slow: 0, killed: 0 };
+  for (const raw of ledgerText.split("\n")) {
+    const [stamp, key] = raw.split("\t");
+    const at = Number(stamp);
+    if (!key || !Number.isFinite(at) || now - at > windowMs || at > now) continue;
+    const [, cause, subject = ""] = key.split("/");
+    if (cause !== TICK_OVERRAN) continue;
+    if (subject.startsWith(TICK_KILLED)) wakes.killed += 1;
+    else if (subject.startsWith(LEGACY_SLOW_SUBJECT)) wakes.slow += 1;
+  }
+  return wakes;
+}
+
+/**
+ * THE ONE READING BOTH READERS SHARE: `org-health` and the weekly report call this over the same cost file the record's table is drawn from, so the p50/p95 they print are the
+ * record's and not a second measurement. `ledgerText` is `null` when the ledger could not be read, which is "not read" and never a zero.
+ * @param {{ costText: string, ledgerText: string | null, now: number, thresholdSeconds?: number }} input @returns {TickHealth}
+ */
+export function tickHealthOf({ costText, ledgerText, now, thresholdSeconds = TICK_SLOW_SECONDS }: { costText: string; ledgerText: string | null; now: number; thresholdSeconds?: number; }): TickHealth {
+  const record = tickRecordOf(parseCostLines(costText), { now, thresholdSeconds });
+  return { windowMs: TICK_RECORD_WINDOW_MS, ticks: record.ticks, p50Ms: record.p50Ms, p95Ms: record.p95Ms, slow: record.slow.length, thresholdSeconds,
+    wakes: ledgerText === null ? null : overranWakesOf(ledgerText, { now }) };
+}
+
+/** Over the limit at the 95th percentile: more than one tick in twenty ran past it, which is a trend and no longer one slow tick. @param {TickHealth} health */
+export function tickWallIsHigh(health: TickHealth): boolean {
+  return health.p95Ms !== null && health.p95Ms > health.thresholdSeconds * MS_PER_SECOND;
+}
+
+/** The reading as one line. @param {TickHealth} health @returns {string} */
+export function tickHealthLine(health: TickHealth): string {
+  const secs = (ms: number | null) => (ms === null ? "n/a" : `${seconds(ms)} s`);
+  const hours = health.windowMs / (60 * 60 * MS_PER_SECOND);
+  const wakes = health.wakes === null ? "not read (the wake ledger could not be read)" : `slow ${health.wakes.slow}, killed ${health.wakes.killed}`;
+  return `tick wall over ${health.ticks} tick${health.ticks === 1 ? "" : "s"} in ${hours} h: p50 ${secs(health.p50Ms)}, p95 ${secs(health.p95Ms)} (limit ${health.thresholdSeconds} s; ${health.slow} over it, `
+    + `recorded on the standing row and waking nobody); tick-overran wakes per day: ${wakes}`;
+}
+
 // ---- THE RECORD'S STATE, AND ITS WRITE -------------------------------------------------------------------------------------------------------
 
-/** `commentId` is the standing comment once known; `unwritten` is set from the first refused write until one lands, with the reason. */
-export type TickRecordState = { commentId: number | null; unwritten: { since: number; why: string } | null };
+/**
+ * `commentId` is the standing comment once known; `unwritten` is set from the first refused write until one lands, with the reason; `row` is the standing row THE TICK
+ * CREATED (done-when 2: created once and recorded, never found by title), kept here because the project declaration is another repository's file that no tick writes.
+ */
+export type TickRecordState = { commentId: number | null; row: number | null; unwritten: { since: number; why: string } | null };
 
 /**
  * The state, or the empty one when there is no file. A file that is there and cannot be read is `unwritten` with that as the reason: absence of a reading is not a
@@ -245,17 +305,18 @@ export function readTickRecordState(path: string, now: number = Date.now()): Tic
   try {
     text = readFileSync(path, "utf8");
   } catch (error) {
-    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { commentId: null, unwritten: null };
-    return { commentId: null, unwritten: { since: now, why: `the record state at ${path} could not be read (${String((error as Error).message).split("\n")[0]})` } };
+    if ((error as NodeJS.ErrnoException).code === "ENOENT") return { commentId: null, row: null, unwritten: null };
+    return { commentId: null, row: null, unwritten: { since: now, why: `the record state at ${path} could not be read (${String((error as Error).message).split("\n")[0]})` } };
   }
   try {
-    const { commentId, unwritten } = JSON.parse(text);
+    const { commentId, row, unwritten } = JSON.parse(text);
     return {
       commentId: Number.isInteger(commentId) ? commentId : null,
+      row: Number.isInteger(row) && row > 0 ? row : null,
       unwritten: unwritten && Number.isFinite(unwritten.since) && typeof unwritten.why === "string" ? { since: unwritten.since, why: unwritten.why } : null,
     };
   } catch {
-    return { commentId: null, unwritten: { since: now, why: `the record state at ${path} is not valid JSON` } };
+    return { commentId: null, row: null, unwritten: { since: now, why: `the record state at ${path} is not valid JSON` } };
   }
 }
 
@@ -279,10 +340,11 @@ export function tickRecordUnwrittenLine(state: TickRecordState, now: number): st
 
 /**
  * The standing row, from the project declaration's text: `units.tickRecordIssue` in the FIRST declared tracker's repository (the heartbeat's own rule: one object,
- * one repository). Never searched for by title. A reason, and never a default, when it is absent or malformed.
- * @param {string} text @returns {{ repo: string, issue: number } | { refusal: string }}
+ * one repository). Never searched for by title. A declared row wins; otherwise the row this tick tool created before (`created`, from the state file); otherwise
+ * `issue` is `null`, which is "none yet, create it once". A reason, and never a default, when the declaration cannot be read or names no tracker.
+ * @param {string} text @param {number | null} [created] @returns {{ repo: string, issue: number | null } | { refusal: string }}
  */
-export function tickRecordTargetFrom(text: string): { repo: string; issue: number } | { refusal: string } {
+export function tickRecordTargetFrom(text: string, created: number | null = null): { repo: string; issue: number | null } | { refusal: string } {
   let parsed: any;
   try {
     parsed = JSON.parse(text);
@@ -292,8 +354,43 @@ export function tickRecordTargetFrom(text: string): { repo: string; issue: numbe
   const repo = Array.isArray(parsed?.tracker) ? parsed.tracker[0]?.repo : undefined;
   if (typeof repo !== "string" || repo === "") return { refusal: "the project declaration names no tracker repository" };
   const issue = parsed?.units?.[TICK_RECORD_ISSUE_KEY];
-  if (!Number.isInteger(issue) || issue <= 0) return { refusal: `the project declaration does not declare units.${TICK_RECORD_ISSUE_KEY} (the standing row, a positive integer)` };
-  return { repo, issue };
+  if (issue !== undefined && !(Number.isInteger(issue) && issue > 0)) return { refusal: `the project declaration's units.${TICK_RECORD_ISSUE_KEY} is not a positive integer` };
+  return { repo, issue: issue ?? created };
+}
+
+/** The title and the body the standing row is created with: the marker is not in it (the marker is the COMMENT's), and the body says how to name it in the declaration. */
+export const TICK_RECORD_ROW_TITLE = "Tick record: slow ticks and the tick wall p50/p95 (standing row, written by the tick)";
+export function tickRecordRowBody(): string {
+  return "The work tick records a tick that ran past its limit HERE, as ONE comment it edits in place (a marker line, then the rolling 24 h table and the p50/p95 tick wall), "
+    + "and wakes no session for it (agent-org#1208, chairman a11ign#928). A tick that was KILLED still wakes `ceo`: it left no cost line, so there is nothing to record.\n\n"
+    + `This row was created once by the tick and its number is kept in the tick's state. To name it in the project declaration, set \`units.${TICK_RECORD_ISSUE_KEY}\` in `
+    + "`.agent-org/project.json` to this number; a declared row wins over the kept one. It is created for the ceo lane and not marked ready, so it is not offered as work.";
+}
+
+/**
+ * THE STANDING ROW, NAMED OR CREATED ONCE (done-when 2). The declaration's row wins; else the one this tool created before; else `create` runs ONCE and the new number is
+ * written to the state file BEFORE anything else is done with it, so a later failure cannot make the next tick create a second row. Never a title search. A create that
+ * fails is a refusal like any refused write (unwritten, retried by the next tick, never a wake).
+ * @param {{ declarationText: string, state: TickRecordState, statePath: string, create: (repo: string) => number, now?: number }} input
+ * @returns {{ repo: string, issue: number } | { refusal: string }}
+ */
+export function standingRowFor({ declarationText, state, statePath, create, now = Date.now() }:
+  { declarationText: string; state: TickRecordState; statePath: string; create: (repo: string) => number; now?: number }): { repo: string; issue: number } | { refusal: string } {
+  const target = tickRecordTargetFrom(declarationText, state.row);
+  if ("refusal" in target) return target;
+  if (target.issue !== null) return { repo: target.repo, issue: target.issue };
+  let issue: number;
+  try {
+    issue = create(target.repo);
+  } catch (error) {
+    return { refusal: `the standing row could not be created in ${target.repo} (${String((error as any)?.stderr ?? "").trim().split("\n")[0] || String((error as Error)?.message ?? error).split("\n")[0]})` };
+  }
+  try {
+    writeTickRecordState(statePath, { ...state, row: issue });
+  } catch (error) {
+    process.stderr.write(`TICK RECORD ROW #${issue} CREATED IN ${target.repo} BUT NOT KEPT at ${statePath}: ${String((error as Error).message).split("\n")[0]}. Declare units.${TICK_RECORD_ISSUE_KEY}: ${issue} in the project declaration, or the next tick creates another.\n`);
+  }
+  return { repo: target.repo, issue };
 }
 
 /** The standing comment, as the tick reaches it: injected, because this file names no `gh` (`gh-call-ratchet.test.ts`). `find` and `post` answer the comment's id, or `null` when unread. */
@@ -307,18 +404,18 @@ export type RecordOutcome = "not-due" | "written" | "unwritten";
  *
  * A REFUSED WRITE IS A STATE AND NEVER A WAKE: it sets `unwritten` in the state file, `org-health` reads it (`tickRecordUnwrittenLine`), and the next tick tries again. The
  * fallback this replaced, an order to `ceo` per overrun, is what the row removed. NEVER THROWS: a tick that did its work must not become a failure because its record
- * could not be written. `io` is `{ refusal }` when the standing row is not declared, which is a refused write like any other.
+ * could not be written. `io` is `{ refusal }` when the standing row can be neither named nor created, which is a refused write like any other.
  *
  * @param {{ line: CostLine | null, costText: string, now: number, thresholdSeconds?: number, costPath: string, statePath: string, io: RecordIo | { refusal: string }, say?: (text: string) => void }} tick
  * @returns {RecordOutcome}
  */
 export function recordSlowTick({ line, costText, now, thresholdSeconds = TICK_SLOW_SECONDS, costPath, statePath, io, say = (text) => process.stderr.write(text) }:
-  { line: CostLine | null; costText: string; now: number; thresholdSeconds?: number; costPath: string; statePath: string; io: RecordIo | { refusal: string }; say?: (text: string) => void }): RecordOutcome {
+  { line: CostLine | null; costText: string; now: number; thresholdSeconds?: number; costPath: string; statePath: string; io: RecordIo | { refusal: string } | (() => RecordIo | { refusal: string }); say?: (text: string) => void }): RecordOutcome {
   const state = readTickRecordState(statePath, now);
   const slow = line !== null && isSlowTick(line, thresholdSeconds);
   if (!slow && state.unwritten === null) return "not-due";
   const refuse = (why: string, forgetId = false): RecordOutcome => {
-    const next: TickRecordState = { commentId: forgetId ? null : state.commentId, unwritten: { since: state.unwritten?.since ?? now, why } };
+    const next: TickRecordState = { commentId: forgetId ? null : state.commentId, row: readTickRecordState(statePath, now).row, unwritten: { since: state.unwritten?.since ?? now, why } };
     try {
       writeTickRecordState(statePath, next);
     } catch (error) {
@@ -327,14 +424,16 @@ export function recordSlowTick({ line, costText, now, thresholdSeconds = TICK_SL
     say(`TICK RECORD NOT WRITTEN (${why}); the next tick retries it and org-health says so. No session is woken for a slow tick.\n`);
     return "unwritten";
   };
-  if ("refusal" in io) return refuse(io.refusal);
+  // `io` may be a function so that an ordinary tick, which owes nothing, does not read the declaration or create a row: it is asked here, past the due check.
+  const target = typeof io === "function" ? io() : io;
+  if ("refusal" in target) return refuse(target.refusal);
   try {
     const body = renderTickRecord(tickRecordOf(parseCostLines(costText), { now, thresholdSeconds, current: line }), { now, thresholdSeconds, costPath });
-    let id = state.commentId ?? io.find();
-    if (id === null) id = io.post(body);
-    else io.edit(id, body);
+    let id = state.commentId ?? target.find();
+    if (id === null) id = target.post(body);
+    else target.edit(id, body);
     try {
-      writeTickRecordState(statePath, { commentId: id, unwritten: null });
+      writeTickRecordState(statePath, { commentId: id, row: readTickRecordState(statePath, now).row, unwritten: null });
     } catch (error) {
       say(`TICK RECORD STATE NOT WRITTEN at ${statePath}: ${String((error as Error).message).split("\n")[0]}. The record itself is written.\n`);
     }

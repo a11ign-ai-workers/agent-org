@@ -35,12 +35,13 @@ import { writeTickScopes } from "./tick-scopes.ts";
 import { defaultRun, promptOrQueue, STANCE, EXIT as PROMPT_EXIT } from "./prompt-session.ts";
 import { PANE_DIALOG_RAISED_FILE, raisePaneDialogs, readRaised, writeRaised } from "./pane-dialog.ts";
 import { HOME_CHECKOUT, PROJECT_DECLARATION_PATH, homeProjectDeclaration } from "./project-config.ts";
+import { LANE_PREFIX } from "./project-vocabulary.ts";
 import { completionPath, writeCompletion } from "./lib/tick-completion.ts";
 import { toolVersionLine } from "./lib/tool-version.ts";
 import { refreshTickSnapshot, type TickEvents } from "./tick-snapshot.ts";
-import { TICK_RECORD_MARKER, clearOwnMarker, deliverTickOrders, killedTickOrders, readKilledTick, recordSlowTick, slowThresholdSeconds, tickMarkerPath,
-  tickRecordPath, tickRecordTargetFrom, writeStartMarker, type RecordIo } from "./work-tick-health.ts";
-import { editComment, keyedCommentsOf, postRowComment } from "./ticket-port/approved-unqueued-reads.ts";
+import { TICK_COST_FILE, TICK_RECORD_MARKER, TICK_RECORD_ROW_TITLE, clearOwnMarker, deliverTickOrders, killedTickOrders, readKilledTick, readTickRecordState, recordSlowTick, slowThresholdSeconds,
+  standingRowFor, tickMarkerPath, tickRecordPath, tickRecordRowBody, writeStartMarker, type RecordIo } from "./work-tick-health.ts";
+import { createRow, editComment, keyedCommentsOf, postRowComment } from "./ticket-port/approved-unqueued-reads.ts";
 import { CENSUS_ENV, GATE_SPANS_ENV, childrenCpuMs, installSpawnCensus, largestSpans, readCensus, readGateSpans, setCensusPhase, summariseCensus } from "./lib/spawn-census.ts";
 
 // Where the reader now lives (the census times each spawn's CPU with it); the tick's tests and callers still import it from here.
@@ -145,7 +146,7 @@ function queuedOrderCount(path: string): number {
 // ---- THE COST OF A TICK (a11ign/a11ign#3566) ------------------------------------------------------------------------------------------------
 
 /** One JSON object per tick, beside the wake ledger. NOT IN the ledger: that file is tab-separated deliveries, and a line of another shape is read as one. */
-export const TICK_COST_FILE = "tick-cost.jsonl";
+export { TICK_COST_FILE }; // named in `work-tick-health.ts` (a leaf), which the gate and the weekly report read the cost file through
 
 /**
  * The file is cut to its newest half past this size. A line is about a kilobyte and a tick runs every two minutes, so the cap holds about two days of
@@ -382,7 +383,7 @@ function beginTickHealth(run: Run) {
 function reportIfSlow(line: ReturnType<typeof tickCostLine> | null, run: Run) {
   clearOwnMarker(run.markerPath, process.pid);
   recordSlowTick({ line, costText: readCostText(run.costPath), now: Date.now(), thresholdSeconds: slowThresholdSeconds(), costPath: run.costPath,
-    statePath: tickRecordPath(run.markerPath), io: tickRecordIo() });
+    statePath: tickRecordPath(run.markerPath), io: () => tickRecordIo(tickRecordPath(run.markerPath)) });
 }
 
 /** The cost file as text, or `""` when it cannot be read: the record then rests on this tick's own line, and says so by counting one tick. @param {string} path */
@@ -395,21 +396,23 @@ function readCostText(path: string): string {
 }
 
 /**
- * The standing comment through the ticket port's argument builders and `ghRun`; `{ refusal }` when the project does not declare the row, which is a refused
- * write like any other (never a wake, never a title search). The declaration is read here, at the moment a write is due, so an ordinary tick reads nothing.
- * @returns {RecordIo | { refusal: string }}
+ * The standing comment through the ticket port's argument builders and `ghRun`. The row is the declared `units.tickRecordIssue`, else the one this tick created before, else
+ * one created NOW, once, `lane:ceo` and not `ready` so it is never offered as work (`standingRowFor`); it is never found by title. `{ refusal }` when it can be neither named
+ * nor created, which is a refused write like any other (never a wake). Asked only when a write is due, so an ordinary tick reads and creates nothing.
+ * @param {string} statePath @returns {RecordIo | { refusal: string }}
  */
-function tickRecordIo(): RecordIo | { refusal: string } {
-  let text: string;
+function tickRecordIo(statePath: string): RecordIo | { refusal: string } {
+  let declarationText: string;
   try {
-    text = readFileSync(join(HOME_CHECKOUT, PROJECT_DECLARATION_PATH), "utf8");
+    declarationText = readFileSync(join(HOME_CHECKOUT, PROJECT_DECLARATION_PATH), "utf8");
   } catch (err) {
     return { refusal: `the project declaration could not be read (${String((err as any)?.message ?? err).split("\n")[0]})` };
   }
-  const target = tickRecordTargetFrom(text);
+  const run = (args: string[]) => ghRun(args);
+  const target = standingRowFor({ declarationText, state: readTickRecordState(statePath), statePath,
+    create: (repo) => createRow({ repo, title: TICK_RECORD_ROW_TITLE, labels: [`${LANE_PREFIX}ceo`], body: tickRecordRowBody(), run }) });
   if ("refusal" in target) return target;
   const { repo, issue } = target;
-  const run = (args: string[]) => ghRun(args);
   return {
     find: () => keyedCommentsOf({ repo, row: issue, marker: TICK_RECORD_MARKER, since: "1970-01-01T00:00:00Z", run }).at(-1)?.id ?? null,
     post: (body) => { postRowComment({ repo, row: issue, body, run }); return null; },

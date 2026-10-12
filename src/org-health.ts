@@ -39,6 +39,8 @@
 // THE TICK RECORD, agent-org#1208 (a11ign#928: a slow tick is recorded on one standing row and wakes nobody):
 //   tick-record-unwritten        any         the standing comment a slow tick edits could not be written (or the project declares no row). A DIGEST that rides the next order and is
 //                                            never an order of its own to wake on; the tick retries each tick, so it clears itself. The record's own p50/p95 are on the row.
+//   tick-wall-high               any         the tick wall's p95 over the last 24 h is past the limit (`tickHealthOf`, the record's own cost file): more than one tick in twenty overran, which is a trend
+//                                            for `ceo`'s daily read and not an order per overrun. Its detail carries p50/p95 and `tick-overran` wakes per day (slow reads 0; killed is the one that wakes).
 // WHY THE 180-MINUTE "NOT PROGRESSING" SIGNAL WAS REPLACED, not tuned: it fired at about 13x the median open-to-merge, exempted held and
 // drafted PRs by construction (so a hold whose reason had gone, agent-org #149, and an approved draft with no stamp, #3406, were
 // invisible), and counted any comment as activity, so a PR the bots kept commenting on never aged (#2950 sat 7.5 h; #3460 was re-queued).
@@ -73,7 +75,7 @@ import { READY_LABEL, STATE_LABELS, stateLabelFindings } from "./claim-labels.ts
 import { boardTruthTable } from "./board-truth-audit.ts";
 // The registry of flags the code ships and the declarations that decide them (agent-org#1135); it imports only the two config leaves this file already does.
 import type { FlagLedger } from "./flag-switch-ledger.ts";
-import { tickRecordUnwrittenLine, type TickRecordState } from "./work-tick-health.ts"; // a leaf (`node:*` only): the tick's own record state and the one line it says
+import { tickHealthLine, tickRecordUnwrittenLine, tickWallIsHigh, type TickHealth, type TickRecordState } from "./work-tick-health.ts"; // a leaf (`node:*` only): the tick's own record state and the one line it says
 // The checkout the tool serves and the project's own words are read from where they are declared (`standalone-roots.test.ts`, `project-vocabulary.test.ts`).
 import { HOME_CHECKOUT } from "./project-config.ts";
 import { ANSWER_PREFIX, BACKLOG_LABEL } from "./project-vocabulary.ts";
@@ -244,6 +246,7 @@ export const SIGNALS = Object.freeze({
   CLAIM_REFUSAL_STORM: "claim-refusal-storm",
   FLAG_WITHOUT_SWITCH: "flag-without-a-switch",
   TICK_RECORD_UNWRITTEN: "tick-record-unwritten",
+  TICK_WALL_HIGH: "tick-wall-high",
 });
 
 /** Signals whose first reader is not `ceo`: the order goes to that session as well as to `ceo`, who takes every signal. */
@@ -744,6 +747,19 @@ export function tickRecordReading({ now, state }: { now: number; state: TickReco
   const line = tickRecordUnwrittenLine(state, now);
   if (line === null || state.unwritten === null) return clear(signal);
   return { signal, status: "tripped", firstTrippedAt: state.unwritten.since, discriminator: `${signal}@${isoOf(state.unwritten.since).slice(0, 10)}`, detail: line };
+}
+
+/**
+ * SIGNAL: THE TICK WALL'S p95 IS PAST THE LIMIT (agent-org#1208, done-when 5). The chairman's two health signals, tick wall p50/p95 and `tick-overran` wakes per day, are read from the
+ * record's own cost file (`tickHealthOf`) and printed on this reading's `detail` whether it trips or not; it TRIPS when the p95 is over the limit, i.e. more than one tick in twenty
+ * overran. A window with no tick is clear (the cost file's own failure is said by the tick). Keyed on the day, so it is one line a day and never an order per overrun.
+ */
+export function tickWallReading({ day, health }: { day: string; health: TickHealth | null; }): Reading {
+  const signal = SIGNALS.TICK_WALL_HIGH;
+  if (health === null || health.ticks === 0) return clear(signal);
+  const detail = tickHealthLine(health);
+  if (!tickWallIsHigh(health)) return { signal, status: "clear", detail };
+  return { signal, status: "tripped", firstTrippedAt: null, discriminator: `${signal}@${day}`, detail };
 }
 
 /**
@@ -1929,6 +1945,8 @@ export function orgHealthReadings(facts: {
         flagSwitches?: FlagLedger | null;
         /** agent-org#1208: the tick record's state file as `readTickRecordState` reads it; OMITTED when the caller does not ask, and handed over by the live gate for the reason `flagSwitches` is. */
         tickRecord?: TickRecordState;
+        /** agent-org#1208: the tick wall's p50/p95 and the `tick-overran` wakes of the last 24 h (`tickHealthOf`); `null` is a cost file that could not be read, OMITTED is "does not ask". */
+        tickHealth?: TickHealth | null;
         /** agent-org#1168: the approved-DIRTY readings. `enabled` is `health.approvedDirty`'s decision; OFF gives no reading, so the caller may always pass it. */
         approvedDirty?: ApprovedDirtyFacts;
     }): Reading[] {
@@ -1960,6 +1978,7 @@ export function orgHealthReadings(facts: {
   if (facts.claimRefusals !== undefined) readings.push(claimRefusalStormReading({ now: facts.now, refusals: facts.claimRefusals }));
   if (facts.flagSwitches !== undefined) readings.push(flagSwitchReading({ day: isoOf(facts.now).slice(0, 10), ledger: facts.flagSwitches }));
   if (facts.tickRecord !== undefined) readings.push(tickRecordReading({ now: facts.now, state: facts.tickRecord }));
+  if (facts.tickHealth !== undefined) readings.push(tickWallReading({ day: isoOf(facts.now).slice(0, 10), health: facts.tickHealth }));
   if (facts.approvedDirty !== undefined) readings.push(...approvedDirtyReadings({ now: facts.now, ...facts.approvedDirty }));
   return readings;
 }
@@ -2067,6 +2086,9 @@ const REMEDY = (Object.freeze({
   [SIGNALS.TICK_RECORD_UNWRITTEN]: "The tick could not write its record: a slow tick is recorded on one standing row (a comment the tick edits in place) and wakes nobody, so a write that fails is "
     + "this line and not an order per overrun. The reason is quoted above. A `units.tickRecordIssue` that is not declared is a change to the project declaration (`.agent-org/project.json`, the "
     + "first tracker's row); a refused `gh` write is the token or the row, and the next tick retries by itself. Do NOT clear it by deleting `tick-record.json`, which only hides the outage.",
+  [SIGNALS.TICK_WALL_HIGH]: "The tick's wall is past its limit at the 95th percentile over the last 24 h: more than one tick in twenty overran. The figures are above (p50, p95, the slow ticks "
+    + "recorded on the standing row, and `tick-overran` wakes per day, where slow reads 0 and killed is the one case that still wakes). This is a trend to read, not a tick to act on: open the "
+    + "standing row's table (the longest phase of each slow tick is named there) and file one row for the phase that dominates, or say it is the host and not the code. A single overrun is never an order.",
   [APPROVED_DIRTY_SIGNAL]: "An approved pull request has been DIRTY (it conflicts with main) for more than " + APPROVED_DIRTY_MINUTES + " minutes and nobody has pushed to its head inside that window, so it cannot land and nothing is rebasing it. "
     + "The named PRs are above. Rebase each one onto main, or if its author is away, say so on the PR and name who takes it; a push to the head clears the finding, and so does a merge. "
     + "Do not clear it by approving again, which changes nothing about the conflict.",
