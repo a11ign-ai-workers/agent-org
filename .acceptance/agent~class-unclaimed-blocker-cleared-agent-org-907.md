@@ -20,4 +20,8 @@ bash -c 'cd "$(git rev-parse --show-toplevel)" && npx rstest run --config script
 
 Closes a11ign/agent-org#907.
 
+Outside-Region: src/serve-by-run.test.ts — its "registry holds no class" test is false once a class ships; it now asserts the shipped classes load and stay `seat` without a seats.json.
+Outside-Region: src/packaging/project-vocabulary.test.ts — declares the port state names the class uses, as `ticket-port/` does.
+Outside-Region: .changeset/class-unclaimed-blocker-cleared.md — the entry a project that pins a tag reads.
+
 platform: n/a (a class file for the registry the row's predecessor built)
