@@ -15,10 +15,14 @@ Acceptance: `bash -c 'cd ~/repos/wt-agent-org-1136 && AGENT_ORG_HOST=/home/agent
 
 Done when:
 1. The Acceptance passes and the PR is merged.
-2. In `pr-owner-gone.test.ts`, an unlabelled PR on branch `agent/<slug>-<n>` with row n open and unheld is `{session:"product-manager", source:"owner-gone"}`; the control with row n held by a live session gives that session; the control whose branch names no row (`fix-typo`, `Closes: none`) stays `ceo`.
+2. In `pr-owner-gone.test.ts`, an unlabelled PR on branch `agent/<slug>-<n>` with row n open and unheld is `{session:"product-manager", source:"owner-gone"}`; the control with row n held by a live session gives that session; the control whose branch names no row (the `fix-typo` shape, which closes no row) stays `ceo`.
 3. The order sentence for the unlabelled shape does not contain "ENDED".
 
-Closes a11ign/a11ign#5201.
+Closes a11ign/agent-org#1136 (a11ign/a11ign#5201).
+
+Flag: none -- a fix to which row an unlabelled PR is routed by, covered by the row's tests; no separate switch in the row's Region
+Health-signals: claims-refused, wakes-held
+Revert: revert this PR
 
 platform: n/a (routing in the work gate's owner ladder; no platform feature)
 
