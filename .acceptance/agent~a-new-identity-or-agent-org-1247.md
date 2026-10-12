@@ -8,7 +8,7 @@ Mutation: refusal removed in `widenIdentity` (3 red); `countsAsProof` accepting 
 
 Evidence: `src/host-identity-canary.test.ts` 8 of 8; `src/app-role-silent.test.ts` 18 of 18; `src/packaging/host-units*.test.ts` 183 of 183; `pnpm run typecheck` reports no error.
 
-Acceptance: `bash -c 'cd ~/repos/agent-org && node --test src/host-identity-canary.test.ts'`
+Acceptance: `bash -c 'cd ~/repos/wt-agent-org-1247 && node --test src/host-identity-canary.test.ts'`
 
 History: full
 
