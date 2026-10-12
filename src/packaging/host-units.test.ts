@@ -1014,7 +1014,7 @@ test("#1974: every shipped unit that spawns `gh` declares which account -- over 
   // units it names are the assertion that it did: a floor is a bound on the count, and these are the
   // members.
   assert.deepEqual(spending.map((u) => u.unit).sort(),
-    ["a11ign-board-report.service", "a11ign-confidence-post.service", "a11ign-corpus-release-nightly.service", "a11ign-kernel-reboot.service", "a11ign-manager-spend-post.service", "a11ign-tmp-prune.service", "a11ign-trace-ingest.service", "a11ign-trace-publish.service", "a11ign-trace-weekly.service", "a11ign-work-tick.service",
+    ["a11ign-board-report.service", "a11ign-confidence-post.service", "a11ign-corpus-release-nightly.service", "a11ign-kernel-reboot.service", "a11ign-manager-spend-post.service", "a11ign-tmp-prune.service", "a11ign-trace-ingest.service", "a11ign-trace-publish-serve.service", "a11ign-trace-publish.service", "a11ign-trace-weekly.service", "a11ign-work-tick.service",
       "a11ign-worktree-prune.service"],
     "every shipped .service that can reach `gh` -- the project's own, which reaches it only through the script it spawns, "
     + "and the dispatcher's, which was charged on UNKNOWN until its script was shipped");
@@ -2794,7 +2794,7 @@ function withListenerHome(body: (home: { shippedDir: string, installedDir: strin
 test("#3025: the listener's template is classified as the tool's and optional on `messaging`, so it is never UNCLASSIFIED", () => {
   assert.ok(TOOL_ENTRIES.includes("chairman-listen.service.in"));
   assert.equal(OPTIONAL_UNITS["chairman-listen.service.in"], "messaging");
-  assert.deepEqual(LONG_RUNNING_TEMPLATES, ["chairman-listen.service.in", "otel-receiver.service.in", "event-receiver.service.in", "event-tunnel.service.in"]);
+  assert.deepEqual(LONG_RUNNING_TEMPLATES, ["chairman-listen.service.in", "otel-receiver.service.in", "event-receiver.service.in", "event-tunnel.service.in", "trace-publish-serve.service.in"]);
   withListenerHome(({ shippedDir }) => {
     assert.deepEqual(unclassifiedEntries({ shippedDir, projectUnitsDir: null }), []);
     writeFileSync(join(shippedDir, "stray-listener.service.in"), LISTENER_TEMPLATE);

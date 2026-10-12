@@ -16,7 +16,7 @@ import { fileURLToPath } from "node:url";
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const HOST_NODE = "%h/.local/bin/node";
 // One entry per command line that runs node: `event-tunnel` runs it twice, `up` (ExecStart) and `down` (ExecStop), a11ign/a11ign#5197.
-const NODE_UNITS = ["confidence-post", "crash-recover", "event-receiver", "event-tunnel", "event-tunnel", "kernel-reboot", "otel-receiver", "shadow-window", "tmp-prune", "trace-ingest", "trace-publish", "work-tick", "worktree-prune"];
+const NODE_UNITS = ["confidence-post", "crash-recover", "event-receiver", "event-tunnel", "event-tunnel", "kernel-reboot", "otel-receiver", "shadow-window", "tmp-prune", "trace-ingest", "trace-publish", "trace-publish-serve", "work-tick", "worktree-prune"];
 const NODE_FLOOR_THAT_STRIPS = 24;
 
 type Manifest = { dependencies?: Record<string, string>; devDependencies?: Record<string, string>; engines?: { node?: string }; scripts?: Record<string, string> };

@@ -107,6 +107,8 @@ export const TOOL_ENTRIES = Object.freeze([
   "manager-spend-post.service.in", "manager-spend-post.timer.in", "manager-spend-post.sh",
   // a11ign/a11ign#3515: the trace pages' pair. The service runs `src/trace/publish.ts`, which decides whether a head has moved; the timer is only a clock.
   "trace-publish.service.in", "trace-publish.timer.in",
+  // a11ign/agent-org#1159: the trace pages' server, a long-running sibling of the publisher (`LONG_RUNNING_TEMPLATES`): the tailnet's proxy mount points at its loopback port.
+  "trace-publish-serve.service.in",
   // a11ign/agent-org#498: the trace store's own five-minute clock. The service runs `src/trace/freshness.ts` (ingest, then the freshness check and its once-per-episode incident); the timer is only a clock.
   "trace-ingest.service.in", "trace-ingest.timer.in",
   // a11ign/a11ign#3849: the /tmp fixture janitor's pair, and the user-level tmpfiles rule that ages the private tmp root out (not a unit: `installTmpfiles` copies it).
@@ -431,6 +433,10 @@ const OTHER_TOOL_FORMS: Readonly<Record<string, ReadonlyArray<readonly [RegExp, 
   ],
   "chairman-watch.service.in": [
     [/^ExecStart=%h\/\.local\/bin\/pnpm run messaging:watch$/m, "ExecStart=%h/.local/bin/node src/messaging/watch.ts"],
+  ],
+  // THE TRACE PAGES' SERVER (a11ign/agent-org#1159): run from the tool's checkout, like the publisher it serves.
+  "trace-publish-serve.service.in": [
+    [/^ExecStart=%h\/\.local\/bin\/node packages\/agent-org\/src\/trace-publish-serve\.ts$/m, "ExecStart=%h/.local/bin/node src/trace-publish-serve.ts"],
   ],
   // THE OTEL RECEIVER (a11ign/a11ign#4071): run from the tool's checkout, like the trace pages' script.
   "otel-receiver.service.in": [
