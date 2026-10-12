@@ -34,6 +34,7 @@
 import { execFileSync } from "node:child_process";
 import { readdirSync, readFileSync, mkdirSync, rmSync, existsSync, realpathSync, writeFileSync,
   renameSync, chmodSync, openSync, fstatSync, readSync, closeSync } from "node:fs";
+import { homedir } from "node:os";
 import { basename, dirname, join, resolve } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { refuseUnknownFlags } from "./lib/cli-flags.ts";
@@ -785,11 +786,11 @@ function scriptOfNode(args: string[]): string | undefined {
  * A unit run from the TOOL'S checkout (`toolForm`, #2974) starts `node src/work-tick.ts`, which is relative to the tool and not to the
  * project, so a `cwd` adds that base as a SECOND candidate; the caller's `exists` keeps the real one.
  * @param {string} command
- * @param {{ repoRoot?: string, scripts?: Record<string, string>, cwd?: string }} [deps]
+ * @param {{ repoRoot?: string, scripts?: Record<string, string>, cwd?: string, home?: string }} [deps]
  * @returns {string[]} absolute paths, deduplicated, WHETHER OR NOT THEY EXIST
  */
 export function programCandidates(command: string, { repoRoot = REPO_ROOT,
-  scripts = packageScripts(repoRoot), cwd }: { repoRoot?: string; scripts?: Record<string, string>; cwd?: string; } = {}): string[] {
+  scripts = packageScripts(repoRoot), cwd, home = homedir() }: { repoRoot?: string; scripts?: Record<string, string>; cwd?: string; home?: string; } = {}): string[] {
   const entries: string[] = [];
   const seen = new Set();
   /** @param {string} text */
@@ -803,8 +804,10 @@ export function programCandidates(command: string, { repoRoot = REPO_ROOT,
       const command = agentOrgCommand([tool, ...argv.slice(1)]);
       if (command !== null && Object.hasOwn(COMMANDS, command)) entries.push(resolve(TOOL_SRC, (COMMANDS as Record<string, string>)[command]));
       else if ((tool === "node" || SHELLS.has(tool)) && isPath(script)) {
-        entries.push(resolve(repoRoot, script));
-        if (cwd !== undefined) entries.push(resolve(cwd, script));
+        // systemd expands `%h` (and `$HOME`) in ExecStart before anything runs, so the file it starts is under the home, not the WorkingDirectory (#1112).
+        const path = expandLeadingHome(script, home);
+        entries.push(resolve(repoRoot, path));
+        if (cwd !== undefined) entries.push(resolve(cwd, path));
       }
       else if (PACKAGE_RUNNERS.has(tool) && argv[1] === "run" && argv[2]) followScript(argv[2]);
     }
@@ -817,6 +820,17 @@ export function programCandidates(command: string, { repoRoot = REPO_ROOT,
   };
   follow(command);
   return [...new Set(entries)];
+}
+
+/**
+ * THE LEADING HOME SPECIFIER, EXPANDED AS SYSTEMD EXPANDS IT (#1112). `%h/repos/control/src/fleet-watch.ts` is the file the service
+ * manager runs, and `resolve` would otherwise join it under the unit's WorkingDirectory as a literal `%h` directory, which is how a
+ * present program was reported as PROGRAM MISSING. ONLY THE LEADING SPECIFIER: a `%h` later in an argument is left as written.
+ * `~` is deliberately NOT here: systemd does not expand it in ExecStart, so reading it as the home would call a missing program present.
+ * @param {string} path @param {string} home @returns {string}
+ */
+function expandLeadingHome(path: string, home: string): string {
+  return path.replace(/^(?:%h|\$HOME|\$\{HOME\})(?=\/|$)/, home);
 }
 
 /**
@@ -2447,13 +2461,13 @@ const defaultGit = (args: string[]) =>
  */
 export function missingUnitPrograms(deps: ShippedDeps & {
     shippedDir?: string; installedDir?: string; readDir?: typeof readdirSync;
-    read?: typeof readFileSync; exists?: typeof existsSync;
+    read?: typeof readFileSync; exists?: typeof existsSync; home?: string;
 } = {}): Finding[] {
-  const { installedDir = INSTALLED_DIR, readDir = readdirSync, read = readFileSync, exists = existsSync } = deps;
+  const { installedDir = INSTALLED_DIR, readDir = readdirSync, read = readFileSync, exists = existsSync, home = homedir() } = deps;
   return installedOrgUnits(installedDir, readDir, unitPrefix(deps)).flatMap((unit) => {
     const text = textOf(join(installedDir, unit), read);
     const installedCopy = installedCopyState(shippedUnitText(unit, deps), text);
-    return missingForUnit(unit, text, { installedCopy, read, exists });
+    return missingForUnit(unit, text, { installedCopy, read, exists, home });
   });
 }
 
@@ -2507,11 +2521,11 @@ function installedOrgUnits(dir: string, readDir: typeof readdirSync, prefix: str
  * it, and a default would let a future caller re-acquire the exact false claim review caught in #2184 --
  * "matches the repository" said by a reader that never compared -- silently and by omission.
  * @param {{ installedCopy: InstalledCopyState, read?: typeof readFileSync,
- *           exists?: typeof existsSync }} deps @returns {Finding[]}
+ *           exists?: typeof existsSync, home?: string }} deps @returns {Finding[]}
  */
-function missingForUnit(unit: string, text: string | null, { installedCopy, read = readFileSync, exists = existsSync }: {
+function missingForUnit(unit: string, text: string | null, { installedCopy, read = readFileSync, exists = existsSync, home = homedir() }: {
         installedCopy: InstalledCopyState; read?: typeof readFileSync;
-        exists?: typeof existsSync;
+        exists?: typeof existsSync; home?: string;
     }): Finding[] {
   // A UNIT WHOSE TEXT CANNOT BE READ IS `unitDrift`'s FINDING, NOT THIS ONE. Guessing at what an
   // unreadable unit starts would report a second fault for one cause, which is the thing the "two
@@ -2521,7 +2535,7 @@ function missingForUnit(unit: string, text: string | null, { installedCopy, read
   if (dir === null) return [];
   const scripts = packageScripts(dir, read);
   const missing = [...new Set(execCommands(text)
-    .flatMap((command) => programCandidates(command, { repoRoot: dir, scripts })))]
+    .flatMap((command) => programCandidates(command, { repoRoot: dir, scripts, home })))]
     .filter((path) => !exists(path));
   return missing.map((path) => missingProgramFinding({ unit, path, dir, installedCopy }));
 }
