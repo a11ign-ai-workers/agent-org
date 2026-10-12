@@ -8,16 +8,18 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WORKER_STATE_DIR, writeDeclaration, type Declaration } from "../worker-state.ts";
 import {
   idleClaimantReading, idleNudgePrompt, WAIT_FIELDS, IDLE_CLAIMANT_MINUTES, IDLE_CLAIMANT_MS, IDLE_STATUSES, EVIDENCE_LABEL, HOLD_LABEL_PREFIX,
+  redOwnPrs, redCheckNudgePrompt, unansweredNudgeNote, idleLimitMs, stoppedNudgePrompt, MAX_UNANSWERED_NUDGES, STOPPED_CLAIMANT_MS,
 } from "../idle-claimant.ts";
 import { HOLD_PREFIX } from "../pr-hold-state.ts";
+import { brokenChecks } from "../red-pr.ts";
 import {
-  claimReading, claimStalledOrders, nextStallState, nudgeKey, claimFactsFrom,
+  claimReading, claimStalledOrders, nextStallState, nudgeKey, claimFactsFrom, stalledNudgeEvents, withRedChecks,
 } from "../claim-stall.ts";
 import { claimRecordComment } from "../row-claim.ts";
 import { AWAITING_EVIDENCE_LABEL, claimStallTick } from "../work-gate.ts";
@@ -204,12 +206,202 @@ test("#2999 before the clock's own interval a remembered idle nudge is HELD as `
   assert.equal(claimReading(facts({ commit: () => ago(5) }), ctx({ nudge, agents: listing("working") })).kind, "moving", "and a holder back at work is simply moving");
 });
 
-test("#2999 a holder with an open PR is NEVER released by the idle reading: it stays `nudged`", () => {
+test("#2999 a holder with an open PR is not released by the SECOND reading, which is the no-PR path's: it is counted (agent-org#743, below)", () => {
   const pr = { number: 2968, reviewDecision: "REVIEW_REQUIRED", labels: [], checksPending: false };
   const told = { nudgedAt: ago(400), deliveredAt: ago(300), idle: true };
+  // delivered 300 minutes ago and idle since ago(50): ONE unanswered nudge, so the next nudge and not a release
   const held = claimReading(facts({ openPrs: 1, ownPrs: [pr], claimedAt: ago(500) }), ctx({ nudge: told }));
-  assert.equal(held.kind, "nudged");
+  assert.equal(held.kind, "nudge");
+  assert.equal((held as { count?: number }).count, 2);
   assert.equal(claimReading(facts({ claimedAt: ago(500) }), ctx({ nudge: told })).kind, "release", "the control: the same memory on a holder with no PR releases");
+});
+
+// --- agent-org#743 (a11ign#4437): A RED PULL REQUEST IS TOLD WITHIN M, WHATEVER WAS DECLARED, AND THREE UNANSWERED NUDGES RELEASE --------------------------------
+//
+// THE CONTROL FOR EVERY "NOT NUDGED" IS THE SAME FIXTURE WITH ONE THING CHANGED: a `waiting-review` holder is excused only because the same holder with a red check is not,
+// the count releases only at the third because the second is a nudge, and a commit resets it only because the same nudge with none is counted on.
+// MUTATION (run by hand, on the PR): `redOwnPrs` always empty fails (1), (2) and the order text; always non-empty fails the GREEN controls; `MAX_UNANSWERED_NUDGES` read as 2
+// fails (4)'s second-does-not; a `progress` that counts a comment fails (5)'s comment control; one that ignores a commit fails (5)'s reset.
+
+const CHECK = { startedAt: "2026-10-02T11:00:00Z", completedAt: "2026-10-02T11:10:00Z" };
+const RED = [{ name: "gate", status: "COMPLETED", conclusion: "FAILURE", ...CHECK }];
+const RED_TS = [{ name: "ts", status: "COMPLETED", conclusion: "FAILURE", ...CHECK }, { name: "gate", status: "COMPLETED", conclusion: "FAILURE", ...CHECK }];
+const GREEN = [{ name: "gate", status: "COMPLETED", conclusion: "SUCCESS", ...CHECK }];
+const redPr = (rollup: object[] = RED, over: object = {}) => ({ number: 2968, reviewDecision: "REVIEW_REQUIRED", labels: [], checksPending: false, statusCheckRollup: rollup, ...over });
+const declare = (state: string) => ({ kind: "excused", state, why: "its pull request is open" });
+const onPr = (pr: object, over: object = {}) => facts({ openPrs: 1, ownPrs: [pr], claimedAt: ago(500), ...over });
+
+test("#743 (1) POSITIVE CONTROL: an idle holder on a RED pull request that declared `waiting-review` is nudged, naming the failing check; the SAME holder green is still excused", () => {
+  const f = onPr(redPr(), { declared: declare("waiting-review") });
+  const red = claimReading(f, ctx({ idleSince: ago(11) }));
+  assert.deepEqual([red.kind, (red as { idle?: boolean }).idle], ["nudge", true]);
+  const [order] = claimStalledOrders([{ facts: f, reading: red }] as never, NOW);
+  assert.match(order.prompt, /ITS PULL REQUEST IS RED: #2968 \(`gate`\)/);
+  assert.match(order.prompt, /FIX THE RED CHECK NOW/);
+  assert.match(order.prompt, /NUDGE 1 OF 3/);
+  assert.doesNotMatch(order.prompt, /YOU DECLARED/, "the text is the red check's, not the declaration's");
+  const green = claimReading(onPr(redPr(GREEN), { declared: declare("waiting-review") }), ctx({ idleSince: ago(11) }));
+  assert.deepEqual(green, { kind: "pr-owned" }, "NEGATIVE CONTROL: green checks, the same declaration: excused as before");
+});
+
+test("#743 (1) `waiting-ci` is voided by a red check too, `done` is not, and a declaration is read only for the pull request's own red", () => {
+  for (const state of ["waiting-ci", "waiting-review"]) {
+    assert.equal(claimReading(onPr(redPr(), { declared: declare(state) }), ctx({ idleSince: ago(11) })).kind, "nudge", state);
+    assert.equal(claimReading(onPr(redPr(GREEN), { declared: declare(state) }), ctx({ idleSince: ago(11) })).kind, "pr-owned", `${state}, green`);
+  }
+  assert.equal(claimReading(onPr(redPr(), { declared: declare("done") }), ctx({ idleSince: ago(11) })).kind, "pr-owned", "`done` lapses on its own facts, not on a red check");
+});
+
+test("#743 (1) the clock for a red pull request is M (10 minutes) with or without a declaration, and N (30) for the green one; a young red pull request has no grace", () => {
+  assert.equal(STOPPED_CLAIMANT_MS / MIN, 10);
+  assert.equal(claimReading(onPr(redPr(), { declared: declare("waiting-ci") }), ctx({ idleSince: ago(5) })).kind, "idle-watch", "5 minutes idle: not yet");
+  // no declaration read at all (the gate could not ask): the older N was 30
+  assert.equal(claimReading(onPr(redPr()), ctx({ idleSince: ago(11) })).kind, "nudge", "red: told at 11 minutes");
+  assert.equal(claimReading(onPr(redPr(GREEN)), ctx({ idleSince: ago(11) })).kind, "idle-watch", "CONTROL: the same holder green is still on N");
+  assert.equal(idleLimitMs({ built: true, prs: withRedChecks([redPr()]) as never }), STOPPED_CLAIMANT_MS);
+  assert.equal(idleLimitMs({ built: true, prs: withRedChecks([redPr(GREEN)]) as never }), IDLE_CLAIMANT_MS);
+  assert.equal(idleLimitMs({ prs: withRedChecks([redPr()]) as never }), IDLE_CLAIMANT_MS, "a caller that does not say `built` keeps N, as for the stopped clock");
+  const young = { createdAt: new Date(ago(5)).toISOString() };
+  assert.equal(claimReading(onPr(redPr(RED, young)), ctx({ idleSince: ago(11) })).kind, "nudge", "a red pull request opened 5 minutes ago is no review the org owes");
+  assert.equal(claimReading(onPr(redPr(GREEN, young)), ctx({ idleSince: ago(50) })).kind, "pr-owned", "CONTROL: a young GREEN one is, as #4017 ruled");
+});
+
+test("#743 (1) what a red check does NOT void: a pull request's own `awaiting-evidence` label, a row's wait, and a red that is only a hold's own jobs", () => {
+  const evidence = redPr(RED, { labels: [{ name: EVIDENCE_LABEL }] });
+  assert.equal(claimReading(onPr(evidence), ctx({ idleSince: ago(50) })).kind, "pr-owned", "the holder named a wait as a field on the pull request itself");
+  assert.equal(claimReading(onPr(redPr(), { waitKind: "not-before" }), ctx({ idleSince: ago(50) })).kind, "pr-owned", "and a row's field");
+  const held = redPr(RED, { labels: [{ name: `${HOLD_LABEL_PREFIX}worker-9` }] });
+  assert.deepEqual(redOwnPrs(withRedChecks([held]) as never), [], "`gate` red under a hold is the hold speaking (red-pr.ts)");
+  assert.deepEqual(redOwnPrs(withRedChecks([redPr(RED_TS, { labels: held.labels })]) as never), [{ number: 2968, repoKey: undefined, checks: ["ts"] }], "CONTROL: `ts` red under the same hold is a breakage");
+  assert.deepEqual(redOwnPrs(withRedChecks([redPr(GREEN)]) as never), []);
+  assert.deepEqual(redOwnPrs(withRedChecks([{ number: 1 }, undefined as never])), [], "no rollup on the pull request is not red");
+});
+
+test("#743 (1) ONE DECIDER, NO CYCLE: `idle-claimant.ts` imports neither `red-pr.ts` nor `pr-hold-state.ts`, and the red it reads is `brokenChecks`' answer, derived by `claim-stall.ts`", () => {
+  // the review of #1151: `idle-claimant.ts` -> `red-pr.ts` -> `pr-hold-state.ts` -> `idle-claimant.ts` failed at the top of the file under `rstest`; and
+  // `org-health.test.ts` (#2956) fails a second list of red conclusions in this file, so the answer is handed in, as `checksPending` is.
+  const source = readFileSync(new URL("../idle-claimant.ts", import.meta.url), "utf8");
+  const imports = [...source.matchAll(/^import\s[^;]*?from\s+"([^"]+)"/gm)].map((m) => m[1]);
+  for (const reaching of ["./red-pr.ts", "./pr-hold-state.ts"]) assert.ok(!imports.includes(reaching), `idle-claimant.ts must not import ${reaching}`);
+  const running = [...RED_TS, { name: "docs", status: "IN_PROGRESS", ...CHECK, completedAt: "0001-01-01T00:00:00Z" }];
+  const rerun = [...RED_TS, { name: "ts", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-10-02T11:20:00Z", completedAt: "2026-10-02T11:30:00Z" }];
+  const timedOut = [{ name: "lint", status: "COMPLETED", conclusion: "TIMED_OUT", ...CHECK }, { name: "gate", status: "COMPLETED", conclusion: "CANCELLED", ...CHECK }];
+  const hold = [{ name: `${HOLD_PREFIX}worker-9` }];
+  const prs = [redPr(RED), redPr(RED_TS), redPr(GREEN), redPr(running), redPr(rerun), redPr(timedOut), redPr(RED_TS, { labels: hold }), redPr(RED, { labels: [`${HOLD_PREFIX}worker-9`] }), redPr(timedOut, { labels: hold })];
+  const answers = prs.map((pr) => {
+    const expected = [...new Set(brokenChecks(pr as never).map((c) => c.name))];
+    assert.deepEqual(withRedChecks([pr])[0].failingChecks, expected, `the names red-pr.ts's brokenChecks finds, for ${JSON.stringify(pr.statusCheckRollup.map((c: any) => `${c.name}:${c.conclusion}`))} ${JSON.stringify(pr.labels)}`);
+    assert.deepEqual(redOwnPrs(withRedChecks([pr]) as never).flatMap((r) => r.checks), expected);
+    return expected.length;
+  });
+  assert.ok(answers.some((n) => n > 0) && answers.some((n) => n === 0), "CONTROL: the fixtures are not all one answer");
+  // a caller that hands over no `failingChecks` (`org-health.ts`, `idle-claim-incident.ts`) reads the pull request as not red, as it did before #743
+  assert.deepEqual(redOwnPrs([redPr(RED)] as never), []);
+  assert.equal(idleLimitMs({ built: true, prs: [redPr(RED)] as never }), IDLE_CLAIMANT_MS);
+});
+
+test("#743 (1) with NO declaration read, a red check is not excused by a reviewer's pane, an approval or a check still running either -- and green is, as #2999 ruled", () => {
+  const reviewer = listing("idle", [{ label: "reviewer-2968", status: "working" }]);
+  const oneRunning = [...RED, { name: "ts", status: "IN_PROGRESS", ...CHECK, completedAt: "0001-01-01T00:00:00Z" }];
+  const cases: [string, object, object][] = [
+    ["a reviewer's pane", redPr(), { agents: reviewer }],
+    ["an approval", redPr(RED, { reviewDecision: "APPROVED" }), {}],
+    ["another check still running", redPr(oneRunning, { checksPending: true }), {}],
+  ];
+  for (const [what, pr, more] of cases) {
+    assert.equal(claimReading(onPr(pr), ctx({ idleSince: ago(11), ...more })).kind, "nudge", `${what}: the failure is the holder's to fix`);
+  }
+  assert.equal(claimReading(onPr(redPr(GREEN)), ctx({ idleSince: ago(50), agents: reviewer })).kind, "pr-owned", "CONTROL: green with the same reviewer is the wait it always was");
+  assert.equal(claimReading(onPr(redPr(GREEN, { reviewDecision: "APPROVED" })), ctx({ idleSince: ago(50) })).kind, "pr-owned", "and green and approved is the queue's");
+});
+
+test("#743 (2) a holder with NO pull request is not counted: the same remembered nudge, idle again, stays `nudged` with `idleAgain` (#860) and is never re-nudged", () => {
+  const noPr = facts({ claimedAt: ago(60) });
+  const told = { nudgedAt: ago(40), deliveredAt: ago(32), idle: true };
+  const held = claimReading(noPr, ctx({ nudge: told, idleSince: ago(35) })) as { kind: string; idleAgain?: boolean; count?: number };
+  assert.deepEqual([held.kind, held.idleAgain, held.count], ["nudged", true, undefined]);
+  const counted = claimReading(onPr(redPr(GREEN), { claimedAt: ago(60) }), ctx({ nudge: told, idleSince: ago(35) })) as typeof held;
+  assert.deepEqual([counted.kind, counted.count], ["nudge", 2], "CONTROL: the same memory on a holder with a pull request open is the second nudge");
+});
+
+test("#743 (2) the THIRD unanswered nudge releases a holder with a pull request open, and the second does not -- the pull request is left as it is", () => {
+  const f = onPr(redPr());
+  const told = (count?: number) => ({ nudgedAt: ago(100), deliveredAt: ago(90), idle: true, ...(count === undefined ? {} : { count }) });
+  const first = claimReading(f, ctx({ nudge: told() })) as { kind: string; count?: number; unanswered?: number; idleMs: number };
+  assert.deepEqual([first.kind, first.count, first.unanswered], ["nudge", 2, ago(100)], "one unanswered nudge: the second is sent, and carries the first");
+  const second = claimReading(f, ctx({ nudge: told(2) })) as typeof first;
+  assert.deepEqual([second.kind, second.count, second.unanswered], ["nudge", 3, ago(100)], "TWO unanswered: the third is sent, NOT a release");
+  const third = claimReading(f, ctx({ nudge: told(MAX_UNANSWERED_NUDGES) })) as { kind: string; why: string; count: number; openPrs?: number[]; nudgedAt: number; idleSince: number };
+  assert.deepEqual([third.kind, third.why, third.count, third.openPrs, third.nudgedAt, third.idleSince], ["release", "stalled", 3, undefined, ago(100), ago(50)]);
+  const [release] = claimStalledOrders([{ facts: f, reading: third }] as never, NOW) as { prompt: string; release: Record<string, unknown> }[];
+  assert.deepEqual([release.release.why, release.release.nudges, release.release.answer, release.release.openPrs], ["stalled", 3, undefined, undefined],
+    "the SAME path as the no-PR release: no `answer`, so the row goes back to `ready`; and no `openPrs`, so the pull request is not what the performer holds the row for");
+  assert.match(release.prompt, /3 nudges went unanswered/);
+  assert.match(release.prompt, /open pull request is left as it is/);
+});
+
+test("#743 (2) CONTROLS: an undelivered nudge, one delivered inside the period, and a holder back at work are not unanswered", () => {
+  const f = onPr(redPr());
+  const at = (over: object) => claimReading(f, ctx({ nudge: { nudgedAt: ago(100), deliveredAt: ago(90), idle: true, count: 3, ...over } }));
+  assert.equal(at({ deliveredAt: null }).kind, "nudged", "never delivered: the holder was not told, so nothing is unanswered");
+  assert.equal(at({ deliveredAt: ago(5) }).kind, "nudged", "delivered 5 minutes ago: not yet a full idle period after it");
+  assert.equal(at({}).kind, "release", "and the same nudge delivered 90 minutes ago, idle since, is the third unanswered");
+  const working = claimReading(f, ctx({ nudge: { nudgedAt: ago(100), deliveredAt: ago(90), idle: true, count: 3 }, agents: listing("working") }));
+  assert.equal(working.kind, "nudged", "a nudge wakes its holder: `working` is read as still inside the nudge, the count is kept and nothing is released on a working holder");
+  assert.deepEqual(nextStallState({}, [{ facts: f, reading: working }] as never, NOW), { 2999: { session: "worker-9", nudgedAt: ago(100), idle: true, nudges: 3 } });
+});
+
+test("#743 (2) a nudge ANSWERED by a commit, a push, a new pull request or a new claim resets the count; a comment or a changed file does not", () => {
+  const told = { nudgedAt: ago(100), deliveredAt: ago(90), idle: true, count: 3 };
+  const reading = (f: Parameters<typeof claimReading>[0], over: object = {}) => claimReading(f, ctx({ nudge: told, ...over }));
+  const stalled = reading(onPr(redPr()));
+  assert.equal(stalled.kind, "release", "the unanswered third, as above: the control for every reset below");
+  for (const [what, f] of [
+    ["a commit", onPr(redPr(), { commit: () => ago(20) })],
+    ["a push", onPr(redPr(), { push: () => ago(20) })],
+    ["a pull request opened", onPr(redPr(RED, { createdAt: new Date(ago(20)).toISOString() }))],
+    ["a new claim", onPr(redPr(), { claimedAt: ago(20) })],
+  ] as const) {
+    const again = reading(f) as { kind: string; count?: number; unanswered?: number };
+    assert.deepEqual([what, again.kind, again.count, again.unanswered], [what, "nudge", undefined, undefined], `${what}: a FIRST reading again, numbered 1`);
+  }
+  assert.equal(reading(onPr(redPr(), { commit: () => ago(20) }), { agents: listing("working") }).kind, "pr-owned", "back at work after the commit: the memory is dropped");
+  assert.equal(reading(onPr(redPr(), { comment: ago(20) })).kind, "release", "a ROW COMMENT after the nudge is not progress: it was the clock's move, not the stall's end");
+  assert.equal(reading(onPr(redPr(), { file: () => ago(20) })).kind, "release", "nor is a changed file");
+  assert.equal(reading(onPr(redPr(), { commit: () => ago(150) })).kind, "release", "a commit BEFORE the nudge is not an answer to it");
+});
+
+test("#743 (2) the count is kept in the memory (absent for the first), rides the order, and files one failure event per unanswered nudge", () => {
+  const f = onPr(redPr());
+  const first = claimReading(f, ctx({ idleSince: ago(50) }));
+  assert.deepEqual(nextStallState({}, [{ facts: f, reading: first }] as never, NOW), { 2999: { session: "worker-9", nudgedAt: NOW, idle: true } }, "the first nudge writes what it always wrote");
+  const second = claimReading(f, ctx({ nudge: { nudgedAt: ago(100), deliveredAt: ago(90), idle: true } }));
+  assert.deepEqual(nextStallState({}, [{ facts: f, reading: second }] as never, NOW), { 2999: { session: "worker-9", nudgedAt: NOW, idle: true, nudges: 2 } });
+  const [order] = claimStalledOrders([{ facts: f, reading: second }] as never, NOW);
+  assert.equal(order.causeKey, nudgeKey("worker-9", 2999, NOW), "a NEW key: the previous nudge's delivery must not read as this one's");
+  assert.notEqual(order.causeKey, nudgeKey("worker-9", 2999, ago(100)));
+  assert.match(order.prompt, /NUDGE 2 OF 3/);
+  assert.deepEqual(stalledNudgeEvents([{ facts: f, reading: second }] as never, NOW).map((e) => e.ref), [`worker-9/#2999/${ago(100)}`], "the nudge it superseded was unanswered");
+  assert.deepEqual(stalledNudgeEvents([{ facts: f, reading: first }] as never, NOW), [], "CONTROL: a first nudge is the guard working, not an event (#4826)");
+  const released = claimReading(f, ctx({ nudge: { nudgedAt: ago(40), deliveredAt: ago(30), idle: true, count: 3 } }));
+  assert.equal(released.kind, "release");
+  assert.deepEqual(nextStallState({}, [{ facts: f, reading: released }] as never, NOW), { 2999: { session: "worker-9", nudgedAt: ago(40), idle: true, nudges: 3, idleSince: ago(50) } },
+    "a release not yet performed keeps what it needs to be read as a release again next tick");
+});
+
+test("#743 (2) a holder with a GREEN pull request is counted too, and told so beside the text it always had; a holder with NO pull request is told nothing new", () => {
+  const green = onPr(redPr(GREEN));
+  const reading = claimReading(green, ctx());
+  const [order] = claimStalledOrders([{ facts: green, reading }] as never, NOW);
+  assert.match(order.prompt, /NO WAIT THE ORG CAN READ/, "the unchanged idle text is still there");
+  assert.ok(order.prompt.endsWith(unansweredNudgeNote(1)));
+  assert.doesNotMatch(order.prompt, /RED/);
+  const none = facts();
+  const [plain] = claimStalledOrders([{ facts: none, reading: claimReading(none, ctx()) }] as never, NOW);
+  assert.doesNotMatch(plain.prompt, /NUDGE \d OF/);
+  assert.equal(plain.prompt, stoppedNudgePrompt({ row: 2999, branch: "agent/x-2999", idleMinutes: 50, releaseMinutes: 120, canRelease: true }), "byte-identical to today's");
+  assert.match(redCheckNudgePrompt({ row: 5, branch: null, idleMinutes: 10, red: [{ number: 38, repoKey: "agent-org", checks: ["gate", "ts"] }], nudge: 3 }),
+    /RED: agent-org#38 \(`gate`, `ts`\)/, "a pull request in another tracked repository is named by its key");
 });
 
 // --- the gate wiring: one decider for "has a wait field" ----------------------------------------------------------------------------------
