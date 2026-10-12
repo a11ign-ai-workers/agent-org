@@ -40,6 +40,9 @@ Outside-Region: src/work-gate-claim-stalled.test.ts — the claim-stalled tick e
 Outside-Region: src/work-gate-idle-again-incident.test.ts — the idle-again incident expectations for an open pull request, flipped to pr-owned (agent-org#805).
 Outside-Region: src/worker-state.test.ts — the worker-state expectation for a holder with an open pull request, flipped to pr-owned (agent-org#805).
 
+Outside-Region: src/claim-stall.ts — this path IS in agent-org#805's Region; the row lists it bare, and the Region check reads a bare path against the other tree (a11ign/a11ign), so it is refused for this repository. The line says the path belongs in this PR, not that it is outside the row.
+Outside-Region: src/work-gate-stale-blocker-cleared.test.ts — this path IS in agent-org#805's Region (the acceptance file); the same bare-path refusal applies, see the line above.
+
 Flag: none -- the defect is the typed wake itself, so a flag left on would keep the wrong nudge and a flag left off ships nothing; the release path is unchanged and what this stops is a nudge, so the bound is a revert.
 
 Health-signals: claims-refused, wakes-held
