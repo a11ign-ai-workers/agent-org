@@ -39,6 +39,15 @@ node --test src/packaging/gate-graphql-pacing.test.ts
 - `src/packaging/host-install-agent-org-launcher.test.ts` ("an absent launcher ...") and `src/packaging/live-tree-independence.test.ts` (two "#3233" tests): they depend on the a11ign checkout and its commits, not on this change.
 - `src/packaging/release-tag-on-merge.test.ts` ("the call names pnpm and changesets ..."): expects no lockfile; `pnpm-lock.yaml` is tracked.
 
+## Outside the Region
+
+These paths belong in this PR; each is named here with its reason.
+
+Outside-Region: src/work-gate/pacing.ts — the row's own rules (the reserve, the sweep, the read-times memory, the flag read), as a pure module the gate and its readers both call; the Region names the gate's entry and reads, not the module they call.
+Outside-Region: src/machinery-flag.ts — `machinery:flag` refuses a name no module registers (`FLAG_REGISTRY`), so the flag is registered here; without it the flag cannot be switched on or off.
+Outside-Region: src/flag-switch-ledger.ts — `FLAGS_WITH_ANOTHER_HOME` must name every registry flag (a test pins the two to each other); one entry for this flag.
+Outside-Region: src/packaging/machinery-flag-switch.test.ts — pins `FLAG_REGISTRY` to its exact list; one entry for this flag.
+
 ## Machinery
 
 Flag: gate.graphqlPacing
