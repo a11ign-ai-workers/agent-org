@@ -1,11 +1,11 @@
-// COPIED FROM `scripts/cli-flags.ts` at f3b5c5f59 (#2658, child 3g of #69; ADR 0040, decision 4): the tool's own copy, so `agent-org` imports nothing outside
-// its package. The product keeps its original and the two can drift, with no cross-repository pin: `agent-org-outward-edges.test.ts` compares them.
+// COPIED FROM `scripts/cli-flags.ts` at cc4dd7e09 (#2658, child 3g of #69; ADR 0040, decision 4): the tool's own copy, so `agent-org` imports nothing outside
+// its package. The product keeps its original and the two can drift, with no cross-repository pin: `copies-drifted` in `src/org-health.ts` reads them.
 // CHANGED FROM THE ORIGINAL: NOTHING but this header.
 // ==== end of copy header ====
 // @ts-check
 // A COPY, ON PURPOSE: this is `a11ign/screenreader-fleet`'s `src/cli-flags.ts` (published as `@a11ign/screenreader-fleet/cli-flags`), kept here
 // because the root scripts that run BEFORE `node_modules` exists (`preinstall`, `prepare`, the tool-only CI jobs) cannot import a package. They
-// used to reach it by a relative path into `packages/worker-fleet/`, which left the workspace with #3504. It imports `node:` built-ins only. The ONE edit to the text: a comment spelled out
+// used to reach it by a relative path into the fleet's laid directory, which left the workspace with #3504. It imports `node:` built-ins only. The ONE edit to the text: a comment spelled out
 // the entry-guard comparison, which `generate-commands-doc.ts` reads as "this file is a command" and asks for a `// command:` header.
 /**
  * Refuse a flag this command does not read.

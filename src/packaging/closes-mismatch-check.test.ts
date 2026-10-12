@@ -255,8 +255,10 @@ esac
 `);
   chmodSync(fake, 0o755);
   // Resolved from this file, not the working directory: the tool sits at `packages/agent-org/` in the project and at the root of its own checkout.
+  // `cwd: dir`, an empty scratch directory: the check reads the pull request's added `.acceptance/` files relative to its working directory, and from the
+  // tool's own directory (`packages/agent-org/` in the project) a merge-commit HEAD names files this directory does not hold, which is an ENOENT.
   const result = spawnSync(process.execPath, [CHECK_CLI, "2810"], {
-    encoding: "utf8", env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, PR_BODY: body },
+    cwd: dir, encoding: "utf8", env: { ...process.env, PATH: `${dir}:${process.env.PATH}`, PR_BODY: body },
   });
   return { status: result.status, out: result.stdout, // null when the check never asked: the sibling query is skipped unless this PR's own facts already fit
     siblingQuery: existsSync(join(dir, "sibling-query.txt")) ? readFileSync(join(dir, "sibling-query.txt"), "utf8") : null };
