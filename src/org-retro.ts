@@ -33,7 +33,7 @@ import { gatherChanges, readLedger as readHandFixLedger, ledgerLine as handFixLi
 import { claudeTurns, codexTurns, transcriptFiles } from "./token-audit.ts";
 import { refuseUnknownFlags, flagValue } from "./lib/cli-flags.ts";
 // THE DORA BLOCK (a11ign/a11ign#3135): measured from the registry and GitHub, per declared repository, by its own leaf module.
-import { FAILURE_LEDGER_FILE, SPEC_LINT_REFUSED_KIND, parseFailureLedger, recordFailures, type FailureEntry } from "./failure-ledger.ts";
+import { EMERGENCY_PRIORITY_NOT_HONOURED_KIND, EMERGENCY_PRIORITY_USED_KIND, FAILURE_LEDGER_FILE, SPEC_LINT_REFUSED_KIND, parseFailureLedger, recordFailures, type FailureEntry } from "./failure-ledger.ts";
 // THE IDLE-CLAIM INCIDENTS (#4642): the pure detector, and the two things its live read borrows -- the gate's idle memory and the herdr listing.
 import { IDLE_CLAIM_INCIDENT_MINUTES, idleClaimIncidents, idleClaimedHours, incidentEvents, incidentSummary, type ClaimedRow, type HolderState, type IdleClaim, type IdleClaimIncident } from "./idle-claim-incident.ts";
 import { WORKER_STATE_DIR, lastDeliveredTo, readDeclarations } from "./worker-state.ts";
@@ -49,7 +49,7 @@ import { newestPerName } from "./newest-check-run.ts";
 import { SESSION_PREFIX } from "./project-vocabulary.ts";
 import { correctionsPerDay, correctionsLine } from "./found-by-chairman.ts";
 // THE TOP BLOCKER (#4602): the gate's per-tick record of rows shelved behind each holder, summed over the window by its own leaf.
-import { BLOCKING_FILE, parseRecord as parseBlockingRecord, topBlocker, type TopBlocker } from "./blocking-impact.ts";
+import { BLOCKING_FILE, deadlockSummary, type DeadlockSummary, parseRecord as parseBlockingRecord, topBlocker, type TopBlocker } from "./blocking-impact.ts";
 import { readDora, readRepository, doraReport, READ_TIMEOUT_MS, renderDora, doraNumbers, doraDeclarations } from "./dora.ts";
 import { homeProjectDeclaration } from "./project-config.ts";
 // THE STOCK-ROW READING (#4175): its own leaf, because it asks the tracker per row and a refused read there names the row.
@@ -380,6 +380,27 @@ function specLintRefusedLines(reading: SpecLintRefusalReading | null | undefined
 }
 
 /**
+ * The emergency-priority lines in a window (a11ign#5032, agent-org#990): `emergency-priority-used` is a label the gate HONOURED and
+ * `emergency-priority-not-honoured` is a misuse. The gate writes one line per row and incident, so a DISTINCT ref is one use or one misuse, however many lines carry it.
+ */
+type EmergencyPriorityReading = { used: number; notHonoured: number };
+
+/** @returns {EmergencyPriorityReading | null} `null` when the ledger was not read or does not parse: a count nobody could read is not a quiet day */
+function emergencyPriorityOf(entries: FailureEntry[] | null, { since, until }: { since: number; until: number; }): EmergencyPriorityReading | null {
+  if (entries === null) return null;
+  const inWindow = entries.filter((entry) => entry.at >= since && entry.at <= until);
+  const distinctRefs = (classKey: string) => new Set(inWindow.filter((entry) => entry.classKey === classKey).map(({ ref }) => ref)).size;
+  return { used: distinctRefs(EMERGENCY_PRIORITY_USED_KIND), notHonoured: distinctRefs(EMERGENCY_PRIORITY_NOT_HONOURED_KIND) };
+}
+
+/** The two emergency-priority lines beside the spec-lint line. `null` is `unknown`, never `0`. */
+function emergencyPriorityLines(reading: EmergencyPriorityReading | null | undefined): string[] {
+  const unknown = "unknown (the failure ledger could not be read)";
+  if (reading === null || reading === undefined) return [`- Emergency-priority honoured uses (24h): ${unknown}`, `- Emergency-priority misuses (24h): ${unknown}`];
+  return [`- Emergency-priority honoured uses (24h): ${reading.used}`, `- Emergency-priority misuses (24h): ${reading.notHonoured}`];
+}
+
+/**
  * Every number, each `unknown` when its source was refused. `reads` holds the RAW reads (`null` for a refused one), so what is
  * computed here is pure and a test drives it with a fixture window whose answers are checked by hand.
  * @param {{ merged: any[] | null, mergedRepositories?: ReturnType<typeof readMerged> | null, openPrs: any[] | null, journal: string | null, ledger: string | null,
@@ -425,6 +446,7 @@ export function buildReport(reads: {
     unwaited: reads.unwaited ?? null,
     untiered: reads.untiered ?? null,
     blocking: topBlockerOf(reads.blockingRecord, now),
+    circularWaits: circularWaitsOf(reads.blockingRecord, now),
     idleClaims: incidentSummary(reads.idleClaims),
     idleClaimedHours: reads.idleClaimedHours ?? null,
     mergedRowOpen: mergedRowOpenSummary(reads.mergedRowOpen),
@@ -432,6 +454,7 @@ export function buildReport(reads: {
     safetyDenials: safetyCheckDenialSummary(reads.safetyDenials),
     underspecified: reads.underspecified ?? null, // a read nobody made or that was refused is `unknown` in the report, never `none`
     specLintRefused: specLintRefusalsOf(parsedFailureLedger(reads.failureLedger), window),
+    emergencyPriority: emergencyPriorityOf(parsedFailureLedger(reads.failureLedger), window),
     dora: reads.dora,
   };
   // `readings` absent is a read nobody made, which says `unknown` and never `no baseline`: only a read that found no file may say that.
@@ -703,6 +726,20 @@ function blockingLines(blocking: ReturnType<typeof buildReport>["blocking"]): st
   return [`- Top blocker: ${blocking.holder}${row}; shelved up to ${blocking.rows} rows for ${duration(blocking.minutes)} (${grouped(Math.round(blocking.rowMinutes))} row-minutes; measured from the gate's per-tick count)`];
 }
 
+/** @returns `undefined` for a record nobody read or that does not parse (`unknown`), otherwise the cycles the daily pass counts (agent-org#930) */
+function circularWaitsOf(text: string | null | undefined, now: number): DeadlockSummary | undefined {
+  if (text === null || text === undefined) return undefined;
+  try { return deadlockSummary(parseBlockingRecord(text), now); } catch { return undefined; }
+}
+
+/** @param {ReturnType<typeof buildReport>["circularWaits"]} circularWaits @returns {string[]} */
+function circularWaitLines(circularWaits: ReturnType<typeof buildReport>["circularWaits"]): string[] {
+  if (circularWaits === undefined) return [`- Circular waits: ${UNKNOWN} (${BLOCKING_FILE} could not be read, so "no cycle was found" cannot be said)`];
+  if (circularWaits.found === 0) return ["- Circular waits: 0 found"];
+  const longest = Math.max(...circularWaits.standing.map((c) => c.minutes), ...circularWaits.broken.map((c) => c.minutes));
+  return [`- Circular waits: ${circularWaits.found} found (${circularWaits.broken.length} broken, longest ${longest} minutes; ${circularWaits.standing.length} standing)`];
+}
+
 /**
  * THE WORKER-HOURS IDLE ON A CLAIMED ROW (#4957): the number, and how it was read, so a reader can set it beside a hand count. `null` is a population nobody could read.
  * @param {IdleClaimedHours | null} reading @returns {string[]}
@@ -769,7 +806,7 @@ export function renderReport(report: ReturnType<typeof buildReport>): string {
   const from = new Date(report.window.since).toISOString();
   const to = new Date(report.window.until).toISOString();
   return [`ORG RETROSPECTIVE ${report.date} -- the 24 hours ${from} to ${to}`, "",
-    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...underspecifiedLines(report.underspecified), ...specLintRefusedLines(report.specLintRefused), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
+    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...circularWaitLines(report.circularWaits), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...underspecifiedLines(report.underspecified), ...specLintRefusedLines(report.specLintRefused), ...emergencyPriorityLines(report.emergencyPriority), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
 }
 
 /**

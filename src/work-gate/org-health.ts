@@ -41,6 +41,7 @@ import { referencesOf, releaseReferencesOf, waitItemOf, staleWaits, bareWaits, m
 import { stallReasonOf, ownerOfPr } from "./pr-orders.ts";
 import { claimedScopesOf, scopeAddedReadings, scopeAddedOrders } from "./scope-added-orders.ts"; // #4759
 import { idleHoldIncidents, idleHoldOrders } from "./idle-hold-incidents.ts"; // #571
+import { forgetReads } from "./reads.ts"; // agent-org#1145: the child's write makes the memo's answers stale
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -368,11 +369,14 @@ const PR_HOLD_ENTRY = fileURLToPath(new URL("../pr-hold.ts", import.meta.url));
  * `rearm-on-release` (a bare label removal leaves it unarmed: "Lifting a hold does not arm"). A child process rather than an import, because the module is a
  * CLI whose `main` runs on load. Exit `0` is DONE; `2` (released but the re-arm could not be proven) is NOT done, so the order still goes to a session.
  * #3479: `repoKey` AIMS IT at the pull request's repository, and the first repository's call is exactly what it was (no flag).
+ * agent-org#1145: the child's `gh` writes are not seen by the read memo (`defaultRun` forgets only the writes it makes itself), so a read of this pull request
+ * after the release is asked again. The memo is forgotten whether the release exited `0` or not: a `2` or a crash may still have written the label.
  * @returns whether the release reported done
  */
 export function releaseHoldViaModule(number: number, session: string, repoKey?: string): boolean {
   const aim = repoKey ? [`--repo-key=${repoKey}`] : [];
   const result = spawnSync(process.execPath, [PR_HOLD_ENTRY, String(number), `--session=${session}`, "--release", ...aim], { encoding: "utf8" });
+  forgetReads();
   if (result.status !== 0) process.stderr.write(`COULD NOT lift hold:${session} on pr-${subjectRef(repoKey, number)} (exit ${result.status}): ${String(result.stderr).trim()}\n`);
   return result.status === 0;
 }
@@ -474,10 +478,12 @@ export function orgHealthNow({ prsRead, keyedPrsRead = [], readyRead, openRowsRe
       readClassRepeat?: () => import("../class-repeat.ts").ClassRepeatFact | null | undefined;
       teamAccess?: () => import("../org-health.ts").TeamAccessFact | undefined;
       readBoardTruth?: (input: BoardTruthInput) => ReturnType<typeof boardTruthAudit> | null | undefined;
+      /** agent-org#1135: the flags the code ships against the declarations; OMITTED is "does not ask", so only the live gate (`work-gate.ts`) reads the project's files */
+      readFlagSwitches?: () => import("../flag-switch-ledger.ts").FlagLedger | null | undefined;
   } = {}) {
   const { now = Date.now(), lastMergedAt = () => readLatestMerge(defaultRun, mergeRepositories()), readCaptures = (at) => readFleetCaptures({ now: at }), log, readCopies, readRefusals,
     readLabJobs = dispatchedLabJobsOrSay, readWaits = waitTickFacts, release, readHolderAgents = readAgents, readToolAgreement = () => undefined, readNodeStrips = () => undefined, readReleaseRuns = () => undefined, readReleaseFailures = () => undefined, raiseReleaseIncidents = () => {}, readFleetBuildIncident = () => undefined, readReleaseBehind = () => undefined, readClassRepeat = () => undefined,
-    teamAccess = () => readTeamAccess(defaultRun), readBoardTruth = () => undefined,
+    teamAccess = () => readTeamAccess(defaultRun), readBoardTruth = () => undefined, readFlagSwitches = () => undefined,
     readMilestoneMoves: readMoves = io.lastMergedAt === undefined ? readMilestoneMoves : undefined } = io; // #4295: the real exact-start read exactly when the merge read is real
   const { prs, required, primaryDrift, claimRefusals, claimFacts } = decideArgs;
   // #2996: THE WAITS ARE READ BEFORE THE READINGS, because a hold's excuse is now a question about its condition. `null` is a refused
@@ -515,6 +521,7 @@ export function orgHealthNow({ prsRead, keyedPrsRead = [], readyRead, openRowsRe
     ...releaseBehindFact(readReleaseBehind()), // #4128
     ...classRepeatFact(readClassRepeat()), // #4126
     ...teamAccessFact(teamAccess()),
+    ...flagSwitchesFact(readFlagSwitches()), // agent-org#1135
     ...boardTruthFact({ openRowsRead, claimedComments, waitFacts: waits?.facts ?? null, now }, readBoardTruth), // #4045
   };
   // #5157: the ledger is the HOST'S unless a caller hands over its own; the lab-jobs test passes `() => []`, so a busy host cannot trip it
@@ -879,6 +886,8 @@ const classRepeatFact = (read: import("../class-repeat.ts").ClassRepeatFact | nu
 
 /** #3634: THE FACT, OR NOTHING, as `toolAgreementFact`: `undefined` is a project that declares no `teamAccess`, so the reading is silent. */
 const teamAccessFact = (read: import("../org-health.ts").TeamAccessFact | undefined) => (read === undefined ? {} : { teamAccess: read });
+/** agent-org#1135: `undefined` is a caller that does not ask (silent), `null` a read that was refused (a stated unknown). */
+const flagSwitchesFact = (read: import("../flag-switch-ledger.ts").FlagLedger | null | undefined) => (read === undefined ? {} : { flagSwitches: read });
 
 /** #3364: THE WAIT READ AFTER THE GATE HAS LIFTED WHAT IT CAN, so the readings and the orders see only the stale waits a session still owes. `null` stays `null`. */
 function liftedWaits(waits: ReturnType<typeof waitTickFacts>, { now, release }: { now: number; release?: typeof releaseHoldViaModule; }) {

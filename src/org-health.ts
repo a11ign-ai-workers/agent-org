@@ -33,6 +33,9 @@
 // THE CLAIM-REFUSAL STORM, agent-org#889 (a11ign/agent-org#885 class 2, the chairman, 2026-10-11):
 //   claim-refusal-storm          > 10 / 15 min   more than ten claims refused inside fifteen minutes, naming the most frequent reason. THE BOUND IS THE CHAIRMAN'S,
 //                                            not a percentile: 163 refusals in 66 minutes (08:09-09:15) stopped every worker start, the fixer's included.
+// THE "MERGED BUT OFF" COUNT, agent-org#1135 (class `hand-reroute`, a11ign#4437):
+//   flag-without-a-switch        any         a `*_FLAG` the code ships (`src/flag-switch-ledger.ts`) whose key no declaration file carries, `false` counting as decided. Named once a day with the date
+//                                            of the merge that added it, to `product-manager`, who files the a11ign switch row the chairman's rule (a11ign#928, 2026-10-12) asks for with the change.
 // WHY THE 180-MINUTE "NOT PROGRESSING" SIGNAL WAS REPLACED, not tuned: it fired at about 13x the median open-to-merge, exempted held and
 // drafted PRs by construction (so a hold whose reason had gone, agent-org #149, and an approved draft with no stamp, #3406, were
 // invisible), and counted any comment as activity, so a PR the bots kept commenting on never aged (#2950 sat 7.5 h; #3460 was re-queued).
@@ -65,6 +68,8 @@ import { CLAIM_REFUSED_KIND, FAILURE_LEDGER_FILE, parseFailureLedger } from "./f
 // A LEAF (`claim-labels.ts` imports nothing), so the label is read from where it is declared, as `repeating-lines.ts` does.
 import { READY_LABEL, STATE_LABELS, stateLabelFindings } from "./claim-labels.ts";
 import { boardTruthTable } from "./board-truth-audit.ts";
+// The registry of flags the code ships and the declarations that decide them (agent-org#1135); it imports only the two config leaves this file already does.
+import type { FlagLedger } from "./flag-switch-ledger.ts";
 // The checkout the tool serves and the project's own words are read from where they are declared (`standalone-roots.test.ts`, `project-vocabulary.test.ts`).
 import { HOME_CHECKOUT } from "./project-config.ts";
 import { ANSWER_PREFIX, BACKLOG_LABEL } from "./project-vocabulary.ts";
@@ -233,10 +238,11 @@ export const SIGNALS = Object.freeze({
   CLASS_REPEAT: "class-repeat",
   MILESTONE_CLOCK: "primary-milestone-idle",
   CLAIM_REFUSAL_STORM: "claim-refusal-storm",
+  FLAG_WITHOUT_SWITCH: "flag-without-a-switch",
 });
 
 /** Signals whose first reader is not `ceo`: the order goes to that session as well as to `ceo`, who takes every signal. */
-const FIRST_READERS = (Object.freeze({ [SIGNALS.STATE_LABEL]: FIRST_READER, [SIGNALS.BOARD_TRUTH]: FIRST_READER, [SIGNALS.SHELVED_CIRCLE]: FIRST_READER }) as Readonly<Record<string, string>>);
+const FIRST_READERS = (Object.freeze({ [SIGNALS.STATE_LABEL]: FIRST_READER, [SIGNALS.BOARD_TRUTH]: FIRST_READER, [SIGNALS.SHELVED_CIRCLE]: FIRST_READER, [SIGNALS.FLAG_WITHOUT_SWITCH]: FIRST_READER }) as Readonly<Record<string, string>>);
 
 /**
  * `detail` is one line: for `unknown` it is WHY, for `tripped` the numbers. `firstTrippedAt` is epoch ms, or `null` when the signal's own source carries no time.
@@ -704,6 +710,24 @@ export function readClaimRefusals({ path, read = (file) => readFileSync(file, "u
  * One API budget as a real call's answer gave it (`poolFromHeaders`, or a `rateLimit` field in a query the gate was sending anyway), NEVER `/rate_limit`, which has reported a full pool during a total outage (#1967). `account` is the login the call ran as, `null` when the answer did not name one.
  */
 export type PoolReading = { account: string | null, resource: string, remaining: number, limit: number, resetAt: string | null };
+
+/**
+ * SIGNAL: A FLAG THE CODE SHIPS OFF AND NOBODY SET (agent-org#1135). `ledger` is `readFlagLedger`'s answer: `null` is a refused read and `{ unknown }` a read that named why it could not be
+ * made, both unknown and never clear (a declaration that did not parse is not a declaration that holds nothing). A flag decided as `false` is not counted, and an absent one is.
+ * It trips THE TICK ONE IS UNSET, with no grace: the violation is that the switch row was not filed with the change, and a grace period is the delay the rule exists to end.
+ * KEYED ON THE DAY AND THE SET, so each unset flag is named once a day (a standing set is one order a day, and a newly shipped flag is a new order the day it ships) and a day's
+ * order is not re-opened by a tick. The detail IS the list: key, the constant that holds it, the merge that added it, and the pull request, so no one searches for which change.
+ */
+export function flagSwitchReading({ day, ledger }: { day: string; ledger: FlagLedger | null; }): Reading {
+  const signal = SIGNALS.FLAG_WITHOUT_SWITCH;
+  if (ledger === null) return unknown(signal, "the flags the code ships could not be read against the declarations");
+  if ("unknown" in ledger) return unknown(signal, ledger.unknown);
+  if (ledger.unset.length === 0) return clear(signal);
+  const lines = ledger.unset.map((flag) => `- \`${flag.key}\` (${flag.name} in ${flag.file}), merged ${flag.mergedAt === null ? "on a date git did not give" : flag.mergedAt.slice(0, 10)}${flag.pr === null ? "" : ` in #${flag.pr}`}`);
+  return { signal, status: "tripped", firstTrippedAt: null,
+    discriminator: `${signal}@${day}:${ledger.unset.map((flag) => flag.key).sort().join(",")}`,
+    detail: `${ledger.unset.length} of ${ledger.shipped} flags the code ships ${ledger.unset.length === 1 ? "is" : "are"} OFF because no declaration sets ${ledger.unset.length === 1 ? "it" : "them"}:\n${lines.join("\n")}` };
+}
 
 /**
  * SIGNAL 11: A POOL IS BELOW `POOL_LOW_FRACTION` OF ITS LIMIT (#3448). A session that meets an exhausted pool sleeps on the reset, and three standing seats did at
@@ -1784,6 +1808,11 @@ export function orgHealthReadings(facts: {
         pools?: PoolReading[] | null; toolAgreement?: { result: ToolAgreement; } | null; nodeStrips?: NodeStripFact | null; teamAccess?: TeamAccessFact; autoOff?: AutoOffFact; stateRows?: Parameters<typeof stateLabelReading>[0]["rows"]; idle?: import("./idle-with-open-rows.ts").IdleRows; shelvedCircle?: ShelvedCircle[] | null; releaseRuns?: ReleaseRuns | null; releaseFailures?: ReleaseFailureRead[] | null; fleetBuildIncident?: FleetBuildIncident[] | null; releaseBehind?: import("./release-behind-main.ts").RepoFact[] | null; boardTruth?: Parameters<typeof boardTruthReading>[0]["audit"];
         classRepeat?: import("./class-repeat.ts").ClassRepeatFact | null; milestoneClock?: Omit<MilestoneClockFact, "endedAt"> | null;
         claimRefusals?: ClaimRefusal[] | null;
+        /**
+         * agent-org#1135: `readFlagLedger()`'s answer, `null` for a refused read and OMITTED when the caller does not ask. THE TICK DOES NOT READ IT ITSELF, unlike the copies and the refusal ledger:
+         * a default read of the project's declarations put a signal into 25 tests that assert the exact orders of a tick (the shape of agent-org#1073), so the live gate hands it over (`work-gate.ts`).
+         */
+        flagSwitches?: FlagLedger | null;
     }): Reading[] {
   const readings = [noMergeReading(facts), redPrReading(facts), refusedRowReading(facts),
     primaryReading({ now: facts.now, drift: facts.drift, since: facts.primarySince })];
@@ -1811,6 +1840,7 @@ export function orgHealthReadings(facts: {
   if (facts.classRepeat !== undefined) readings.push(...classRepeatReadings({ now: facts.now, classRepeat: facts.classRepeat }));
   if (facts.milestoneClock !== undefined) readings.push(milestoneClockReading({ now: facts.now, fact: facts.milestoneClock === null ? null : { ...facts.milestoneClock, endedAt: facts.lastMergedAt } }));
   if (facts.claimRefusals !== undefined) readings.push(claimRefusalStormReading({ now: facts.now, refusals: facts.claimRefusals }));
+  if (facts.flagSwitches !== undefined) readings.push(flagSwitchReading({ day: isoOf(facts.now).slice(0, 10), ledger: facts.flagSwitches }));
   return readings;
 }
 
@@ -1910,6 +1940,10 @@ const REMEDY = (Object.freeze({
     + "The most frequent reason is quoted above: READ IT FIRST. A `COULD NOT DETERMINE` / `BEHIND THE RELEASE` reason is the stale-rule guard (`src/row-claim/stale-rule-guard.ts`) refusing from a checkout that is behind the newest release: "
     + "run `update-tool` in the tool checkout, or find why the release did not cut (`release-run-failed`). Any other reason is the claim's own rule: fix the cause or file it `" + READY_LABEL + "` with an owner in this turn, and "
     + "do not clear the signal by editing the ledger, which only hides the storm.",
+  [SIGNALS.FLAG_WITHOUT_SWITCH]: "Each flag named shipped without its switch: the code reads it as OFF when absent, so the change it guards is merged and not running, and nobody decided that. "
+    + "The chairman's rule (a11ign#928, 2026-10-12) is that a flagged change ships with its a11ign switch row, filed at the same time. For each key, file that row `" + READY_LABEL + "` WITH AN OWNER in this turn "
+    + "(or find the one already filed and say so on it), naming the declaration file that carries the key and the value to set. `false` counts as decided, so a flag the org means to leave off is set to `false`, "
+    + "not left absent. A flag switched by `machinery:flag` is not counted (`FLAGS_WITH_ANOTHER_HOME`); one that is, and should not be, is a change to that map and not to a declaration.",
 }) as Readonly<Record<string, string>>);
 
 /** @returns who is ordered: the signal's first reader if it has one, then `ceo`, who takes every signal */

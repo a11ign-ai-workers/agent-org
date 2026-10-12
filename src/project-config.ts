@@ -69,9 +69,11 @@ export type RoutingDeclaration = {
   cheaperMinP: number,
   /** ...and one DEARER than the fallback needs this one. A cheap pick is the cheaper one to be wrong about, because a wrong Haiku start moves up one rung (#4630). */
   dearerMinP: number,
+  /** The P a Sonnet pick must reach to veto Haiku on a Tests-first row (a11ign#5110). Read between 0.5 and 0.99: under 0.5 the veto is the default, and above 0.99 it is one in name only. */
+  sonnetVetoMinP: number,
 };
 /** What an ABSENT `routing` block reads as (#4904): every route, the four questions composed by hand thresholds, and the chairman's two acceptance thresholds for when `choice` is set. */
-export const ABSENT_ROUTING: Readonly<RoutingDeclaration> = Object.freeze({ question: "traits", routes: [...ROUTES], guidance: {}, cheaperMinP: 0.5, dearerMinP: 0.7 });
+export const ABSENT_ROUTING: Readonly<RoutingDeclaration> = Object.freeze({ question: "traits", routes: [...ROUTES], guidance: {}, cheaperMinP: 0.5, dearerMinP: 0.7, sonnetVetoMinP: 0.7 });
 export type ProjectDeclaration = { schema: number, tracker: Tracker[], code: CodeRepository[], leakPatterns: LeakPattern[], dora: DoraRepository[], offerMilestones: string[], routing: RoutingDeclaration, repo: string, boardOwner: string, boardNumber: number };
 
 /** A refusal that carries the field it is about, so a caller (and a test) can tell WHICH rule fired and not merely that one did. */
@@ -294,7 +296,7 @@ function readOfferMilestones(declaration: Record<string, unknown>, source: strin
   return list;
 }
 
-const ROUTING_KEYS = ["question", "routes", "guidance", "cheaperMinP", "dearerMinP"];
+const ROUTING_KEYS = ["question", "routes", "guidance", "cheaperMinP", "dearerMinP", "sonnetVetoMinP"];
 const isRoute = (value: unknown): value is RouteName => typeof value === "string" && (ROUTES as readonly string[]).includes(value);
 /** A list of non-empty strings with at least one entry, or the refusal naming `field`. */
 function nonEmptyStrings(value: unknown, field: string, source: string): string[] {
@@ -348,6 +350,14 @@ function readThreshold(block: Record<string, unknown>, name: "cheaperMinP" | "de
   return value;
 }
 
+/** The veto's bar is read only between 0.5 and 0.99 (a11ign#5110): outside it the field names itself, so a typo cannot silently flip Haiku's default. */
+function readVetoThreshold(block: Record<string, unknown>, source: string): number {
+  if (!Object.hasOwn(block, "sonnetVetoMinP")) return ABSENT_ROUTING.sonnetVetoMinP;
+  const value = block.sonnetVetoMinP;
+  if (typeof value !== "number" || !(value >= 0.5 && value <= 0.99)) throw new ProjectDeclarationRefusal("routing.sonnetVetoMinP", `it must be a probability from 0.5 to 0.99, not ${JSON.stringify(value)}`, source);
+  return value;
+}
+
 /**
  * #4904: HOW A NEW ENGINEER IS ROUTED, the optional `routing` block. ABSENT reads as {@link ABSENT_ROUTING}: today's three routes and today's four questions, so a project that never
  * names it routes exactly as before. This is NOT the defaulting `PROJECT_DECLARATION` refuses: it adds no value of any project's identity, it names the router's own behaviour, and
@@ -363,7 +373,7 @@ function readRouting(declaration: Record<string, unknown>, source: string): Rout
   const question = block.question ?? ABSENT_ROUTING.question;
   if (question !== "choice" && question !== "traits") throw new ProjectDeclarationRefusal("routing.question", `${JSON.stringify(question)} is not \`choice\` or \`traits\``, source);
   const routes = readRoutes(block, source);
-  return { question, routes, guidance: readGuidance(block, routes, source), cheaperMinP: readThreshold(block, "cheaperMinP", source), dearerMinP: readThreshold(block, "dearerMinP", source) };
+  return { question, routes, guidance: readGuidance(block, routes, source), cheaperMinP: readThreshold(block, "cheaperMinP", source), dearerMinP: readThreshold(block, "dearerMinP", source), sonnetVetoMinP: readVetoThreshold(block, source) };
 }
 
 /**

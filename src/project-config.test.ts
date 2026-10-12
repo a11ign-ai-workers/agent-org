@@ -33,7 +33,7 @@ function fieldRefused(text: string): string {
 
 test("an ABSENT routing block reads as today: every route, the four questions composed, and the acceptance thresholds 0.5 and 0.7", () => {
   const read = parseProjectDeclaration(JSON.stringify(BASE), "fixture/project.json").routing;
-  assert.deepEqual(read, { question: "traits", routes: ["haiku/high", "sonnet/medium", "sonnet/high"], guidance: {}, cheaperMinP: 0.5, dearerMinP: 0.7 });
+  assert.deepEqual(read, { question: "traits", routes: ["haiku/high", "sonnet/medium", "sonnet/high"], guidance: {}, cheaperMinP: 0.5, dearerMinP: 0.7, sonnetVetoMinP: 0.7 });
   assert.deepEqual(read.routes, [...ROUTES]);
   assert.notEqual(read.routes, ABSENT_ROUTING.routes, "a reader's copy: a caller that sorts it does not move every project's routes");
   assert.deepEqual(routingOf({}), read, "an empty block is an absent one");
@@ -42,7 +42,16 @@ test("an ABSENT routing block reads as today: every route, the four questions co
 test("a valid block reads back as written, and `question: choice` is the one line that turns the route question on", () => {
   assert.equal(routingOf({ question: "choice" }).question, "choice");
   const full = routingOf({ question: "choice", routes: ["sonnet/high", "sonnet/medium"], cheaperMinP: 0.4, dearerMinP: 0.85, guidance: { "sonnet/high": GUIDANCE } });
-  assert.deepEqual(full, { question: "choice", routes: ["sonnet/medium", "sonnet/high"], guidance: { "sonnet/high": { what: "a stated edit", signals: ["one file"], notFor: "a new module", examples: ["#4629 a constant", "#4875 a threshold"] } }, cheaperMinP: 0.4, dearerMinP: 0.85 });
+  assert.deepEqual(full, { question: "choice", routes: ["sonnet/medium", "sonnet/high"], guidance: { "sonnet/high": { what: "a stated edit", signals: ["one file"], notFor: "a new module", examples: ["#4629 a constant", "#4875 a threshold"] } }, cheaperMinP: 0.4, dearerMinP: 0.85, sonnetVetoMinP: 0.7 });
+  assert.equal(routingOf({ sonnetVetoMinP: 0.85 }).sonnetVetoMinP, 0.85, "a project sets the veto bar and it reads back");
+});
+
+test("#5208: `routing.sonnetVetoMinP` is REFUSED at load outside 0.5 to 0.99, naming the field; both ends are the control", () => {
+  for (const bad of [0.49, 0.995, 1, 1.2, 0, "0.85", null, Number.NaN]) {
+    assert.equal(fieldRefused(withRouting({ sonnetVetoMinP: bad })), "routing.sonnetVetoMinP", JSON.stringify(bad));
+  }
+  assert.equal(routingOf({ sonnetVetoMinP: 0.5 }).sonnetVetoMinP, 0.5, "the control: 0.5 is the bottom of the range");
+  assert.equal(routingOf({ sonnetVetoMinP: 0.99 }).sonnetVetoMinP, 0.99, "the control: 0.99 is the top of the range");
   assert.equal(routingOf({ question: "traits" }).question, "traits");
   assert.equal(routingOf({ _comment: "keys that start with an underscore are notes" }).question, "traits");
 });

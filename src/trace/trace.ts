@@ -1188,10 +1188,10 @@ export function githubEventsOfNamed({ held, since, rowRepo, gh, validators = NO_
 /** wakes-per-row's reading of each week, from the same pulls, so its counts are the ones the aggregate compares its own with. */
 function wakesPerRowByWeek({ starts, pulls, rowRepo, claims, ledger, cache }: { starts: number[]; pulls: PullRequest[]; rowRepo: string; claims: Map<number, number>; ledger: LedgerEntry[]; cache: string; }) {
   const transcripts = readTranscripts(join(homedir(), ".claude", "projects"), starts[0]);
-  const instances = readInstances(cache);
+  const { instances, skipped } = readInstances(cache);
   const claimedAt = new Map([...claims].map(([row, at]) => [row, at as number | null]));
   const readings = new Map(starts.map((start) => [start, measure({ window: { from: start, to: start + WEEK_DAYS * MS_PER_DAY }, pulls, transcripts, ledger, instances, claimedAt, rowRepo }).rows]));
-  return { readings, unreadable: transcripts.flatMap((transcript) => (transcript.ok ? [] : [transcript.file])) };
+  return { readings, unreadable: transcripts.flatMap((transcript) => (transcript.ok ? [] : [transcript.file])), skippedInstances: skipped };
 }
 
 const STOP_LABEL: Record<string, string> = { floor: "FLOOR", budget: "BUDGET", failure: "GITHUB ERROR" };
@@ -1250,12 +1250,15 @@ async function mainAggregate() {
   const log = json ? console.error : console.log; // stdout of a `--json 1` run is the JSON and nothing before it
   const { rowRepo, cache, now, ledger, store, ingested, pulls, openRows, unreadRows, github, moves } = await readSources({ since, storePath, budget, log });
   const starts = Array.from({ length: Math.floor((weekStart(now) - since) / (WEEK_DAYS * MS_PER_DAY)) + 1 }, (_, week) => since + week * WEEK_DAYS * MS_PER_DAY);
-  const { readings, unreadable } = wakesPerRowByWeek({ starts, pulls, rowRepo, claims: claimsOf(store.events), ledger, cache });
+  const { readings, unreadable, skippedInstances } = wakesPerRowByWeek({ starts, pulls, rowRepo, claims: claimsOf(store.events), ledger, cache });
   const held = { from: ingested.firstRunSince, basis: `the ingest state's first run, ${new Date(ingested.firstRunAt).toISOString()}, over transcripts modified after that time` };
   const { HOME_CHECKOUT } = await import("../project-config.ts");
   const { paths: pullPaths, note } = readMergePaths({ checkout: HOME_CHECKOUT, rowRepo, since });
   const result = aggregate({ events: store.events, pulls, rowRepo, now, since, held, readings, unreadable: [...new Set([...ingested.failed, ...unreadable])], unreadRows, openRows, moves, pullPaths });
-  console.log(json ? JSON.stringify(result, null, 2) : renderAggregate(result, { ingestFooter: ["", ...ingestLines(ingested), githubSummary({ github, budget, unread: unreadRows.length }), ...(note ? [note] : []), NOT_HELD] }));
+  // A skipped spare-cycles line is named, never silently dropped (agent-org#1122): the aggregate still posts, and says what it did not read.
+  const skipped = skippedInstances > 0 ? [`spare-cycles: ${skippedInstances} unparseable line${skippedInstances === 1 ? "" : "s"} skipped, not read as instances (agent-org#1122)`] : [];
+  if (json) skipped.forEach((line) => console.error(line)); // stdout of a `--json 1` run is the JSON and nothing before it
+  console.log(json ? JSON.stringify(result, null, 2) : renderAggregate(result, { ingestFooter: ["", ...ingestLines(ingested), githubSummary({ github, budget, unread: unreadRows.length }), ...(note ? [note] : []), ...skipped, NOT_HELD] }));
 }
 
 async function mainMap() {

@@ -320,7 +320,8 @@ export function decide({ prs, readyRows, promotableRows = [], chairmanBlocked = 
   // four-row Ready queue. It sits behind `rowOrders` for the ordering the causes above use: a row already
   // on the shelf can be claimed this minute, while this one still needs promoting first.
   // #2286: `closings` LETS IT BACK OFF. Absent, it asks at the unstaged key on every TTL, as before.
-  orders.push(...unclaimedBlockerClearedOrders(openRows, undefined, { closings }));
+  // #1129: `primaryDrift.originSha` IS THE `origin/main` HEAD THIS TICK READ; the class guards `promote` on a `Head:` line, so without it the class always holds.
+  orders.push(...unclaimedBlockerClearedOrders(openRows, undefined, { closings, head: primaryDrift?.originSha ?? null }));
 
   // The backlog is counted the same way, or the order would report rows the pool equally cannot take.
   // `ownerOf`, not `laneOwnerOf`: routed rows reach `decide` now, and the POOL's count must be exactly

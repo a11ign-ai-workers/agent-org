@@ -418,8 +418,10 @@ function readClaims({ held, byRow, openPrs, mergedPrs, elsewhere, io, repo, now,
  */
 function rememberedFor({ entry, session, row, ledger, key }: { entry: import("../claim-stall.ts").StallState[string] | undefined; session: string; row: number; ledger: () => string; key: string; }) {
   const remembered = entry?.session === session ? entry : undefined;
+  // agent-org#743: `nudges` is how many unanswered nudges this stall has had, absent for the first
   const nudge = remembered?.nudgedAt !== undefined ? { nudgedAt: remembered.nudgedAt, idle: remembered.idle === true,
-    deliveredAt: nudgeDeliveredAt(ledger(), scopedCauseKey(key, nudgeKey(session, row, remembered.nudgedAt))) } : null;
+    deliveredAt: nudgeDeliveredAt(ledger(), scopedCauseKey(key, nudgeKey(session, row, remembered.nudgedAt))),
+    ...(remembered.nudges === undefined ? {} : { count: remembered.nudges }) } : null;
   return { nudge, goneSince: remembered?.goneSince ?? null, idleSince: remembered?.idleSince ?? null };
 }
 

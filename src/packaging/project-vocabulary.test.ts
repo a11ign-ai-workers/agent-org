@@ -168,6 +168,8 @@ const DECLARED_NON_VOCABULARY_HITS: Declaration[] = [
   // leaf's no-import contract or state the same four facts twice, and `project-vocabulary.ts` imports them from here instead (assertion 1, above,
   // pins the values equal).
   ...nonVocabulary("claim-labels.ts", ['"ready"', '"was-ready"', '"in-progress"', '"started"'], "the import-free leaf the claim-lifecycle labels are defined in (#804)"),
+  // #910: `TicketState` values of the ticket port, which the class compares an item's state against and sets; they are states of the port's own union, not labels.
+  ...nonVocabulary("decision-run/classes/ready-queue-empty.ts", ['"backlog"', '"ready"'], "TicketState values of the ticket port, not labels"),
   // #3942: the same leaf holds `STATE_LABELS`, whose `backlog` and `blocked` ARE vocabulary labels. It cannot import the vocabulary (no imports, same contract), so it keeps its
   // own copy and `state-label-exactly-one.test.ts` ("STATE_LABELS is the six names ...") pins each equal to the vocabulary's, which is what stops the copy drifting.
   ...nonVocabulary("claim-labels.ts", ['"backlog"', '"blocked"'], "the import-free leaf's own copy of two vocabulary labels in STATE_LABELS, pinned equal to them (#3942)"),
@@ -192,6 +194,8 @@ const DECLARED_NON_VOCABULARY_HITS: Declaration[] = [
   // `github-adapter.ts` is the one place that maps them to this project's labels (decision 5), so a second project's vocabulary changes the
   // adapter's table and never these. The spelling is the same as a11ign's labels because the ADR chose it so.
   ...nonVocabulary("ticket-port/port.ts", ['"backlog"', '"ready"', '"in-progress"', '"out-of-release"', "`lane:"], "the port's own state and flag names (ADR 0046 decision 1), not this project's labels"),
+  // agent-org#907: a decision class names the port's states in the change it asks for (`state: "ready"`) and reads the shelved ones (`backlog`); the role excerpt says `ready` to the run.
+  ...nonVocabulary("decision-run/classes/unclaimed-blocker-cleared.ts", ['"backlog"', '"ready"', "`ready`"], "the port's own state names (ADR 0046 decision 1) in a class's StateChange, and the word the run's excerpt uses for it"),
   ...nonVocabulary("ticket-port/github-adapter.ts", ['"backlog"', '"ready"', '"in-progress"', '"lane:'], "the port's state and flag names, as the keys of the adapter's mapping table (ADR 0046 decision 5); the labels they map to are read from the vocabulary"),
   // `decision-run/classes/row-off-board.ts` (agent-org#911): the class answers in, and its actions are written through, the PORT'S state and flag names (`backlog`, `ready`, `lane:`),
   // and it names them in the question and role excerpt a run reads. The labels they map to are the adapter's to read from the vocabulary; a class never spells a label.

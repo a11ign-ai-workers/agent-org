@@ -151,7 +151,7 @@ test("the role excerpt is under its named cap, and names every allowed answer", 
 test("POSITIVE CONTROL: the file in `classes/` loads through the registry, by its cause", async () => {
   const loaded = await loadClasses(HERE);
   // The registry imports the file by URL, a second instance of the module, so the class is compared by what it declares.
-  assert.deepEqual([...loaded.keys()], ["row-off-board"]);
+  assert.ok(loaded.has("row-off-board"), "the file registers under its cause; other classes in the directory are not this test's to name");
   assert.deepEqual(loaded.get("row-off-board")?.allowed, cls.allowed);
   assert.deepEqual(loaded.get("row-off-board")?.schema, cls.schema);
   assert.equal(cls.tierQuestion?.({ ...ORDER }, portOf(null)).default, TIER_DEFAULT);

@@ -40,6 +40,7 @@ import { declaredClosedRows } from "./row-claim/file-overlap-rule.ts";
 import { declaredGhAccount } from "./gh-identity.ts";
 import { repeatingLinesTick } from "./repeating-lines.ts";
 import { readToolAgreement, readReleaseRuns, readReleaseFailures, fileReleaseIncidents, readFleetBuildIncidents, type ReleaseRuns, type CanaryState } from "./org-health.ts";
+import { readFlagLedger } from "./flag-switch-ledger.ts"; // agent-org#1135: the gate is the one caller that reads the project's declarations; `orgHealthNow` otherwise does not ask
 import { readNodeStrips } from "./node-strips-types.ts";
 import { liveClassRepeatIo, readClassRepeat } from "./class-repeat.ts";
 // #2938: THE DAILY RETROSPECTIVE, in its own leaf for the same reason: it reads the journal, the ledger and a day of PRs once, and says what it found.
@@ -536,7 +537,7 @@ function main() {
   // The third read is only needed to size the refill, and a refused one must not read as an empty shelf.
   // #3566: this one, `needs:chairman` and the open rows (`openRowsRead`) are asked TOGETHER, and with the other repositories' lists (slice 6).
   const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); endGateSpan("readLanes"); const reenqueueState = readReenqueueState(); const waitReads = endGateSpan("waitReads", waitReadsBeforeDecide(prs, otherScopes, openRowsRead, reenqueueState)); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
-  // agent-org#5177: the other trackers' parked rows, which `otherScopeTicks` ticks but the home seam never reads; flag `rows.autoUnpark`, default OFF.
+  // agent-org#5177: the other trackers' parked rows, which `otherScopeTicks` ticks but the home seam never reads; flag `rows.autoUnpark` in `machinery-canary.json` (not project.json), default OFF.
   unparkOtherTrackers({ state: reenqueueState, scopes: otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }])), facts: waitReads?.facts ?? null, now: Date.now(), run: defaultRun, log: (line) => process.stderr.write(line) });
   const unreadChairmanRows = endGateSpan("chairmanReads", chairmanReadsRefused(chairmanBlocked ?? [])); // #3390: said, not skipped -- an unread row is not an unanswered one
   if (unreadChairmanRows.length > 0) process.stderr.write(`chairman-answered: could not read the timeline of ${unreadChairmanRows.map((n) => `#${n}`).join(", ")}; those rows are NOT checked this tick\n`);
@@ -613,7 +614,7 @@ function main() {
   orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => (releaseSeen.runs = readReleaseRuns(defaultRun, repoNow())),
     readReleaseFailures: () => readReleaseFailures(defaultRun, releaseRepositories(), { known: { [repoNow()]: releaseSeen.runs } }), // agent-org#887: every repository the org releases; the project's runs are the ones read just above
     raiseReleaseIncidents: (reads) => { fileReleaseIncidents(reads, { run: defaultRun, tracker: repoNow() }); },
-    readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readWaits: unparkingWaits(() => waitReads, { run: defaultRun }) })),
+    readFleetBuildIncident: () => readFleetBuildIncidents(defaultRun, repoNow()), readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readBoardTruth: boardTruthNow, readFlagSwitches: () => readFlagLedger(), readWaits: unparkingWaits(() => waitReads, { run: defaultRun }) })),
     ...endGateSpan("rulingOrders", rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() })), ...chairmanAsksNow(openRowsRead),
     ...holdHolderOrdersNow({ prs: prs === null ? null : [...prs, ...pullRequestsOfOthers(otherScopes)] })); // #2848, #2936, #2997, #4020, #4970: before the dead man's switch -- a repeating line, a stuck org: something found
   endGateSpan("chairmanAsks+holdHolders");
