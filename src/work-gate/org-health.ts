@@ -391,7 +391,22 @@ const declaredRepoKeys = (): Set<string> => new Set(homeProjectDeclaration().cod
  * #3479: a pull request of a repository the project declares is lifted too, released WITH its key; `declared` is the test's seam for which keys those are.
  */
 export function liftResolvedHolds(stale: import("../wait-condition.ts").StaleWait[], { now, release = releaseHoldViaModule, log = (line) => process.stderr.write(line), declared = declaredRepoKeys() }: { now: number; release?: typeof releaseHoldViaModule; log?: (line: string) => void; declared?: ReadonlySet<string>; }): import("../wait-condition.ts").StaleWait[] {
-  const { lifts, remaining } = liftableHolds(stale, now, declared);
+  return applyHoldLifts(liftableWaits(stale, now, declared), { release, log });
+}
+
+/**
+ * agent-org#1209 (read step): WHICH STALE WAITS THE GATE MAY LIFT, from the wait read alone. Nothing is released here, so a rehearsal that reads tells nothing
+ * to the pull requests; `applyHoldLifts` is the step that releases what this names.
+ */
+export function liftableWaits(stale: import("../wait-condition.ts").StaleWait[], now: number, declared: ReadonlySet<string> = declaredRepoKeys()): { lifts: import("../wait-condition.ts").HoldLift[]; remaining: import("../wait-condition.ts").StaleWait[]; } {
+  return liftableHolds(stale, now, declared);
+}
+
+/**
+ * agent-org#1209 (effect step): RELEASE THE HOLDS `liftableWaits` NAMED, each through `release`, and log the lifts that held. Returns the stale waits that STILL
+ * need a session, which is what `liftResolvedHolds` always returned: the ones `liftableWaits` left, and the lifts whose release failed.
+ */
+export function applyHoldLifts({ lifts, remaining }: { lifts: import("../wait-condition.ts").HoldLift[]; remaining: import("../wait-condition.ts").StaleWait[]; }, { release = releaseHoldViaModule, log = (line) => process.stderr.write(line) }: { release?: typeof releaseHoldViaModule; log?: (line: string) => void; } = {}): import("../wait-condition.ts").StaleWait[] {
   const failed = lifts.filter(({ item, holders }) => !holders.map((session) => release(item.number, session, item.repoKey)).every(Boolean));
   for (const { item, holders } of lifts.filter((l) => !failed.includes(l))) log(`DID lift-hold pr-${subjectRef(item.repoKey, item.number)} (${holders.join(", ")}) -- its Waiting-for is true; no session woken\n`);
   return [...remaining, ...failed.flatMap((l) => l.stale)];
@@ -705,15 +720,31 @@ function readProseAndOrder({ repo, log }: { repo: string; log: (line: string) =>
  * since the record is the state) and the audit is returned all the same, because the signal does not depend on the post.
  */
 export function boardTruthNow({ openRowsRead, claimedComments, waitFacts, now }: BoardTruthInput, { repo = repoNow(), run = defaultRun, agents = readAgents, post = postDaysTable, log = (line) => process.stderr.write(`${line}\n`) }: { repo?: string; run?: (args: string[]) => string; agents?: typeof readAgents; post?: typeof postDaysTable; log?: (line: string) => void; } = {}) {
+  const audit = readBoardTruthAudit({ openRowsRead, claimedComments, waitFacts, now }, { repo, run, agents });
+  postBoardTruth(audit, { now, repo, run, post, log });
+  return audit;
+}
+
+/**
+ * agent-org#1209 (read step): THE AUDIT OF THE BOARD AGAINST REALITY, with NO POST. The closed rows, the merged PRs and the herdr listing are read here, each a refused
+ * read is `null`, unread. `postBoardTruth` is the step that posts what this returns; `boardTruthNow` is the two in order, as the gate has always called it.
+ */
+export function readBoardTruthAudit({ openRowsRead, claimedComments, waitFacts, now }: BoardTruthInput, { repo = repoNow(), run = defaultRun, agents = readAgents }: { repo?: string; run?: (args: string[]) => string; agents?: typeof readAgents; } = {}) {
   const { openRows, commentsComplete } = boardRowsOf(openRowsRead, claimedComments);
   const read = readBoardFacts(repo, { run, agents, now, openRows, waitFacts });
-  const audit = boardTruthAudit(commentsComplete ? read : { ...read, liveSessions: null });
+  return boardTruthAudit(commentsComplete ? read : { ...read, liveSessions: null });
+}
+
+/**
+ * agent-org#1209 (effect step): POST THE DAY'S TABLE for `audit`, and label the prose findings' rows (`readProseAndOrder`, inside `postDaysTable`). BEST EFFORT: a failure
+ * is said on `log` and never reaches the tick, since the next tick asks again.
+ */
+export function postBoardTruth(audit: ReturnType<typeof boardTruthAudit>, { now, repo = repoNow(), run = defaultRun, post = postDaysTable, log = (line) => process.stderr.write(`${line}\n`) }: { now: number; repo?: string; run?: (args: string[]) => string; post?: typeof postDaysTable; log?: (line: string) => void; }): void {
   try {
     post({ audit, day: editionDay(new Date(now)), repo, run, now, readProse: readProseAndOrder({ repo, log }) });
   } catch (error) {
     log(`board-truth: the day's table was not posted (${error instanceof Error ? error.message.split("\n")[0] : error}); the next tick asks again`);
   }
-  return audit;
 }
 
 /**
