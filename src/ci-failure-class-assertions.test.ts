@@ -34,9 +34,10 @@ const RED_TEST_LOG = PASSING_PRINTS + FAILING_ASSERTION;
 // A runner lost before any assertion ran: no failing assertion line, only the runner's own `##[error]` messages.
 const LOST_RUNNER_LOG = "Current runner version: '2.329.0'\n##[error]The runner has received a shutdown signal. This can happen when the runner service is stopped.\n##[error]The hosted runner: lost communication with the server. Anything in your workflow may have run.\n";
 
-test("the flag is shipped OFF, so the classifier is today's until a switch turns it on", () => {
-  assert.equal(CI_CLASS.assertionsOnly, false);
-  assert.equal(readCiFailure(PR, fakeGh(RED_TEST_LOG), NOW)!.rateLimitOrRunnerLost, true, "no flag passed: the whole log is read, as before");
+test("the flag is shipped ON, so the failing assertions are read by default and the explicit OFF is today's whole-log read", () => {
+  assert.equal(CI_CLASS.assertionsOnly, true);
+  assert.equal(readCiFailure(PR, fakeGh(RED_TEST_LOG), NOW)!.rateLimitOrRunnerLost, false, "no flag passed: the printed rate limit is the passing test's output, not the cause");
+  assert.equal(readCiFailure(PR, fakeGh(RED_TEST_LOG), NOW, OFF)!.rateLimitOrRunnerLost, true, "the explicit OFF reads the whole log, as before");
 });
 
 test("a passing test's rate-limit text beside a failing assertion is the test's output: infrastructure before the flag, own-defect after it, routed to the owner", async () => {

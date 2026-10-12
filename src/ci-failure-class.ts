@@ -170,10 +170,10 @@ const RATE_LIMIT_OR_RUNNER_LOST = /rate limit|runner has received a shutdown sig
 const FAILING_ASSERTION = /AssertionError|^\s*(?:not ok\b|FAIL\b|✖|✗)/;
 /**
  * #1166 (a11ign#928, chairman): `assertionsOnly` reads the rate-limit and lost-runner text from the FAILING ASSERTION lines when a failing assertion is named, so a passing test that prints
- * "rate limit" beside a real failure is the test's output and not the cause. Shipped OFF: the classifier is then today's, which reads the whole log. Passed to {@link readCiFailure}; the a11ign
- * switch row filed beside #1166 is what turns it on.
+ * "rate limit" beside a real failure is the test's output and not the cause. Shipped ON (a11ign#5216, the switch row filed beside #1166); the explicit OFF, passed as the `flags` argument of
+ * {@link readCiFailure}, is today's classifier, which reads the whole log.
  */
-export const CI_CLASS: { readonly assertionsOnly: boolean } = Object.freeze({ assertionsOnly: false });
+export const CI_CLASS: { readonly assertionsOnly: boolean } = Object.freeze({ assertionsOnly: true });
 const READS_OUTSIDE = /\b(ENOTFOUND|EAI_AGAIN|ECONNRESET|ETIMEDOUT|ECONNREFUSED)\b|getaddrinfo|could not resolve host|unable to access '?https?:/i;
 const RED_CONCLUSIONS = new Set(["failure", "timed_out"]);
 const RUN_AND_JOB = /\/actions\/runs\/(\d+)\/job\/(\d+)/;
