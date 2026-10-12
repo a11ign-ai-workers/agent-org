@@ -69,6 +69,7 @@ import { boardTruthTable } from "./board-truth-audit.ts";
 import { HOME_CHECKOUT } from "./project-config.ts";
 import { ANSWER_PREFIX, BACKLOG_LABEL } from "./project-vocabulary.ts";
 import { openIncidentsOf } from "./ticket-port/open-incidents.ts";
+import { closeIncident, closedIncidentsOf, createIncident, jobLogOf } from "./ticket-port/release-incidents.ts";
 // A LEAF too (it imports `newest-check-run.ts` and `pr-hold-state.ts`, which import nothing): the ONE decider of what counts as red.
 import { brokenChecks } from "./red-pr.ts";
 // A LEAF too: the closed grammar of what a declared wait is waiting FOR (#2996), and the two ages that bound how long one may stand unexplained.
@@ -1448,8 +1449,7 @@ export function firstErrorLine(log: string): FirstError {
 function readFirstError(run: (args: string[]) => string, repo: string, job: FailedJob | undefined): FirstError {
   if (job?.id === undefined) return { unread: "the failed job's id was not read" };
   try {
-    // `--allow-escape-sequences`: a job's log carries the runner's colour codes and `gh api` refuses to print a response with any (measured against a real agent-org release log, 2026-10-12); `firstErrorLine` strips them
-    return firstErrorLine(run(["api", "--allow-escape-sequences", `repos/${repo}/actions/jobs/${job.id}/logs`]));
+    return firstErrorLine(jobLogOf(repo, job.id, run)); // the colour codes the log carries are stripped by `firstErrorLine`
   } catch {
     return { unread: "the failed job's log could not be read" };
   }
@@ -1564,21 +1564,18 @@ export function fileReleaseIncidents(failures: ReleaseFailureRead[], { run, trac
     for (const item of open) {
       const named = releaseFailureOf(item.body);
       if (named === null || !released.has(named.repo)) continue;
-      // the REST close, not the CLI's: this closes the gate's own incident item and no row from a merge, and `close-rows-sweep.test.ts` reads every CLI close in a source file as the latter
-      run(["issue", "comment", String(item.number), "--body", `release.yml on ${named.repo}'s main succeeded again, so the failure this was raised for is over.`]);
-      run(["api", "--method", "PATCH", `repos/${tracker}/issues/${item.number}`, "-f", "state=closed", "-f", "state_reason=completed"]);
+      closeIncident(tracker, item.number, `release.yml on ${named.repo}'s main succeeded again, so the failure this was raised for is over.`, run);
       out.closed.push(item.number);
     }
     for (const { repo, episode, title, body } of failed) {
       if (openFor(repo)) continue;
-      const closed = tryJson(() => run(["api", "--method", "GET", `repos/${tracker}/issues`, "-f", "state=closed", "-f", "labels=incident", "-f", "per_page=100",
-        "--jq", "[.[] | select(.pull_request | not) | {number, body}]"]));
-      if (!Array.isArray(closed)) {
+      const closed = closedIncidentsOf(tracker, run);
+      if (closed === null) {
         say(`org-health: ${SIGNALS.RELEASE_FAILED} could not read the closed incidents of ${tracker}, so the incident of ${repo} is not filed this tick.\n`);
         continue;
       }
       if (closed.some((item) => { const named = releaseFailureOf(String(item?.body ?? "")); return named?.repo === repo && named.episode === episode; })) continue;
-      run(["issue", "create", "--title", title, "--label", "incident", "--body", body]);
+      createIncident(tracker, { title, body }, run);
       out.filed.push(title);
     }
   } catch (err) {

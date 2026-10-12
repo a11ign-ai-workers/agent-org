@@ -266,8 +266,9 @@ test("a first failure FILES ONE incident item: labelled `incident`, naming the r
   const out = fileReleaseIncidents([read(PROJECT_REPO, PROJECT_GREEN), read(AGENT_ORG, AGENT_ORG_ONE_FAILURE, LINE)], { run: gh, tracker: TRACKER, say: quiet([]) });
   assert.equal(out.filed.length, 1);
   assert.equal(writes.length, 1);
-  const [verb, sub, , title, , label, , body] = writes[0];
-  assert.deepEqual([verb, sub, label], ["issue", "create", "incident"]);
+  const after = (flag: string) => writes[0][writes[0].indexOf(flag) + 1];
+  const [title, label, body] = [after("--title"), after("--label"), after("--body")];
+  assert.deepEqual([writes[0][0], writes[0][1], label, after("--repo")], ["issue", "create", "incident", TRACKER], "filed in the tracker it read, not in whichever repository the process stands in");
   assert.equal(title, `Release failed on ${AGENT_ORG}: ${QUOTE}`);
   assert.ok(body.includes(`its first error line: "${QUOTE}"`));
   assert.ok(body.includes(`\nIncident: ${RELEASE_INCIDENT_KEY}\n`));
@@ -294,7 +295,8 @@ test("a repository that RELEASES again closes its open incident, and only its ow
   const fixed = [run(AGENT_ORG, 5006, "success", "2026-10-11T09:40:00Z"), ...AGENT_ORG_STREAK];
   const out = fileReleaseIncidents([read(AGENT_ORG, fixed), read(PROJECT_REPO, PROJECT_FAILED, LINE)], { run: gh, tracker: TRACKER, say: quiet([]) });
   assert.deepEqual(out.closed, [41]);
-  assert.deepEqual(writes.map((w) => w.slice(0, 3)), [["issue", "comment", "41"], ["api", "--method", "PATCH"]]);
+  assert.deepEqual(writes.map((w) => w.slice(0, 2)), [["issue", "comment"], ["api", "--method"]]);
+  assert.deepEqual([writes[0][2], writes[0][writes[0].indexOf("--repo") + 1], writes[1][2]], ["41", TRACKER, "PATCH"]);
   assert.ok(writes[1].includes(`repos/${TRACKER}/issues/41`) && writes[1].includes("state=closed"), "the item that was closed is the agent-org one, in the tracker");
 });
 
