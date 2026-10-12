@@ -432,9 +432,14 @@ const SELF = "red-pr.ts";
 const EXEMPT: Record<string, string> = {
   "merge-queue.ts": "decides whether ONE queued PR may merge from its required checks; counts and ages nothing",
   "queue-stalled.ts": "reads the gate verdict of an ARMED PR to tell a stalled queue from a slow one",
+  "work-gate/pr-state.ts": "the gate's own settled-green / still-running reading of a rollup (`checksSettledGreen`, `blockingChecks`): it asks whether checks have SETTLED, and counts and ages no red PR (a11ign#5152: it was one file with `redPrFacts`, which imports the decider)",
+  "work-gate/reads.ts": "names `statusCheckRollup` in the `gh pr list --json` field list and marks `checksPending` from it; reads no verdict (a11ign#5152)",
+  "work-gate/causes/pr-reviews.ts": "narrows a rollup to the newest run per name to tell a PR that is still RUNNING from one that is settled, for the review-blocked order; counts no red (a11ign#5152)",
+  "work-gate/causes/org-health-github-incident.ts": "reads a FAILED job's own conclusion to tell a runner that never started from a red check; it names one job's failure, not how many PRs are red (a11ign#5152)",
   "work-gate/pr-orders.ts": "the order logic (`redOnlyFromAHold` asks `isHeldRed`, #2993; the rest is who is asked, not how many are red), `HOLD_RED_JOBS` pinned equal to red-pr.ts's in org-retro.test.ts",
 };
-const EXEMPT_CEILING = 3;
+// 3 before a11ign#5152 split `work-gate.ts`: its readers of the rollup were ONE file, which imported the decider for `redPrFacts`; they are four modules now.
+const EXEMPT_CEILING = 7;
 
 /** Code with every `//`, `/* *\/` comment removed, so a header that NAMES `statusCheckRollup` does not enlist its file. */
 const codeOf = (source: string) => source.replace(/\/\*[\s\S]*?\*\//g, "").replace(/^\s*\/\/.*$/gm, "").replace(/\s\/\/\s.*$/gm, "");

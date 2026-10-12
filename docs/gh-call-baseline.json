@@ -341,9 +341,45 @@
       "spawns": 1,
       "calls": 2
     },
-    "src/work-gate.ts": {
-      "spawns": 1,
-      "calls": 39
+    "src/work-gate/causes/org-health-github-incident.ts": {
+      "spawns": 0,
+      "calls": 4
+    },
+    "src/work-gate/causes/org-health-resolver-defects.ts": {
+      "spawns": 0,
+      "calls": 4
+    },
+    "src/work-gate/causes/pr-checks.ts": {
+      "spawns": 0,
+      "calls": 2
+    },
+    "src/work-gate/causes/pr-ejected.ts": {
+      "spawns": 0,
+      "calls": 3
+    },
+    "src/work-gate/causes/pr-reviews.ts": {
+      "spawns": 0,
+      "calls": 4
+    },
+    "src/work-gate/causes/rows-answers.ts": {
+      "spawns": 0,
+      "calls": 3
+    },
+    "src/work-gate/causes/rows-blocker-cleared.ts": {
+      "spawns": 0,
+      "calls": 1
+    },
+    "src/work-gate/causes/rows-chairman.ts": {
+      "spawns": 0,
+      "calls": 2
+    },
+    "src/work-gate/causes/rows-claims-closed.ts": {
+      "spawns": 0,
+      "calls": 1
+    },
+    "src/work-gate/causes/rows-offer.ts": {
+      "spawns": 0,
+      "calls": 4
     },
     "src/work-gate/chairman-ask-orders.ts": {
       "spawns": 0,
@@ -353,8 +389,16 @@
       "spawns": 0,
       "calls": 1
     },
+    "src/work-gate/orders.ts": {
+      "spawns": 0,
+      "calls": 1
+    },
     "src/work-gate/org-health.ts": {
       "spawns": 0,
+      "calls": 6
+    },
+    "src/work-gate/reads.ts": {
+      "spawns": 1,
       "calls": 6
     },
     "src/work-gate/ready-when-unblocked.ts": {
@@ -364,6 +408,10 @@
     "src/work-gate/row-call-count-orders.ts": {
       "spawns": 0,
       "calls": 1
+    },
+    "src/work-gate/tick.ts": {
+      "spawns": 0,
+      "calls": 2
     },
     "src/work-tick.ts": {
       "spawns": 2,

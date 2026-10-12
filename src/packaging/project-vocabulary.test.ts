@@ -186,8 +186,8 @@ const DECLARED_NON_VOCABULARY_HITS: Declaration[] = [
   ...nonVocabulary("pr-hold-state.ts", ["`answer:"], "prose in an order's text naming the `answer:<session>` field, quoted and never matched"),
   // `work-gate.ts`: the same `herdr` STATUS mentioned in a report string, and `run(["pr", "ready", ...])` -- GitHub's own `gh pr ready` CLI verb,
   // not the row `ready` label.
-  ...nonVocabulary("work-gate.ts", ["`blocked`"], "the `herdr` status mentioned in a report string"),
-  ...nonVocabulary("work-gate.ts", ['"ready"'], "GitHub's own `gh pr ready` CLI verb, not the row `ready` label"),
+  ...nonVocabulary("work-gate/orders.ts", ["`blocked`"], "the `herdr` status mentioned in a report string"),
+  ...nonVocabulary("work-gate/orders.ts", ['"ready"'], "GitHub's own `gh pr ready` CLI verb, not the row `ready` label"),
   // `ticket-port/` (agent-org#484, ADR 0046): the PORT'S OWN state and flag names. They are the names ADR 0046 decision 1 rules for any tracker, and
   // `github-adapter.ts` is the one place that maps them to this project's labels (decision 5), so a second project's vocabulary changes the
   // adapter's table and never these. The spelling is the same as a11ign's labels because the ADR chose it so.
