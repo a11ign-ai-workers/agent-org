@@ -42,6 +42,8 @@ import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./lib/git-env.ts";
 import { PARKED_LABEL, conditionHolds, declaredWaitsOf, isItemWait, waitFieldsOf, waitItemOf } from "./wait-condition.ts";
+import { machineryFlagOn, type CanaryState } from "./org-health.ts";
+import type { WaitFacts } from "./wait-condition.ts";
 import { notBeforeDate, notBeforeIso } from "./waiting-condition.ts";
 import { CLAIM_LABEL, READY_LABEL } from "./claim-labels.ts";
 import { ANSWER_PREFIX, BACKLOG_LABEL, BLOCKED_LABEL, NEEDS_CHAIRMAN_LABEL } from "./project-vocabulary.ts";
@@ -223,36 +225,37 @@ export function reportUnpark(result: UnparkResult, log: (line: string) => void) 
  * @param {(args: string[]) => string} run @param {{ worktree?: () => TickWorktree }} [deps] `worktree` is where the promotion runs from, a seam for a test that builds its own checkout
  * @returns {UnparkIo}
  */
-export function githubIo(run: (args: string[]) => string, { worktree = tickWorktree }: { worktree?: () => TickWorktree; } = {}): UnparkIo {
+export function githubIo(run: (args: string[]) => string, { worktree = tickWorktree, repo = REPO }: { worktree?: () => TickWorktree; repo?: string; } = {}): UnparkIo {
   return {
     readLabels: (number) => {
-      const read = JSON.parse(run(["issue", "view", String(number), "--repo", REPO, "--json", "labels,state"]));
+      const read = JSON.parse(run(["issue", "view", String(number), "--repo", repo, "--json", "labels,state"]));
       return { labels: (read.labels ?? []).map((l: any) => String(l.name)), state: String(read.state) };
     },
-    setLabels: (number, labels) => { run(["api", "--method", "PUT", `repos/${REPO}/issues/${number}/labels`, ...labels.flatMap((l) => ["-f", `labels[]=${l}`])]); },
-    promote: (number) => promoteViaModule(number, worktree),
-    mergedClosers: (number) => mergedClosersOf(number, run),
+    setLabels: (number, labels) => { run(["api", "--method", "PUT", `repos/${repo}/issues/${number}/labels`, ...labels.flatMap((l) => ["-f", `labels[]=${l}`])]); },
+    // `row-file --promote` acts only on the home tracker, so a row of another one is routed to `product-manager` with that reason rather than promoted from the wrong tracker.
+    promote: (number) => (repo === REPO ? promoteViaModule(number, worktree) : { ok: false, refusal: `\`row-file --promote\` acts only on ${REPO}, the home tracker, so ${repo}#${number} cannot be promoted by the tick` }),
+    mergedClosers: (number) => mergedClosersOf(number, run, repo),
     // The close time only dates a line of the comment, so a read that fails says "not dated" there; it is not a reason to leave a row parked.
     closedAt: (number) => {
       try {
-        const at = Date.parse(run(["api", `repos/${REPO}/issues/${number}`, "--jq", ".closed_at"]).trim());
+        const at = Date.parse(run(["api", `repos/${repo}/issues/${number}`, "--jq", ".closed_at"]).trim());
         return Number.isFinite(at) ? at : null;
       } catch (cause) {
         process.stderr.write(`unpark-satisfied: could not date the close of #${number} (${cause instanceof Error ? cause.message.split("\n")[0] : cause}); the comment says "not dated"\n`);
         return null;
       }
     },
-    comment: (number, body) => { run(["issue", "comment", String(number), "--repo", REPO, "--body", body]); },
+    comment: (number, body) => { run(["issue", "comment", String(number), "--repo", repo, "--body", body]); },
   };
 }
 
 /**
  * THE MERGED PULL REQUESTS THAT NAME THE ROW (`closedByPullRequestsReferences`, GitHub's own resolution of a `Closes #n`, never a regex over a body). THROWS on a failed call or a shape it does not
  * recognise: an empty answer read off a refused call would say "nothing merged" and offer a row with nothing to build.
- * @param {number} number @param {(args: string[]) => string} run @returns {{ number: number, mergedAt: string }[]}
+ * @param {number} number @param {(args: string[]) => string} run @param {string} [repo] the row's own repository @returns {{ number: number, mergedAt: string }[]}
  */
-export function mergedClosersOf(number: number, run: (args: string[]) => string): { number: number; mergedAt: string; }[] {
-  const [owner, name] = REPO.split("/");
+export function mergedClosersOf(number: number, run: (args: string[]) => string, repo: string = REPO): { number: number; mergedAt: string; }[] {
+  const [owner, name] = repo.split("/");
   const query = `{ repository(owner: "${owner}", name: "${name}") { issue(number: ${number}) { closedByPullRequestsReferences(first: 20) { nodes { number state mergedAt } } } } }`;
   const nodes = JSON.parse(run(["api", "graphql", "-f", `query=${query}`]))?.data?.repository?.issue?.closedByPullRequestsReferences?.nodes;
   if (!Array.isArray(nodes)) throw new Error(`the closing pull requests of #${number} could not be read (an answer with no \`nodes\`)`);
@@ -325,4 +328,24 @@ export function unparkingWaits<T>(readWaits: (input: { prsRead: any[] | null; op
     reportUnpark(unparkSatisfied({ rows: input.openRowsRead, facts, now: input.now }, io), log);
     return waits;
   };
+}
+
+/** The machinery flag that turns the other-tracker pass on (`machinery-canary.json`, default OFF). Off reads and writes nothing for another tracker's rows; the home pass is not behind it. */
+export const AUTO_UNPARK_FLAG = "rows.autoUnpark";
+
+/**
+ * THE SAME PASS FOR EACH OTHER DECLARED TRACKER (a11ign/agent-org#904 sat parked ~18h after its edges closed): `otherScopeTicks` ticks those rows, and the seam above reads the home
+ * repository only, so nothing visited them. Each row is handed over WITH ITS OWN REPOSITORY on it, so its `Waiting-for:` lines are qualified against that repository (`ownedBy`) and never
+ * answer from the home one; a reference the facts do not hold is unknown, which keeps the row parked. A failed read names the tracker and the pass goes on with the others.
+ * @param {{ state: import("./org-health.ts").CanaryState, scopes: { repo: string, rows: any[] | null }[], facts: import("./wait-condition.ts").WaitFacts | null, now: number, run: (args: string[]) => string, log: (line: string) => void }} input
+ */
+export function unparkOtherTrackers({ state, scopes, facts, now, run, log }: { state: CanaryState; scopes: { repo: string; rows: any[] | null; }[]; facts: WaitFacts | null; now: number; run: (args: string[]) => string; log: (line: string) => void; }): void {
+  if (!machineryFlagOn(state, AUTO_UNPARK_FLAG)) return;
+  for (const { repo, rows } of scopes) {
+    if (!Array.isArray(rows)) continue;
+    const tagged = rows.map((row) => ({ ...row, repoKey: repo, repo }));
+    const result = unparkSatisfied({ rows: tagged, facts: facts ?? { items: {} }, now }, githubIo(run, { repo }));
+    reportUnpark(result, log);
+    for (const { number, reason } of result.unread) log(`unpark-satisfied: ${repo}#${number} is parked and NOT un-parked: ${reason}\n`);
+  }
 }

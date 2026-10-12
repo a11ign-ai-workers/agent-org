@@ -61,7 +61,7 @@ import { orgHealthNow, rulingOrdersNow, boardTruthNow, waitTickFacts, releaseRep
 import { approvedUnqueuedNow } from "./approved-unqueued.ts";
 import { recordRouteOutcomesOnHost } from "./work-gate/route-outcome-pass.ts";
 import { quietOrgHealth } from "./work-gate/org-health-suppression.ts";
-import { unparkingWaits } from "./unpark-satisfied.ts"; // #4050: a parked row whose every condition is true is un-parked where the tick reads the waits
+import { unparkOtherTrackers, unparkingWaits } from "./unpark-satisfied.ts"; // #4050: a parked row whose every condition is true is un-parked where the tick reads the waits; agent-org#5177: and in every other tracker, behind `rows.autoUnpark`
 // #2898: WHO OWNS A PULL REQUEST lives in `work-gate/pr-owners.ts`, which imports the shared session reads BACK from this file (the cycle `pr-orders.ts` above describes);
 // every name it exported is re-exported here, so no caller of `work-gate.ts` changes.
 import { withWaitingEdges } from "./work-gate/pr-waits.ts";
@@ -534,6 +534,8 @@ function main() {
   // The third read is only needed to size the refill, and a refused one must not read as an empty shelf.
   // #3566: this one, `needs:chairman` and the open rows (`openRowsRead`) are asked TOGETHER, and with the other repositories' lists (slice 6).
   const { promotableRows, chairmanBlocked, openRowsRead, otherScopes } = readLanesAfterOutageCheck(); endGateSpan("readLanes"); const waitReads = endGateSpan("waitReads", waitReadsBeforeDecide(prs, otherScopes, openRowsRead)); // #3095: `otherScopes` is read here, once -- B4 below compares with their pull requests, and `otherScopeTicks` ticks them
+  // agent-org#5177: the other trackers' parked rows, which `otherScopeTicks` ticks but the home seam never reads; flag `rows.autoUnpark`, default OFF.
+  unparkOtherTrackers({ state: readReenqueueState(), scopes: otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }])), facts: waitReads?.facts ?? null, now: Date.now(), run: defaultRun, log: (line) => process.stderr.write(line) });
   const unreadChairmanRows = endGateSpan("chairmanReads", chairmanReadsRefused(chairmanBlocked ?? [])); // #3390: said, not skipped -- an unread row is not an unanswered one
   if (unreadChairmanRows.length > 0) process.stderr.write(`chairman-answered: could not read the timeline of ${unreadChairmanRows.map((n) => `#${n}`).join(", ")}; those rows are NOT checked this tick\n`);
   // ONE COALESCE PER REFUSED LANE, NAMED. `prs ?? []` was written three times and `readyRows ?? []` twice;
