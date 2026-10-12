@@ -302,15 +302,15 @@ test("two tripped signals are TWO orders, each carrying the other, and unknowns 
 
 test("the tick SAYS each unknown on stderr and does not say a tripped signal; it never throws", () => {
   const said: string[] = [];
-  const orders = orgHealthTick(quiet({ lastMergedAt: null, refusals: null, drift: null }) as never, { log: (l) => said.push(l) });
+  const orders = orgHealthTick(quiet({ lastMergedAt: null, refusals: null, drift: null }) as never, { readRefusals: () => [], log: (l) => said.push(l) });
   assert.deepEqual(orders, [], "three unknowns and one clear: nothing to offer");
   assert.equal(said.length, 3);
   assert.match(said.join(""), /org-health: no-merge-while-work-exists UNKNOWN -- the last merge could not be read.*not read as clear/);
   const tripped: string[] = [];
-  assert.equal(orgHealthTick(quiet({ lastMergedAt: NOW - 4 * HOUR_MS }) as never, { log: (l) => tripped.push(l) }).length, 1);
+  assert.equal(orgHealthTick(quiet({ lastMergedAt: NOW - 4 * HOUR_MS }) as never, { readRefusals: () => [], log: (l) => tripped.push(l) }).length, 1);
   assert.deepEqual(tripped, [], "a tripped signal's report is its order: a line written every tick would be offered by repeating-lines as a fault");
   const broke: string[] = [];
-  assert.deepEqual(orgHealthTick(quiet({ redPrs: [null] }) as never, { log: (l) => broke.push(l) }), []);
+  assert.deepEqual(orgHealthTick(quiet({ redPrs: [null] }) as never, { readRefusals: () => [], log: (l) => broke.push(l) }), []);
   assert.match(broke.join(""), /org-health: could not run/);
 });
 
@@ -343,13 +343,13 @@ test("POSITIVE CONTROL: at 05:30Z on 2026-10-01 the merge list says 10 h since #
   const before = MERGES_AROUND_THE_IDLE_WINDOW.filter((p) => p.merged_at === null || p.merged_at < "2026-10-01T05:30:00Z");
   const lastMergedAt = readLastMergedAt(jqLatestMerge(before), "a11ign/a11ign");
   assert.equal(lastMergedAt, Date.parse("2026-09-30T19:02:50Z"));
-  const orders = orgHealthTick({ ...quiet(), now: Date.parse("2026-10-01T05:30:00Z"), lastMergedAt, work: WORK } as never, { log: () => undefined }) as Order[];
+  const orders = orgHealthTick({ ...quiet(), now: Date.parse("2026-10-01T05:30:00Z"), lastMergedAt, work: WORK } as never, { readRefusals: () => [], log: () => undefined }) as Order[];
   assert.equal(orders.length, 1);
   assert.equal(orders[0].session, "ceo");
   assert.match(orders[0].prompt, /10 h since the last merge \(2026-09-30T19:02:50Z\); 1 green unheld PR\(s\)/);
   assert.match(orders[0].prompt, /It first tripped at 2026-09-30T22:02:50Z/, "three hours after #2839");
   const after = readLastMergedAt(jqLatestMerge(MERGES_AROUND_THE_IDLE_WINDOW), "a11ign/a11ign");
-  assert.deepEqual(orgHealthTick({ ...quiet(), now: Date.parse("2026-10-01T07:40:00Z"), lastMergedAt: after, work: WORK } as never, { log: () => undefined }), [],
+  assert.deepEqual(orgHealthTick({ ...quiet(), now: Date.parse("2026-10-01T07:40:00Z"), lastMergedAt: after, work: WORK } as never, { readRefusals: () => [], log: () => undefined }), [],
     "the control: the same org after #2843 landed is healthy and is not offered");
 });
 

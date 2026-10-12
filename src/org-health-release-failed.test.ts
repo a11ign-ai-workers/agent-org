@@ -113,7 +113,7 @@ test("a second failure is a NEW order: the discriminator is the run", () => {
 
 // --- the order ---------------------------------------------------------------------------------------------------------------------
 
-const QUIET = { now: NOW, lastMergedAt: NOW - 60 * 60_000, work: { greenPrs: 0, claimableRows: 0 }, redPrs: [], refusals: {},
+const QUIET = { now: NOW, lastMergedAt: NOW - 60 * 60_000, work: { greenPrs: 0, claimableRows: 0 }, redPrs: [], refusals: {}, claimRefusals: [],
   drift: { behind: 0, ahead: 0, dirty: [] }, primarySince: null };
 
 test("the signal is in the readings only when the fact is given, and the order says what retries it", () => {
@@ -184,7 +184,7 @@ test("the reader's refusals are nulls, never an empty answer: the list, the jobs
 test("orgHealthNow offers the order from the reader it is given, and nothing when the reader is not asked or the release is clean", () => {
   const decideArgs = { prs: [], required: [], readyRows: [], prFiles: new Map(), rowBranches: [], openRows: [], primaryDrift: null, claimRefusals: [] };
   const tick = (readReleaseRuns?: () => unknown) => orgHealthNow({ prsRead: [], readyRead: [], openRowsRead: [], decideArgs, decided: [] } as never,
-    { now: NOW, lastMergedAt: () => NOW, readCaptures: () => undefined, readLabJobs: () => [], log: () => {}, teamAccess: () => undefined,
+    { now: NOW, lastMergedAt: () => NOW, readCaptures: () => undefined, readRefusals: () => [], readLabJobs: () => [], log: () => {}, teamAccess: () => undefined,
       readWaits: () => ({ facts: new Map(), stale: [], bare: [], manual: 0 }), ...(readReleaseRuns && { readReleaseRuns }) } as never) as { subject: string; session: string; prompt: string }[];
   const ofSignal = <T extends { subject: string }>(orders: T[]) => orders.filter((o) => o.subject === SIGNAL);
   const order = ofSignal(tick(() => failedWith()))[0];

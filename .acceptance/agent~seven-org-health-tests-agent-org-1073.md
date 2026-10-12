@@ -1,0 +1,11 @@
+Six org-health test files no longer read the host's own claim-refusal ledger, so they are green while the ledger holds a refusal storm. Each hands `claimRefusals: []` in the facts it gives `orgHealthTick`/`orgHealthReadings` (the QUIET fact objects of `org-health-auto-off-refusal`, `org-health-release-failed` and `release-behind-main`, the three `facts` objects of `org-health-fleet-and-copies`), or `readRefusals: () => []` in the options of its `orgHealthTick` (`packaging/org-health`) and `orgHealthNow` (`org-health-release-failed`, `release-behind-main`, `packaging/wait-condition`) calls. No source file changes.
+
+Acceptance: `npx rstest run --config scripts/rstest/rstest.config.ts src/org-health-auto-off-refusal.test.ts src/org-health-release-failed.test.ts src/packaging/org-health-fleet-and-copies.test.ts src/packaging/org-health.test.ts src/packaging/wait-condition.test.ts src/release-behind-main.test.ts`
+
+Mutation: for each of the six files in turn, every `claimRefusals: []` and `readRefusals: () => []` this change added removed (so the file reads the real ledger again) failed that file and no other: auto-off-refusal 2, release-failed 1, fleet-and-copies 2, org-health 2, wait-condition 2, release-behind-main 1 (the counts the row measured before the change). Each file restored from a `cp` backup in the session scratchpad; `diff` against the backup reported identical.
+
+Measured: before the change, on this host with its ledger holding the storm (78 refusals in 15 minutes, "this checkout holds 951 live worktrees"), the command printed `VERDICT fail: 10 of 143 tests failed in 6 files`. After it, `VERDICT pass: 143 tests in 6 files`, on the same host while the ledger still held the storm. One first attempt put `claimRefusals: []` in `packaging/org-health.test.ts`'s shared `quiet()` base and failed "two tripped signals are TWO orders" (an added `claim-refusal-storm: clear` reading in an exact readings list), so that file passes `readRefusals: () => []` to its five `orgHealthTick` calls instead.
+
+Not here, and named: the row's item 3 (`src/worker-stop-hook.test.ts`, `src/work-gate-other-scopes-concurrent.test.ts`) and the seventh file `org-health-queued-lab-jobs.test.ts` (a11ign#5157's) are untouched.
+
+Closes a11ign/agent-org#1073
