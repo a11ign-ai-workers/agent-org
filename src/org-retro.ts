@@ -49,7 +49,7 @@ import { newestPerName } from "./newest-check-run.ts";
 import { SESSION_PREFIX } from "./project-vocabulary.ts";
 import { correctionsPerDay, correctionsLine } from "./found-by-chairman.ts";
 // THE TOP BLOCKER (#4602): the gate's per-tick record of rows shelved behind each holder, summed over the window by its own leaf.
-import { BLOCKING_FILE, parseRecord as parseBlockingRecord, topBlocker, type TopBlocker } from "./blocking-impact.ts";
+import { BLOCKING_FILE, deadlockSummary, type DeadlockSummary, parseRecord as parseBlockingRecord, topBlocker, type TopBlocker } from "./blocking-impact.ts";
 import { readDora, readRepository, doraReport, READ_TIMEOUT_MS, renderDora, doraNumbers, doraDeclarations } from "./dora.ts";
 import { homeProjectDeclaration } from "./project-config.ts";
 // THE STOCK-ROW READING (#4175): its own leaf, because it asks the tracker per row and a refused read there names the row.
@@ -446,6 +446,7 @@ export function buildReport(reads: {
     unwaited: reads.unwaited ?? null,
     untiered: reads.untiered ?? null,
     blocking: topBlockerOf(reads.blockingRecord, now),
+    circularWaits: circularWaitsOf(reads.blockingRecord, now),
     idleClaims: incidentSummary(reads.idleClaims),
     idleClaimedHours: reads.idleClaimedHours ?? null,
     mergedRowOpen: mergedRowOpenSummary(reads.mergedRowOpen),
@@ -725,6 +726,20 @@ function blockingLines(blocking: ReturnType<typeof buildReport>["blocking"]): st
   return [`- Top blocker: ${blocking.holder}${row}; shelved up to ${blocking.rows} rows for ${duration(blocking.minutes)} (${grouped(Math.round(blocking.rowMinutes))} row-minutes; measured from the gate's per-tick count)`];
 }
 
+/** @returns `undefined` for a record nobody read or that does not parse (`unknown`), otherwise the cycles the daily pass counts (agent-org#930) */
+function circularWaitsOf(text: string | null | undefined, now: number): DeadlockSummary | undefined {
+  if (text === null || text === undefined) return undefined;
+  try { return deadlockSummary(parseBlockingRecord(text), now); } catch { return undefined; }
+}
+
+/** @param {ReturnType<typeof buildReport>["circularWaits"]} circularWaits @returns {string[]} */
+function circularWaitLines(circularWaits: ReturnType<typeof buildReport>["circularWaits"]): string[] {
+  if (circularWaits === undefined) return [`- Circular waits: ${UNKNOWN} (${BLOCKING_FILE} could not be read, so "no cycle was found" cannot be said)`];
+  if (circularWaits.found === 0) return ["- Circular waits: 0 found"];
+  const longest = Math.max(...circularWaits.standing.map((c) => c.minutes), ...circularWaits.broken.map((c) => c.minutes));
+  return [`- Circular waits: ${circularWaits.found} found (${circularWaits.broken.length} broken, longest ${longest} minutes; ${circularWaits.standing.length} standing)`];
+}
+
 /**
  * THE WORKER-HOURS IDLE ON A CLAIMED ROW (#4957): the number, and how it was read, so a reader can set it beside a hand count. `null` is a population nobody could read.
  * @param {IdleClaimedHours | null} reading @returns {string[]}
@@ -791,7 +806,7 @@ export function renderReport(report: ReturnType<typeof buildReport>): string {
   const from = new Date(report.window.since).toISOString();
   const to = new Date(report.window.until).toISOString();
   return [`ORG RETROSPECTIVE ${report.date} -- the 24 hours ${from} to ${to}`, "",
-    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...underspecifiedLines(report.underspecified), ...specLintRefusedLines(report.specLintRefused), ...emergencyPriorityLines(report.emergencyPriority), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
+    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...circularWaitLines(report.circularWaits), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...underspecifiedLines(report.underspecified), ...specLintRefusedLines(report.specLintRefused), ...emergencyPriorityLines(report.emergencyPriority), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
 }
 
 /**
