@@ -12,7 +12,7 @@ Mutation: (each restored, `cmp` byte-identical, and only its own test red): funn
 
 **Live, and what is not claimed.** `register` ran once against the real App: the secret file was created, and `PATCH /app/hook/config` answered 404, because an App has no webhook until it has been made Active once in its settings. That is the chairman's step (brief on the row), after which `register` sets the URL and secret. Nothing is exposed and no delivery is proven by this PR.
 
-Acceptance: `npx rstest run --config scripts/rstest/rstest.config.ts src/event-tunnel.test.ts`
+Acceptance: `env -u AGENT_ORG_HOST npx rstest run --config scripts/rstest/rstest.config.ts src/event-tunnel.test.ts`
 
 Closes: none — the code half; the pull request that flags `.agent-org/host.json` closes a11ign/a11ign#5197, after this release is tagged
 
