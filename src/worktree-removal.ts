@@ -17,7 +17,7 @@ import { spawnSync } from "node:child_process";
 import { appendFileSync, mkdirSync, readdirSync, readFileSync } from "node:fs";
 import { basename, dirname, join, resolve } from "node:path";
 import { worktreeOwner } from "./worktree-owner.ts";
-import { REPO } from "./project-identity.ts";
+import { homeProjectDeclaration, type Tracker } from "./project-config.ts";
 import { SESSION_PREFIX } from "./project-vocabulary.ts";
 
 /** The log's default home, beside the other host state (`claim-stalls.json`, `kept-claims.json`, `salvage/`). */
@@ -28,6 +28,9 @@ export const REMOVAL_LOG_ENV = "A11Y_WORKTREE_REMOVAL_LOG";
 
 /** `git worktree` directories are named for the row, so `wt-2623` names #2623 even with no branch to read. */
 const ROW_FROM_DIRECTORY = /^wt-(\d+)$/;
+
+/** A keyed tracker's directory: `wt-agent-org-1216` is row 1216 of the tracker keyed `agent-org` (`claimNames`, `row-claim.ts`). */
+const KEYED_DIRECTORY = /^wt-(.+)-\d+$/;
 
 /** Sub-directories searched for worktrees inside a tree a remover deletes whole -- a scratchpad holds them one or two deep. */
 const NESTED_DEPTH = 3;
@@ -93,12 +96,25 @@ export const defaultGh: Gh = (args) => {
 };
 
 /**
+ * The repository a tree's row lives in (#1216). A `wt-<key>-<n>` directory is row `<n>` of the tracker `<key>`; a `wt-<n>` directory,
+ * or one that names no row this way, is the first tracker's (key `""`). A key no tracker declares is `undetermined`: the number
+ * alone names a different row in every repository that has one, so reading the primary's would answer for the wrong row.
+ * @param {{ path: string }} tree @param {readonly Tracker[]} trackers @returns {{ repo: string } | { undetermined: string }}
+ */
+export function treeRepo(tree: { path: string; }, trackers: readonly Tracker[]): { repo: string; } | { undetermined: string; } {
+  const key = KEYED_DIRECTORY.exec(basename(tree.path))?.[1];
+  const tracker = trackers.find((t) => t.key === (key ?? ""));
+  if (tracker !== undefined) return { repo: tracker.repo };
+  return { undetermined: `${tree.path} names tracker \`${key}\`, which no tracker declares, so its row's repository could not be determined` };
+}
+
+/**
  * The `session:` claims on one row: `[]` when it is open and unclaimed or closed, else the sessions. Throws when the row
  * cannot be read -- the caller turns that into a refusal, never into "unclaimed".
- * @param {number} row @param {Gh} gh @returns {string[]}
+ * @param {number} row @param {string} repo @param {Gh} gh @returns {string[]}
  */
-function sessionsHolding(row: number, gh: Gh): string[] {
-  const read = JSON.parse(gh(["issue", "view", String(row), "--repo", REPO, "--json", "state,labels"]));
+function sessionsHolding(row: number, repo: string, gh: Gh): string[] {
+  const read = JSON.parse(gh(["issue", "view", String(row), "--repo", repo, "--json", "state,labels"]));
   if (read.state === "CLOSED") return [];
   return read.labels.map((l: { name: string; }) => l.name)
     .filter((name: string) => name.startsWith(SESSION_PREFIX))
@@ -114,14 +130,18 @@ function sessionsHolding(row: number, gh: Gh): string[] {
  * Costs one `gh issue view` per row, and only for a tree every other check has already passed for removal.
  *
  * @param {{ path: string, branch?: string | null }} tree
- * @param {{ gh?: Gh, except?: string }} [deps] `except` is the session entitled to remove its own tree (a `decline`)
+ * @param {{ gh?: Gh, except?: string, trackers?: readonly Tracker[] }} [deps] `except` is the session entitled to remove its own tree (a `decline`); `trackers` is the declaration's, read from the home project when not given
  * @returns {{ refused: false } | { refused: true, reason: string }}
  */
-export function claimRefusal(tree: { path: string; branch?: string | null; }, { gh = defaultGh, except }: { gh?: Gh; except?: string; } = {}): { refused: false; } | { refused: true; reason: string; } {
-  for (const row of rowCandidates(tree)) {
+export function claimRefusal(tree: { path: string; branch?: string | null; }, { gh = defaultGh, except, trackers = homeProjectDeclaration().tracker }: { gh?: Gh; except?: string; trackers?: readonly Tracker[]; } = {}): { refused: false; } | { refused: true; reason: string; } {
+  const rows = rowCandidates(tree);
+  if (rows.length === 0) return { refused: false };
+  const home = treeRepo(tree, trackers);
+  if ("undetermined" in home) return { refused: true, reason: `${home.undetermined} -- refusing to remove a tree on an unanswered question (#1216)` };
+  for (const row of rows) {
     let held: string[];
     try {
-      held = sessionsHolding(row, gh);
+      held = sessionsHolding(row, home.repo, gh);
     } catch (cause) {
       return { refused: true, reason: `${tree.path} names row #${row} and its claim could not be read (${(cause as Error).message}) -- refusing to remove a tree on an unanswered question (#2782)` };
     }
@@ -141,15 +161,17 @@ export function claimRefusal(tree: { path: string; branch?: string | null; }, { 
  * closed: the tristate every remover here keeps.
  *
  * @param {{ path: string, branch?: string | null }} tree
- * @param {{ gh?: Gh }} [deps]
+ * @param {{ gh?: Gh, trackers?: readonly Tracker[] }} [deps]
  * @returns {{ closed: true } | { closed: false, reason: string }}
  */
-export function rowsClosed(tree: { path: string; branch?: string | null; }, { gh = defaultGh }: { gh?: Gh; } = {}): { closed: true; } | { closed: false; reason: string; } {
+export function rowsClosed(tree: { path: string; branch?: string | null; }, { gh = defaultGh, trackers = homeProjectDeclaration().tracker }: { gh?: Gh; trackers?: readonly Tracker[]; } = {}): { closed: true; } | { closed: false; reason: string; } {
   const rows = rowCandidates(tree);
   if (rows.length === 0) return { closed: false, reason: `${tree.path} names no row, so no closed row releases it (#3850)` };
+  const home = treeRepo(tree, trackers);
+  if ("undetermined" in home) return { closed: false, reason: `${home.undetermined} -- not treated as closed (#3850, #1216)` };
   for (const row of rows) {
     try {
-      const { state } = JSON.parse(gh(["issue", "view", String(row), "--repo", REPO, "--json", "state"]));
+      const { state } = JSON.parse(gh(["issue", "view", String(row), "--repo", home.repo, "--json", "state"]));
       if (state !== "CLOSED") return { closed: false, reason: `row #${row} is ${String(state).toLowerCase()}, so the stamp is not stale (#3850)` };
     } catch (cause) {
       return { closed: false, reason: `row #${row} could not be read (${(cause as Error).message}) -- not treated as closed (#3850)` };
