@@ -179,6 +179,18 @@ export const TOOL_CAUSE_DECLARATIONS = Object.freeze([
     why: "fixing a red build is debugging, and a wrong guess costs a full CI cycle on top of the tokens, "
       + "so the cheaper tier is not cheaper here",
   }),
+  declareCause("pr-approval-not-counted", GROUPS.ACTION, {
+    kind: "claude",
+    model: "sonnet",
+    // HIGH, because the act is one routing decision and the job is WORKING OUT WHY. An approval GitHub
+    // holds as `REVIEW_REQUIRED` has several causes -- a missing code-owner review, a stale or dismissed
+    // approval, a rule this approval does not answer -- and each one sends the PR to a different fix.
+    // The cheap tier routes on the first reason it sees, and a wrong route sends the PR back to a reviewer
+    // who has already answered (#1249).
+    effort: "high",
+    why: "the approval is in hand and the question is which of several rules is still owed; a wrong guess "
+      + "re-asks a reviewer who already answered, or routes a PR to an owner who cannot fix it",
+  }),
   declareCause("ready-queue-empty", GROUPS.JUDGMENT_START, {
     kind: "claude",
     model: "sonnet",
