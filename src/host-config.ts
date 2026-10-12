@@ -32,7 +32,7 @@ export const HOST_DECLARATION_PATH = ".agent-org/host.json";
  * that runs it. Everything else `host-units.ts` asks "enabled? active?" of is a timer; these get the same two questions, and the same remedy.
  * Named here rather than read off an `[Install]` section because `work-tick.service` carries one too and is a oneshot its timer starts.
  */
-export const LONG_RUNNING_TEMPLATES = Object.freeze(["chairman-listen.service.in", "otel-receiver.service.in", "event-receiver.service.in"]);
+export const LONG_RUNNING_TEMPLATES = Object.freeze(["chairman-listen.service.in", "otel-receiver.service.in", "event-receiver.service.in", "event-tunnel.service.in"]);
 
 /** A template is this suffix on the shipped name; the rendered name is `<prefix><name>` without it. */
 export const TEMPLATE_SUFFIX = ".in";
@@ -48,7 +48,13 @@ export type HostProject = { id: string, checkout: string };
 export type HostConfig = { schema: number, home: string, binDir: string, primary: string, projects: HostProject[], gh: GhDirectories, tool?: string, toolVersion?: string, stateDir?: string, clones?: Readonly<Record<string, string>>, triage?: Readonly<TriageDeclaration>, events?: Readonly<EventsDeclaration>, github?: Readonly<GithubDeclaration> };
 export type TriageDeclaration = { provider: "none" } | { provider: "jev", keyPath: string, minConfidence: number };
 export type EventsReceiver = { port: number, secretPath: string, tunnel: "cloudflare" | "tailscale" };
-export type EventsDeclaration = { source: "poll", reconcileMinutes?: number } | { source: "webhook", receiver: Readonly<EventsReceiver>, reconcileMinutes: number };
+/** How GitHub reaches the receiver (a11ign/a11ign#5197): `tailscale-funnel` serves its loopback port at `publicUrl`; `none` (the default, and an absent key) exposes nothing. */
+export type EventsTunnel = "tailscale-funnel" | "none";
+export const EVENTS_TUNNELS = Object.freeze(["tailscale-funnel", "none"] as const);
+type EventsTunnelFacts = { tunnel?: EventsTunnel, publicUrl?: string };
+export type EventsDeclaration =
+  | ({ source: "poll", reconcileMinutes?: number, receiver?: Readonly<EventsReceiver> } & EventsTunnelFacts)
+  | ({ source: "webhook", receiver: Readonly<EventsReceiver>, reconcileMinutes: number } & EventsTunnelFacts);
 export type UnitsDeclaration = { prefix: string, boardReportWorkflow: string, own: string[] };
 
 /** How a role authenticates (#4900). `user-accounts` is today's behaviour and the default; `github-apps` names the app (`app-token.ts`'s `AppIdentity`). */
@@ -348,14 +354,67 @@ function readEvents(host: Record<string, unknown>, source: string): Readonly<Eve
     throw new HostConfigRefusal("events.source", `it must be "poll" or "webhook", not ${JSON.stringify(kind)}`, source);
   }
   const reconcileMinutes = readReconcileMinutes(events, source);
+  const tunnelFacts = readTunnelFacts(events, source);
+  const funnel = tunnelFacts.tunnel === "tailscale-funnel";
   if (kind === "poll") {
-    if (Object.hasOwn(events, "receiver")) throw new HostConfigRefusal("events.receiver", "it names a receiver, and `source` is `poll`, so it would be ignored", source);
-    if (reconcileMinutes === undefined) return POLL;
-    return Object.freeze({ source: "poll", reconcileMinutes });
+    // A poll host that opens the funnel runs the receiver too, so the feed is proven BEFORE the gate reads it (a11ign/a11ign#5197). A receiver is read under any named `tunnel`, `none` included,
+    // so the revert is the one word and not a second edit; under `poll` with no `tunnel` at all it would be ignored, and is refused as it was.
+    if (Object.hasOwn(events, "receiver") && !Object.hasOwn(events, "tunnel")) throw new HostConfigRefusal("events.receiver", "it names a receiver, and `source` is `poll` with no `tunnel`, so it would be ignored", source);
+    const receiver = funnel || Object.hasOwn(events, "receiver") ? readDeclaredReceiver(events, source, "a `tailscale-funnel` tunnel needs the receiver it exposes") : undefined;
+    if (reconcileMinutes === undefined && receiver === undefined && Object.keys(tunnelFacts).length === 0) return POLL;
+    return Object.freeze({ source: "poll", ...(reconcileMinutes === undefined ? {} : { reconcileMinutes }), ...(receiver === undefined ? {} : { receiver }), ...tunnelFacts });
   }
-  if (!Object.hasOwn(events, "receiver")) throw new HostConfigRefusal("events.receiver", "it is missing; a `webhook` source needs the receiver its deliveries reach", source);
-  const receiver = readReceiver(requiredObject(events.receiver, "events.receiver", source), source);
-  return Object.freeze({ source: "webhook", receiver, reconcileMinutes: reconcileMinutes ?? DEFAULT_RECONCILE_MINUTES });
+  const receiver = readDeclaredReceiver(events, source, "a `webhook` source needs the receiver its deliveries reach");
+  return Object.freeze({ source: "webhook", receiver, reconcileMinutes: reconcileMinutes ?? DEFAULT_RECONCILE_MINUTES, ...tunnelFacts });
+}
+
+/** @param {Record<string, unknown>} events @param {string} source @param {string} why @returns {Readonly<EventsReceiver>} */
+function readDeclaredReceiver(events: Record<string, unknown>, source: string, why: string): Readonly<EventsReceiver> {
+  if (!Object.hasOwn(events, "receiver")) throw new HostConfigRefusal("events.receiver", `it is missing; ${why}`, source);
+  return readReceiver(requiredObject(events.receiver, "events.receiver", source), source);
+}
+
+/**
+ * THE TUNNEL'S FACTS (a11ign/a11ign#5197): `tunnel` (`tailscale-funnel` or `none`; absent is `none`, and is left absent so a host that names neither reads as it always did) and `publicUrl`, the
+ * address GitHub posts to. Funnel serves ONE https port (443) at a path, so `publicUrl` must be `https://<host>/<path>`: no port, no query, a path whose characters a unit line carries.
+ * A funnel with no `publicUrl` is refused (nothing names the path), and so is one whose receiver's own `tunnel` is not `tailscale` (two declarations of one tunnel that disagree).
+ * `publicUrl` on a `none` host is read and unused, so the revert is the one word `none` and not a second edit.
+ * @param {Record<string, unknown>} events @param {string} source @returns {EventsTunnelFacts}
+ */
+function readTunnelFacts(events: Record<string, unknown>, source: string): EventsTunnelFacts {
+  const facts: EventsTunnelFacts = {};
+  if (Object.hasOwn(events, "tunnel")) {
+    const tunnel = events.tunnel;
+    if (!EVENTS_TUNNELS.includes(tunnel as EventsTunnel)) {
+      throw new HostConfigRefusal("events.tunnel", `it must be "tailscale-funnel" or "none", not ${JSON.stringify(tunnel)}`, source);
+    }
+    facts.tunnel = tunnel as EventsTunnel;
+  }
+  if (Object.hasOwn(events, "publicUrl")) facts.publicUrl = readPublicUrl(events.publicUrl, source);
+  if (facts.tunnel !== "tailscale-funnel") return facts;
+  if (facts.publicUrl === undefined) throw new HostConfigRefusal("events.publicUrl", "it is missing; a `tailscale-funnel` tunnel serves the receiver at a path, and nothing else names it", source);
+  const receiver = Object.hasOwn(events, "receiver") ? requiredObject(events.receiver, "events.receiver", source) : undefined;
+  if (receiver !== undefined && receiver.tunnel !== "tailscale") {
+    throw new HostConfigRefusal("events.receiver.tunnel", `it must be "tailscale" when \`events.tunnel\` is "tailscale-funnel", not ${JSON.stringify(receiver.tunnel)}`, source);
+  }
+  return facts;
+}
+
+const PUBLIC_URL_PATH = /^\/[A-Za-z0-9_.~-]+(?:\/[A-Za-z0-9_.~-]+)*$/;
+/** @param {unknown} value @param {string} source @returns {string} */
+function readPublicUrl(value: unknown, source: string): string {
+  const refuse = (why: string) => new HostConfigRefusal("events.publicUrl", `${why}, not ${JSON.stringify(value)}`, source);
+  if (typeof value !== "string") throw refuse("it must be a string `https://<host>/<path>`");
+  let url: URL;
+  try {
+    url = new URL(value);
+  } catch {
+    throw refuse("it must be a URL `https://<host>/<path>`");
+  }
+  if (url.protocol !== "https:" || url.port !== "" || url.search !== "" || url.hash !== "" || url.username !== "" || !PUBLIC_URL_PATH.test(url.pathname) || value !== url.href) {
+    throw refuse("it must be exactly `https://<host>/<path>` with no port, query, credentials or trailing slash");
+  }
+  return value;
 }
 
 /** @param {Record<string, unknown>} events @param {string} source @returns {number | undefined} */
@@ -630,7 +689,7 @@ export const EVENT_QUEUE_ENTRY = "events/queue.jsonl";
  */
 function eventReceiverValues(host: HostConfig): Record<string, string> {
   const events = host.events;
-  if (events === undefined || events.source !== "webhook") return {};
+  if (events?.receiver === undefined) return {};
   const { port, secretPath } = events.receiver;
   const queue = stateEntryPath(EVENT_QUEUE_ENTRY, { host, home: host.home, env: {} });
   for (const [field, path] of [["events.receiver.secretPath", secretPath], ["events.queue", queue]] as const) {
