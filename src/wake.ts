@@ -7449,6 +7449,10 @@ function releaseHeadline(request: ReleaseRequest): string {
     return `this row was CLOSED while it still carried the claim${request.interrupt === true ? `, and \`${request.session}\` was mid-turn on it, so its turn was interrupted (#3535)` : " (#3535)"}`;
   }
   if (request.why === "gone") return `\`${request.session}\` no longer exists in herdr's own workspace listing (#2747), not merely quiet`;
+  // agent-org#743: a stall released after its nudges went unanswered says how many, and that the pull request stays as it is (the order carries the count)
+  if (request.why === "stalled" && request.nudges !== undefined) {
+    return `${request.nudges} ${request.nudges === 1 ? "nudge" : "nudges"} went unanswered (the branch gained no commit and no head moved after any of them), and the pull request is left open as it is`;
+  }
   return `nothing on this row moved for ${request.idleMinutes} minutes (no commit, push, pull request, changed file or row comment) and the nudge was not answered`;
 }
 

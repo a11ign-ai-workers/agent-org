@@ -1241,6 +1241,19 @@ test("#2470 (4) a stalled release ENDS the spare's workspace, declines the claim
   assert.deepEqual(r.dropped, ["worker-7"], "and the registry entry goes, so the next spawn for the address is not read as one that left without the teardown");
 });
 
+test("agent-org#743 (row 1152) a stalled release after three unanswered nudges NAMES them and says the pull request is left open; without `nudges` the sentence is today's", () => {
+  const nudged = releaseHost({ world: { dirty: [{ file: "a.mjs", ago: 900 }], unpushed: 2 } });
+  assert.equal(performRelease({ ...STALL, nudges: 3, openPrs: [9] }, nudged.deps).released, true);
+  assert.match(nudged.comment(), /3 nudges went unanswered \(the branch gained no commit and no head moved after any of them\), and the pull request is left open as it is/);
+  assert.equal(nudged.comment().includes("the nudge was not answered"), false, "the nudged reading does not also say the one-nudge sentence");
+
+  const plain = releaseHost({ world: { dirty: [{ file: "a.mjs", ago: 900 }], unpushed: 2 } });
+  assert.equal(performRelease(STALL, plain.deps).released, true);
+  assert.ok(plain.comment().includes("nothing on this row moved for 250 minutes (no commit, push, pull request, changed file or row comment) and the nudge was not answered"),
+    `control: a request with no nudges reads today's sentence byte for byte: ${plain.comment()}`);
+  assert.equal(plain.comment().includes("went unanswered"), false);
+});
+
 test("#2470 (7) a tree with NOTHING in it is not kept (and its empty branch is deleted, or the respawn's claim would refuse over it)", () => {
   const r = releaseHost({ world: {} });
   assert.equal(performRelease(STALL, r.deps).released, true);
