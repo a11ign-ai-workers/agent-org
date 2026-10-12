@@ -1,4 +1,4 @@
-// no-token: every case is a string in and a verdict out; nothing here reaches gh, herdr or the ledger on disk
+// no-token: gh -- every case is a string in and a verdict out; `wake.ts` is imported only for `ledgerLine` and `wakeIdOf`, which build text, so nothing reaches `gh`, herdr or the ledger on disk
 /**
  * #5147: AN ORDER THE GATE ISSUED VERIFIES, A MADE-UP ONE DOES NOT, and two deliveries of one order to a holder that did not move its head
  * file one repeat.
