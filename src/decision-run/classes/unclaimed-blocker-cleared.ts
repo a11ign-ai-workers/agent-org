@@ -10,6 +10,7 @@
 //   2. the item's body carries an `Open-check` section, so there is a premise to have re-read;
 //   3. the item is still in `backlog` or carries no state (the gap), is not held, and every edge is closed: no open `blockedBy`, no `waitingFor`, no `not before` ahead.
 // Any of these missing leaves `hold` and `escalate` allowed and `promote` no action.
+import { homeProjectDeclaration } from "../../project-config.ts";
 import type { ItemRef, TicketItem } from "../../ticket-port/port.ts";
 import type { BriefQuestion } from "../brief.ts";
 import type { DecisionAction, DecisionClass, DecisionOrder } from "../registry.ts";
@@ -47,8 +48,8 @@ const SCHEMA = {
   },
 } as const;
 
-/** The repository each tracker key of an order's subject (`row-7`, `row-agent-org#7`) names. An unknown key is no item, and so no action. */
-export const SCOPES: Readonly<Record<string, string>> = { "": "a11ign/a11ign", "agent-org": "a11ign/agent-org" };
+/** The repository each key of an order's subject (`row-7`, `row-agent-org#7`) names, read from the project's declaration. An unknown key is no item, and so no action. */
+export const scopeOf = (key: string): string | undefined => homeProjectDeclaration().code.find((repository) => repository.key === key)?.repo;
 
 /** The head the order hands the run: a `Head: <sha>` line in its prompt. An order that names none leaves `promote` unavailable. */
 export const HEAD_PATTERN = /^\s*(?:main\s+)?head:\s*`?([0-9a-f]{7,40})`?\s*$/im;
@@ -65,7 +66,7 @@ const read = new Map<string, Read>();
 
 export function itemOf(order: Pick<DecisionOrder, "subject" | "causeKey">): ItemRef | null {
   const found = [order.causeKey, `${order.subject ?? ""}`].map((text) => /(?:^|\/)row-(?:([a-z0-9-]+)#)?(\d+)(?:\/|$)/.exec(text)).find((m) => m !== null);
-  const scope = found == null ? undefined : SCOPES[found[1] ?? ""];
+  const scope = found == null ? undefined : scopeOf(found[1] ?? "");
   return found == null || scope === undefined ? null : { tracker: "github", scope, id: Number(found[2]) };
 }
 
