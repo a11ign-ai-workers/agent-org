@@ -8601,7 +8601,8 @@ async function main() {
   const host = hostOrEmpty();
   // #4888: `ci-failure-class` and `review-depth` are asked here, of the orders about to be delivered.
   // #832: a ready `lane:orchestrator` row becomes a one-shot run's order HERE, after the ledger's reads, when `workers.orchestratorOneShot` is on; off, `ready` is the same array.
-  const ready = withCeoOneShot(withOrchestratorOneShot(await withReviewDepth(await withCiFailureClass(todo, { host, ledgerPath }), { host, ledgerPath })));
+  const ready = withCeoOneShot(withOrchestratorOneShot(await withReviewDepth(await withCiFailureClass(todo, { host, ledgerPath }), { host, ledgerPath })),
+    { rowOf: rowRefOfOrder, readRow: readRowForTier });
   const routes = await routesForStarts(ready, { host, ledgerPath });
   // agent-org#904: AN ORDER WHOSE CLASS THE PROJECT SET TO `run` IS SERVED HERE, BEFORE `deliver`, because `deliver` is synchronous and a run is not. A project with no `.agent-org/seats.json`,
   // or whose classes are all `seat`, gets an empty map after one file read, and `deliver` below is then called exactly as it was.
