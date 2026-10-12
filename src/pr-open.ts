@@ -242,6 +242,7 @@ function regionPassLine({ rows, changed, standing, base }: { rows: string; chang
  * @param {import("./acceptance-commands.ts").ClosesReference[]} references
  * #3083: a row that STATES its repository (`statedRepository`) and is opened in THAT repository's tree (`tree.repo`, the `--repo`) wrote its
  * bare paths relative to that root, so they are read as its key's; stated or opened elsewhere, a bare path is the first repository's as ever.
+ * #1182: and so does a row QUALIFIED to that repository (`Closes owner/repo#N`) when its body states none.
  * @param {{ rowBody: (number: number, repo?: string) => string, rootFiles?: Set<string>, tree: { key: string, repo: string | undefined } }} deps
  * @returns {{ kind: "region", region: string[] } | { kind: "unread", why: string } | { kind: "no-section", row: string }}
  */
@@ -259,7 +260,9 @@ function readRegions(references: import("./acceptance-commands.ts").ClosesRefere
     // `declaredRegionFiles` reads `origin/main`'s root files by default; an injected set spares a test that git call.
     const declared = declaredRegionFiles(text, rootFiles ? { rootFiles } : undefined);
     if (declared === null) return { kind: "no-section", row: name };
-    const keyBare = tree.key !== "" && statedRepository(text) === tree.repo;
+    // #1182: a row QUALIFIED to this tree's repository (`Closes owner/repo#N`) is that repository's row even when its body does not say so, so
+    // its bare paths are that tree's. A sentence the body states wins over the qualifier, as #3083 pinned.
+    const keyBare = tree.key !== "" && (statedRepository(text) ?? reference.repo) === tree.repo;
     for (const path of declared) union.add(keyBare && splitRegionEntry(path).key === "" ? `${tree.key}:${path}` : path);
     const repositories = new Set<string>();
     for (const entry of declared) {

@@ -328,6 +328,40 @@ test("#3083 WIRING: the sentence is read by the one `statedRepository` in row-fi
   assert.doesNotMatch(PR_OPEN_SOURCE, /repository is\\s/i, "no second reading of the sentence");
 });
 
+// --- #1182: a bare Region path of a row QUALIFIED to another repository is read in that repository's tree -----------------------------
+
+const CLOSES_1182 = prBody("Closes a11ign/agent-org#805");
+const ROW_805 = regionBody(AGENT_ORG_ROW_PATHS);
+
+test("#1182 done-when 1: a PR opened in agent-org for a row qualified to agent-org, with bare Region paths, reads them INSIDE with no Outside-Region line", () => {
+  const r = drive(inAgentOrg(CLOSES_1182), { rows: { 805: ROW_805 }, changed: AGENT_ORG_ROW_PATHS });
+  assert.equal(r.code, 0, r.err);
+  assert.match(r.out, /REGION: 2 changed path\(s\) .*2 inside, 0 exempt, 0 cleared by an Outside-Region line\./);
+  assert.doesNotMatch(r.out + r.err, /Outside-Region:/);
+});
+
+test("#1182 done-when 2: a path the qualified row does NOT name is still refused, and it is the only one", () => {
+  const r = drive(inAgentOrg(CLOSES_1182), { rows: { 805: ROW_805 }, changed: [...AGENT_ORG_ROW_PATHS, "src/board.ts"] });
+  assert.equal(r.code, EXIT_NOTHING_SENT);
+  assert.match(r.err, /^ {2}src\/board\.ts$/m);
+  assert.doesNotMatch(r.err, /^ {2}src\/row-file\.ts$/m);
+  assert.match(r.err, /1 path\(s\) changed outside/);
+});
+
+test("#1182 done-when 2: a path keyed to ANOTHER repository in the row is still refused, though the bare path beside it is covered", () => {
+  const keyed = regionBody(["nvda-worker:src/row-file.ts", "src/packaging/pr-open-region.test.ts"]);
+  const r = drive(inAgentOrg(CLOSES_1182), { rows: { 805: keyed }, changed: AGENT_ORG_ROW_PATHS });
+  assert.equal(r.code, EXIT_NOTHING_SENT);
+  assert.match(r.err, /^ {2}src\/row-file\.ts$/m, "a path keyed to another repository covers nothing in this tree");
+  assert.doesNotMatch(r.err, /^ {2}src\/packaging\/pr-open-region\.test\.ts$/m);
+});
+
+test("#1182: a row of the home repository is still the first repository's, so its bare paths are refused in agent-org", () => {
+  const r = drive(inAgentOrg(prBody("Closes a11ign/a11ign#805")), { rows: { 805: ROW_805 }, changed: AGENT_ORG_ROW_PATHS });
+  assert.equal(r.code, EXIT_NOTHING_SENT, "a row of the home repository's bare paths are the home tree's, not agent-org's");
+  assert.match(r.err, /2 path\(s\) changed outside/);
+});
+
 // --- #3149: the refusal names `--repo` when this checkout is another repository of the project, and `(new)` is a note ----------------
 
 const AGENT_ORG_ORIGINS = ["https://github.com/a11ign/agent-org", "https://github.com/a11ign/agent-org.git", "git@github.com:a11ign/agent-org.git\n"];
