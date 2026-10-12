@@ -8,8 +8,6 @@ Measured: `VERDICT pass: 10 tests in 1 file` for the acceptance file. With `src/
 
 Not here, and named: the live reading after agent-org#904 merges is out of scope (resource ban); a non-home row still needs a human promote after it is un-parked; the refusal's generic text says `row-file --promote=<n>`, which is wrong for a non-home row; `readWaitRef` still swallows errors to `null`; `MAX_WAIT_READS = 30` with PRs-first ordering can starve later references. `rows.autoUnpark` is NOT flipped in `machinery-canary.json` by this change.
 
-Reopened (2026-10-12): the pass does not fire in a live tick, and the cause is the flag's home, not the un-park logic. `rows.autoUnpark` lives ONLY in the `rows.autoUnpark` record of `machinery-canary.json`; no code outside tests sets that record (`withMachineryFlag` has test-only callers), so it ships OFF and nothing turns it on. The `rows.autoUnpark: true` key in a11y-witness's `project.json` is never read, so it misleads. This change names that home in the comments (`unpark-satisfied.ts`, `work-gate.ts`) and makes a refused other-tracker read (`openRows: null`, from a failed `gh` list) NAMED in the log instead of skipped silently (test 11, which fails on origin/main). #905's own unit shape is un-parked on origin/main (test 10, which passes there), so the unit logic is not the live miss; the live miss that remains is the OFF flag, and turning it on is `ceo`'s, not this change's.
-
 Flag: rows.autoUnpark
 Health-signals: claims-refused, wakes-held
 Revert: turn `rows.autoUnpark` off in `machinery-canary.json` (it ships OFF), or revert this PR
