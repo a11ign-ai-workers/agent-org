@@ -19,8 +19,8 @@ Mutation: each break was applied to one source file, the acceptance test (and th
 
 Evidence, measured at this head: the acceptance command passes 7 of 7. `pnpm run typecheck` exits 0. `pnpm test` reads 4 failed of 10,963 in 645 files; the four are `host-install-agent-org-launcher` (a placeholder `@@eventsPort@@` no host value fills), `live-tree-independence` twice (`Cannot find module 'tsx/package.json'`) and `release-tag-on-merge` (a `pnpm-lock.yaml` now exists), the same four agent-org#1195's evidence names at 4588b28e. They were not re-run on a clean `origin/main` here; none of them imports a file this diff changes.
 
-Outside-Region: src/flag-switch-ledger.ts — the pinned test requires FLAGS_WITH_ANOTHER_HOME to equal FLAG_REGISTRY, and the digest's flag-without-a-switch reads that map, so the flag cannot be switchable and still counted without this one line (agent-org#1195 changed it the same way)
+`src/flag-switch-ledger.ts` is outside the Region as filed and is declared as such in the pull request body: the pinned test requires `FLAGS_WITH_ANOTHER_HOME` to equal `FLAG_REGISTRY`, and the digest's `flag-without-a-switch` reads that map, so the flag cannot be switchable and still counted without that one line (agent-org#1195 changed it the same way).
 
 Flag: holds.recheck
-Health-signals: approved-unqueued, blind-ticks
+Health-signals: wakes-held, approved-unqueued
 Revert: turn `holds.recheck` off with `machinery:flag off holds.recheck` (it ships OFF, so today's gate is the default), or revert this pull request
