@@ -194,6 +194,8 @@ const DECLARED_NON_VOCABULARY_HITS: Declaration[] = [
   // `github-adapter.ts` is the one place that maps them to this project's labels (decision 5), so a second project's vocabulary changes the
   // adapter's table and never these. The spelling is the same as a11ign's labels because the ADR chose it so.
   ...nonVocabulary("ticket-port/port.ts", ['"backlog"', '"ready"', '"in-progress"', '"out-of-release"', "`lane:"], "the port's own state and flag names (ADR 0046 decision 1), not this project's labels"),
+  // agent-org#907: a decision class names the port's states in the change it asks for (`state: "ready"`) and reads the shelved ones (`backlog`); the role excerpt says `ready` to the run.
+  ...nonVocabulary("decision-run/classes/unclaimed-blocker-cleared.ts", ['"backlog"', '"ready"', "`ready`"], "the port's own state names (ADR 0046 decision 1) in a class's StateChange, and the word the run's excerpt uses for it"),
   ...nonVocabulary("ticket-port/github-adapter.ts", ['"backlog"', '"ready"', '"in-progress"', '"lane:'], "the port's state and flag names, as the keys of the adapter's mapping table (ADR 0046 decision 5); the labels they map to are read from the vocabulary"),
   // `worker-state.ts` (#460): `"blocked"` is the worker-state NAME `worker:state blocked <row> <reason>` accepts and the `herdr` pane STATUS the
   // tick tells; `` `blocked` `` is that same state named in its refusal text. Neither is the `blocked` GitHub label (the command's own label
