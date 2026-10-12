@@ -216,7 +216,7 @@ test("reading the real path: a mirror written to `runs/fleet-auto-off-mirror.jso
 
 // --- the tick: the signal is in SIGNALS, in the order, and in the log when unknown ---------------------------------------------------
 
-const QUIET = { now: NOW, lastMergedAt: NOW - 60 * MINUTE_MS, work: { greenPrs: 0, claimableRows: 0 }, redPrs: [], refusals: {},
+const QUIET = { now: NOW, lastMergedAt: NOW - 60 * MINUTE_MS, work: { greenPrs: 0, claimableRows: 0 }, redPrs: [], refusals: {}, claimRefusals: [],
   drift: { behind: 0, ahead: 0, dirty: [] }, primarySince: null };
 
 test("the readings carry the signal only when the fact is given, and the order names the signal, the reason, the age and the bound", () => {

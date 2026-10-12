@@ -315,7 +315,7 @@ test("the calls one read spends: a release, one listing per releasable path, and
 
 // --- the signal through the org-health path ------------------------------------------------------------------------------------
 
-const QUIET = { now: at("2026-10-09T10:00:00Z"), lastMergedAt: at("2026-10-09T09:00:00Z"), work: { greenPrs: 0, claimableRows: 0 }, redPrs: [], refusals: {},
+const QUIET = { now: at("2026-10-09T10:00:00Z"), lastMergedAt: at("2026-10-09T09:00:00Z"), work: { greenPrs: 0, claimableRows: 0 }, redPrs: [], refusals: {}, claimRefusals: [],
   drift: { behind: 0, ahead: 0, dirty: [] }, primarySince: null };
 
 test("the signal is in the readings only when the fact is given, and its order names what to do", () => {
@@ -345,7 +345,7 @@ test("the tick says an unread repository on stderr and offers nothing; a level o
 test("the gate's own path carries it: orgHealthNow with the fact orders it, and without the reader asks nothing", () => {
   const decideArgs = { prs: [], required: [], readyRows: [], prFiles: new Map(), rowBranches: [], openRows: [], primaryDrift: null, claimRefusals: [] };
   const tick = (readReleaseBehind?: () => unknown) => orgHealthNow({ prsRead: [], readyRead: [], openRowsRead: [], decideArgs, decided: [] } as never,
-    { now: QUIET.now, lastMergedAt: () => QUIET.now, readCaptures: () => undefined, readLabJobs: () => [], log: () => {}, teamAccess: () => undefined,
+    { now: QUIET.now, lastMergedAt: () => QUIET.now, readCaptures: () => undefined, readRefusals: () => [], readLabJobs: () => [], log: () => {}, teamAccess: () => undefined,
       readWaits: () => ({ facts: new Map(), stale: [], bare: [], manual: 0 }), ...(readReleaseBehind && { readReleaseBehind }) } as never) as { subject: string }[];
   const ofSignal = (orders: { subject: string }[]) => orders.filter((o) => o.subject === SIGNAL);
   assert.equal(ofSignal(tick(() => [factOf(replayWorld())])).length, 1, "a repository behind its releases is offered by the tick");
