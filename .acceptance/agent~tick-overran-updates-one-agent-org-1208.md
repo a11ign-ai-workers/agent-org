@@ -1,5 +1,7 @@
 A tick that ran past its threshold is now recorded, not delivered: `reportIfSlow` appends nothing to the order and instead edits ONE standing comment on the row `units.tickRecordIssue` names in `.agent-org/project.json` with a rolling 24 h table of slow ticks and the p50/p95 tick wall (agent-org#1208). A KILLED tick still wakes, unchanged. A write that could not be made is kept in `tick-record.json`, the next tick retries it, and org-health says so once (`tick-record-unwritten`, a DIGEST class) instead of waking ceo per overrun.
 
+History: full
+
 Acceptance: `node --test src/work-tick-health.test.ts src/packaging/work-gate.test.ts src/packaging/worker-profile.test.ts`
 
 Mutation: each run with `src/work-tick-health.ts` copied aside and restored byte-identical (`diff`), each breaking its own tests. Record never due (`return "not-due"` first): 5 tests (the first write, the edit in place, the 24 h table, the retry and the through-the-tick record). Record always due (the `not-due` return removed): the control "a fast tick with nothing owed touches nothing". A refused write that forgets the first `since`: the retry test, which pins that `since` survives a second refusal.
