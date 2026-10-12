@@ -6,14 +6,28 @@
 // directions, are in the pull request.
 import assert from "node:assert/strict";
 import { spawnSync } from "node:child_process";
-import { existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
+import { cpSync, existsSync, mkdirSync, mkdtempSync, readFileSync, readdirSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import { FAILURE_LEDGER_FILE, parseFailureLedger } from "./failure-ledger.ts";
-import { WORKER_STATE_DIR, readDeclarations, writeDeclaration } from "./worker-state.ts";
-import { MAX_REFUSALS, STOP_HOOK_BOUND_KIND, STOP_HOOK_DIR, claimedRowOf, main, runHook, type Seams, type StopPr } from "./worker-stop-hook.ts";
+import type { Seams, StopPr } from "./worker-stop-hook.ts";
+
+// agent-org#1147: THE PROJECT THIS FILE RUNS AGAINST IS A RECORDED ONE (`org-health.test.ts`'s #3233 rule). The hook's imports reach `board-snapshot-scope.ts`, which reads the
+// project's declaration when it is imported, and with no `$AGENT_ORG_HOST` that is wherever the suite happens to be run from: the file passed in the project's tree (CI) and the
+// program run below exited 1 anywhere else. The host file is set FIRST and the hook imported AFTER it, dynamically, and the program is handed the same file.
+const SCRATCH = mkdtempSync(join(tmpdir(), "worker-stop-hook-project-"));
+test.after(() => rmSync(SCRATCH, { recursive: true, force: true }));
+const PROJECT = join(SCRATCH, "project");
+cpSync(fileURLToPath(new URL("./packaging/fixtures/org-health/project", import.meta.url)), PROJECT, { recursive: true });
+const HOST_FILE = join(SCRATCH, "host.json");
+writeFileSync(HOST_FILE, JSON.stringify({ schema: 1, home: SCRATCH, binDir: join(SCRATCH, "bin"), primary: "fixture", projects: [{ id: "fixture", checkout: PROJECT }],
+  gh: { workers: join(SCRATCH, "workers"), leads: join(SCRATCH, "leads"), leadsHeader: [], leadsWorkspaces: [] } }));
+process.env.AGENT_ORG_HOST = HOST_FILE;
+
+const { WORKER_STATE_DIR, readDeclarations, writeDeclaration } = await import("./worker-state.ts");
+const { MAX_REFUSALS, STOP_HOOK_BOUND_KIND, STOP_HOOK_DIR, claimedRowOf, main, runHook } = await import("./worker-stop-hook.ts");
 
 const T0 = Date.parse("2026-10-11T09:00:00Z");
 const MIN = 60_000;
@@ -138,7 +152,7 @@ test("driven through the entry with the hook payload as stdin text: refused, the
 
 test("the program itself, run as the hook is: stop_hook_active ends in exit 0 and says nothing, and a payload that is not JSON exits 0 and says why", () => {
   const program = fileURLToPath(new URL("./worker-stop-hook.ts", import.meta.url));
-  const run = (input: string) => spawnSync(process.execPath, [program], { input, encoding: "utf8", env: { PATH: process.env.PATH ?? "" } });
+  const run = (input: string) => spawnSync(process.execPath, [program], { input, encoding: "utf8", env: { PATH: process.env.PATH ?? "", AGENT_ORG_HOST: HOST_FILE } });
   const continuing = run(JSON.stringify({ stop_hook_active: true }));
   assert.deepEqual([continuing.status, continuing.stderr], [0, ""]);
   const garbled = run("not json");
