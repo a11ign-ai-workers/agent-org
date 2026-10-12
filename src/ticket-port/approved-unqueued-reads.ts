@@ -24,6 +24,17 @@ export function postRowComment({ repo, row, body, run }: { repo: string; row: nu
   run(["issue", "comment", String(row), "--repo", repo, "--body", body]);
 }
 
+/**
+ * File a new row in `repo` with `labels` and answer its number (agent-org#1208: the tick's standing row, created once). the create prints the row's URL; a print that
+ * is not one is thrown, because a row filed and not numbered would be filed again.
+ */
+export function createRow({ repo, title, labels, body, run }: { repo: string; title: string; labels: string[]; body: string; run: Run }): number {
+  const printed = run(["issue", "create", "--repo", repo, "--title", title, ...labels.flatMap((label) => ["--label", label]), "--body", body]).trim();
+  const number = /\/issues\/(\d+)\s*$/.exec(printed)?.[1];
+  if (number === undefined) throw new Error(`the create printed no row URL: ${printed.slice(0, 120)}`);
+  return Number(number);
+}
+
 /** Replace the body of the comment `id` of `repo`: the day's reading, edited and never posted a second time. */
 export function editComment({ repo, id, body, run }: { repo: string; id: number; body: string; run: Run }): void {
   run(["api", "-X", "PATCH", `repos/${repo}/issues/comments/${id}`, "-f", `body=${body}`]);

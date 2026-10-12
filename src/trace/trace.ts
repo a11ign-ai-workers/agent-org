@@ -33,6 +33,7 @@ import type { Ask, Validated } from "./publish.ts";
 import { renderWakeCache, wakeCache } from "./wake-cache.ts";
 import { isManagerSpend, mainManagerSpend } from "./manager-spend.ts";
 import { eventsOfCodexSession } from "./codex-turns.ts";
+import { TICK_COST_FILE, tickHealthLine, tickHealthOf } from "../work-tick-health.ts"; // a leaf: the tick's own record, read here for the two health signals (agent-org#1208)
 import { ghCallLines, ghIngestLines, ingestGhCalls } from "./gh-calls.ts";
 import { countingGh, readGithubEvents } from "./github-events.ts";
 import { freshnessLine, sessionsWorking, STALE_AFTER_MS, storeFreshness, transcriptRoots } from "./freshness.ts";
@@ -1283,7 +1284,25 @@ async function mainAggregate() {
   // A skipped spare-cycles line is named, never silently dropped (agent-org#1122): the aggregate still posts, and says what it did not read.
   const skipped = skippedInstances > 0 ? [`spare-cycles: ${skippedInstances} unparseable line${skippedInstances === 1 ? "" : "s"} skipped, not read as instances (agent-org#1122)`] : [];
   if (json) skipped.forEach((line) => console.error(line)); // stdout of a `--json 1` run is the JSON and nothing before it
-  console.log(json ? JSON.stringify(result, null, 2) : renderAggregate(result, { ingestFooter: ["", ...ingestLines(ingested), githubSummary({ github, budget, unread: unreadRows.length }), ...(note ? [note] : []), ...skipped, NOT_HELD] }));
+  console.log(json ? JSON.stringify(result, null, 2) : renderAggregate(result, { ingestFooter: ["", ...ingestLines(ingested), githubSummary({ github, budget, unread: unreadRows.length }), ...(note ? [note] : []), ...skipped, ...tickHealthFooter(cache, now), NOT_HELD] }));
+}
+
+/**
+ * agent-org#1208 (a11ign#928): THE TICK'S TWO HEALTH SIGNALS, tick wall p50/p95 and `tick-overran` wakes per day, read from the SAME cost file and ledger the standing row's table is drawn
+ * from (`tickHealthOf`), so the weekly report and `org-health` print one measurement. A slow tick wakes nobody, so that case reads 0; a file that cannot be read is said, never a zero.
+ * @param {string} cache the directory the wake ledger and the cost file are in @param {number} now
+ */
+export function tickHealthFooter(cache: string, now: number): string[] {
+  const read = (file: string): string | null => {
+    try {
+      return readFileSync(join(cache, file), "utf8");
+    } catch {
+      return null;
+    }
+  };
+  const costText = read(TICK_COST_FILE);
+  if (costText === null) return [`TICK HEALTH: not read: ${join(cache, TICK_COST_FILE)} could not be read`];
+  return [`TICK HEALTH (last 24 h, the record's own cost file): ${tickHealthLine(tickHealthOf({ costText, ledgerText: read("wake-ledger"), now }))}`];
 }
 
 async function mainMap() {

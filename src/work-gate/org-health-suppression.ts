@@ -77,6 +77,8 @@ export const ORG_HEALTH_CLASSES: Readonly<Record<string, { severity: "page"; } |
   "row-without-exactly-one-state": DIGEST,
   "wait-without-reason": DIGEST,
   "board-disagrees-with-reality": DIGEST,
+  "tick-record-unwritten": DIGEST, // agent-org#1208: one line that rides the next order while a slow tick's record cannot be written; the tick retries by itself, so it is never a wake of its own
+  "tick-wall-high": DIGEST, // agent-org#1208: the tick wall's p95 past the limit, named once a day with p50/p95 and the wakes per day; `ceo` reads the trend daily, so it rides the next order
   "flag-without-a-switch": DIGEST, // agent-org#1135: a list named once a day to its first reader, `product-manager`, who files each switch row; `ceo` reading it again adds a turn and not a decision
 });
 

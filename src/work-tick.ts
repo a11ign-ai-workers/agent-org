@@ -34,12 +34,14 @@ import { dueRepos, readDueIndex } from "./due-index.ts";
 import { writeTickScopes } from "./tick-scopes.ts";
 import { defaultRun, promptOrQueue, STANCE, EXIT as PROMPT_EXIT } from "./prompt-session.ts";
 import { PANE_DIALOG_RAISED_FILE, raisePaneDialogs, readRaised, writeRaised } from "./pane-dialog.ts";
-import { homeProjectDeclaration } from "./project-config.ts";
+import { HOME_CHECKOUT, PROJECT_DECLARATION_PATH, homeProjectDeclaration } from "./project-config.ts";
+import { LANE_PREFIX } from "./project-vocabulary.ts";
 import { completionPath, writeCompletion } from "./lib/tick-completion.ts";
 import { toolVersionLine } from "./lib/tool-version.ts";
 import { refreshTickSnapshot, type TickEvents } from "./tick-snapshot.ts";
-import { clearOwnMarker, deliverTickOrders, killedTickOrders, readKilledTick, slowThresholdSeconds, slowTickOrders, tickMarkerPath,
-  writeStartMarker } from "./work-tick-health.ts";
+import { TICK_COST_FILE, TICK_RECORD_MARKER, TICK_RECORD_ROW_TITLE, clearOwnMarker, deliverTickOrders, killedTickOrders, readKilledTick, readTickRecordState, recordSlowTick, slowThresholdSeconds,
+  standingRowFor, tickMarkerPath, tickRecordPath, tickRecordRowBody, writeStartMarker, type RecordIo } from "./work-tick-health.ts";
+import { createRow, editComment, keyedCommentsOf, postRowComment } from "./ticket-port/approved-unqueued-reads.ts";
 import { CENSUS_ENV, GATE_SPANS_ENV, childrenCpuMs, installSpawnCensus, largestSpans, readCensus, readGateSpans, setCensusPhase, summariseCensus } from "./lib/spawn-census.ts";
 
 // Where the reader now lives (the census times each spawn's CPU with it); the tick's tests and callers still import it from here.
@@ -144,7 +146,7 @@ function queuedOrderCount(path: string): number {
 // ---- THE COST OF A TICK (a11ign/a11ign#3566) ------------------------------------------------------------------------------------------------
 
 /** One JSON object per tick, beside the wake ledger. NOT IN the ledger: that file is tab-separated deliveries, and a line of another shape is read as one. */
-export const TICK_COST_FILE = "tick-cost.jsonl";
+export { TICK_COST_FILE }; // named in `work-tick-health.ts` (a leaf), which the gate and the weekly report read the cost file through
 
 /**
  * The file is cut to its newest half past this size. A line is about a kilobyte and a tick runs every two minutes, so the cap holds about two days of
@@ -374,13 +376,48 @@ function beginTickHealth(run: Run) {
 
 /**
  * AT THE END, after the cost line, which is what it reads. The marker is cleared FIRST: a tick killed while it reports must not be reported again as
- * killed by the next one, and one report per tick is the row's own rule.
+ * killed by the next one, and one report per tick is the row's own rule. A SLOW tick is RECORDED on the standing row and wakes nobody (agent-org#1208); the
+ * same call retries a record an earlier tick could not write. It never throws, and the file's own `recordSlowTick` says what was refused.
  * @param {ReturnType<typeof tickCostLine> | null} line @param {Run} run
  */
 function reportIfSlow(line: ReturnType<typeof tickCostLine> | null, run: Run) {
   clearOwnMarker(run.markerPath, process.pid);
-  if (line === null) return;
-  deliverTickOrders(slowTickOrders(line, { thresholdSeconds: slowThresholdSeconds(), costPath: run.costPath }), run.wakeCommand);
+  recordSlowTick({ line, costText: readCostText(run.costPath), now: Date.now(), thresholdSeconds: slowThresholdSeconds(), costPath: run.costPath,
+    statePath: tickRecordPath(run.markerPath), io: () => tickRecordIo(tickRecordPath(run.markerPath)) });
+}
+
+/** The cost file as text, or `""` when it cannot be read: the record then rests on this tick's own line, and says so by counting one tick. @param {string} path */
+function readCostText(path: string): string {
+  try {
+    return readFileSync(path, "utf8");
+  } catch {
+    return "";
+  }
+}
+
+/**
+ * The standing comment through the ticket port's argument builders and `ghRun`. The row is the declared `units.tickRecordIssue`, else the one this tick created before, else
+ * one created NOW, once, `lane:ceo` and not `ready` so it is never offered as work (`standingRowFor`); it is never found by title. `{ refusal }` when it can be neither named
+ * nor created, which is a refused write like any other (never a wake). Asked only when a write is due, so an ordinary tick reads and creates nothing.
+ * @param {string} statePath @returns {RecordIo | { refusal: string }}
+ */
+function tickRecordIo(statePath: string): RecordIo | { refusal: string } {
+  let declarationText: string;
+  try {
+    declarationText = readFileSync(join(HOME_CHECKOUT, PROJECT_DECLARATION_PATH), "utf8");
+  } catch (err) {
+    return { refusal: `the project declaration could not be read (${String((err as any)?.message ?? err).split("\n")[0]})` };
+  }
+  const run = (args: string[]) => ghRun(args);
+  const target = standingRowFor({ declarationText, state: readTickRecordState(statePath), statePath,
+    create: (repo) => createRow({ repo, title: TICK_RECORD_ROW_TITLE, labels: [`${LANE_PREFIX}ceo`], body: tickRecordRowBody(), run }) });
+  if ("refusal" in target) return target;
+  const { repo, issue } = target;
+  return {
+    find: () => keyedCommentsOf({ repo, row: issue, marker: TICK_RECORD_MARKER, since: "1970-01-01T00:00:00Z", run }).at(-1)?.id ?? null,
+    post: (body) => { postRowComment({ repo, row: issue, body, run }); return null; },
+    edit: (id, body) => editComment({ repo, id, body, run }),
+  };
 }
 
 /**
@@ -508,10 +545,24 @@ export function writeHeartbeat(at: number, run: (file: string, args: string[], o
   });
 }
 
+/**
+ * THE ONE PLACE THIS FILE NAMES `gh` (`gh-call-ratchet.test.ts` holds it to the calls it had): the heartbeat's two writes and the tick record's reads and writes
+ * (agent-org#1208) all go through it, so the record adds no call site.
+ * @param {(file: string, args: string[], options: object) => unknown} run @param {string[]} args @param {object} options
+ */
+function ghCall(run: (file: string, args: string[], options: object) => unknown, args: string[], options: object): unknown {
+  return run("gh", args, options);
+}
+
+/** `gh` run for the tick record, answering what it printed; a refusal throws with `stderr` on the error, which `recordSlowTick` says. @param {string[]} args @returns {string} */
+function ghRun(args: string[]): string {
+  return String(ghCall(execFileSync, args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"], timeout: HEARTBEAT_TIMEOUT_MS }));
+}
+
 /** @param {{ at: number, repo: string, run: (file: string, args: string[], options: object) => unknown, options: object }} write @returns {void} */
 function writeHeartbeatVariable({ at, repo, run, options }: { at: number; repo: string; run: (file: string, args: string[], options: object) => unknown; options: object; }): void {
   try {
-    run("gh", ["api", "-X", "PATCH", `repos/${repo}/actions/variables/${HEARTBEAT_VARIABLE}`, "-f", `value=${at}`], options);
+    ghCall(run, ["api", "-X", "PATCH", `repos/${repo}/actions/variables/${HEARTBEAT_VARIABLE}`, "-f", `value=${at}`], options);
   } catch (err) {
     process.stderr.write(`HEARTBEAT NOT WRITTEN to ${repo} variable ${HEARTBEAT_VARIABLE}: ${whatGhSaid(err)}. A reader off this host will see the previous value.\n`);
   }
@@ -520,7 +571,7 @@ function writeHeartbeatVariable({ at, repo, run, options }: { at: number; repo: 
 /** @param {{ at: number, repo: string, run: (file: string, args: string[], options: object) => unknown, options: object }} write @returns {void} */
 function writeHeartbeatComment({ at, repo, run, options }: { at: number; repo: string; run: (file: string, args: string[], options: object) => unknown; options: object; }): void {
   try {
-    run("gh", ["api", "-X", "PATCH", `repos/${repo}/issues/comments/${HEARTBEAT_COMMENT_ID}`, "-f", `body=${heartbeatCommentBody(at)}`], options);
+    ghCall(run, ["api", "-X", "PATCH", `repos/${repo}/issues/comments/${HEARTBEAT_COMMENT_ID}`, "-f", `body=${heartbeatCommentBody(at)}`], options);
   } catch (err) {
     process.stderr.write(`HEARTBEAT COMMENT NOT WRITTEN to ${repo} comment ${HEARTBEAT_COMMENT_ID}: ${whatGhSaid(err)}. A reader with no token will see the previous value.\n`);
   }

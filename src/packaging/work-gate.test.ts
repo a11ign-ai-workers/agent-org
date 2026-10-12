@@ -1134,8 +1134,9 @@ test("every cause is classified as START or FINISH -- a new one cannot default i
   // that is most worth doing, so a window must not withhold it.
   // #2845: `ready-row-unclaimable` is FINISH too. It starts no work -- it asks `product-manager` to unstick a row the claim keeps
   // refusing -- and a drain is when a stuck row most needs to be seen, since the pool's engineers are withheld anyway.
-  // #3567: `tick-overran` is FINISH, and a JUDGMENT cause. It starts no work -- it tells `ceo` that a tick ran slow or was killed -- and a drain
-  // is when nobody is looking at the tick, so a window must not withhold the one signal that says the tick is the thing that stopped.
+  // #3567: `tick-overran` is FINISH, and a JUDGMENT cause. It starts no work -- it tells `ceo` that a tick was KILLED (agent-org#1208: a slow one is recorded on a
+  // standing row and wakes nobody) -- and a drain is when nobody is looking at the tick, so a window must not withhold the one signal that says the tick is the
+  // thing that stopped.
   // #2936: `org-health` is FINISH, and a JUDGMENT cause. It starts no work -- it tells `ceo` that nothing is landing, a red PR is unattended, a row
   // is refused or the primary is stale -- and a drain is exactly when an org that is not landing anything should be told.
   // #636: `ready-rows-untiered` is FINISH too. It starts no work -- it asks `product-manager` to put a tier decision on rows already ready -- and a drain is

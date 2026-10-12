@@ -35,7 +35,7 @@ const GATE = [workGateSource(), ...["work-gate/pr-orders.ts", "work-gate/lab-job
   "org-retro.ts", // #2938: and the daily retrospective's beside the numbers it carries
   "work-gate/row-call-count-orders.ts", // #2898: and `row-call-count-signal`'s order, moved out of the gate with its readings
   "pr-hold-state.ts", // #4970: and the hold-holder wake and decision, built beside the hold reading they are about
-  "work-tick-health.ts"] // #3567: and `tick-overran`'s, which the TICK builds about itself and no gate ever sees
+  "work-tick-health.ts"] // #3567: and `tick-overran`'s, which the TICK builds about itself and no gate ever sees (agent-org#1208: only the KILLED tick's now; a slow one is recorded)
   .map((f) => readFileSync(new URL(`../${f}`, import.meta.url), "utf8"))].join("\n");
 
 /** The two shapes `profileFor` and `spawnInvocation` return, and narrowing that ASSERTS rather than casts. */
