@@ -382,6 +382,7 @@ function ownershipOf(pr: any, source: string, task: string) {
   if (source === "label") return `It carries your session label, so the ${task} is yours.`;
   if (source === "dependency-bot") return `A dependency bot opened it and no session works such a pull request, so the ${task} is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR), or close it.`;
   if (source === "owner-gone") return `${capitalised(deadOwnerBasis(pr))}, so the ${task} is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR), or close it.`;
+  if (source === "automation-writer") return `The writer app opened it on an \`automation/\` branch and no session works such a pull request, so the ${task} is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR), or close it.`;
   if (source === "chairman-author") return `The chairman opened it and no session works it, so the ${task} is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR), or close it.`;
   return `The ${task} is yours: ${notConvincedBasis(pr, source)}.`;
 }
@@ -721,6 +722,21 @@ export function isDependencyBotPr(pr: any): boolean {
 }
 
 /**
+ * The login the writer app opens a pull request as (a11ign/agent-org#1239): the re-pin writer, which regenerates the pins of the workflows
+ * `ceo` leads. Read the way {@link DEPENDENCY_BOT_LOGIN} is, so the bare, `app/` and `[bot]` spellings are one author.
+ */
+const AUTOMATION_WRITER_LOGIN = /^(?:app\/)?octo-sts(?:\[bot\])?$/i;
+
+/**
+ * Whether the writer app opened `pr` on an `automation/` branch (a11ign/agent-org#1239). No session claims, labels or stamps one, so the
+ * ladder names `ceo` for it rather than falling to "nobody could be named": `ceo` is the lane of every workflow the writer regenerates.
+ * Both halves are required: a worker-authored pull request on an `automation/` branch, or the writer's on any other branch, is not this rung's.
+ */
+export function isAutomationWriterPr(pr: any): boolean {
+  return AUTOMATION_WRITER_LOGIN.test(String(pr?.author?.login ?? "")) && String(pr?.headRefName ?? "").startsWith("automation/");
+}
+
+/**
  * Whether the chairman opened `pr` (agent-org#950). A chairman's pull request is no session's work, so no claim, label or stamp names one; `ceo` is
  * its reader, and `ownerOfPr` says so rather than reaching its last rung by falling off the ladder. An exact login, as every other read of
  * `CHAIRMAN_LOGINS` is: it names one person's account, never "any human" and never the shared worker account.
@@ -787,16 +803,19 @@ const capitalised = (clause: string) => clause.charAt(0).toUpperCase() + clause.
  *                     act, or close it -- and the ladder SAYS so, which keeps it out of `owner-unresolved`. `withClosingRowOwners` sets
  *                     `closingRowsClosed` / `closingRowsUnheld` / `closingRowsNone` ONLY on a PR carrying `labelEnded`, so a label that stands, a row held by a
  *                     live session, an unreadable (empty) rows list, or no label at all is unchanged.
- *   8. `chairman-author` a pull request the chairman opened (agent-org#950), with nothing above naming a session. Not a pull request nobody could
+ *   8. `automation-writer` a pull request the writer app (`octo-sts`) opened on an `automation/` branch (a11ign/agent-org#1239), with nothing above
+ *                     naming a session. Its reader is `ceo`, the lane of every workflow the writer regenerates. Without this rung a11ign/a11ign#5210 and
+ *                     #5283 (`automation/docs-pin-write`, no label) reached `ceo` and were recorded as `owner-unresolved` for an address that was right.
+ *   9. `chairman-author` a pull request the chairman opened (agent-org#950), with nothing above naming a session. Not a pull request nobody could
  *                     name: its reader is `ceo`, who holds the chairman's pull requests and the outage briefs, and a11ign/a11ign#5041 (the chairman's own
  *                     outage mitigation, branch `agent/scheduler-search-mitigation`, no label) reached rung 9 and was recorded as `owner-unresolved`, the
  *                     seventh time, for an address that was right. A label naming an ENDED session does not stop it: `ceo` is the chairman's reader
- *                     either way. Only `CHAIRMAN_LOGINS` -- never another person, never the worker account, so an unlabelled agent PR still falls to 9.
- *   9. `ceo`          nobody could be named. Never `product-manager` for a PR with no dead owner to name.
+ *                     either way. Only `CHAIRMAN_LOGINS` -- never another person, never the worker account, so an unlabelled agent PR still falls to 10.
+ *  10. `ceo`          nobody could be named. Never `product-manager` for a PR with no dead owner to name.
  * "Live" in rungs 2-5 is the same test #2912 made: the session still HOLDS A CLAIM on an open row. `isLiveSession`
  * is not asked, so a live session holding NO claim is answered by `ceo`, which can act.
  */
-export function ownerOfPr(pr: any): { session: string; source: "label" | "closing-row" | "branch-row" | "branch-name" | "stamp" | "dependency-bot" | "owner-gone" | "chairman-author" | "ceo"; } {
+export function ownerOfPr(pr: any): { session: string; source: "label" | "closing-row" | "branch-row" | "branch-name" | "stamp" | "dependency-bot" | "owner-gone" | "automation-writer" | "chairman-author" | "ceo"; } {
   const label = sessionOf(pr);
   if (label && !pr?.labelEnded) return { session: label, source: "label" };
   if (pr?.rowOwner) return { session: pr.rowOwner.session, source: pr.rowOwner.source === "branch" ? "branch-row" : "closing-row" };
@@ -804,6 +823,7 @@ export function ownerOfPr(pr: any): { session: string; source: "label" | "closin
   if (pr?.stampOwner) return { session: pr.stampOwner.session, source: "stamp" };
   if (isDependencyBotPr(pr)) return { session: UNOWNED_PR_SESSION, source: "dependency-bot" };
   if (pr?.closingRowsClosed || pr?.closingRowsUnheld || pr?.closingRowsNone) return { session: DEAD_OWNER_FALLBACK, source: "owner-gone" };
+  if (isAutomationWriterPr(pr)) return { session: UNOWNED_PR_SESSION, source: "automation-writer" };
   if (isChairmanAuthoredPr(pr)) return { session: UNOWNED_PR_SESSION, source: "chairman-author" };
   return { session: UNOWNED_PR_SESSION, source: "ceo" };
 }
@@ -831,6 +851,7 @@ function ownershipSentence(pr: any, { blocking, nowMs }: { blocking: any[]; nowM
     stamp: `It carries no session label and closes no row you hold, but the worktree its branch ${branch} is checked out in was stamped by you, so it is yours to fix.`,
     "dependency-bot": "A dependency bot opened it and no session works such a pull request, so it is yours to route: re-lane it to a session that should fix it, or close it.",
     "owner-gone": `${capitalised(deadOwnerBasis(pr))}, so it is yours to route: re-lane it (\`${SESSION_PREFIX}<name>\` on the PR) to a session that can fix it, or close it.`,
+    "automation-writer": "The writer app opened it on an `automation/` branch and no session works such a pull request, so it is yours to route: re-lane it (`" + SESSION_PREFIX + "<name>` on the PR) to a session that should fix it, or close it.",
     "chairman-author": "The chairman opened it and no session works it, so it is yours to route: re-lane it (`" + SESSION_PREFIX + "<name>` on the PR) to a session that should fix it, or close it.",
     ceo: unownedSentence(pr, { blocking, nowMs }),
   };
@@ -1034,6 +1055,7 @@ function notConvincedBasis(pr: any, source: string) {
   if (source === "branch-name") return `its branch \`${pr.headRefName}\` names you`;
   if (source === "dependency-bot") return "a dependency bot opened it and no session works such a pull request";
   if (source === "owner-gone") return deadOwnerBasis(pr);
+  if (source === "automation-writer") return "the writer app opened it on an `automation/` branch and no session works such a pull request";
   if (source === "chairman-author") return "the chairman opened it and no session works it";
   return `the worktree its branch \`${pr.headRefName}\` is checked out in was stamped by you`;
 }
