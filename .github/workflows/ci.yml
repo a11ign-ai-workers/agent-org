@@ -39,7 +39,7 @@ name: ci
 env:
   # a11ign/a11ign at the commit the tool's suite was last run against (54947391e, 2026-10-11, the a11ign/a11ign#5144 merge, the originals of `src/lib/cli-flags.ts` and `src/lib/git-env.ts` that `copies-drifted` compares agent-org's copies against (agent-org#1055, agent-org#1049); before it eaebb69cd, 2026-10-11, the a11ign/a11ign#4960 merge, which carries the `ceo.md` bound for `idleClaimedHours` that `org-retro.test.ts` reads (agent-org#862, advanced by agent-org#884); before it 1d11a3726, 2026-10-09, which contains #4287's Octo STS `auto-arm.yml` that `auto-arm-token.test.ts` pins (a11ign/a11ign#4288); before it 4649f4d93, 2026-10-08, the #4177 merge, which carries the `ceo.md` bound for `unwaitedStockRows` that `org-retro.test.ts` requires (#4175); before it 4da77f552, after #4089 rewrote `examples/workflow.yml`; moved from 9915703d6 of 2026-10-06 because `public-claim.test.ts` reads that
   # file and no allow-list entry matches both versions). A sha and never a branch: a branch moves under a pull request that did not touch it.
-  PROJECT_REF: 54947391eb36ccf84ff7365e6530f13d180980de
+  PROJECT_REF: 3418d7313644c5f662d4cfa38fdddfe4c22a10d7
 
 on:
   pull_request:

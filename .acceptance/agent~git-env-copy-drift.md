@@ -7,7 +7,7 @@ Acceptance:
 grep -c "COPIED FROM .packages/guards/src/git-env.ts. at 3418d7313" src/lib/git-env.ts
 ```
 
-no-release: a comment line and a header in a copy; nothing a pinned project runs changes
+no-release: a comment line and a header in a copy, with the CI pin that matches it; nothing a pinned project runs changes
 
 Closes: none -- clears the copies-drifted org-health trip; no row was filed for a one-line comment sync.
 
