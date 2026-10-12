@@ -1315,7 +1315,7 @@ export function readUnderspecified({ now, declaration = homeProjectDeclaration()
  *   readDoraReport?: (now: number) => ReturnType<typeof readDora> | null, readUnwaited?: (now: number) => ReturnType<typeof unwaitedStockRows>, readUntiered?: () => ReturnType<typeof untieredReadyRows>, readMergedRepositories?: (now: number) => ReturnType<typeof readMerged> }} where
  * MERGED PRS ARE READ FROM EVERY DECLARED REPOSITORY (`readMerged`, #3593), each named with `-R`; `merged` stays the PRIMARY's list, the definition the count had before.
  */
-export function readAll({ now, stateDir, unit = "a11ign-work-tick.service", memory = freshRetroReads(),
+function retroClasses({ now, stateDir, unit = "a11ign-work-tick.service", memory = freshRetroReads(),
   readMergedRepositories = (at) => readMerged({ declaration: homeProjectDeclaration(), since: at - WINDOW_MS }),
   readHandFixes = (at) => readHandFixLedger({ read: gatherChanges(), now: new Date(at) }),
   readUnwaited = (at) => unwaitedStockRows({ reader: ghTrackerReader(homeProjectDeclaration().repo), now: at }),
@@ -1331,30 +1331,89 @@ export function readAll({ now, stateDir, unit = "a11ign-work-tick.service", memo
         readUnderspecifiedStops?: (now: number) => UnderspecifiedReading | null;
     }) {
   const since = now - WINDOW_MS;
-  const mergedRepositories = attemptDora(() => readMergedRepositories(now));
-  const openPrs = ghJson(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,labels,statusCheckRollup,reviewDecision"]);
-  const failureLedger = readText(`${stateDir}/${FAILURE_LEDGER_FILE}`);
-  return {
-    merged: mergedRepositories?.[0]?.prs ?? null,
-    mergedRepositories,
-    openPrs,
-    idleClaims: readIdleClaims({ now, stateDir, openPrs, agents: readAgentListing() }),
-    idleClaimedHours: readIdleHours(now),
-    mergedRowOpen: readOpenRowIncidents(now),
-    inertOptions: readInertOptionReading(now, recordedRefs(failureLedger, CLOSED_ON_MERGE_NOT_OUTCOME)),
-    safetyDenials: readDenials(now),
-    underspecified: readUnderspecifiedStops(now),
-    journal: readJournal(unit),
-    ledger: readText(`${stateDir}/wake-ledger`),
-    failureLedger,
-    blockingRecord: readText(`${stateDir}/${BLOCKING_FILE}`),
-    turns: readTurns(since),
-    readings: readReadings(join(stateDir, READINGS_FILE)),
-    handFixes: readHandFixes(now), // a refused read is a reading that says so (`status: "unknown"`), never a throw and never a 0
-    unwaited: attemptDora(() => readUnwaited(now)), // a declaration that will not parse is a refused read, like the DORA one
-    untiered: attemptDora(() => readUntiered()),
-    dora: attemptDora(() => readDoraReport(now)),
-  };
+  return [
+    { name: "merged lists", read: () => {
+      const mergedRepositories = attemptDora(() => readMergedRepositories(now));
+      return { merged: mergedRepositories?.[0]?.prs ?? null, mergedRepositories };
+    } },
+    { name: "open pull requests", read: () => {
+      const openPrs = ghJson(["pr", "list", "--state", "open", "--limit", "100", "--json", "number,labels,statusCheckRollup,reviewDecision"]);
+      return { openPrs, idleClaims: readIdleClaims({ now, stateDir, openPrs, agents: readAgentListing() }) };
+    } },
+    { name: "idle claimed hours", read: () => ({ idleClaimedHours: readIdleHours(now) }) },
+    { name: "rows left open", read: () => ({ mergedRowOpen: readOpenRowIncidents(now) }) },
+    { name: "inert options", read: () => {
+      const failureLedger = readText(`${stateDir}/${FAILURE_LEDGER_FILE}`);
+      return { failureLedger, inertOptions: readInertOptionReading(now, recordedRefs(failureLedger, CLOSED_ON_MERGE_NOT_OUTCOME)) };
+    } },
+    { name: "safety denials", read: () => ({ safetyDenials: readDenials(now) }) },
+    { name: "underspecified stops", read: () => ({ underspecified: readUnderspecifiedStops(now) }) },
+    { name: "journal", read: () => ({ journal: readJournal(unit) }) },
+    { name: "transcripts", read: () => ({ turns: readTurns(since) }) },
+    { name: "state files", read: () => ({
+      ledger: readText(`${stateDir}/wake-ledger`),
+      blockingRecord: readText(`${stateDir}/${BLOCKING_FILE}`),
+      readings: readReadings(join(stateDir, READINGS_FILE)),
+    }) },
+    // a refused read is a reading that says so (`status: "unknown"`), never a throw and never a 0
+    { name: "hand fixes", read: () => ({ handFixes: readHandFixes(now) }) },
+    // a declaration that will not parse is a refused read, like the DORA one
+    { name: "unwaited", read: () => ({ unwaited: attemptDora(() => readUnwaited(now)) }) },
+    { name: "untiered", read: () => ({ untiered: attemptDora(() => readUntiered()) }) },
+    { name: "dora", read: () => ({ dora: attemptDora(() => readDoraReport(now)) }) },
+  ];
+}
+
+/**
+ * EVERY READ `retroClasses` makes, in one call and with no budget: the whole report's inputs. `main` (the manual run) takes this; the gate's tick takes
+ * `readRetroClasses`, which is this read cut into ticks.
+ */
+export function readAll(where: Parameters<typeof retroClasses>[0]): Parameters<typeof buildReport>[0] {
+  return Object.assign({}, ...retroClasses(where).map((cls) => cls.read())) as Parameters<typeof buildReport>[0];
+}
+
+/** THE RETRO READ'S OWN WALL PER TICK (agent-org#1089): well under `GATE_BUDGET_MS`, and the same shape as `DORA_TICK_BUDGET_MS`. A class that starts past it waits for the next tick. */
+export const RETRO_TICK_BUDGET_MS = 60 * 1000;
+
+/** The day's classes already read, kept between ticks (`RETRO_CLASSES_FILE`), keyed by UTC date like the DORA cache. */
+export const RETRO_CLASSES_FILE = "retro-read-classes.json";
+
+/** The classes read so far for `date`, and the memory keys they used. A file that cannot be read, or is for another date, is an empty day. */
+function keptClasses(path: string, date: string): { classes: Record<string, any>; used: string[]; } {
+  const kept = attemptDora(() => JSON.parse(readFileSync(path, "utf8")));
+  const usable = kept?.date === date && kept.classes !== null && typeof kept.classes === "object" && Array.isArray(kept.used);
+  return usable ? { classes: kept.classes, used: kept.used } : { classes: {}, used: [] };
+}
+
+/** What a budgeted tick left: the class it stopped before, the classes read so far (of this day), and the seconds this tick spent. */
+export type ClassPending = { stopped: string; read: number; of: number; elapsedMs: number; };
+
+/**
+ * THE RETRO'S READ, CUT INTO TICKS (agent-org#1089). Each class is read in order, and a class is not started once `budgetMs` has passed in this tick (at
+ * least ONE class is read per tick whatever the budget). Each class's fields are kept in the day's file as they are read, so the next tick resumes at the first unread one; the
+ * memory's used keys are kept with them, so the state entry keeps the marks the earlier ticks read. The full report is offered only when EVERY class is read: until then the answer is
+ * `{ classPending }`. `budgetMs` and `clock` are the seams a test supplies.
+ */
+export function readRetroClasses(where: Parameters<typeof retroClasses>[0], { budgetMs = RETRO_TICK_BUDGET_MS, clock = Date.now }: { budgetMs?: number; clock?: () => number; } = {}): Parameters<typeof buildReport>[0] | { classPending: ClassPending; } {
+  const memory = where.memory ?? freshRetroReads();
+  const path = join(where.stateDir, RETRO_CLASSES_FILE);
+  const date = utcDate(where.now);
+  const kept = keptClasses(path, date);
+  for (const key of kept.used) memory.used.add(key);
+  const classes = retroClasses({ ...where, memory });
+  const began = clock();
+  let readThisTick = 0;
+  for (const cls of classes) {
+    if (Object.hasOwn(kept.classes, cls.name)) continue;
+    if (readThisTick > 0 && clock() - began >= budgetMs) {
+      keepReadings(path, { date, classes: kept.classes, used: [...memory.used] });
+      keepRetroReads(where.stateDir, memory);
+      return { classPending: { stopped: cls.name, read: classes.filter((other) => Object.hasOwn(kept.classes, other.name)).length, of: classes.length, elapsedMs: clock() - began } };
+    }
+    kept.classes[cls.name] = cls.read();
+    readThisTick += 1;
+  }
+  return Object.assign({}, ...classes.map((cls) => kept.classes[cls.name])) as Parameters<typeof buildReport>[0];
 }
 
 /**
@@ -1378,9 +1437,9 @@ export function recordReading({ stateDir, date, numbers, mergedRepositories }: {
  * The gate's read: DORA FIRST, because it is the long one and the only one that resumes, and the others (merged lists, journal, transcripts) are not worth making on a tick
  * that cannot offer the report. `{ doraPending }` is how it says so. `dora` and `readRest` are the seams a test supplies.
  * @param {{ now: number, stateDir: string }} where
- * @param {{ dora?: Partial<Parameters<typeof resumableDora>[0]>, readRest?: (where: Parameters<typeof readAll>[0]) => ReturnType<typeof readAll> }} [seams]
+ * @param {{ dora?: Partial<Parameters<typeof resumableDora>[0]>, readRest?: (where: Parameters<typeof retroClasses>[0]) => ReturnType<typeof readRetroClasses> }} [seams]
  */
-export function readWhenDoraIsRead(where: { now: number; stateDir: string; memory?: RetroReads; }, { dora = {}, readRest = readAll }: { dora?: Partial<Parameters<typeof resumableDora>[0]>; readRest?: (where: Parameters<typeof readAll>[0]) => ReturnType<typeof readAll>; } = {}) {
+export function readWhenDoraIsRead(where: { now: number; stateDir: string; memory?: RetroReads; }, { dora = {}, readRest = (where) => readRetroClasses(where) }: { dora?: Partial<Parameters<typeof resumableDora>[0]>; readRest?: (where: Parameters<typeof retroClasses>[0]) => ReturnType<typeof readRetroClasses>; } = {}) {
   const progress = resumableDora({ stateDir: where.stateDir, now: where.now, ...dora });
   return progress.complete ? readRest({ ...where, readDoraReport: () => progress.report }) : { doraPending: progress };
 }
@@ -1412,7 +1471,7 @@ function untieredSweepTick({ stateDir, log, readUntiered }: { stateDir: string; 
  * BEFORE the report, so a day already delivered costs one file read and not the day of PR, journal and transcript reads.
  * THE ONLY WRITER OF THE READINGS FILE (`main` below never writes): offering the retrospective IS recording today's reading.
  * A TICK THAT HAS NOT YET READ EVERY DECLARED REPOSITORY offers nothing and says how many it has (#3736): `read` answers `{ doraPending }` and the other reads are not made.
- * @param {{ now?: number, stateDir?: string, log?: (line: string) => void, read?: (where: Parameters<typeof readAll>[0]) => Parameters<typeof buildReport>[0] | { doraPending: Extract<ReturnType<typeof resumableDora>, { complete: false }> }, readLedger?: (stateDir: string) => string | null,
+ * @param {{ now?: number, stateDir?: string, log?: (line: string) => void, read?: (where: Parameters<typeof retroClasses>[0]) => Parameters<typeof buildReport>[0] | { doraPending: Extract<ReturnType<typeof resumableDora>, { complete: false }> } | { classPending: ClassPending }, readLedger?: (stateDir: string) => string | null,
  *   record?: typeof recordReading, readUntiered?: () => ReturnType<typeof untieredReadyRows> | null }} [seams]
  * @returns {(ReturnType<typeof retrospectiveOrder> | ReturnType<typeof untieredSweepOrder>)[]}
  */
@@ -1420,7 +1479,7 @@ export function retrospectiveTick({ now = Date.now(), stateDir = stateEntryPath(
   read = (where) => readWhenDoraIsRead(where),
   readLedger = (dir) => readText(`${dir}/wake-ledger`), record = recordReading,
   readUntiered = () => untieredReadyRows({ trackers: homeProjectDeclaration().tracker.map((tracker) => ghReadyReader(tracker)) }) }: {
-        now?: number; stateDir?: string; log?: (line: string) => void; read?: (where: Parameters<typeof readAll>[0]) => Parameters<typeof buildReport>[0] | { doraPending: Extract<ReturnType<typeof resumableDora>, { complete: false; }>; }; readLedger?: (stateDir: string) => string | null;
+        now?: number; stateDir?: string; log?: (line: string) => void; read?: (where: Parameters<typeof retroClasses>[0]) => Parameters<typeof buildReport>[0] | { doraPending: Extract<ReturnType<typeof resumableDora>, { complete: false; }>; } | { classPending: ClassPending; }; readLedger?: (stateDir: string) => string | null;
         record?: typeof recordReading; readUntiered?: () => ReturnType<typeof untieredReadyRows> | null;
     } = {}): (ReturnType<typeof retrospectiveOrder> | ReturnType<typeof untieredSweepOrder>)[] {
   return [...dailyRetrospective({ now, stateDir, log, read, readLedger, record }), ...untieredSweepTick({ stateDir, log, readUntiered })];
@@ -1428,7 +1487,7 @@ export function retrospectiveTick({ now = Date.now(), stateDir = stateEntryPath(
 
 /** The daily retrospective's half of `retrospectiveTick`. */
 function dailyRetrospective({ now, stateDir, log, read, readLedger, record }: {
-        now: number; stateDir: string; log: (line: string) => void; read: (where: Parameters<typeof readAll>[0]) => Parameters<typeof buildReport>[0] | { doraPending: Extract<ReturnType<typeof resumableDora>, { complete: false; }>; };
+        now: number; stateDir: string; log: (line: string) => void; read: (where: Parameters<typeof retroClasses>[0]) => Parameters<typeof buildReport>[0] | { doraPending: Extract<ReturnType<typeof resumableDora>, { complete: false; }>; } | { classPending: ClassPending; };
         readLedger: (stateDir: string) => string | null; record: typeof recordReading;
     }): ReturnType<typeof retrospectiveOrder>[] {
   try {
@@ -1440,6 +1499,10 @@ function dailyRetrospective({ now, stateDir, log, read, readLedger, record }: {
     if ("doraPending" in inputs) {
       const { read: done, of, readThisTick, elapsedMs } = inputs.doraPending;
       log(`org-retro: the DORA read has ${done} of ${of} repositories (${readThisTick} read this tick, ${Math.round(elapsedMs / MS_PER_SECOND)} s); no org-retrospective order until every declared repository is read.\n`);
+      return [];
+    }
+    if ("classPending" in inputs) {
+      log(`org-retro: read stopped at ${inputs.classPending.stopped} after ${Math.round(inputs.classPending.elapsedMs / MS_PER_SECOND)} s (${inputs.classPending.read} of ${inputs.classPending.of} classes read); no org-retrospective order until every class is read.\n`);
       return [];
     }
     log(`${retroReadsLine(memory)}\n`);
