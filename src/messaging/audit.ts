@@ -53,7 +53,7 @@ export function asksSomething(text: string, markers: readonly string[] = REQUEST
 }
 
 /** A release quotes the label names it removed or never applied ("once its answer:ceo is removed"), so in one a label marker is not a request. The `?` and "reply" checks still apply to it. */
-const markersOf = (line: Line): readonly string[] => (String(line.key).split(":")[0] === "release" ? [] : REQUEST_MARKERS);
+export const markersOf = (line: Line): readonly string[] => (String(line.key).split(":")[0] === "release" ? [] : REQUEST_MARKERS);
 
 const nonEmpty = (value: unknown): boolean => typeof value === "string" && value.trim() !== "";
 
@@ -105,6 +105,11 @@ export function auditLines(lines: Line[], audienceOf: AudienceOf = declaredAudie
 export function eventOf({ misuse, at }: { misuse: Misuse; at: number | undefined }): FailureEvent {
   const ref = `${misuse.messageRef} ${misuse.half} ${JSON.stringify(misuse.excerpt)}`.replace(/[\t\r\n]/g, " ");
   return { classKey: MESSAGING_AUDIENCE_MISUSE_KIND, ref, ...(at === undefined ? {} : { at }) };
+}
+
+/** The entry for an announcement that `deliver()` REFUSED (agent-org#1222): nothing was sent, so the ref names the key that was held, not a provider message. */
+export function refusalEventOf(key: string, text: string): FailureEvent {
+  return eventOf({ misuse: { half: HALF.question, messageRef: key, excerpt: excerptOf(text) }, at: undefined });
 }
 
 /** @returns how many ledger lines were audited before, or null when no audit ever ran; a cursor that is not a count throws, so a corrupt one is never read as "start over" */
