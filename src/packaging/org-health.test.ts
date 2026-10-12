@@ -16,7 +16,7 @@ import { test, after } from "node:test";
 import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync, chmodSync, readFileSync, readdirSync, cpSync } from "node:fs";
 import { execFileSync, spawnSync } from "node:child_process";
-import { fileURLToPath } from "node:url";
+import { fileURLToPath, pathToFileURL } from "node:url";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { sandboxGitEnv } from "../lib/git-env.ts";
@@ -481,28 +481,55 @@ test("#2956 ONE DECIDER, both directions: a fixture module with its own FAILURE 
 
 // --- the gate as a process ------------------------------------------------------------------------------------------
 
-/** The real gate with a stub `gh` that answers the two list reads with `[]` and REFUSES every other call, and no journal. */
-function gateAsAProcess() {
+/**
+ * agent-org#1178: THE GATE'S ONE HTTP CALL IS STUBBED, SO THE TEST SAYS THE SAME THING DURING A GITHUB INCIDENT AND OUTSIDE ONE. The gate asks githubstatus.com once a tick, from a child
+ * `node -e` that `startGithubStatus()` spawns with no URL argument, so the test has no argument or file to hand it. What reaches that child is the environment: `NODE_OPTIONS=--import=<file>`
+ * preloads this stub into the gate and into the worker beneath it, and the stub answers the fetch the way the status page does. A real incident was read from the log at
+ * 49942b43 (run 38248349829): the live page said `Actions degraded_performance` and the gate offered its `github-incident` order into an assertion about something else.
+ */
+const STATUS_COMPONENTS = (status: string) => ["Actions", "API Requests", "Git Operations"].map((name) => ({ name, status }));
+const STATUS_SUMMARIES = {
+  operational: { components: STATUS_COMPONENTS("operational"), incidents: [] },
+  incident: { components: STATUS_COMPONENTS("degraded_performance"),
+    incidents: [{ id: "stubincident01", name: "Incident with Actions, Pull Requests and Issues", status: "investigating", components: STATUS_COMPONENTS("degraded_performance") }] },
+};
+
+/** The real gate with a stub `gh` that answers the two list reads with `[]` and REFUSES every other call, no journal, and githubstatus.com answering `status`. */
+function gateAsAProcess(status: keyof typeof STATUS_SUMMARIES = "operational") {
   const dir = mkdtempSync(join(tmpdir(), "org-health-gate-"));
   try {
     writeFileSync(join(dir, "gh"), "#!/bin/sh\ncase \"$*\" in\n  \"pr list\"*|\"issue list\"*) printf '%s' '[]' ;;\n  *) exit 1 ;;\nesac\n");
     writeFileSync(join(dir, "journalctl"), "#!/bin/sh\nexit 1\n");
     chmodSync(join(dir, "gh"), STUB_MODE);
     chmodSync(join(dir, "journalctl"), STUB_MODE);
-    return spawnSync(process.execPath, [GATE_ENTRY], { encoding: "utf8", env: { ...process.env, HOME: dir, PATH: `${dir}:${process.env.PATH ?? ""}` } });
+    const stub = join(dir, "github-status-stub.mjs");
+    writeFileSync(stub, "const summary = " + JSON.stringify(STATUS_SUMMARIES[status]) + ";\n"
+      + "globalThis.fetch = async () => new Response(JSON.stringify(summary), { status: 200, headers: { \"content-type\": \"application/json\" } });\n");
+    const nodeOptions = [process.env.NODE_OPTIONS, "--import=" + pathToFileURL(stub).href].filter(Boolean).join(" ");
+    return spawnSync(process.execPath, [GATE_ENTRY], { encoding: "utf8", env: { ...process.env, HOME: dir, PATH: `${dir}:${process.env.PATH ?? ""}`, NODE_OPTIONS: nodeOptions } });
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
 }
 
+const ordersOf = (ran: ReturnType<typeof gateAsAProcess>) => ran.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l) as Order);
+
 test("THE GATE AS A PROCESS runs the question: a refused merge read is said on stderr as an UNKNOWN, and is not offered as a stall", () => {
-  const ran = gateAsAProcess();
+  const ran = gateAsAProcess("operational");
   assert.match(ran.stderr, /org-health: no-merge-while-work-exists UNKNOWN -- the last merge could not be read/, ran.stderr);
-  const orders = ran.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l) as Order);
+  assert.match(ran.stderr, /github-status: operational/, "POSITIVE CONTROL: the stub reached the gate's status call, so the live page was not what was read\n" + ran.stderr);
   // The gate here reads the declarations of whichever project runs the suite, and `flag-without-a-switch` (agent-org#1135) is a count of what THAT project has not set, not a reading of the
   // refused merge read this test is about: it is left out so the test says the same thing on a project that has set every flag and on one that has not.
-  assert.deepEqual(orders.filter((o) => o.cause === "org-health" && o.subject !== SIGNALS.FLAG_WITHOUT_SWITCH), [], "a refusal is not evidence of a stall");
+  assert.deepEqual(ordersOf(ran).filter((o) => o.cause === "org-health" && o.subject !== SIGNALS.FLAG_WITHOUT_SWITCH), [], "a refusal is not evidence of a stall");
   assert.deepEqual(SIGNALS.NO_MERGE, "no-merge-while-work-exists");
+});
+
+test("THE GATE AS A PROCESS, agent-org#1178: a GitHub incident IS offered as its own order, and it is the only org-health order a refused merge read leaves", () => {
+  const ran = gateAsAProcess("incident");
+  assert.match(ran.stderr, /GITHUB INCIDENT: Incident with Actions, Pull Requests and Issues/, ran.stderr);
+  const offered = ordersOf(ran).filter((o) => o.cause === "org-health" && o.subject !== SIGNALS.FLAG_WITHOUT_SWITCH);
+  assert.deepEqual(offered.map((o) => o.subject), ["github-incident"], "the incident is offered, and the refusal still is not a stall");
+  assert.equal(offered[0].causeKey, "ceo/org-health/github-incident/stubincident01");
 });
 
 // --- 7. THE OUTCOME CLOCK (#3486) replaced #2970's `pr-not-progressing` and its tests, which were this section: they are in `outcome-clock.test.ts` ---

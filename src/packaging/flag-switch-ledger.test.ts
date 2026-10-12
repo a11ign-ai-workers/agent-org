@@ -88,12 +88,13 @@ test("(1) the walk takes `.ts` and `.mjs`, skips tests, fixtures and node_module
 });
 
 test("(2) the three directions: absent is reported, the same key set `false` is not, and a key with another home is not", () => {
-  const shipped = [FLAG("AUTO_UNPARK_FLAG", "rows.autoUnpark"), FLAG("CHAIN_WAIT_FLAG", "queue.chainWaitWake")];
+  const shipped = [FLAG("HAIKU_BRIEF_FLAG", "workers.haikuBrief"), FLAG("CHAIN_WAIT_FLAG", "queue.chainWaitWake")];
   const keysOf = (declarations: unknown[]) => unsetFlags({ shipped, declarations }).map((flag) => flag.key);
-  assert.deepEqual(keysOf([{ decisions: true }]), ["rows.autoUnpark"], "absent: rows.autoUnpark is the violation; queue.chainWaitWake is switched by `machinery:flag`");
-  assert.deepEqual(keysOf([{ rows: { autoUnpark: false } }]), [], "the same key set `false` is a decision, and not counted");
-  assert.deepEqual(keysOf([{ rows: { autoUnpark: true } }]), [], "and `true` is one too");
-  assert.deepEqual(keysOf([]), ["rows.autoUnpark"], "no declaration at all: still only the one without another home");
+  assert.deepEqual(keysOf([{ decisions: true }]), ["workers.haikuBrief"], "absent: workers.haikuBrief is the violation; queue.chainWaitWake is switched by `machinery:flag`");
+  assert.deepEqual(keysOf([{ workers: { haikuBrief: false } }]), [], "the same key set `false` is a decision, and not counted");
+  assert.deepEqual(keysOf([{ workers: { haikuBrief: true } }]), [], "and `true` is one too");
+  assert.deepEqual(keysOf([]), ["workers.haikuBrief"], "no declaration at all: still only the one without another home");
+  assert.deepEqual(unsetFlags({ shipped: [FLAG("AUTO_UNPARK_FLAG", "rows.autoUnpark")], declarations: [] }), [], "rows.autoUnpark is switched by `machinery:flag`, so nothing declared does not count it (agent-org#1161)");
   assert.deepEqual(unsetFlags({ shipped: [FLAG("CHAIN_WAIT_FLAG", "queue.chainWaitWake")], declarations: [] }), [], "a key in FLAGS_WITH_ANOTHER_HOME is not reported with nothing declared");
   assert.deepEqual(unsetFlags({ shipped: [FLAG("CHAIN_WAIT_FLAG", "queue.chainWaitWake")], declarations: [], anotherHome: {} }).map((flag) => flag.key), ["queue.chainWaitWake"],
     "and the map is what excuses it: without the entry the same flag is reported (the exemption is not a hard-coded name)");
@@ -135,9 +136,8 @@ test("(3) the ledger reads every declaration file: decided in host.json or decis
   const answer = readFlagLedger({ toolRoot: TOOL, ...half, merge });
   assert.ok(!("unknown" in answer));
   assert.deepEqual(answer.unset.map(({ key, mergedAt, pr }) => ({ key, mergedAt, pr })), [
-    { key: "rows.autoUnpark", mergedAt: "2026-10-12T08:01:58+00:00", pr: 1118 },
     { key: "workers.haikuBrief", mergedAt: "2026-10-11T18:46:01+00:00", pr: 1022 },
-  ], "decisions.json absent is no fault; the two undecided flags are named with the merge that added each");
+  ], "decisions.json absent is no fault; rows.autoUnpark has another home, so the one undecided flag is named with the merge that added it");
 });
 
 test("(3) a declaration that cannot be read is UNKNOWN and never a list, and so is a missing required file or a tree with no flag", () => {
@@ -157,7 +157,7 @@ test("(3) the real tree against a declaration that sets nothing names the flags 
   const nothing = readFlagLedger({ ...project("real-nothing", { "project.json": "{}", "host.json": "{}" }), merge: () => ({ mergedAt: null, pr: null }) });
   assert.ok(!("unknown" in nothing));
   const keys = nothing.unset.map((flag) => flag.key);
-  for (const key of ["workers.haikuBrief", "workers.orchestratorOneShot", "rows.specLint", "rows.autoUnpark"]) assert.ok(keys.includes(key), `${key} is counted`);
+  for (const key of ["workers.haikuBrief", "workers.orchestratorOneShot", "rows.specLint"]) assert.ok(keys.includes(key), `${key} is counted`);
   for (const key of Object.keys(FLAGS_WITH_ANOTHER_HOME)) assert.ok(!keys.includes(key), `${key} is not`);
   const all = Object.fromEntries((discoverFlags() ?? []).map((flag) => [flag.key, false]));
   const decided = readFlagLedger({ ...project("real-all", { "project.json": "{}", "decisions.json": JSON.stringify(all), "host.json": "{}" }), merge: () => ({ mergedAt: null, pr: null }) });

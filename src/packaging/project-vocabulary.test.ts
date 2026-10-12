@@ -197,6 +197,9 @@ const DECLARED_NON_VOCABULARY_HITS: Declaration[] = [
   // agent-org#907: a decision class names the port's states in the change it asks for (`state: "ready"`) and reads the shelved ones (`backlog`); the role excerpt says `ready` to the run.
   ...nonVocabulary("decision-run/classes/unclaimed-blocker-cleared.ts", ['"backlog"', '"ready"', "`ready`"], "the port's own state names (ADR 0046 decision 1) in a class's StateChange, and the word the run's excerpt uses for it"),
   ...nonVocabulary("ticket-port/github-adapter.ts", ['"backlog"', '"ready"', '"in-progress"', '"lane:'], "the port's state and flag names, as the keys of the adapter's mapping table (ADR 0046 decision 5); the labels they map to are read from the vocabulary"),
+  // `decision-run/classes/row-off-board.ts` (agent-org#911): the class answers in, and its actions are written through, the PORT'S state and flag names (`backlog`, `ready`, `lane:`),
+  // and it names them in the question and role excerpt a run reads. The labels they map to are the adapter's to read from the vocabulary; a class never spells a label.
+  ...nonVocabulary("decision-run/classes/row-off-board.ts", ['"backlog"', '"ready"', '"lane:', "`backlog`", "`ready`"], "the port's own state and flag names as the class's answers and actions, and the prose that names them to a run"),
   // `worker-state.ts` (#460): `"blocked"` is the worker-state NAME `worker:state blocked <row> <reason>` accepts and the `herdr` pane STATUS the
   // tick tells; `` `blocked` `` is that same state named in its refusal text. Neither is the `blocked` GitHub label (the command's own label
   // is the answer label, read from the vocabulary at run time, not spelled here).

@@ -100,6 +100,47 @@ export function mergedPrsInWindow(repo: string, windowMinutes: number, gh_: (arg
   return readMergedPullRequests({ repo, select: "number", run: gh_, base: "main", window: { since } }).map((pr) => ({ number: Number(pr.number) }));
 }
 
+/** #1175: the merged-PR read is tried this many times in all when GitHub answers a transient 5xx. One 502 on that read failed `trunk`'s `closeRows` job, and that read red as a red `main`. */
+export const MERGED_READ_ATTEMPTS = 3;
+
+/**
+ * #1175: THE SWITCH, flag `sweep.retryTransient`, shipped OFF. CI reads it from the environment of the `closeRows` job (`SWEEP_RETRY_TRANSIENT=1`), because a CI runner
+ * has no `machinery-canary.json` to read a flag from. Unset, or any value but `1`, is today's single read, byte for byte.
+ * @param {Record<string, string | undefined>} [env]
+ * @returns {boolean}
+ */
+export function retryTransientOn(env: Record<string, string | undefined> = process.env): boolean {
+  return env.SWEEP_RETRY_TRANSIENT === "1";
+}
+
+/** A synchronous wait: `main` is synchronous, and a retry that returns at once is the retry that met the same 502. */
+const sleepMs = (ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms);
+
+/** A 5xx is the one answer a second read can change. A 4xx is the request itself, and asking it again gets the same answer. */
+const TRANSIENT_5XX = /\bHTTP 5\d\d\b/;
+
+/**
+ * #1175: `read` again on a transient 5xx, at most `MERGED_READ_ATTEMPTS` times in all. Any other failure is thrown on its first attempt, unchanged. When every attempt
+ * fails, the throw names the attempts, so the `CANNOT ASK` line does not read like a single 502 that was never tried twice.
+ * @template T
+ * @param {() => T} read
+ * @param {(ms: number) => void} [pause] the wait before the next attempt; a test passes a no-op
+ * @returns {T}
+ */
+export function readWithRetry<T>(read: () => T, pause: (ms: number) => void = sleepMs): T {
+  for (let attempt = 1; ; attempt += 1) {
+    try {
+      return read();
+    } catch (cause) {
+      const message = cause instanceof Error ? cause.message : String(cause);
+      if (!TRANSIENT_5XX.test(message)) throw cause;
+      if (attempt >= MERGED_READ_ATTEMPTS) throw new Error(`all ${attempt} attempts failed, the last with: ${message}`);
+      console.log(`SWEEP: the merged-PR read answered a transient 5xx on attempt ${attempt} of ${MERGED_READ_ATTEMPTS} -- reading again.`);
+      pause(attempt * 1000);
+    }
+  }
+}
+
 /**
  * #776/#791: a row GitHub closed natively, before either path ran, still carries its claim and a live Status.
  * Strips the one and settles the other, returning the refusal for each row whose Status did NOT move (#1299).
@@ -318,7 +359,7 @@ function main() {
 
   let prs;
   try {
-    prs = mergedPrsInWindow(repo, windowMinutes);
+    prs = retryTransientOn() ? readWithRetry(() => mergedPrsInWindow(repo, windowMinutes)) : mergedPrsInWindow(repo, windowMinutes);
   } catch (cause) {
     console.error(`CANNOT ASK: listing merged PRs failed -- ${cause instanceof Error ? cause.message : cause}`);
     exitAfterSweep(EXIT.CANNOT_ASK);
