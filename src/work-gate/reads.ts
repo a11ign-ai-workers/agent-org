@@ -563,7 +563,7 @@ export const GH_READS = Object.freeze({
   // #3883: ONE CALL, EVERY TICK THAT HAS A COMPLETE HERDR LISTING (always, on a live org): the CLOSED rows still carrying `in-progress`, `number,labels` only, filtered
   // server-side, so what comes back is the claim debris and nothing else (the 25 live-seat rows plus whatever a hand close left since the last tick), never 264 rows' comments.
   conditionalOnCompleteHerdrListing: "api graphql repository.issues(labels: in-progress, states: CLOSED) number,labels,closedAt, the newest 500 (readClosedClaimLabelRows, once per declared tracker -- a closed row's claim labels, stripped when the holder is not listed, or is an idle worker past ten minutes)",
-  conditionalOnListedWorker: "api graphql repository { issue(number: <each listed worker-<n>, and each worker-<key>-<n> in its own tracker>) { state labels comments } } (readClosedClaimedRows -- a closed row's claim, one call per tracker a listed instance is of)",
+  conditionalOnListedWorker: "api repos/<repo>/issues/<n> for each listed worker-<n>, and each worker-<key>-<n> in its own tracker, then issues/<n>/comments, issues/<n>/timeline and pulls/<n> for each CLOSED claimed row (readClosedClaimedRows -- a closed row's claim, over REST: GraphQL's pool can run dry, REST's does not, agent-org#1113)",
   // #3390: TWO REST CALLS PER ROW LABELLED `needs:chairman` (its `labeled` events, and its comments), and NONE when nothing carries the label.
   conditionalOnChairmanLabelledRow: "api repos/{owner}/{repo}/issues/{n}/events and /comments (withChairmanEventTimes -- chairman-answered)",
   // #3079: THREE REST CALLS PER NON-PRIMARY CODE REPOSITORY, every tick (agent-org#539; it was one) -- the newest push runs and the newest schedule runs of its `ci.yml` on

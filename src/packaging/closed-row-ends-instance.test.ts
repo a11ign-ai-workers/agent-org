@@ -194,13 +194,25 @@ test("#3535 an interrupt herdr refuses is NOT a release: nothing is changed and 
 // --- THE READ IS CONDITIONAL (Done-when 5) -----------------------------------------------------------------------------------
 
 type Call = { args: string[]; repo: string | undefined };
-const isClosedClaimRead = (args: string[]) => args[0] === "api" && args[1] === "graphql" && args.some((a) => a.includes("issue(number:"));
+const isClosedClaimRead = (args: string[]) => args[0] === "api" && /\/issues\/\d+$/.test(args.at(-1) ?? "");
 const OPEN_ROWS = [{ number: 41, title: "open row", labels: [{ name: "ready" }], body: "", blockedBy: { nodes: [] }, updatedAt: "2026-10-06T05:00:00Z" }];
 
-/** What GraphQL answers for the listed workers' rows: `state` and `labels` decide which come back as a closed claim. */
-const issue = (number: number, state: string, labels: string[]) => ({ number, state, labels: { nodes: labels.map((name) => ({ name })) },
-  comments: { nodes: [record(`worker-${number}`)] }, closedByPullRequestsReferences: { nodes: [] as { number: number }[] } });
-const graphql = (...issues: ReturnType<typeof issue>[]) => JSON.stringify({ data: { repository: Object.fromEntries(issues.map((i) => [`r${i.number}`, i])) } });
+/** One listed worker's row as the REST reads answer it (#1113): `state` and `labels` decide which come back as a closed claim; `pulls` are its cross-referencing pull requests. */
+const issue = (number: number, state: string, labels: string[], pulls: { number: number; head: string; }[] = []) => ({ number, state, labels,
+  comments: [record(`worker-${number}`)], pulls });
+/** What the REST reads answer for the rows handed in: `issues/<n>`, its comments and timeline, and each `pulls/<n>`. Any other path is an absent row (HTTP 404). */
+const rest = (...rows: ReturnType<typeof issue>[]) => (args: string[]) => {
+  const answers = new Map<string, unknown>();
+  for (const r of rows) {
+    answers.set(`issues/${r.number}`, { number: r.number, state: r.state.toLowerCase(), labels: r.labels.map((name) => ({ name })), comments: r.comments.length });
+    answers.set(`issues/${r.number}/comments?per_page=100&page=1`, r.comments.map((c) => ({ body: c.body, created_at: c.createdAt, user: { login: c.author.login } })));
+    answers.set(`issues/${r.number}/timeline`, r.pulls.map((p) => ({ event: "cross-referenced", source: { issue: { number: p.number, title: "t", pull_request: {} } } })));
+    for (const p of r.pulls) answers.set(`pulls/${p.number}`, { head: { ref: p.head } });
+  }
+  const path = args.at(-1)!.replace(/^repos\/[^/]+\/[^/]+\//, "");
+  if (!answers.has(path)) throw Object.assign(new Error("Command failed: gh api"), { status: 1, stderr: "gh: Not Found (HTTP 404)" });
+  return JSON.stringify(answers.get(path));
+};
 const CLAIM = ["in-progress", "started", "session:worker-3535"];
 
 /** Every `gh` call one `readOpenRowFollowUps` makes, batched or not, with herdr's listing handed in. */
@@ -223,11 +235,8 @@ test("#3535 (5) herdr lists NO worker-<n> (only standing seats): the closed-clai
 
 test("#3535 (5) CONTROL: herdr lists worker-<n>: the SAME read IS made, ONCE, for THOSE rows' numbers only, in the follow-ups' own batch", () => {
   const agents = [{ label: "ceo", status: "idle" }, { label: "worker-3535", status: "working" }, { label: "worker-3600", status: "idle" }];
-  const { got, asked, batches } = followUps(agents, (args) => (isClosedClaimRead(args) ? graphql(issue(3535, "CLOSED", CLAIM), issue(3600, "OPEN", CLAIM)) : "[]"));
-  assert.equal(asked.length, 1, "exactly one call for every listed instance's row");
-  const query = asked[0].args.find((a) => a.startsWith("query="))!;
-  assert.deepEqual([...query.matchAll(/issue\(number: (\d+)\)/g)].map((m) => m[1]), ["3535", "3600"], "the listed workers' rows, and no other row");
-  assert.match(query, /closedByPullRequestsReferences\([^)]*\) \{ nodes \{ number headRefName title \}/, "each closing pull request with the head and title that say whose it is");
+  const { got, asked, batches } = followUps(agents, (args) => (args.at(-1)?.includes("/issues/") ? rest(issue(3535, "CLOSED", CLAIM), issue(3600, "OPEN", CLAIM))(args) : "[]"));
+  assert.deepEqual(asked.map((c) => c.args.at(-1)?.replace(/^.*\/issues\//, "")), ["3535", "3600"], "one issue read for every listed instance's row, and no other row");
   assert.deepEqual(got.closedClaims?.rows?.map((r) => r.number), [3535], "only the CLOSED row that still carries the claim: worker-3600's row is open");
   assert.deepEqual(got.closedClaims?.agents, agents, "with the listing the interrupt is decided from");
   assert.ok(batches.some((b) => b.some((c) => isClosedClaimRead(c.args))), "asked together with the other follow-ups, not after them");
@@ -235,17 +244,17 @@ test("#3535 (5) CONTROL: herdr lists worker-<n>: the SAME read IS made, ONCE, fo
 
 test("#3535 (5) a listed worker's row that is closed WITHOUT the claim label, or does not exist, is not a closed claim", () => {
   const agents = [{ label: "worker-3535", status: "working" }, { label: "worker-3600", status: "working" }];
-  const rows = (answer: string) => closedClaimsWhenWorkerListed(agents, () => answer)?.rows;
-  assert.deepEqual(rows(graphql(issue(3535, "CLOSED", ["started"]), issue(3600, "CLOSED", ["in-progress", "session:worker-3600"])))?.map((r) => r.number), [3600]);
-  assert.deepEqual(rows(JSON.stringify({ data: { repository: { r3535: null, r3600: null } } })), [], "an absent row is no claim");
+  const rows = (run: (args: string[]) => string) => closedClaimsWhenWorkerListed(agents, run)?.rows;
+  assert.deepEqual(rows(rest(issue(3535, "CLOSED", ["started"]), issue(3600, "CLOSED", ["in-progress", "session:worker-3600"])))?.map((r) => r.number), [3600]);
+  assert.deepEqual(rows(rest()), [], "an absent row is no claim");
 });
 
 test("#3535 (5) the shape the decision reads: labels, the claim record's comments and the closing pull requests", () => {
-  const [row] = closedClaimsWhenWorkerListed([{ label: "worker-3535", status: "working" }], () => graphql(issue(3535, "CLOSED", CLAIM)))!.rows!;
+  const [row] = closedClaimsWhenWorkerListed([{ label: "worker-3535", status: "working" }], rest(issue(3535, "CLOSED", CLAIM)))!.rows!;
   const { orders } = closedTick([row], [{ label: "worker-3535", status: "working" }]);
   assert.deepEqual([orders[0].release?.branch, orders[0].release?.interrupt], [BRANCH, true], "the claim record is found in the comments as the read returns them");
-  const byPr = { ...issue(3535, "CLOSED", CLAIM), closedByPullRequestsReferences: { nodes: [{ number: 313, headRefName: BRANCH, title: "t" }] } };
-  const [merged] = closedClaimsWhenWorkerListed([{ label: "worker-3535", status: "working" }], () => graphql(byPr))!.rows!;
+  const byPr = issue(3535, "CLOSED", CLAIM, [{ number: 313, head: BRANCH }]);
+  const [merged] = closedClaimsWhenWorkerListed([{ label: "worker-3535", status: "working" }], rest(byPr))!.rows!;
   assert.deepEqual(closedTick([merged], [{ label: "worker-3535", status: "working" }]).orders, [], "a row closed by its own pull request is left to the merged release");
 });
 
@@ -254,7 +263,6 @@ test("#3535 (5) the call is refused, or herdr is unreadable: UNREAD (rows null),
   const refused = () => { throw Object.assign(new Error("Command failed: gh"), { status: 1, stderr: "HTTP 502", stdout: "" }); };
   assert.deepEqual(closedClaimsWhenWorkerListed(agents, refused), { rows: null, agents });
   assert.deepEqual(closedClaimsWhenWorkerListed(agents, () => "not json"), { rows: null, agents });
-  assert.deepEqual(closedClaimsWhenWorkerListed(agents, () => JSON.stringify({ data: null })), { rows: null, agents });
   assert.deepEqual(closedClaimsWhenWorkerListed(null, () => "[]"), { rows: null, agents: null });
 });
 
