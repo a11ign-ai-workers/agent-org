@@ -125,7 +125,7 @@ import { sweepFilingAtFiling } from "./sweep-window.ts"; // #4603
 import { appendDistinctFrom, DISTINCT_FROM_FLAG, duplicateRowCheck } from "./duplicate-row.ts"; // #4634
 import { homeHostConfig, stateEntryPath } from "./host-config.ts";
 import { decide, decisionLogPathFrom, decisionSwitchesPath, type DecisionDeps } from "./decision-provider.ts"; // agent-org#1017: Jev reads a spec that was promoted
-import { FAILURE_LEDGER_FILE, recordFailure } from "./failure-ledger.ts"; // agent-org#1017: a spec-lint refusal is one line of the ledger the claim refusals use
+import { FAILURE_LEDGER_FILE, SPEC_LINT_REFUSED_KIND, recordFailure } from "./failure-ledger.ts"; // agent-org#1017: a spec-lint refusal is one line of the ledger the claim refusals use
 import { answerLabelRefusal } from "./answer-label-guard.ts"; // a11ign#4679: every writer of `answer:<session>` asks it first
 import { testsFirstOf } from "./merge-guard.ts"; // a11ign#5109: the one reader of a row's `Tests-first:` line
 import { githubTicketAdapter, TRACKER as TICKET_TRACKER } from "./ticket-port/github-adapter.ts"; // agent-org#1017: the comment on the row goes through the port, not a new `gh` call here
@@ -2628,11 +2628,10 @@ export function promoteArgvRefusal(argv: string[]): string | null {
 // ---------------------------------------------------------------------------------------------------
 
 /**
- * The failure-ledger kind of ONE LINT REFUSAL, one line per finding: `<kind>\t<ts ms>\t#<row> <field> <rule>`, the shape `claim-refused`
- * takes (agent-org#972), so a count of lines is a count of refused findings and a spike reads as a lint that is too strict. Not seeded in
- * `FAILURE_KINDS`, for the reason `CLAIM_REFUSED_KIND` gives. The retro's "Rows refused by the spec lint (24h)" line reads it (a follow-up row).
+ * `SPEC_LINT_REFUSED_KIND` is defined in `failure-ledger.ts`, where the retro reads it without importing this CLI; re-exported here so the
+ * promotion's importers keep their name (the `OUT_OF_RELEASE` pattern above).
  */
-export const SPEC_LINT_REFUSED_KIND = "spec-lint-refused";
+export { SPEC_LINT_REFUSED_KIND };
 
 /** What a promotion asks of the lint. Every field is injectable; absent, it is this machine's. */
 export type SpecLintAtPromotion = {

@@ -33,7 +33,7 @@ import { gatherChanges, readLedger as readHandFixLedger, ledgerLine as handFixLi
 import { claudeTurns, codexTurns, transcriptFiles } from "./token-audit.ts";
 import { refuseUnknownFlags, flagValue } from "./lib/cli-flags.ts";
 // THE DORA BLOCK (a11ign/a11ign#3135): measured from the registry and GitHub, per declared repository, by its own leaf module.
-import { FAILURE_LEDGER_FILE, parseFailureLedger, recordFailures, type FailureEntry } from "./failure-ledger.ts";
+import { FAILURE_LEDGER_FILE, SPEC_LINT_REFUSED_KIND, parseFailureLedger, recordFailures, type FailureEntry } from "./failure-ledger.ts";
 // THE IDLE-CLAIM INCIDENTS (#4642): the pure detector, and the two things its live read borrows -- the gate's idle memory and the herdr listing.
 import { IDLE_CLAIM_INCIDENT_MINUTES, idleClaimIncidents, idleClaimedHours, incidentEvents, incidentSummary, type ClaimedRow, type HolderState, type IdleClaim, type IdleClaimIncident } from "./idle-claim-incident.ts";
 import { WORKER_STATE_DIR, lastDeliveredTo, readDeclarations } from "./worker-state.ts";
@@ -57,7 +57,7 @@ import { unwaitedStockRows, unwaitedLines, ghTrackerReader } from "./unwaited-st
 import { untieredReadyRows, untieredLines, ghReadyReader, untieredOffer, untieredSweepKey, parseUntieredMemory, UNTIERED_MEMORY_FILE, type UntieredRow } from "./untiered-ready-rows.ts";
 import { HAIKU_TIER_LABEL } from "./worker-profile.ts";
 // THE "UNDERSPECIFIED" FEEDBACK LOOP (a11ign#5117): a leaf, so the retro stays importable before any install.
-import { underspecifiedLines, underspecifiedReading, underspecifiedStops, type UnderspecifiedReading } from "./spec-lint.ts";
+import { UNNAMED_FIELD, underspecifiedLines, underspecifiedReading, underspecifiedStops, type UnderspecifiedReading } from "./spec-lint.ts";
 import { commentsSince } from "./ticket-port/comments-since.ts";
 import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: the claimed rows and the merged list are connections, never a search
 import { asListJson, readMergedPullRequests, SINCE_PAGE_SIZE, WindowCutShort } from "./ticket-port/rows-since.ts";
@@ -355,6 +355,30 @@ function parsedFailureLedger(text: string | null | undefined): FailureEntry[] | 
   try { return parseFailureLedger(text); } catch { return null; }
 }
 
+/** The spec lint's refusals in a window (agent-org#1017): the DISTINCT rows, and the lines by field. A line's ref is `#<row> <field> <rule>`. */
+type SpecLintRefusalReading = { rows: number; total: number; byField: Record<string, number> };
+
+/** @returns {SpecLintRefusalReading | null} `null` when the ledger was not read or does not parse: a refusal count nobody could read is not a quiet day */
+function specLintRefusalsOf(entries: FailureEntry[] | null, { since, until }: { since: number; until: number; }): SpecLintRefusalReading | null {
+  if (entries === null) return null;
+  const refusals = entries.filter((entry) => entry.classKey === SPEC_LINT_REFUSED_KIND && entry.at >= since && entry.at <= until);
+  const byField: Record<string, number> = {};
+  for (const { ref } of refusals) {
+    const field = ref.split(" ")[1] ?? UNNAMED_FIELD;
+    byField[field] = (byField[field] ?? 0) + 1;
+  }
+  return { rows: new Set(refusals.map(({ ref }) => ref.split(" ")[0])).size, total: refusals.length, byField };
+}
+
+/** The report's line beside the underspecified-stops line. `null` is `unknown`, never `0`. */
+function specLintRefusedLines(reading: SpecLintRefusalReading | null | undefined): string[] {
+  const label = "- Rows refused by the spec lint (24h)";
+  if (reading === null || reading === undefined) return [`${label}: unknown (the failure ledger could not be read)`];
+  if (reading.total === 0) return [`${label}: 0`];
+  const counts = Object.entries(reading.byField).sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([field, count]) => `${field} ${count}`).join(", ");
+  return [`${label}: ${reading.rows} ${reading.rows === 1 ? "row" : "rows"} (${reading.total} ${reading.total === 1 ? "finding" : "findings"} refused: ${counts})`];
+}
+
 /**
  * Every number, each `unknown` when its source was refused. `reads` holds the RAW reads (`null` for a refused one), so what is
  * computed here is pure and a test drives it with a fixture window whose answers are checked by hand.
@@ -362,7 +386,7 @@ function parsedFailureLedger(text: string | null | undefined): FailureEntry[] | 
  *   turns: any[] | null, handFixes: ReturnType<typeof readHandFixLedger> | null, readings?: Readings, dora?: ReturnType<typeof readDora> | null,
  *   unwaited?: ReturnType<typeof unwaitedStockRows> | null, untiered?: ReturnType<typeof untieredReadyRows> | null, failureLedger?: string | null, blockingRecord?: string | null }} reads
  * `blockingRecord` absent or `null` is a record nobody read or that could not be parsed: the top-blocker line says `unknown`, never "nothing was shelved".
- * `failureLedger` absent or `null` is a ledger nobody read or that could not be read (a line that does not parse included): the corrections line says `unknown`, never `0`.
+ * `failureLedger` absent or `null` is a ledger nobody read or that could not be read (a line that does not parse included): the corrections line and the spec-lint refusals line say `unknown`, never `0`.
  * `unwaited` absent or `null` is a stock-row read nobody made or that was refused: `unknown`, never 0.
  * `untiered` absent or `null` is a ready-row read nobody made or that was refused (a tracker that could not be listed included): `unknown`, never 0.
  * IT IS PRINTED AND NOT YET IN `NUMBERS`: `packaging/org-retro.test.ts` requires a bound for every `NUMBERS` id in `ceo.md`'s retrospective section, which is `ceo`'s to word, so the trend waits for that line.
@@ -407,6 +431,7 @@ export function buildReport(reads: {
     inertOptions: inertOptionSummary(reads.inertOptions),
     safetyDenials: safetyCheckDenialSummary(reads.safetyDenials),
     underspecified: reads.underspecified ?? null, // a read nobody made or that was refused is `unknown` in the report, never `none`
+    specLintRefused: specLintRefusalsOf(parsedFailureLedger(reads.failureLedger), window),
     dora: reads.dora,
   };
   // `readings` absent is a read nobody made, which says `unknown` and never `no baseline`: only a read that found no file may say that.
@@ -744,7 +769,7 @@ export function renderReport(report: ReturnType<typeof buildReport>): string {
   const from = new Date(report.window.since).toISOString();
   const to = new Date(report.window.until).toISOString();
   return [`ORG RETROSPECTIVE ${report.date} -- the 24 hours ${from} to ${to}`, "",
-    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...underspecifiedLines(report.underspecified), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
+    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...underspecifiedLines(report.underspecified), ...specLintRefusedLines(report.specLintRefused), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
 }
 
 /**
