@@ -79,7 +79,8 @@ function commentsOf(api: (path: string, flags?: string[]) => any, number: number
  * `closedByPullRequestsReferences(first: 5)` was. A cross-reference names a pull request that mentions the row, which is the population a closing keyword makes too.
  */
 function closingPullRequestsOf(api: (path: string, flags?: string[]) => any, number: number) {
-  const events: any[] = api(`issues/${number}/timeline`, ["--paginate"]);
+  // `--paginate` alone prints one JSON array per page back to back, which is not JSON once the timeline has a second page; `--slurp` makes it one array of pages
+  const events: any[] = (api(`issues/${number}/timeline`, ["--paginate", "--slurp"]) as any[][]).flat();
   const pulls = new Map<number, { number: number; title: string; }>();
   for (const event of events) {
     if (event.event === "cross-referenced" && event.source?.issue?.pull_request) pulls.set(event.source.issue.number, { number: event.source.issue.number, title: event.source.issue.title });

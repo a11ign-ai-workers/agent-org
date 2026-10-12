@@ -106,3 +106,26 @@ test("#1113 (7) the comments read is the LAST 100, as GraphQL's `comments(last: 
   assert.deepEqual([comments[0]?.body, comments.at(-1)?.body], ["c51", "c150"]);
   assert.deepEqual(calls.map((args) => args.at(-1)?.replace(/^repos\/[^/]+\/[^/]+\//, "")), ["issues/5011", "issues/5011/comments?per_page=100&page=1", "issues/5011/comments?per_page=100&page=2", "issues/5011/timeline"]);
 });
+
+test("#1113 (8) a timeline on two pages is read whole: `gh api --paginate` prints one array per page back to back, so the read asks for --slurp and flattens the pages", () => {
+  const firstPage = Array.from({ length: 100 }, (_, i) => ({ event: "labeled", id: i }));
+  const secondPage = [{ event: "cross-referenced", source: { issue: { number: 412, title: "the fix", pull_request: {} } } }];
+  const answers: Record<string, unknown> = {
+    "issues/5011": issue(5011, "closed", CLAIM, 1),
+    "issues/5011/comments?per_page=100&page=1": [comment("the claim record")],
+    "pulls/412": { head: { ref: "agent/a-fix-5011" } },
+  };
+  const calls: string[][] = [];
+  const run = (args: string[]) => {
+    calls.push(args);
+    const path = args[args.length - 1].replace(/^repos\/[^/]+\/[^/]+\//, "");
+    if (path === "issues/5011/timeline" && args.includes("--slurp")) return JSON.stringify([firstPage, secondPage]);
+    if (path === "issues/5011/timeline" && args.includes("--paginate")) return `${JSON.stringify(firstPage)}\n${JSON.stringify(secondPage)}`;
+    if (path in answers) return JSON.stringify(answers[path]);
+    throw Object.assign(new Error("Command failed: gh api"), { status: 1, stderr: "gh: Not Found (HTTP 404)" });
+  };
+  const rows = readClosedClaimedRows([5011], run, undefined, () => assert.fail("nothing is refused"));
+  assert.deepEqual(rows?.[0]?.closedByPullRequestsReferences, [{ number: 412, headRefName: "agent/a-fix-5011", title: "the fix" }],
+    "the cross-reference on the second page is found, not refused as invalid JSON");
+  assert.ok(calls.some((args) => args.includes("--slurp")), "the timeline is asked for with --slurp");
+});

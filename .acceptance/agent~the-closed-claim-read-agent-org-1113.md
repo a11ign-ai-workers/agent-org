@@ -11,11 +11,11 @@ The read was one `gh api graphql` call per tracker per tick. On 2026-10-12 the G
 
 **Known difference.** A timeline cross-reference names any pull request that mentions the row, where GraphQL's `closedByPullRequestsReferences` named only pull requests that closed it. The consumers decide by head branch (the claim's own check reads `headRefName`), so a mentioning pull request whose branch is not the claim's changes nothing. This is stated here, not changed.
 
-**Mutation.** `src/closed-claim-rest-read.test.ts` fails 7 of 7 against the origin/main implementation (the GraphQL read), and fails when a GraphQL call is put back in the REST read. The implementation was restored byte-identical from a scratchpad copy and checked with `cmp`. The fixtures of the three older suites were then moved from GraphQL to REST, which does not touch the implementation.
+**Mutation.** `src/closed-claim-rest-read.test.ts` fails 7 of 7 against the origin/main implementation (the GraphQL read), and fails when a GraphQL call is put back in the REST read. The implementation was restored byte-identical from a scratchpad copy and checked with `cmp`. Timeline pages: a second mutation drops `--slurp` from the timeline read, and test (8), a timeline on two pages, fails 1 of 8 (the reviewer's finding on #1115: `gh api --paginate` prints one array per page, which is not JSON once there is a second page). The fixtures of the three older suites were then moved from GraphQL to REST, which does not touch the implementation.
 
 **Evidence.**
-- `node --test src/closed-claim-rest-read.test.ts`: 7 of 7 pass.
-- The 17 test files that reference the closed-claim read: 788 of 788 pass.
+- `node --test src/closed-claim-rest-read.test.ts`: 8 of 8 pass.
+- The 17 test files that reference the closed-claim read: 789 of 789 pass.
 - `node --test src/packaging/gh-call-ratchet.test.ts`: 8 of 8 pass.
 - `pnpm run typecheck`: clean.
 
