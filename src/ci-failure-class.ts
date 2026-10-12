@@ -166,6 +166,14 @@ const LOG_LINES_KEPT = 200;
 // No word boundaries: `AssertionError` and `TypeError` are the lines that matter, and a boundary after `error` would skip both.
 const ERROR_LINE = /error|errno|fail|assert|not ok|exception|timed? ?out|rate limit|cancell?ed|\u2716|\u2717/i;
 const RATE_LIMIT_OR_RUNNER_LOST = /rate limit|runner has received a shutdown signal|lost communication with the server|hosted runner .* lost|runner .* (?:was|has been) (?:lost|terminated)/i;
+// #1166: the lines that say a TEST failed. `##[error]` is deliberately not one: the runner's own lost-runner message is an `##[error]` line.
+const FAILING_ASSERTION = /AssertionError|^\s*(?:not ok\b|FAIL\b|✖|✗)/;
+/**
+ * #1166 (a11ign#928, chairman): `assertionsOnly` reads the rate-limit and lost-runner text from the FAILING ASSERTION lines when a failing assertion is named, so a passing test that prints
+ * "rate limit" beside a real failure is the test's output and not the cause. Shipped OFF: the classifier is then today's, which reads the whole log. Passed to {@link readCiFailure}; the a11ign
+ * switch row filed beside #1166 is what turns it on.
+ */
+export const CI_CLASS: { readonly assertionsOnly: boolean } = Object.freeze({ assertionsOnly: false });
 const READS_OUTSIDE = /\b(ENOTFOUND|EAI_AGAIN|ECONNRESET|ETIMEDOUT|ECONNREFUSED)\b|getaddrinfo|could not resolve host|unable to access '?https?:/i;
 const RED_CONCLUSIONS = new Set(["failure", "timed_out"]);
 const RUN_AND_JOB = /\/actions\/runs\/(\d+)\/job\/(\d+)/;
@@ -250,12 +258,22 @@ function pinWaitOrFalse(read: { repo: string; sha: string; log: string }, gh: Gh
 }
 
 /**
+ * IS THE RATE-LIMIT OR LOST-RUNNER TEXT THE CAUSE OF THIS RED CHECK (#1166). With `assertionsOnly` and a failing assertion named, only those lines are read: the text a passing test
+ * prints is not the runner's. With none named the whole log is read, as today, which is the runner that was lost before any assertion ran.
+ */
+export function rateLimitOrLostRunner(log: string, { assertionsOnly }: { assertionsOnly: boolean }): boolean {
+  const asserted = log.split("\n").filter((line) => FAILING_ASSERTION.test(line));
+  return RATE_LIMIT_OR_RUNNER_LOST.test(assertionsOnly && asserted.length > 0 ? asserted.join("\n") : log);
+}
+
+/**
  * THE FACTS OF ONE RED PULL REQUEST, or `null` when they could not be read or there is nothing red at the head the order names (the head moved, or the red check is not an Actions job).
  * The first failing check that is not the roll-up `gate` is the one classified (the roll-up's log names no cause, #5151): a pull request with several red checks is told about the first,
  * and the order's own text still lists them all. `waitsOnPinBump` is read only when that check is the ONLY red one besides the roll-up.
  * @param now an injected clock, so "at the same time" is testable
+ * @param flags {@link CI_CLASS}: the rate-limit read of the failing assertions (#1166); the default is today's read of the whole log
  */
-export function readCiFailure({ repo, number, head8 }: RedPullRequest, gh: Gh, now: number = Date.now()): CiFailure | null {
+export function readCiFailure({ repo, number, head8 }: RedPullRequest, gh: Gh, now: number = Date.now(), flags: { assertionsOnly: boolean } = CI_CLASS): CiFailure | null {
   const pull = json(gh, `repos/${repo}/pulls/${number}`);
   const sha = String(pull?.head?.sha ?? "");
   if (!sha.startsWith(head8)) return null;
@@ -278,7 +296,7 @@ export function readCiFailure({ repo, number, head8 }: RedPullRequest, gh: Gh, n
     redOnMain: redOnMainNow(onMain, workflow, now),
     redOnOtherPrs: redOnOtherPrsNow(failing, { workflow, branch: String(pull?.head?.ref ?? ""), now }),
     readsOutsideRepository: errorLines.some((line) => READS_OUTSIDE.test(line)),
-    rateLimitOrRunnerLost: RATE_LIMIT_OR_RUNNER_LOST.test(log),
+    rateLimitOrRunnerLost: rateLimitOrLostRunner(log, flags),
     rerunAlready: Number(run.run_attempt ?? 1) > 1,
     // present only when true: a failure that is not waiting on a bump is the object it was before #5151, key for key
     ...(causes.length === 1 && pinWaitOrFalse({ repo, sha, log }, gh) ? { waitsOnPinBump: true } : {}),
