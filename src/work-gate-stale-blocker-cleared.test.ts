@@ -316,13 +316,16 @@ const popClaim = (number: number) => ({ number, comments: [{ body: claimRecordCo
 /** A pull request of the holder's, on the claim's branch, opened 15 minutes after the claim (young, and inside the clock's own interval). */
 const popPr = (number: number, extra: Partial<Pr> = {}): Pr => ({ number: 900 + number, headRefName: `agent/x-${number}`, title: `row ${number}`,
   createdAt: "2026-10-04T10:45:00Z", ...extra });
+/** A failing check on the holder's own pull request: the one case the #1151 ruling exempts (the red-check nudge, `redCheckNudgePrompt`). */
+const POP_RED = [{ name: "gate", status: "COMPLETED", conclusion: "FAILURE" }];
 
-/** Every order typed for the placement, as `{ cause, causeKey }`, over the claim's life. */
-function populationOf(placement: Placement, withPr: boolean): { cause: string; causeKey: string; }[] {
+/** Every order typed for the placement, as `{ cause, causeKey }`, over the claim's life. `red` puts a failing check on the holder's own pull request. */
+function populationOf(placement: Placement, withPr: boolean, red = false): { cause: string; causeKey: string; }[] {
   const otherRow = placement === "other-tracker";
   const row = otherRow ? POP_OTHER_ROW : POP_ROW;
-  const homeOpen = withPr && placement === "home" ? [popPr(row)] : [];
-  const elsewhereOpen = withPr && placement !== "home" ? [popPr(row, { repoKey: "agent-org" })] : [];
+  const prExtra = red ? { statusCheckRollup: POP_RED } as Partial<Pr> : {};
+  const homeOpen = withPr && placement === "home" ? [popPr(row, prExtra)] : [];
+  const elsewhereOpen = withPr && placement !== "home" ? [popPr(row, { ...prExtra, repoKey: "agent-org" })] : [];
   const memory: Record<string, unknown> = {};
   const typed: { cause: string; causeKey: string; }[] = [];
   let claimFacts: Facts = undefined as never;
@@ -346,6 +349,12 @@ test("agent-org#805 THE POPULATION: no claim-stalled or blocker-cleared order is
   for (const placement of ["home", "elsewhere", "other-tracker"] as const) {
     assert.deepEqual(populationOf(placement, true), [], `${placement}: an open closing pull request types nothing`);
   }
+});
+
+test("agent-org#805 RED-CHECK CONTROL: the holder's OWN RED pull request IS nudged (the red-check nudge, the one exception), and nothing else is typed for it", () => {
+  const typed = populationOf("home", true, true);
+  assert.ok(typed.some((o) => o.cause === "claim-stalled"), "a red own pull request is typed: the red-check nudge is the exception the ruling names");
+  assert.deepEqual([...new Set(typed.map((o) => o.cause))], ["claim-stalled"], "blocker-cleared is still not typed for it");
 });
 
 test("agent-org#805 POSITIVE CONTROL: the same rows with NO pull request ARE typed -- claim-stalled once idle, and blocker-cleared for the home row", () => {

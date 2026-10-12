@@ -4,12 +4,12 @@ An open pull request of the holder's is the holder working, so it is never a cla
 
 Closes a11ign/agent-org#805
 
-Acceptance: `npx rstest run --config scripts/rstest/rstest.config.ts src/work-gate-stale-blocker-cleared.test.ts` gives `VERDICT pass: 20 tests in 1 file`. Acceptance file: `.acceptance/agent~no-claim-stalled-or-agent-org-805.md`.
+Acceptance: `npx rstest run --config scripts/rstest/rstest.config.ts src/work-gate-stale-blocker-cleared.test.ts` gives `VERDICT pass: 21 tests in 1 file`. Acceptance file: `.acceptance/agent~no-claim-stalled-or-agent-org-805.md`.
 
 What changed:
 
 1. **Claim-stall** (`src/claim-stall.ts`, `overlayReading`). A non-red open pull request of the holder's returns the clock reading (`pr-owned`) and never a nudge. The young-pull-request regime that typed nudges for an open pull request is removed, and its `#4017` note with it. A red own pull request still goes through the nudge path (`redOwnPrs`).
-2. **Population test** (`src/work-gate-stale-blocker-cleared.test.ts`, "agent-org#805 THE POPULATION"). It runs `claimStallTick` every 5 minutes for 240 minutes, with memory carried, and `blockerClearedReading` for home rows, for a held row with an open closing pull request in each tracker. It asserts no order is typed. The positive control is the same row without the open pull request, which is typed. The population test reproduced the stale wakes before the fix.
+2. **Population test** (`src/work-gate-stale-blocker-cleared.test.ts`, "agent-org#805 THE POPULATION"). It runs `claimStallTick` every 5 minutes for 240 minutes, with memory carried, and `blockerClearedReading` for home rows, for a held row with an open closing pull request in each tracker. It asserts no order is typed. The positive control is the same row without the open pull request, which is typed. A second control: the holder's own RED pull request IS nudged, the one exception the #1151 ruling names, and blocker-cleared is still not typed for it. The population test reproduced the stale wakes before the fix.
 3. **Out-of-Region test updates** (`src/packaging/idle-claimant.test.ts`, `src/idle-claimant-stopped.test.ts`, `src/work-gate-claim-stalled.test.ts`, `src/work-gate-idle-again-incident.test.ts`, `src/worker-state.test.ts`). Expectations that a green open pull request is counted or nudged are flipped to `pr-owned`, with no order. The #743 counted-nudge controls use a red pull request, so the red exception is what they measure. Each changed assertion carries an `agent-org#805` comment.
 4. **Changeset** (patch).
 
@@ -24,7 +24,7 @@ Per-path table (wakes in the retro window, from the wake log; `stale` = typed af
 19 of the 56 wakes had no pull request found. The claim-stalled stale wakes come from the path this PR removes. The 7 blocker-cleared stale wakes are the other-tracker gap, filed as a11ign/agent-org#1162. The retro reads `stale` at 0 for claim-stalled after this lands; the 7 blocker-cleared remainders stay until #1162 merges.
 
 Measured:
-- `npx rstest run --config scripts/rstest/rstest.config.ts src/work-gate-stale-blocker-cleared.test.ts`: `VERDICT pass: 20 tests in 1 file`.
+- `npx rstest run --config scripts/rstest/rstest.config.ts src/work-gate-stale-blocker-cleared.test.ts`: `VERDICT pass: 21 tests in 1 file`.
 - `src/packaging/idle-claimant.test.ts`: `VERDICT pass: 41 tests in 1 file`.
 - Acceptance file plus the claim, idle, worker-state and red-pull-request suites (13 files): `VERDICT pass: 314 tests in 13 files`.
 - `pnpm run typecheck`: exit 0, no errors.
