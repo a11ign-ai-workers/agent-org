@@ -243,6 +243,64 @@ test("#4620 SALVAGE CONTROL 2b/4: a failed `git stash create` names git's stderr
   assert.ok(!reason.includes("Command failed"), "the command line is not what the reader is left with");
 });
 
+/** A tree with a tracked edit and `count` intent-to-add entries (`git add -N`) under `pkg/`, which `git stash create` cannot carry. */
+function intentToAddTree(primary: Primary, name: string, count: number) {
+  const path = tree(primary, name);
+  writeFileSync(join(path, "app.txt"), "one\nan edit\n");
+  const paths = Array.from({ length: count }, (_, i) => `pkg/ita-${i + 1}.txt`);
+  mkdirSync(join(path, "pkg"));
+  for (const p of paths) writeFileSync(join(path, p), "not yet added\n");
+  git(path, "add", "-N", ...paths);
+  return { path, paths };
+}
+
+test("#4620 INTENT-TO-ADD: a tree holding `git add -N` entries is refused before any ref is written, naming the first entries and a count", () => {
+  const primary = buildPrimary();
+  const { path } = intentToAddTree(primary, "wt-ita-a", 5);
+  const report = pruneWorktrees(primary.root, { now: QUIET(), ...REMOVE_BY_REF });
+  assert.deepEqual(report.removed, []);
+  assert.ok(existsSync(path), "the tree stands");
+  assert.equal(readFileSync(join(path, "app.txt"), "utf8"), "one\nan edit\n", "with its edit");
+  assert.deepEqual(salvageRefs(primary), [], "no ref for a tree that is refused");
+  assert.deepEqual(report.dirty.map((r) => r.path), [path]);
+  const reason = report.dirty[0].reason ?? "";
+  assert.match(reason, /holds 5 intent-to-add entries \(pkg\/ita-1\.txt, pkg\/ita-2\.txt, pkg\/ita-3\.txt and 2 more\)/, reason);
+  assert.ok(!reason.includes("pkg/ita-4.txt"), "only the first few are named");
+});
+
+test("#4620 INTENT-TO-ADD CONTROL 1/2: a failed `git stash create` names the entries AND git's stderr in the reason", () => {
+  const primary = buildPrimary();
+  const { path } = intentToAddTree(primary, "wt-ita-b", 1);
+  const stderr = "error: Entry 'pkg/ita-1.txt' not uptodate. Cannot merge.\nCannot save the current worktree state\n";
+  const run = (cmd: string, args: string[], opts: { cwd: string }) => {
+    if (args.includes("stash")) throw Object.assign(new Error("Command failed: git stash create"), { stderr });
+    return realRun(cmd, args, opts);
+  };
+  const report = pruneWorktrees(primary.root, { now: QUIET(), ...REMOVE_BY_REF, run });
+  assert.deepEqual(report.removed, []);
+  assert.ok(existsSync(path), "the tree stands");
+  const reason = report.dirty[0].reason ?? "";
+  assert.match(reason, /holds 1 intent-to-add entry \(pkg\/ita-1\.txt\)/, reason);
+  assert.ok(reason.endsWith("(error: Entry 'pkg/ita-1.txt' not uptodate. Cannot merge. Cannot save the current worktree state)"), reason);
+  assert.ok(!reason.includes("Command failed"), "the command line is not what the reader is left with");
+});
+
+test("#4620 INTENT-TO-ADD CONTROL 2/2: a `git stash create` that DOES print a commit still refuses, and writes no ref for a detached head", () => {
+  const primary = buildPrimary();
+  const path = intentToAddTree(primary, "wt-ita-c", 1).path;
+  git(path, "checkout", "--quiet", "--detach");
+  // A stash that would succeed: its commit omits the entries, so pinning it would keep the tracked edit and lose their content.
+  const run = (cmd: string, args: string[], opts: { cwd: string }) => {
+    if (args.includes("stash")) return `${sha(path, "HEAD")}\n`;
+    return realRun(cmd, args, opts);
+  };
+  const report = pruneWorktrees(primary.root, { now: QUIET(), ...REMOVE_BY_REF, run });
+  assert.deepEqual(report.removed, []);
+  assert.ok(existsSync(path), "the tree stands");
+  assert.deepEqual(salvageRefs(primary), [], "neither the head nor the edit is pinned for a refused tree");
+  assert.match(report.dirty[0].reason ?? "", /holds 1 intent-to-add entry \(pkg\/ita-1\.txt\)/);
+});
+
 test("#4620 SAME NAME: three dirty trees under different parents that share one basename are each salvaged to a ref of their own", () => {
   const primary = buildPrimary();
   const trees = ["a", "b", "c"].map((parent) => {

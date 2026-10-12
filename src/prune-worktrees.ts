@@ -959,7 +959,7 @@ export const SALVAGE_REF_PREFIX = "refs/salvage/";
 const SALVAGE_IDENTITY = ["-c", "user.name=prune-worktrees", "-c", "user.email=prune-worktrees@localhost"];
 
 /** What a DIRTY tree needs before removal: `salvage` is whether tracked edits must be pinned first; `ignorable` is `cleanliness`'s. */
-export type Recovery = { head: string, branch: string | null, salvage: boolean, ignorable: string[] };
+export type Recovery = { head: string, branch: string | null, salvage: boolean, ignorable: string[], intentToAdd: string[] };
 export type RecoveryVerdict = { into: "recoverable", recovery: Recovery } | { into: "dirty", reason: string } | { into: "active" } | { into: "inconclusive" };
 
 /**
@@ -970,9 +970,9 @@ export type RecoveryVerdict = { into: "recoverable", recovery: Recovery } | { in
  *
  * @param {string} worktreePath
  * @param {{ run?: typeof defaultRun, ignoreAuthority?: string | null }} [deps]
- * @returns {{ tracked: number, untrackedWork: boolean, ignorable: string[] } | "unknown"}
+ * @returns {{ tracked: number, untrackedWork: boolean, ignorable: string[], intentToAdd: string[] } | "unknown"}
  */
-export function trackedStatus(worktreePath: string, { run = defaultRun, ignoreAuthority = null }: { run?: typeof defaultRun; ignoreAuthority?: string | null; } = {}): { tracked: number; untrackedWork: boolean; ignorable: string[]; } | "unknown" {
+export function trackedStatus(worktreePath: string, { run = defaultRun, ignoreAuthority = null }: { run?: typeof defaultRun; ignoreAuthority?: string | null; } = {}): { tracked: number; untrackedWork: boolean; ignorable: string[]; intentToAdd: string[]; } | "unknown" {
   let status: string;
   try {
     status = run("git", ["status", "--porcelain", "-z"], { cwd: worktreePath });
@@ -981,6 +981,8 @@ export function trackedStatus(worktreePath: string, { run = defaultRun, ignoreAu
   }
   const entries = status.split("\0").filter((entry) => entry !== "");
   const untracked = entries.filter((entry) => entry.startsWith("?? ")).map((entry) => entry.slice(3));
+  // #825: ` A` is `git add -N`. The index holds the path with no content, so `git stash create` cannot pin it (it refuses the tree).
+  const intentToAdd = entries.filter((entry) => entry.startsWith(" A ")).map((entry) => entry.slice(3));
   const ignorable: string[] = [];
   let untrackedWork = false;
   for (const path of untracked) {
@@ -989,7 +991,7 @@ export function trackedStatus(worktreePath: string, { run = defaultRun, ignoreAu
     if (ignored) ignorable.push(path);
     else untrackedWork = true;
   }
-  return { tracked: entries.length - untracked.length, untrackedWork, ignorable };
+  return { tracked: entries.length - untracked.length, untrackedWork, ignorable, intentToAdd };
 }
 
 /** `git rev-parse --verify <rev>^{commit}`'s sha; THROWS when the name does not resolve to a commit. */
@@ -1034,7 +1036,7 @@ export function recoveryFor(repoRoot: string, entry: WorktreeEntry, { run, now, 
     if (status.tracked === 0) {
       return { into: "dirty", reason: `its HEAD is detached at ${head.slice(0, 12)} and no ref holds it, and it has no tracked edit to pin` };
     }
-    return { into: "recoverable", recovery: { head, branch: null, salvage: true, ignorable: status.ignorable } };
+    return { into: "recoverable", recovery: { head, branch: null, salvage: true, ignorable: status.ignorable, intentToAdd: status.intentToAdd } };
   }
   let named = "";
   try {
@@ -1045,7 +1047,7 @@ export function recoveryFor(repoRoot: string, entry: WorktreeEntry, { run, now, 
   if (named === "" || named !== head) {
     return { into: "dirty", reason: `refs/heads/${entry.branch} ${named === "" ? "does not resolve" : `reads ${named.slice(0, 12)}`}, not HEAD ${head.slice(0, 12)}, so no surviving ref holds its commits` };
   }
-  return { into: "recoverable", recovery: { head, branch: entry.branch, salvage: status.tracked > 0, ignorable: status.ignorable } };
+  return { into: "recoverable", recovery: { head, branch: entry.branch, salvage: status.tracked > 0, ignorable: status.ignorable, intentToAdd: status.intentToAdd } };
 }
 
 /** A tree's directory name as one ref component: what git allows, nothing it could mistake for a range, a lock or a hidden name. */
@@ -1109,22 +1111,41 @@ export function salvageTracked(worktreePath: string, repoRoot: string, recovery:
     const listed = run("git", ["for-each-ref", "--format=%(refname) %(objectname) %(tree) %(parent)", `${SALVAGE_REF_PREFIX}${name}-*`], { cwd: repoRoot })
       .split("\n").filter((line) => line.trim() !== "").map((line) => line.split(" "))
       .filter(([ref]) => mine.test(ref));
+    // #825: stash create comes BEFORE any ref is written, so a tree it refuses leaves no head pin behind for the next hour to find.
+    const created = run("git", [...SALVAGE_IDENTITY, "stash", "create"], { cwd: worktreePath }).trim();
+    if (recovery.intentToAdd.length > 0) {
+      return { reason: `${intentToAddNote(recovery.intentToAdd)}, which cannot be pinned, so the tree is refused` };
+    }
+    if (created === "") {
+      return { reason: "`git stash create` printed no commit for a tree that reads as carrying tracked changes, so there is nothing to read back" };
+    }
     const refs: string[] = [];
     if (recovery.branch === null) {
       const pinned = listed.find(([ref, sha]) => /-head-\d+$/.test(ref) && sha === recovery.head);
       refs.push(pinned !== undefined ? pinned[0] : pinRef(repoRoot, `${SALVAGE_REF_PREFIX}${name}-head-${epoch}`, recovery.head, run));
-    }
-    const created = run("git", [...SALVAGE_IDENTITY, "stash", "create"], { cwd: worktreePath }).trim();
-    if (created === "") {
-      return { reason: "`git stash create` printed no commit for a tree that reads as carrying tracked changes, so there is nothing to read back" };
     }
     const createdTree = run("git", ["rev-parse", "--verify", `${created}^{tree}`], { cwd: repoRoot }).trim();
     const same = listed.find(([ref, , tree, parent]) => !/-head-\d+$/.test(ref) && tree === createdTree && parent === recovery.head);
     refs.push(same !== undefined ? same[0] : pinRef(repoRoot, `${SALVAGE_REF_PREFIX}${name}-${epoch}`, created, run));
     return { refs, edits: same !== undefined ? readCommit(repoRoot, same[0], run) : created };
   } catch (cause) {
-    return { reason: `its work could not be pinned under ${SALVAGE_REF_PREFIX} and read back (${failureDetail(cause)})` };
+    const holds = recovery.intentToAdd.length > 0 ? `${intentToAddNote(recovery.intentToAdd)}; ` : "";
+    return { reason: `${holds}its work could not be pinned under ${SALVAGE_REF_PREFIX} and read back (${failureDetail(cause)})` };
   }
+}
+
+/**
+ * #825: THE INTENT-TO-ADD ENTRIES A TREE HOLDS, NAMED FOR A READER: the count, and the first three paths with the rest counted. `git add -N`
+ * records a path in the index with no content, which `git stash create` refuses (`not uptodate. Cannot merge.`), so such a tree is refused
+ * and the reason names the entries rather than git's first one alone.
+ *
+ * @param {string[]} paths
+ * @returns {string}
+ */
+function intentToAddNote(paths: string[]): string {
+  const shown = paths.slice(0, 3).join(", ");
+  const more = paths.length > 3 ? ` and ${paths.length - 3} more` : "";
+  return `it holds ${paths.length} intent-to-add ${paths.length === 1 ? "entry" : "entries"} (${shown}${more})`;
 }
 
 /**
