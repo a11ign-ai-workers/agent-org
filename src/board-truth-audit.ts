@@ -352,6 +352,23 @@ function namesDifferentFailureClasses(row: BoardRow, other: BoardRow): boolean {
 }
 
 /**
+ * The `<repo>#<n>` a switch row's title names after `Switch on the flag of`, lower-cased; `undefined` for any other title.
+ * @param {string | undefined} title @returns {string | undefined}
+ */
+const switchRowRefOf = (title: string | undefined): string | undefined => /^\s*switch on the flag of ([^\s()]+#\d+)/i.exec(String(title ?? ""))?.[1].toLowerCase();
+
+/**
+ * Two switch-row titles that name different flags are two rows (agent-org#1200): the org files every switch row from one template, so `Switch on the flag of agent-org#1166` and
+ * `... of agent-org#1167` share 9 of 11 words (0.82, over `DUPLICATE_SIMILARITY`) and the audit called a11ign#5216-#5219 and #5230 twins. Closing one as a twin leaves a shipped flag OFF.
+ * A title not of the form, or two naming the same flag, are compared by words alone.
+ * @param {BoardRow} row @param {BoardRow} other @returns {boolean}
+ */
+function namesDifferentFlags(row: BoardRow, other: BoardRow): boolean {
+  const [a, b] = [switchRowRefOf(row.title), switchRowRefOf(other.title)];
+  return a !== undefined && b !== undefined && a !== b;
+}
+
+/**
  * The build a pipeline verify row names: its `Verifies: #n` line or its `<!-- verify-row: build #n -->` marker (`verify-row.ts` writes both). A reader of the body, so a row that names no build is `[]`.
  * @param {string | undefined} body @returns {number[]}
  */
@@ -369,7 +386,7 @@ function verifiesOrVerifiedBy(row: BoardRow, other: BoardRow): boolean {
 /** @param {BoardRow} row @param {BoardRow} other @returns {boolean} */
 function nearDuplicates(row: BoardRow, other: BoardRow): boolean {
   const [a, b] = [wordsOf(row.title), wordsOf(other.title)];
-  return a.size >= DUPLICATE_MIN_WORDS && b.size >= DUPLICATE_MIN_WORDS && similarity(a, b) >= DUPLICATE_SIMILARITY && !namesDifferentRepos(row, other) && !namesDifferentFailureClasses(row, other) && !verifiesOrVerifiedBy(row, other);
+  return a.size >= DUPLICATE_MIN_WORDS && b.size >= DUPLICATE_MIN_WORDS && similarity(a, b) >= DUPLICATE_SIMILARITY && !namesDifferentRepos(row, other) && !namesDifferentFailureClasses(row, other) && !namesDifferentFlags(row, other) && !verifiesOrVerifiedBy(row, other);
 }
 
 /** @param {BoardRow} row @param {Map<number, BoardRow>} known @returns {Finding[]} */

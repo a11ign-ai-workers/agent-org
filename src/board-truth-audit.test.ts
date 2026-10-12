@@ -276,6 +276,26 @@ test("class-repeat titles of different failure classes are not near-duplicates (
   assert.deepEqual(found({ openRows: [notOfTheForm(4836, plain), notOfTheForm(4837, `${plain} again`)] }, QUESTIONS.DUPLICATE), [4837], "neither title carries an id: words decide");
 });
 
+/** The switch rows of a11ign#5216-#5219 as filed on 2026-10-12: one template, one class, a different code row's flag each. @param {number} flag */
+const switchRowTitle = (flag: number) => `Switch on the flag of agent-org#${flag} (class a11ign#928)`;
+
+test("switch-row titles naming different flags are not near-duplicates (agent-org#1200)", () => {
+  const [a, b] = [row(5216, ["ready"], { title: switchRowTitle(1166) }), row(5217, ["ready"], { title: switchRowTitle(1167) })];
+  // POSITIVE CONTROL for the line below: the pair clears the word threshold on its own, so the empty result is the flag rule and not a short title.
+  assert.ok(similarity(wordsOf(a.title), wordsOf(b.title)) >= DUPLICATE_SIMILARITY, "the two real titles clear the word threshold on their own");
+  assert.deepEqual(found({ openRows: [a, b] }, QUESTIONS.DUPLICATE), [], "#5216 and #5217 are two rows for two flags");
+  assert.deepEqual(found({ openRows: [row(5230, ["ready"], { title: "Switch on the flag of agent-org#1180 (class main-red, a11ign#928)" }), b] }, QUESTIONS.DUPLICATE), [], "a different flag under another class is still a different flag");
+  assert.deepEqual(found({ openRows: [b], closedRows: [{ ...a, state: "CLOSED", stateReason: "COMPLETED" }] }, QUESTIONS.DUPLICATE), [], "against a closed row of another flag");
+  // the same flag is still one row: the later of two is the duplicate, whatever the case of the repository name
+  assert.deepEqual(found({ openRows: [a, row(5220, ["ready"], { title: switchRowTitle(1166) })] }, QUESTIONS.DUPLICATE), [5220]);
+  assert.deepEqual(found({ openRows: [a, row(5220, ["ready"], { title: switchRowTitle(1166).replace("agent-org", "Agent-Org") })] }, QUESTIONS.DUPLICATE), [5220], "a flag reference is compared lower-cased");
+  // a title not of the form is compared by words alone, whether or not the other title is of it
+  const notOfTheForm = (number: number, title: string) => row(number, ["ready"], { title });
+  const flipped = (flag: number) => `Flip the flag of agent-org#${flag} (class a11ign#928)`;
+  assert.deepEqual(found({ openRows: [notOfTheForm(5240, flipped(1166)), notOfTheForm(5241, flipped(1167))] }, QUESTIONS.DUPLICATE), [5241], "neither title is of the form: words decide");
+  assert.deepEqual(found({ openRows: [a, notOfTheForm(5242, "Switch on the flag of agent-org #1167 (class a11ign#928)")] }, QUESTIONS.DUPLICATE), [5242], "only one title is of the form (its reference is not written `<repo>#<n>`): words decide");
+});
+
 /** The pair as it stood on 2026-10-10: the build a11ign#4488 and the verify row the pipeline filed for it (`verify-row.ts`), #4901. @param {string} title */
 const verifyRowOf = (title: string) => `## Done-when\n\n1. The reading holds.\n\nNot-before: 2026-10-11T00:00:00Z\nVerifies: #4488\n\n<!-- verify-row: build #4488 -->\n`;
 
