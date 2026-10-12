@@ -22,3 +22,6 @@ bash -c 'cd "$(git rev-parse --show-toplevel)" && npx rstest run --config script
 Closes a11ign/agent-org#905.
 
 platform: n/a (a class file for the registry the row's predecessor built)
+
+Outside-Region: src/serve-by-run.test.ts — its "default registry holds no class" case asserted the premise this row ends (it failed CI); it now asserts the registry holds only `answer-owed`.
+Outside-Region: .changeset/the-answer-owed-class-exists.md — the entry a project that pins a tag reads.

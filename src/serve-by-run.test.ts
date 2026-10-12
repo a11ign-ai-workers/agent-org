@@ -414,8 +414,7 @@ test("laneReason, ROUTED_TO, FLEET_LAB_PATTERNS and SPAWN_CAUSES are byte-identi
   assert.ok(/(?:const|function)\s+ROUTED_TO\b/.test("const ROUTED_TO = 1;"), "the marker recognises a declaration it is looking for");
 });
 
-test("the default class registry holds no class, so merging this row changes nothing", async () => {
+test("the default class registry holds only `answer-owed` (agent-org#905), and a class is switched on by the seats file, never by existing", async () => {
   const { CLASSES_DIR } = await import("./serve-by-run.ts");
-  assert.equal(existsSync(CLASSES_DIR), false, "no class file ships with the seam: a class is a later row, and it is what makes a `run` setting mean something");
-  assert.equal((await loadClasses(CLASSES_DIR)).size, 0);
+  assert.deepEqual([...(await loadClasses(CLASSES_DIR)).keys()], ["answer-owed"], "the first class ships as a file; each later one is its own row");
 });
