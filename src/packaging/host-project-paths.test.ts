@@ -116,7 +116,8 @@ const TODAYS_TEXT = {
   // installed copy reads STALE until `host:install` runs, which is a host action and not this row's.
   // #2892 MOVED IT AGAIN, deliberately: `ExecStart` runs `%h/.local/bin/pnpm` instead of `/usr/bin/npm`. Same staleness, same remedy.
   // #3850 MOVED IT AGAIN, deliberately: the unit runs under `Nice=19` and `IOSchedulingClass=idle`. Same staleness, same remedy.
-  "a11ign-worktree-prune.service": "d7547daa8e26f8e16979769f20abdbd22e1626d0e50030d2d4aee63326d5a879",
+  // #1067 MOVED IT AGAIN, deliberately: the unit makes a pass over the tool's checkout before the project's, bounded by `timeout`, and `TimeoutStartSec` is raised to cover both. Same staleness, same remedy.
+  "a11ign-worktree-prune.service": "d06f9ef4fd19f80426b949e712e7131ab9150bfb31966fa404981f3a3db78ffa",
   "a11ign-worktree-prune.timer": "82d72dd99d18eddb5285245bc4f5b9b750b1e88536be7759cdc524d9b1cbe467",
   "a11ign-board-report.service": "3e7791d9f24ae9aa3519898259f1ea68c1f8b4cd721f97b62916c9f81835b0c1",
   "a11ign-board-report.timer": "6edd74ab8a7d4117197dddd448e30a2ab63ab9972799dd90f5f500c067f033f1",

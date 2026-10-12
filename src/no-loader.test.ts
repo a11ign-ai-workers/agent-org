@@ -4,7 +4,7 @@
  * HOST's own (`%h/.local/bin/node`, which strips types: #4388) on a `.ts` file. `/usr/bin/node` is the distro build and prints `process.features.typescript` = `false`, so a unit naming it
  * runs only while a loader carries the TypeScript, which is the arrangement this row ended and `node-strips-types.ts` raises when it returns.
  *
- * POSITIVE CONTROLS: the six units this row repointed are named (a template directory that read as empty would otherwise pass every assertion below), and the parser is shown to see a
+ * POSITIVE CONTROLS: the units this row repointed (and #1067's worktree-prune, which runs node on the tool's checkout too) are named (a template directory that read as empty would otherwise pass every assertion below), and the parser is shown to see a
  * loader and a distro `node` in fixture lines.
  */
 import { test } from "node:test";
@@ -15,7 +15,7 @@ import { fileURLToPath } from "node:url";
 
 const ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
 const HOST_NODE = "%h/.local/bin/node";
-const SIX_UNITS = ["confidence-post", "crash-recover", "event-receiver", "kernel-reboot", "otel-receiver", "shadow-window", "tmp-prune", "trace-ingest", "trace-publish", "work-tick"];
+const NODE_UNITS = ["confidence-post", "crash-recover", "event-receiver", "kernel-reboot", "otel-receiver", "shadow-window", "tmp-prune", "trace-ingest", "trace-publish", "work-tick", "worktree-prune"];
 const NODE_FLOOR_THAT_STRIPS = 24;
 
 type Manifest = { dependencies?: Record<string, string>; devDependencies?: Record<string, string>; engines?: { node?: string }; scripts?: Record<string, string> };
@@ -59,7 +59,7 @@ test("no shipped unit names a loader, and each that runs node names the host's o
     const run = nodeProgramOf(line);
     return run === null ? [] : [{ name, line, ...run }];
   }));
-  assert.deepEqual(found.map((f) => f.name).sort(), SIX_UNITS, "CONTROL: the six repointed units are the ones that run node");
+  assert.deepEqual(found.map((f) => f.name).sort(), NODE_UNITS, "CONTROL: the repointed units are the ones that run node (worktree-prune since #1067)");
   assert.deepEqual([...templates()].flatMap(([name, text]) => commandLines(text).filter((line) => NAMES_TSX.test(line)).map(() => name)), []);
   for (const f of found) {
     assert.equal(f.binary, HOST_NODE, `${f.name}: ${f.line}`);
