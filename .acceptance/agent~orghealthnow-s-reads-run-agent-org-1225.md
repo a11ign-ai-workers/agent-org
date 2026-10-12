@@ -1,4 +1,4 @@
-Closes a11ign/a11ign#1225
+Closes a11ign/agent-org#1225
 
 ## What changed
 
