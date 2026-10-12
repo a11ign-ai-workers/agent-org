@@ -150,11 +150,11 @@ const facts = (over: object = {}) => ({ row: 2999, session: "worker-9", claimedA
 const ctx = (over: object = {}) => ({ now: NOW, restartAt: null, nudge: null, agents: listing("idle"), goneSince: null, idleSince: ago(50), ...over }) as
   Parameters<typeof claimReading>[1];
 
-test("#2999 a holder with an open PR is `pr-owned` for the clock and a nudge for the overlay -- unless a reviewer is requested", () => {
+test("#2999 (agent-org#805) a holder with an open PR is `pr-owned` for the clock and for the overlay, reviewer or not; with no PR it is the nudge", () => {
   const pr = { number: 2968, reviewDecision: "REVIEW_REQUIRED", labels: [], checksPending: false };
   const nudged = claimReading(facts({ openPrs: 1, ownPrs: [pr] }), ctx());
-  assert.equal(nudged.kind, "nudge");
-  assert.equal((nudged as { idle?: boolean }).idle, true);
+  assert.deepEqual(nudged, { kind: "pr-owned" }, "agent-org#805: an open pull request of the holder's is never a nudge, with or without a reviewer");
+  assert.equal(claimReading(facts({ openPrs: 0 }), ctx()).kind, "nudge", "CONTROL: with NO open pull request the same holder is nudged");
   const reviewed = claimReading(facts({ openPrs: 1, ownPrs: [pr] }), ctx({ agents: listing("idle", [{ label: "reviewer-2968", status: "working" }]) }));
   assert.deepEqual(reviewed, { kind: "pr-owned" }, "the control: the same holder with a reviewer asked for is left alone");
 });
@@ -206,13 +206,12 @@ test("#2999 before the clock's own interval a remembered idle nudge is HELD as `
   assert.equal(claimReading(facts({ commit: () => ago(5) }), ctx({ nudge, agents: listing("working") })).kind, "moving", "and a holder back at work is simply moving");
 });
 
-test("#2999 a holder with an open PR is not released by the SECOND reading, which is the no-PR path's: it is counted (agent-org#743, below)", () => {
+test("#2999 a holder with an open PR is NEVER released by the idle reading (agent-org#805: it is `pr-owned`, not `nudged`)", () => {
   const pr = { number: 2968, reviewDecision: "REVIEW_REQUIRED", labels: [], checksPending: false };
   const told = { nudgedAt: ago(400), deliveredAt: ago(300), idle: true };
   // delivered 300 minutes ago and idle since ago(50): ONE unanswered nudge, so the next nudge and not a release
   const held = claimReading(facts({ openPrs: 1, ownPrs: [pr], claimedAt: ago(500) }), ctx({ nudge: told }));
-  assert.equal(held.kind, "nudge");
-  assert.equal((held as { count?: number }).count, 2);
+  assert.equal(held.kind, "pr-owned", "agent-org#805: an open PR is pr-owned, so the told memory neither releases it nor reads as a nudge");
   assert.equal(claimReading(facts({ claimedAt: ago(500) }), ctx({ nudge: told })).kind, "release", "the control: the same memory on a holder with no PR releases");
 });
 
@@ -257,7 +256,7 @@ test("#743 (1) the clock for a red pull request is M (10 minutes) with or withou
   assert.equal(claimReading(onPr(redPr(), { declared: declare("waiting-ci") }), ctx({ idleSince: ago(5) })).kind, "idle-watch", "5 minutes idle: not yet");
   // no declaration read at all (the gate could not ask): the older N was 30
   assert.equal(claimReading(onPr(redPr()), ctx({ idleSince: ago(11) })).kind, "nudge", "red: told at 11 minutes");
-  assert.equal(claimReading(onPr(redPr(GREEN)), ctx({ idleSince: ago(11) })).kind, "idle-watch", "CONTROL: the same holder green is still on N");
+  assert.equal(claimReading(onPr(redPr(GREEN)), ctx({ idleSince: ago(11) })).kind, "pr-owned", "CONTROL (agent-org#805): the same holder green is never a nudge, whatever its idle time");
   assert.equal(idleLimitMs({ built: true, prs: withRedChecks([redPr()]) as never }), STOPPED_CLAIMANT_MS);
   assert.equal(idleLimitMs({ built: true, prs: withRedChecks([redPr(GREEN)]) as never }), IDLE_CLAIMANT_MS);
   assert.equal(idleLimitMs({ prs: withRedChecks([redPr()]) as never }), IDLE_CLAIMANT_MS, "a caller that does not say `built` keeps N, as for the stopped clock");
@@ -320,8 +319,9 @@ test("#743 (2) a holder with NO pull request is not counted: the same remembered
   const told = { nudgedAt: ago(40), deliveredAt: ago(32), idle: true };
   const held = claimReading(noPr, ctx({ nudge: told, idleSince: ago(35) })) as { kind: string; idleAgain?: boolean; count?: number };
   assert.deepEqual([held.kind, held.idleAgain, held.count], ["nudged", true, undefined]);
-  const counted = claimReading(onPr(redPr(GREEN), { claimedAt: ago(60) }), ctx({ nudge: told, idleSince: ago(35) })) as typeof held;
-  assert.deepEqual([counted.kind, counted.count], ["nudge", 2], "CONTROL: the same memory on a holder with a pull request open is the second nudge");
+  const counted = claimReading(onPr(redPr(), { claimedAt: ago(60) }), ctx({ nudge: told, idleSince: ago(35) })) as typeof held;
+  assert.deepEqual([counted.kind, counted.count], ["nudge", 2], "CONTROL: the same memory on a RED holder with a pull request open is the second nudge (the red exception)");
+  assert.equal(claimReading(onPr(redPr(GREEN), { claimedAt: ago(60) }), ctx({ nudge: told, idleSince: ago(35) })).kind, "pr-owned", "agent-org#805: a GREEN holder with the same memory is pr-owned");
 });
 
 test("#743 (2) the THIRD unanswered nudge releases a holder with a pull request open, and the second does not -- the pull request is left as it is", () => {
@@ -389,13 +389,12 @@ test("#743 (2) the count is kept in the memory (absent for the first), rides the
     "a release not yet performed keeps what it needs to be read as a release again next tick");
 });
 
-test("#743 (2) a holder with a GREEN pull request is counted too, and told so beside the text it always had; a holder with NO pull request is told nothing new", () => {
+test("#743 (2) a holder with a RED pull request is counted, a GREEN one is not nudged at all (agent-org#805); a holder with NO pull request is told nothing new", () => {
   const green = onPr(redPr(GREEN));
-  const reading = claimReading(green, ctx());
-  const [order] = claimStalledOrders([{ facts: green, reading }] as never, NOW);
-  assert.match(order.prompt, /NO WAIT THE ORG CAN READ/, "the unchanged idle text is still there");
-  assert.ok(order.prompt.endsWith(unansweredNudgeNote(1)));
-  assert.doesNotMatch(order.prompt, /RED/);
+  assert.deepEqual(claimStalledOrders([{ facts: green, reading: claimReading(green, ctx()) }] as never, NOW), [], "CONTROL: a green holder, idle, gets no order");
+  const red = onPr(redPr());
+  const [order] = claimStalledOrders([{ facts: red, reading: claimReading(red, ctx()) }] as never, NOW);
+  assert.match(order.prompt, /RED: /, "the red-check nudge is the exception the ruling names");
   const none = facts();
   const [plain] = claimStalledOrders([{ facts: none, reading: claimReading(none, ctx()) }] as never, NOW);
   assert.doesNotMatch(plain.prompt, /NUDGE \d OF/);
@@ -445,25 +444,27 @@ test("#2999 through the gate: a row carrying a future `Not-before:` or `needs:ch
   assert.equal(gateTick(claimRow("", ["answer:worker-9"])).length, 1, "an answer owed BY THE HOLDER is the row waiting on the holder, which `declaredWait` already refuses to read as one");
 });
 
-test("#2999 through the gate: only the NEWEST run per check name decides `checks-pending`, so a superseded pending run is not a wait", () => {
+test("#2999 through the gate (agent-org#805): an open PR is never nudged for its checks, the newest run or not; with no open PR the declared wait lapses and the holder is nudged", () => {
   const stale = { name: "gate", status: "IN_PROGRESS", startedAt: "2026-10-02T10:00:00Z", completedAt: "0001-01-01T00:00:00Z" };
   const done = { name: "gate", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-10-02T10:05:00Z", completedAt: "2026-10-02T10:09:00Z" };
   const newer = { name: "gate", status: "IN_PROGRESS", startedAt: "2026-10-02T10:20:00Z", completedAt: "0001-01-01T00:00:00Z" };
   const pr = (statusCheckRollup: object[]) => ({ number: 2968, headRefName: BRANCH, reviewDecision: "REVIEW_REQUIRED", labels: [], statusCheckRollup });
   const waitingCi = { state: "waiting-ci" as const, pr: { number: 2968 } };
   // #460: a pending check is a wait only for a holder that DECLARED `waiting-ci` (the declaration is what is read; the check is what must still be true)
-  assert.equal(declaredTick(claimRow(""), waitingCi, { prs: [pr([stale, done])] }).length, 1, "the newer, completed run settles it: the declared wait has lapsed and the holder is nudged");
-  assert.equal(declaredTick(claimRow(""), waitingCi, { prs: [pr([done, newer])] }).length, 0, "the control: the pending run NEWER than the completed one is the wait the holder named");
-  assert.equal(gateTick(claimRow(""), { prs: [pr([done, newer])] }).length, 1, "and the same pending run with NOTHING declared is no longer a wait");
+  assert.equal(declaredTick(claimRow(""), waitingCi, { prs: [pr([stale, done])] }).length, 0, "agent-org#805: an open PR is never nudged, whichever run is the newest");
+  assert.equal(declaredTick(claimRow(""), waitingCi, { prs: [pr([done, newer])] }).length, 0, "agent-org#805: the pending run NEWER than the completed one does not make it a nudge either");
+  assert.equal(declaredTick(claimRow(""), waitingCi, { prs: [] }).length, 1, "CONTROL: with no open PR the declared wait has lapsed and the holder is nudged");
+  assert.equal(gateTick(claimRow(""), { prs: [pr([done, newer])] }).length, 0, "agent-org#805: and the same open PR with NOTHING declared is not nudged");
 });
 
-test("#2999 through the gate: an open PR is not nudged for a holder that declared `waiting-review`; the undeclared holder is, a live `reviewer-<n>` or not, and `claimFactsFrom` carries the PR", () => {
+test("#2999 through the gate (agent-org#805): an open PR is never nudged, declared or not, reviewer or not; with no PR the undeclared holder is nudged; `claimFactsFrom` carries the PR", () => {
   const pr = { number: 2968, headRefName: BRANCH, reviewDecision: "REVIEW_REQUIRED", labels: [], checksPending: false };
   const reviewer = listing("idle", [{ label: "reviewer-2968", status: "working" }]);
-  assert.equal(gateTick(claimRow(""), { prs: [pr] }).length, 1);
-  assert.equal(gateTick(claimRow(""), { prs: [pr], agents: reviewer }).length, 1, "#460: a reviewer's pane is inference, and the holder's own declaration is the evidence");
+  assert.equal(gateTick(claimRow(""), { prs: [pr] }).length, 0, "agent-org#805: an open PR is never a nudge, declared or not");
+  assert.equal(gateTick(claimRow(""), { prs: [pr], agents: reviewer }).length, 0, "and a reviewer's pane changes nothing: the open PR is the holder's");
+  assert.equal(gateTick(claimRow(""), { prs: [] }).length, 1, "CONTROL: with NO open pull request the undeclared holder is nudged");
   assert.equal(declaredTick(claimRow(""), { state: "waiting-review", pr: { number: 2968 } }, { prs: [pr], agents: reviewer }).length, 0, "declared, the same holder is waiting");
-  assert.equal(declaredTick(claimRow(""), { state: "waiting-review", pr: { number: 2969 } }, { prs: [pr] }).length, 1, "a declaration for ANOTHER pull request is not this one's wait");
+  assert.equal(declaredTick(claimRow(""), { state: "waiting-review", pr: { number: 2969 } }, { prs: [pr] }).length, 0, "agent-org#805: a declaration for ANOTHER pull request does not make this one a nudge either");
   const built = claimFactsFrom({ row: 2999, session: "worker-9", waiting: null, blockedBy: [], comments: [claimComment], openPrs: [pr], mergedPrs: null,
     repo: "/repo", waitKind: "not-before" }, noGit as never) as { ownPrs: unknown[]; waitKind: string };
   assert.deepEqual(built.ownPrs, [pr]);

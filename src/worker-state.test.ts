@@ -275,7 +275,7 @@ test("NEGATIVE CONTROL: an idle worker with a fresh `waiting-ci` for an open PR 
   const waiting = dirOf({ state: "waiting-ci", pr: { number: 9460 } });
   assert.deepEqual(nudgedAt({ prs: [prOf(460, { pending: true })], stateDir: waiting }), [], "declared, open, a check running: the wait the worker named");
   assert.equal(nudgedAt({ prs: [], stateDir: waiting })[0], M, "the same declaration once the pull request is no longer open: stalled, and told within the figure");
-  assert.equal(nudgedAt({ prs: [prOf(460)], stateDir: waiting })[0], M, "and once the checks have finished: the result is in, and a worker waiting on it has something to do");
+  assert.deepEqual(nudgedAt({ prs: [prOf(460)], stateDir: waiting }), [], "agent-org#805: and once the checks have finished, an open pull request is still never a nudge");
   // MERGED is `mergedReading`'s before it is the idle reading's (#2470): a holder whose pull request merged and whose tree is clean is RELEASED, which is a
   // stronger reply than a nudge, and the declaration does not stand between the gate and it. (`declarationReading` calls this declaration `lapsed`, above.)
   const merged = { number: 9460, headRefName: "agent/x-460", mergedAt: "2026-10-10T08:58:00Z" };
@@ -289,7 +289,7 @@ test("NEGATIVE CONTROL: an idle worker with a fresh `waiting-ci` for an open PR 
 test("an idle worker with NO declaration is nudged at #458's figure (M), not at the 45-minute clock; a `done` herdr status is as idle as `idle`", () => {
   const none = dirOf(null);
   assert.equal(nudgedAt({ stateDir: none })[0], M, "no PR, no declaration");
-  assert.equal(nudgedAt({ prs: [prOf(460, { pending: true })], stateDir: none })[0], M, "an open PR with a pending check is not a declaration");
+  assert.deepEqual(nudgedAt({ prs: [prOf(460, { pending: true })], stateDir: none }), [], "agent-org#805: an open PR with a pending check is never a nudge, declared or not");
   assert.equal(nudgedAt({ stateDir: none, status: "done" })[0], M);
   assert.deepEqual(nudgedAt({ stateDir: none, status: "working" }), [], "twin: a working worker is not idle");
   const [order] = tickAt(M, { stateDir: none }, { 460: { session: "worker-9", idleSince: T0 } });
@@ -299,18 +299,18 @@ test("an idle worker with NO declaration is nudged at #458's figure (M), not at 
   assert.match(order.prompt, /agent-org worker:state blocked <row> <reason>/);
 });
 
-test("a declaration OLDER than the worker's last turn is nudged at M, and the same one declared after that turn began is not", () => {
+test("a declaration older than the worker's last turn, or made before its claim, is no excuse only for a CLOSED pull request (agent-org#805: an open one is never a nudge); with the PR closed the declaration lapses and the worker is nudged at M", () => {
   const waiting = { state: "waiting-ci" as const, pr: { number: 9460 } };
   const world = (dir: string, ledger = ""): World => ({ prs: [prOf(460, { pending: true })], stateDir: dir, ledger });
   const turnBegan = `${T0 - 2 * MIN}\tworker-9/claim-stalled/row-460/nudge-1\n`;
   const old = dirOf(waiting, 5);
-  assert.equal(nudgedAt(world(old, turnBegan))[0], M, "declared 5 minutes ago, but a prompt reached the worker 2 minutes ago: that turn ended without declaring");
+  assert.deepEqual(nudgedAt(world(old, turnBegan)), [], "agent-org#805: declared 5 minutes ago, before the prompt that began the turn 2 minutes ago: the open PR is still never a nudge");
   const fresh = dirOf(waiting, 1);
-  assert.deepEqual(nudgedAt(world(fresh, turnBegan)), [], "the control: declared 1 minute ago, after that prompt");
+  assert.deepEqual(nudgedAt(world(fresh, turnBegan)), [], "declared 1 minute ago, after that prompt: no nudge either");
   const beforeClaim = dirOf(waiting, 30);
-  assert.equal(nudgedAt(world(beforeClaim))[0], M, "declared before the claim began: another claim's");
-  const stale = tickAt(M, world(old, turnBegan), { 460: { session: "worker-9", idleSince: T0 } })[0];
-  assert.match(stale.prompt, /BEFORE YOUR LAST TURN BEGAN/, "and the order says so, not that nothing was declared");
+  assert.deepEqual(nudgedAt(world(beforeClaim)), [], "agent-org#805: declared before the claim began: still an open PR, still never a nudge");
+  assert.equal(nudgedAt({ ...world(old, turnBegan), prs: [] })[0], M, "CONTROL: with the PR closed, the declaration is lapsed (its turn ended without declaring) and the worker is nudged at M");
+  assert.deepEqual(tickAt(M, world(old, turnBegan), { 460: { session: "worker-9", idleSince: T0 } }), [], "and no order at all for the open PR");
 });
 
 // --- 3. `blocked` applies the label, and the excuse ends when it is removed -----------------------------------------------

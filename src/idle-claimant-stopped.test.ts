@@ -103,14 +103,14 @@ function declaredIn(declaration: Omit<Declaration, "session" | "at">, { minutesB
   return dir;
 }
 
-test("NEGATIVE CONTROL (#460): an open PR with a pending check excuses the worker only when it DECLARED `waiting-ci` for it; the twins are nudged at M", () => {
+test("NEGATIVE CONTROL (#460, withdrawn for an open PR by agent-org#805): an open PR of the holder's is never nudged, pending or declared; its no-PR twin is nudged at M", () => {
   const pr = prOf(4001, { pending: true });
   const waiting = declaredIn({ state: "waiting-ci", pr: { number: pr.number } });
   const declaredNothing = fixture({ prs: [pr] });
   try {
     assert.deepEqual(nudgedAt(fixture({ prs: [pr], stateDir: waiting }), 60), [], "declared, still pending: the wait the worker named");
-    assert.equal(nudgedAt(declaredNothing, 60)[0], M, "the same pending PR with nothing declared is no longer read as a wait: it is stalled at M, not at the 45-minute clock");
-    assert.equal(nudgedAt(fixture({ prs: [prOf(4001)], stateDir: waiting }), 60)[0], M, "the declaration outlives its condition: the check finished, so `waiting-ci` is not true any more");
+    assert.deepEqual(nudgedAt(declaredNothing, 60), [], "agent-org#805: the same pending PR with nothing declared is not nudged either -- the row's invariant is the open pull request");
+    assert.deepEqual(nudgedAt(fixture({ prs: [prOf(4001)], stateDir: waiting }), 60), [], "agent-org#805: the declaration outliving its condition does not change that an open pull request is never nudged");
   } finally {
     rmSync(waiting, { recursive: true, force: true });
   }
@@ -122,7 +122,7 @@ test("REGIME OFF: a state directory that cannot be READ (not merely empty) leave
   writeFileSync(`${unreadable}/${WORKER_STATE_DIR}`, "a file where the directory should be");
   try {
     assert.deepEqual(nudgedAt(fixture({ prs: [prOf(4001, { pending: true })], stateDir: unreadable }), 60), [], "could not ask: a pending check is a wait, as before");
-    assert.equal(nudgedAt(fixture({ prs: [prOf(4001)], stateDir: unreadable }), 60)[0], IDLE_CLAIMANT_MINUTES, "and a PR is on N, as before");
+    assert.deepEqual(nudgedAt(fixture({ prs: [prOf(4001)], stateDir: unreadable }), 60), [], "and an open PR is never nudged (agent-org#805), whichever rules apply");
   } finally {
     rmSync(unreadable, { recursive: true, force: true });
   }
@@ -213,13 +213,20 @@ test("two unanswered nudges for different rows read back as ONE repeat of the cl
   assert.deepEqual(repeatsIn(entries.slice(0, 1), { windowMs: 24 * 60 * MIN }), [], "the control: one unanswered nudge is an event and not a repeat");
 }));
 
-test("a holder with an open pull request is nudged by the idle clock and NEVER released (#2999), and a nudge that was never delivered is no event (a delivered one is, once idle again: work-gate-idle-again-incident.test.ts); a `working` worker is not nudged at all", () => withDir((dir) => {
+test("a holder with an open pull request is never nudged or released (agent-org#805, #2999), and its no-PR twin is nudged by the idle clock; a `working` worker is not nudged at all", () => withDir((dir) => {
   const memory: Record<string, unknown> = {};
   const pr = fixture({ stateDir: dir, prs: [prOf(4001)] });
   const nudges = new Set<string>(); // one episode is one `causeKey`, offered again on every tick of its window
   for (let m = 0; m <= IDLE_CLAIMANT_MINUTES + UNTOLD_RELEASE_MINUTES; m++) tickAt(m, pr, memory).forEach((o) => nudges.add(o.causeKey));
-  assert.equal(nudges.size, 1, "the control: the nudge IS sent, so the empty ledger below is not a ledger of a holder nobody nudged");
+  assert.equal(nudges.size, 0, "an open pull request of the holder's types no order at all, nudge or release");
   noLedger(dir);
+  withDir((twinDir) => {
+    const twinMemory: Record<string, unknown> = {};
+    const twin = fixture({ stateDir: twinDir });
+    const twinNudges = new Set<string>();
+    for (let m = 0; m <= IDLE_CLAIMANT_MINUTES + UNTOLD_RELEASE_MINUTES; m++) tickAt(m, twin, twinMemory).forEach((o) => twinNudges.add(o.causeKey));
+    assert.equal(twinNudges.size, 1, "the control: the same holder with NO pull request IS nudged, so the empty result above is not a holder nobody nudged");
+  });
   withDir((other) => {
     const working = fixture({ stateDir: other, workers: { "worker-9": "working" } });
     const mem: Record<string, unknown> = {};

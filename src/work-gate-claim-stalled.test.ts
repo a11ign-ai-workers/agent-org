@@ -2147,21 +2147,22 @@ test("#4017 each of the five measured shapes -- an idle holder, a pull request o
   }
 });
 
-test("#4017 CONTROLS: the same holder is still nudged when its pull request is older than the interval, has no age on record, or there is none", () => {
+test("#4017 CONTROLS (age rule withdrawn by agent-org#805): an open pull request of the holder's reads `pr-owned` at ANY age, and only a holder with NO open pull request is nudged", () => {
   const nudged = (facts: Facts) => claimReading(facts, IDLE_FOR_N);
+  // agent-org#805: the interval no longer turns a holder's open pull request into a nudge; the age the list carried is not the question
   const stood = nudged(holderWith(unreviewedPr(STALL_INTERVAL_MS)));
-  assert.deepEqual([stood.kind, (stood as { idle?: boolean }).idle], ["nudge", true], "AT the interval it is no longer young: #2968 sat 171 minutes behind `pr-owned`");
-  assert.equal(nudged(holderWith(unreviewedPr(STALL_INTERVAL_MS - 1))).kind, "pr-owned", "one millisecond short of it is still young");
-  assert.equal(nudged(holderWith(unreviewedPr(undefined))).kind, "nudge", "an age the list did not carry is not a young pull request: absence is not proof");
-  assert.equal(nudged(holderWith(unreviewedPr(undefined, { createdAt: "not a date" }))).kind, "nudge", "nor is one that does not parse");
+  assert.equal(stood.kind, "pr-owned", "agent-org#805: AT the interval the open pull request is still the holder's, and is still never a nudge (was: #2968's 171 minutes read as idle)");
+  assert.equal(nudged(holderWith(unreviewedPr(STALL_INTERVAL_MS - 1))).kind, "pr-owned", "one millisecond short of it: pr-owned, as before");
+  assert.equal(nudged(holderWith(unreviewedPr(undefined))).kind, "pr-owned", "agent-org#805: an age the list did not carry no longer matters either: the pull request is open");
+  assert.equal(nudged(holderWith(unreviewedPr(undefined, { createdAt: "not a date" }))).kind, "pr-owned", "agent-org#805: nor one that does not parse");
   const none = nudged(holderWith(null));
-  assert.deepEqual([none.kind, (none as { idle?: boolean }).idle], ["nudge", true], "NO open pull request and no wait is nudged, as before");
+  assert.deepEqual([none.kind, (none as { idle?: boolean }).idle], ["nudge", true], "CONTROL: NO open pull request and no wait is nudged, as before");
   const oldAndNew = nudged({ ...holderWith(unreviewedPr(STALL_INTERVAL_MS + MIN)), openPrs: 2,
     ownPrs: [unreviewedPr(STALL_INTERVAL_MS + MIN), unreviewedPr(10 * MIN, { number: 10 })] } as Facts);
   assert.equal(oldAndNew.kind, "pr-owned", "a holder that opened a second pull request ten minutes ago has just MOVED");
 });
 
-test("#4017 the tick: a young pull request of an idle holder sends nothing while the state directory cannot be read, and the same one aged past the interval sends the idle nudge", () => {
+test("#4017 the tick: an open pull request of an idle holder sends nothing while the state directory cannot be read, young or aged past the interval; with NO pull request the idle nudge IS sent", () => {
   // #460 reversed the grace for a gate that CAN read declarations (below): `/state/worker-state` being a FILE is the "could not ask" case, where the older rules stay.
   const unreadable = mkdtempSync(join(tmpdir(), "claim-stalled-unreadable-"));
   writeFileSync(join(unreadable, WORKER_STATE_DIR), "a file where the directory should be");
@@ -2169,15 +2170,18 @@ test("#4017 the tick: a young pull request of an idle holder sends nothing while
     const memory = () => ({ 2407: { session: "worker-7", idleSince: ago(50) } });
     const young = tickWith({}, [claim(600)], { agents: IDLE_HOLDER, memory: memory(), stateDir: unreadable, prs: [{ ...OPEN_PR, createdAt: iso(ago(54)) }] });
     assert.deepEqual(young.orders, [], "a pull request opened 54 minutes ago is the review the org owes, not the holder stalling");
+    // agent-org#805: a minute past the interval the open pull request is still the holder's, so still no order
     const aged = tickWith({}, [claim(600)], { agents: IDLE_HOLDER, memory: memory(), stateDir: unreadable, prs: [{ ...OPEN_PR, createdAt: iso(ago(N_MIN + 1)) }] });
-    assert.equal(aged.orders.length, 1, "CONTROL: the same fixture a minute past the interval still reaches the holder");
-    assert.match(aged.orders[0].prompt, /IDLE FOR \d+ MINUTES WITH NO WAIT THE ORG CAN READ/);
+    assert.deepEqual(aged.orders, [], "agent-org#805: a minute past the interval, the open pull request is still never a nudge");
+    const none = tickWith({}, [claim(600)], { agents: IDLE_HOLDER, memory: memory(), stateDir: unreadable });
+    assert.equal(none.orders.length, 1, "CONTROL: the same fixture with NO pull request still reaches the holder");
+    assert.match(none.orders[0].prompt, /NOTHING ON IT HAS MOVED/, "with no pull request the clock's order is the one that reaches it");
   } finally {
     rmSync(unreadable, { recursive: true, force: true });
   }
 });
 
-test("#460 the tick: a young pull request no longer excuses an idle holder that declared nothing; `waiting-review` for THAT pull request does, and the nudge says which", () => {
+test("#460 the tick (declarations no longer decide an open pull request, agent-org#805): an idle holder with an open pull request is never nudged, declared or not; with no pull request, nothing declared is nudged", () => {
   const memory = () => ({ 2407: { session: "worker-7", idleSince: ago(50) } });
   const young = [{ ...OPEN_PR, createdAt: iso(ago(54)) }];
   const declared = (declaration: Omit<Declaration, "session" | "at">) => {
@@ -2188,12 +2192,14 @@ test("#460 the tick: a young pull request no longer excuses an idle holder that 
   const waiting = declared({ state: "waiting-review", pr: { number: 9 } });
   const other = declared({ state: "waiting-review", pr: { number: 10 } });
   try {
+    // agent-org#805: the open pull request is the holder's whatever it declared, so none of these is nudged
     const none = tickWith({}, [claim(600)], { agents: IDLE_HOLDER, memory: memory(), prs: young });
-    assert.equal(none.orders.length, 1, "nothing declared: the 54-minute-old pull request is not an excuse any more");
-    assert.match(none.orders[0].prompt, /YOU DECLARED NOTHING/);
-    assert.deepEqual(tickWith({}, [claim(600)], { agents: IDLE_HOLDER, memory: memory(), prs: young, stateDir: waiting }).orders, [], "CONTROL: declared for #9, which is open and awaiting review");
-    const wrong = tickWith({}, [claim(600)], { agents: IDLE_HOLDER, memory: memory(), prs: young, stateDir: other });
-    assert.equal(wrong.orders.length, 1, "a declaration naming a pull request the holder does not have is nobody's wait");
+    assert.deepEqual(none.orders, [], "agent-org#805: nothing declared, and the 54-minute-old pull request is still never a nudge");
+    assert.deepEqual(tickWith({}, [claim(600)], { agents: IDLE_HOLDER, memory: memory(), prs: young, stateDir: waiting }).orders, [], "declared for #9, which is open and awaiting review: no nudge");
+    assert.deepEqual(tickWith({}, [claim(600)], { agents: IDLE_HOLDER, memory: memory(), prs: young, stateDir: other }).orders, [], "agent-org#805: a declaration naming another pull request does not make this one a nudge either");
+    const noPr = tickWith({}, [claim(600)], { agents: IDLE_HOLDER, memory: memory() });
+    assert.equal(noPr.orders.length, 1, "CONTROL: with NO open pull request, the holder is nudged");
+    assert.match(noPr.orders[0].prompt, /NOTHING ON IT HAS MOVED/);
   } finally {
     rmSync(waiting, { recursive: true, force: true });
     rmSync(other, { recursive: true, force: true });

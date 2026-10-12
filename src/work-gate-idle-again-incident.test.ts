@@ -128,26 +128,36 @@ test("a nudge the holder was NEVER TOLD of is not 'idle again': no event until i
   });
 }));
 
-test("a holder with an open PR and NOTHING pending is an incident one period after the delivery, and is never released (the case no release could ever write)", () => withDir((dir) => {
+test("a holder with an open PR is never nudged, so no incident follows it, pending or not (agent-org#805); it is never released either", () => withDir((dir) => {
   const r = run(dir, { prs: [prOf(476)], until: M + 1 + M + 10 });
-  assert.equal(r.nudgedMinute, M, "nudged: under the declaration regime a PR with nothing declared is the stopped holder's");
-  assert.deepEqual(r.appeared, [M + 1 + M]);
-  assert.deepEqual(r.releases, [], "and it is not released: the event is the whole of what the tick says about it");
+  assert.equal(r.nudgedMinute, null, "agent-org#805: an open PR of the holder's is never a nudge, whatever is declared or pending");
+  assert.deepEqual(r.appeared, [], "so no nudge is delivered and no idle-again incident is written");
+  assert.deepEqual(r.releases, [], "and it is not released");
   withDir((other) => {
     const waiting = run(other, { prs: [prOf(476, { pending: true })], until: M + 1 + M + 10 });
-    assert.equal(waiting.nudgedMinute, M, "the twin under the regime: a pending check is no excuse, only a declaration is, so it IS nudged and the incident follows");
+    assert.equal(waiting.nudgedMinute, null, "agent-org#805: the pending check changes nothing for an open PR");
+    withDir((noPr) => {
+      const twin = run(noPr, { until: M + 1 + M + 10 });
+      assert.equal(twin.nudgedMinute, M, "CONTROL: the holder with NO open PR IS nudged at M under the regime, so the nulls above are not a holder nobody nudged");
+      assert.deepEqual(twin.appeared, [M + 1 + M], "and the incident follows one period after the delivery");
+    });
   });
 }));
 
-test("REGIME OFF: a holder with an open PR is on the 30-minute bound -- nudged at 30, an incident one period after delivery; a pending check is a wait and writes nothing", () => withDir((dir) => {
+test("REGIME OFF: a holder with an open PR is never nudged (agent-org#805), on the 30-minute bound or not; with NO open PR it is nudged at 30 and an incident follows one period after delivery", () => withDir((dir) => {
   const r = run(dir, { prs: [prOf(476)], regimeOff: true, until: N + 1 + N + 10 });
-  assert.equal(r.nudgedMinute, N, "nudged at the 30-minute bound (it was 45)");
-  assert.deepEqual(r.appeared, [N + 1 + N]);
+  assert.equal(r.nudgedMinute, null, "agent-org#805: no nudge at the 30-minute bound or at 45 for an open PR of the holder's");
+  assert.deepEqual(r.appeared, [], "so no incident");
   assert.deepEqual(r.releases, [], "never released (#2999)");
   withDir((other) => {
     const waiting = run(other, { prs: [prOf(476, { pending: true })], regimeOff: true, until: N + 1 + N + 10 });
-    assert.equal(waiting.nudgedMinute, null, "the twin: a pending check is a wait the org can read, so no nudge");
+    assert.equal(waiting.nudgedMinute, null, "the pending check changes nothing for an open PR: no nudge");
     assert.deepEqual(waiting.appeared, [], "and no incident");
+    withDir((noPr) => {
+      const twin = run(noPr, { regimeOff: true, until: N + 1 + N + 10 });
+      assert.equal(twin.nudgedMinute, M, "CONTROL: with NO open PR the holder IS nudged (on the stopped bound, which a holder with no PR has whatever the regime), so the nulls above are not a holder nobody nudged");
+      assert.deepEqual(twin.appeared, [M + 1 + M], "and the incident follows one period after the delivery");
+    });
   });
 }));
 
