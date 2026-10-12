@@ -2794,7 +2794,7 @@ function withListenerHome(body: (home: { shippedDir: string, installedDir: strin
 test("#3025: the listener's template is classified as the tool's and optional on `messaging`, so it is never UNCLASSIFIED", () => {
   assert.ok(TOOL_ENTRIES.includes("chairman-listen.service.in"));
   assert.equal(OPTIONAL_UNITS["chairman-listen.service.in"], "messaging");
-  assert.deepEqual(LONG_RUNNING_TEMPLATES, ["chairman-listen.service.in", "otel-receiver.service.in", "event-receiver.service.in"]);
+  assert.deepEqual(LONG_RUNNING_TEMPLATES, ["chairman-listen.service.in", "otel-receiver.service.in", "event-receiver.service.in", "event-tunnel.service.in"]);
   withListenerHome(({ shippedDir }) => {
     assert.deepEqual(unclassifiedEntries({ shippedDir, projectUnitsDir: null }), []);
     writeFileSync(join(shippedDir, "stray-listener.service.in"), LISTENER_TEMPLATE);
@@ -3023,7 +3023,8 @@ test("#3443 (5): `toolVersion` is `latest` or one release tag, every other value
 const toolHost3443 = () => hostWith({ tool: TOOL_3443 });
 const plainHost3443 = () => hostWith({});
 // agent-org#980: the property below walks EVERY template in the directory, and the event receiver's renders only for a host that declares `webhook`, so its host does.
-const webhookToolHost3443 = () => hostWith({ tool: TOOL_3443, events: { source: "webhook", receiver: { port: 8787, secretPath: "/etc/a11ign/webhook-secret", tunnel: "cloudflare" } } });
+// a11ign/a11ign#5197: and the funnel's only for a host that opens one, so its host does that too (the receiver's own `tunnel` then reads `tailscale`).
+const webhookToolHost3443 = () => hostWith({ tool: TOOL_3443, events: { source: "webhook", tunnel: "tailscale-funnel", publicUrl: "https://agents.example.ts.net/webhook", receiver: { port: 8787, secretPath: "/etc/a11ign/webhook-secret", tunnel: "tailscale" } } });
 
 test("#3443 (6): the chairman listener and watcher render `node <tool>/src/...` with AGENT_ORG_HOST in tool form, and today's bytes without a tool", () => {
   const units = readUnitsDeclaration();

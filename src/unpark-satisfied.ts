@@ -330,7 +330,7 @@ export function unparkingWaits<T>(readWaits: (input: { prsRead: any[] | null; op
   };
 }
 
-/** The machinery flag that turns the other-tracker pass on (`machinery-canary.json`, default OFF). Off reads and writes nothing for another tracker's rows; the home pass is not behind it. */
+/** The machinery flag that turns the other-tracker pass on. Its ONLY home is the `rows.autoUnpark` record in `machinery-canary.json` (default OFF): a `rows.autoUnpark` key in a project's `project.json` is never read, so setting it there does nothing. Off reads and writes nothing for another tracker's rows; the home pass is not behind it. */
 export const AUTO_UNPARK_FLAG = "rows.autoUnpark";
 
 /**
@@ -342,7 +342,10 @@ export const AUTO_UNPARK_FLAG = "rows.autoUnpark";
 export function unparkOtherTrackers({ state, scopes, facts, now, run, log }: { state: CanaryState; scopes: { repo: string; rows: any[] | null; }[]; facts: WaitFacts | null; now: number; run: (args: string[]) => string; log: (line: string) => void; }): void {
   if (!machineryFlagOn(state, AUTO_UNPARK_FLAG)) return;
   for (const { repo, rows } of scopes) {
-    if (!Array.isArray(rows)) continue;
+    if (!Array.isArray(rows)) {
+      log(`unpark-satisfied: ${repo} rows were not read; its parked rows stay parked this tick\n`);
+      continue;
+    }
     const tagged = rows.map((row) => ({ ...row, repoKey: repo, repo }));
     const result = unparkSatisfied({ rows: tagged, facts: facts ?? { items: {} }, now }, githubIo(run, { repo }));
     reportUnpark(result, log);

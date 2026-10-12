@@ -280,6 +280,7 @@ const DECLARED_CARRIERS: Declaration[] = [
   { name: "host-units.ts", reason: "the units' own templates name the repository; row 3f of #69 moves them" },
   { name: "org-watch.ts", reason: "a later row of #69 moves it" },
   { name: "reviewer/pr-review-verdict.sh", reason: "the verdict script; row 3e of #69 moves it" },
+  { name: "decision-run/classes/ready-queue-empty.ts", reason: "a row mention (`#7`, `agent-org#7`) names one of the project's two trackers, and the queue is served on the record issue (#910)" },
 ];
 
 test("a file that newly carries the literal is DECLARED with a reason, against the base this change merges into", () => {

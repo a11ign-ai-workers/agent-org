@@ -414,7 +414,9 @@ test("laneReason, ROUTED_TO, FLEET_LAB_PATTERNS and SPAWN_CAUSES are byte-identi
   assert.ok(/(?:const|function)\s+ROUTED_TO\b/.test("const ROUTED_TO = 1;"), "the marker recognises a declaration it is looking for");
 });
 
-test("the default class registry holds only `answer-owed` (agent-org#905), and a class is switched on by the seats file, never by existing", async () => {
+test("the default class registry holds the classes that ship as files (agent-org#905, #910), and a class is switched on by the seats file, never by existing", async () => {
   const { CLASSES_DIR } = await import("./serve-by-run.ts");
-  assert.deepEqual([...(await loadClasses(CLASSES_DIR)).keys()], ["answer-owed"], "the first class ships as a file; each later one is its own row");
+  const causes = [...(await loadClasses(CLASSES_DIR)).keys()];
+  // Each class is its own row, so the test names the classes it knows and does not pin the whole set: pinning it made every new class edit this line.
+  for (const known of ["answer-owed", "ready-queue-empty"]) assert.ok(causes.includes(known), `${known} ships as a file`);
 });
