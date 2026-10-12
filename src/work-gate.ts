@@ -133,6 +133,7 @@ import { anyBlockerClearingCandidate, blockerClearedReading, boardingPortOf, cla
   withStaleRefusals } from "./work-gate/tick.ts";
 import { REVIEWER_STATE_DIR, type Scope, comparablePrFiles, labelsOf, scopesOf } from "./work-gate/vocabulary.ts";
 import { endGateSpan } from "./lib/spawn-census.ts";
+import { repeatedOrdersTick } from "./order-verify.ts";
 export { openRowState, workingClaims, waitingBreakdown, stalledOrder, performActions } from "./work-gate/orders.ts";
 export { CHAIN_WAIT_FLAG, CHAIN_WAIT_FILE, CHAIN_WAIT_MINUTES, CHAIN_WAIT_ESCALATION_SESSION, blockedReasonOf, chainWaitsOf, advanceChainWaits,
   chainWaitWakeText, chainWaitEscalationText, chainWaitOrder, chainWaitOrders } from "./work-gate/causes/org-health-chain-wait.ts";
@@ -609,6 +610,7 @@ function main() {
   // FIRST OF ALL, AND ON PURPOSE (#2163): `wake` delivers in this order and records each delivery with a write, so
   // on a full disk the tick can end partway. The order that says the disk is full must not be the one behind it.
   orders.unshift(...diskOrders);
+  orders.push(...endGateSpan("repeatedOrders", repeatedOrdersTick())); // #5147: flag-gated (`orders-verifiable`); a repeat the holder ignored is an incident, filed once
   orders.push(...deadMansSwitch({ orders, drain, performed, openRows: openRowsRead, agents: herdrListing }), ...retrospectiveTick()); endGateSpan("deadMansSwitch+retrospective"); // #2938: AFTER the switch, which reads `orders` -- a once-a-day offer must not mask a stall
   // #4065: LAST, and AFTER the switch above: a stuck org that found something is not a quiet org, even when `ceo` is not woken for it. Only the `org-health` orders to `ceo` are held, and the digest rides the first order `ceo` still gets.
   const emitted = quietOrgHealth(settleOverdueLists(orders, { portFor: portOf }), { dir: REVIEWER_STATE_DIR }); endGateSpan("settleOrders"); // agent-org#491: the `overdue` list is a row write, not an order

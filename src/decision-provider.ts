@@ -28,7 +28,7 @@ import { DEFAULT_TRIAGE_MIN_CONFIDENCE } from "./host-config.ts";
 // (`triage-provider.ts` imports `decide` back for `triageOrder`: a cycle, and safe because neither module uses the other at load, only inside a call.)
 import { askProvider, printDiagnostic, processState, TRIAGE_UNAVAILABLE, type Described, type ProviderQuestion, type TriageDeps } from "./triage-provider.ts";
 
-export const DECISION_USES = Object.freeze(["model-routing", "wake-triage", "ci-failure-class", "failure-class-match", "duplicate-row", "review-depth", "spec-review"] as const);
+export const DECISION_USES = Object.freeze(["model-routing", "wake-triage", "ci-failure-class", "failure-class-match", "duplicate-row", "review-depth", "spec-review", "orders-verifiable"] as const);
 export type DecisionUse = (typeof DECISION_USES)[number];
 /** More than this is not a trimmed state, and is not sent. */
 export const MAX_STATE_BYTES = 4096;
