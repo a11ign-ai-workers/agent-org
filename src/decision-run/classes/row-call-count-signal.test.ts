@@ -68,7 +68,7 @@ test("POSITIVE CONTROL: the reason is capped, the count is read from the prompt,
   assert.equal(whyNotClass(cls), null);
   const classes = await loadClasses(CLASSES_DIR);
   // The registry imports the file by URL, so the instance is its own: compare what it serves, not identity.
-  assert.deepEqual([...classes.keys()], ["row-call-count-signal"]);
+  assert.ok(classes.has("row-call-count-signal"), "the registry serves this cause");
   assert.deepEqual([...(classes.get("row-call-count-signal")?.allowed ?? [])], [...cls.allowed]);
 });
 

@@ -9,7 +9,7 @@ The `row-call-count-signal` decision class (Move 3, a11ign/a11ign#4505): a file 
 
 Mutation: allowed-answer check never firing (1 red, its own negative control); claim check never firing (1 red) and always firing (3 red); tier default moved to Sonnet (2 red). Each restore byte-identical (copy in the scratchpad, `diff`).
 
-Evidence: `src/decision-run/classes/row-call-count-signal.test.ts` 10 of 10; `src/decision-run` with `src/serve-by-run.test.ts` green at this head; `tsc --noEmit` clean.
+Evidence: `src/decision-run/classes/row-call-count-signal.test.ts` 10 of 10; `src/decision-run` with `src/serve-by-run.test.ts` green at the rebased head; `tsc --noEmit` clean.
 
 Acceptance: `npx rstest run --config scripts/rstest/rstest.config.ts src/decision-run/classes/row-call-count-signal.test.ts`
 
@@ -17,7 +17,6 @@ Acceptance: `npx rstest run --config scripts/rstest/rstest.config.ts src/decisio
 
 Closes a11ign/agent-org#908.
 
-Outside-Region: src/serve-by-run.test.ts — its tripwire "the default class registry holds no class" is exactly what the first class falsifies; it now asserts the registry holds this one class and that it is `seat` without a seats file.
 
 platform: n/a (a class module the registry already defines)
 
