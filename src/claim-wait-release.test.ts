@@ -20,7 +20,7 @@ const NOTHING = { state: "none" as const, dirty: 0, unpushed: 0 };
 
 const facts = (over: Partial<ClaimFacts> = {}): ClaimFacts => ({
   row: 3870, session: "worker-3870", claimedAt: NOW - 60 * MIN, branch: "agent/x-3870", worktree: "/w/wt-3870",
-  comment: null, commit: null, push: null, file: () => null, work: () => NOTHING, openPrs: 0, mergedPr: null,
+  comment: null, commit: () => null, push: () => null, file: () => null, work: () => NOTHING, openPrs: 0, mergedPr: null,
   waiting: "waiting until 2026-10-10T19:00:00Z", waitKind: "not-before", blockedBy: [], ...over,
 });
 
@@ -69,7 +69,7 @@ test("NEGATIVE: a fleet-hold is the holder's own wait, and a fact built with no 
 });
 
 test("NEGATIVE: no declared wait is not released by this reading (a moving claim stays moving)", () => {
-  const moving = claimReading(facts({ waiting: null, waitKind: null, commit: NOW - 5 * MIN }), CTX);
+  const moving = claimReading(facts({ waiting: null, waitKind: null, commit: () => NOW - 5 * MIN }), CTX);
   assert.equal(moving.kind, "moving");
 });
 

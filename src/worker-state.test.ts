@@ -581,7 +581,7 @@ test("NEGATIVE CONTROL: a failed edge write FALLS BACK to the label, so the work
 
 test("NEGATIVE CONTROL: the gate reads a holder BLOCKED by `--on` the way the shipped decider does: released when nothing is built, HOLDING while it has dirty files or unpushed commits (twin: the same claim with no edge is read by the clock)", () => {
   const claim = (work: ReturnType<ClaimFacts["work"]>, blockedBy: number[]): ClaimFacts => ({
-    row: 12, session: "worker-agent-org-12", claimedAt: T0, branch: "agent/x", worktree: "/w", comment: null, commit: null, push: null,
+    row: 12, session: "worker-agent-org-12", claimedAt: T0, branch: "agent/x", worktree: "/w", comment: null, commit: () => null, push: () => null,
     file: () => null, work: () => work, openPrs: 0, mergedPr: null, waiting: null, blockedBy,
   });
   const ctx = { now: T0 + 60 * MIN, restartAt: null, agents: null, nudge: null, goneSince: null, idleSince: null };

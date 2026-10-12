@@ -143,7 +143,7 @@ test("#2999 (4) the nudge names every row-field spelling and the pull-request wa
 // --- the nudge and the second reading, through `claimReading` ------------------------------------------------------------------------------
 
 const facts = (over: object = {}) => ({ row: 2999, session: "worker-9", claimedAt: ago(60), branch: "agent/x-2999", worktree: null,
-  comment: null, commit: null, push: null, file: () => null, work: () => ({ state: "none", dirty: 0, unpushed: 0 }),
+  comment: null, commit: () => null, push: () => null, file: () => null, work: () => ({ state: "none", dirty: 0, unpushed: 0 }),
   openPrs: 0, mergedPr: null, waiting: null, blockedBy: [], ownPrs: [], ...over }) as unknown as Parameters<typeof claimReading>[0];
 const ctx = (over: object = {}) => ({ now: NOW, restartAt: null, nudge: null, agents: listing("idle"), goneSince: null, idleSince: ago(50), ...over }) as
   Parameters<typeof claimReading>[1];
@@ -200,8 +200,8 @@ test("#2999 before the clock's own interval a remembered idle nudge is HELD as `
   const held = claimReading(facts(), ctx({ nudge, agents: listing("working") }));
   assert.equal(held.kind, "nudged", "base says `moving` (claimed 60 minutes ago): without the overlay the nudge memory would be dropped here");
   assert.deepEqual(nextStallState({}, [{ facts: facts(), reading: held }] as never, NOW), { 2999: { session: "worker-9", nudgedAt: ago(10), idle: true } });
-  assert.equal(claimReading(facts({ commit: ago(5) }), ctx({ nudge, idleSince: ago(2) })).kind, "idle-watch", "a commit after the nudge is a move: the idle clock starts afresh");
-  assert.equal(claimReading(facts({ commit: ago(5) }), ctx({ nudge, agents: listing("working") })).kind, "moving", "and a holder back at work is simply moving");
+  assert.equal(claimReading(facts({ commit: () => ago(5) }), ctx({ nudge, idleSince: ago(2) })).kind, "idle-watch", "a commit after the nudge is a move: the idle clock starts afresh");
+  assert.equal(claimReading(facts({ commit: () => ago(5) }), ctx({ nudge, agents: listing("working") })).kind, "moving", "and a holder back at work is simply moving");
 });
 
 test("#2999 a holder with an open PR is NEVER released by the idle reading: it stays `nudged`", () => {
