@@ -772,12 +772,14 @@ export function reportClearingDrops({ openRows, prs, closings, claimFacts }: Par
  * @param otherScopes the other repositories' lanes, already read this tick (#3566): their open lists are not asked again
  */
 export function claimStallsWithFacts(rows: Parameters<typeof claimStallsNow>[0], claimedComments: Parameters<typeof claimStallsNow>[1], prs: Parameters<typeof claimStallsNow>[2], otherScopes: ReturnType<typeof readOtherScopes>,
-  seams: Pick<NonNullable<Parameters<typeof claimStallsNow>[3]>, "tick" | "merged" | "elsewhere" | "log"> & { run?: (args: string[], repo?: string) => string; } = {}): { claimStalls: ReturnType<typeof claimStallsNow>; claimFacts: import("../work-gate/claim-stall-tick.ts").ClaimFactsOfTick | null | undefined; } {
+  seams: Pick<NonNullable<Parameters<typeof claimStallsNow>[3]>, "tick" | "merged" | "elsewhere" | "log"> & { run?: (args: string[], repo?: string) => string; } = {},
+  // #1183: the wait facts this tick read, so a holder's body `Waiting-for:` is read against the same facts the ready rows are
+  waitFacts: import("../wait-condition.ts").WaitFacts | null = null): { claimStalls: ReturnType<typeof claimStallsNow>; claimFacts: import("../work-gate/claim-stall-tick.ts").ClaimFactsOfTick | null | undefined; } {
   let claimFacts: import("../work-gate/claim-stall-tick.ts").ClaimFactsOfTick | null | undefined;
   const { run, ...stubs } = seams;
   // agent-org#747: `trackers` is every OTHER declared tracker's claimed rows, from the lanes already read, so the stall pass evaluates their holders too
   const claimStalls = claimStallsNow(rows, claimedComments, prs, { onFacts: (facts) => { claimFacts = facts; },
-    elsewhere: () => readElsewherePrs(undefined, undefined, otherScopes), trackers: () => otherTrackerClaims(otherScopes, run), ...stubs });
+    elsewhere: () => readElsewherePrs(undefined, undefined, otherScopes), trackers: () => otherTrackerClaims(otherScopes, run), waitFacts, ...stubs });
   return { claimStalls, claimFacts };
 }
 
