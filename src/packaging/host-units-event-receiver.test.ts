@@ -48,7 +48,7 @@ test("agent-org#980: the template is classified as the tool's, long-running with
   assert.ok(TOOL_ENTRIES.includes(TEMPLATE));
   assert.ok(LONG_RUNNING_TEMPLATES.includes(TEMPLATE), "`enable --now` on the SERVICE is what starts it: no clock does");
   assert.ok(!TOOL_ENTRIES.includes("event-receiver.timer.in"));
-  assert.deepEqual(Object.keys(HOST_OPTIONAL_UNITS), [TEMPLATE]);
+  assert.deepEqual(Object.keys(HOST_OPTIONAL_UNITS), [TEMPLATE, "event-tunnel.service.in"], "the receiver's template and, since a11ign/a11ign#5197, the funnel's");
   assert.ok(Object.keys(HOST_OPTIONAL_UNITS).every((name) => existsSync(join(SHIPPED_DIR, name))), "every host-optional template is a file that is there");
   assert.deepEqual(unclassifiedEntries({ shippedDir: SHIPPED_DIR, projectUnitsDir: null, units: UNITS, host: pollHost() }), []);
 });

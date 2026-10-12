@@ -53,14 +53,14 @@ test("briefRole: orchestrator names orchestrator.md and not engineer.md; the def
   assert.doesNotMatch(orchestrator, /engineer\.md/);
   assert.match(spawn(), /roles\/engineer\.md/, "the negative control: without the option the prompt does name engineer.md");
   assert.doesNotMatch(spawn(), /orchestrator\.md/);
-  assert.deepEqual([...SPAWN_BRIEF_ROLES], ["engineer", "orchestrator"]);
+  assert.deepEqual([...SPAWN_BRIEF_ROLES], ["engineer", "orchestrator", "ceo"]);
   assert.ok(Object.isFrozen(SPAWN_BRIEF_ROLES));
 });
 
 test("a role outside the list, a path and the empty string each throw, naming the role and the list", () => {
-  for (const role of ["ceo", "reviewer", "", "../engineer"]) {
+  for (const role of ["product-manager", "reviewer", "", "../engineer"]) {
     assert.throws(() => spawn({ briefRole: role }), (error: Error) =>
-      error.message.includes(JSON.stringify(role)) && error.message.includes("engineer, orchestrator"), `addressed: ${JSON.stringify(role)}`);
+      error.message.includes(JSON.stringify(role)) && error.message.includes("engineer, orchestrator, ceo"), `addressed: ${JSON.stringify(role)}`);
     assert.throws(() => briefRoleSentence(role), (error: Error) => error.message.includes(JSON.stringify(role)), `briefRoleSentence: ${JSON.stringify(role)}`);
   }
 });

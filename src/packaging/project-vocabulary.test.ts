@@ -168,6 +168,8 @@ const DECLARED_NON_VOCABULARY_HITS: Declaration[] = [
   // leaf's no-import contract or state the same four facts twice, and `project-vocabulary.ts` imports them from here instead (assertion 1, above,
   // pins the values equal).
   ...nonVocabulary("claim-labels.ts", ['"ready"', '"was-ready"', '"in-progress"', '"started"'], "the import-free leaf the claim-lifecycle labels are defined in (#804)"),
+  // #910: `TicketState` values of the ticket port, which the class compares an item's state against and sets; they are states of the port's own union, not labels.
+  ...nonVocabulary("decision-run/classes/ready-queue-empty.ts", ['"backlog"', '"ready"'], "TicketState values of the ticket port, not labels"),
   // #3942: the same leaf holds `STATE_LABELS`, whose `backlog` and `blocked` ARE vocabulary labels. It cannot import the vocabulary (no imports, same contract), so it keeps its
   // own copy and `state-label-exactly-one.test.ts` ("STATE_LABELS is the six names ...") pins each equal to the vocabulary's, which is what stops the copy drifting.
   ...nonVocabulary("claim-labels.ts", ['"backlog"', '"blocked"'], "the import-free leaf's own copy of two vocabulary labels in STATE_LABELS, pinned equal to them (#3942)"),
