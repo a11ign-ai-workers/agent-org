@@ -482,26 +482,35 @@ test("agent-org#804: a reading with every row measured prints no PARTIAL", () =>
 const NUL_PADDED = "\0".repeat(64);
 const cycleLine = (role: string, row: number, iso: string) => JSON.stringify({ role, row, rows: [row], at: at(iso), clean: true });
 const VALID_CYCLES = [cycleLine("worker-3390", 3390, "2026-10-04T10:00:00Z"), cycleLine("worker-agent-org-804", 804, "2026-10-04T11:00:00Z")];
-function spareDir(lines: string[]) {
+/** Runs `check` on a fresh cache dir holding `lines`, and removes the dir after, as `runCommand` does for its `HOME`. */
+function withSpareDir(lines: string[], check: (dir: string) => void) {
   const dir = mkdtempSync(join(tmpdir(), "spare-cycles-"));
-  writeFileSync(join(dir, "spare-cycles"), `${lines.join("\n")}\n`);
-  writeFileSync(join(dir, "spare-instances.json"), "{}");
-  return dir;
+  try {
+    writeFileSync(join(dir, "spare-cycles"), `${lines.join("\n")}\n`);
+    writeFileSync(join(dir, "spare-instances.json"), "{}");
+    check(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 }
 
 test("agent-org#1122: a NUL-padded spare-cycles line between two valid ones is skipped and counted, and both valid instances are read", () => {
-  const read = readInstances(spareDir([VALID_CYCLES[0], NUL_PADDED, VALID_CYCLES[1]]));
-  assert.deepEqual(read.instances.map((instance) => [instance.session, instance.rows, instance.endedAt]), [
-    ["worker-3390", [3390], at("2026-10-04T10:00:00Z")],
-    ["worker-agent-org-804", [804], at("2026-10-04T11:00:00Z")],
-  ]);
-  assert.equal(read.skipped, 1);
+  withSpareDir([VALID_CYCLES[0], NUL_PADDED, VALID_CYCLES[1]], (dir) => {
+    const read = readInstances(dir);
+    assert.deepEqual(read.instances.map((instance) => [instance.session, instance.rows, instance.endedAt]), [
+      ["worker-3390", [3390], at("2026-10-04T10:00:00Z")],
+      ["worker-agent-org-804", [804], at("2026-10-04T11:00:00Z")],
+    ]);
+    assert.equal(read.skipped, 1);
+  });
 });
 
 test("agent-org#1122: the same fixture without the NUL line skips nothing (positive control)", () => {
-  const read = readInstances(spareDir(VALID_CYCLES));
-  assert.equal(read.instances.length, 2);
-  assert.equal(read.skipped, 0);
+  withSpareDir(VALID_CYCLES, (dir) => {
+    const read = readInstances(dir);
+    assert.equal(read.instances.length, 2);
+    assert.equal(read.skipped, 0);
+  });
 });
 
 test("agent-org#1122: the reading names the skipped spare-cycles lines, and a reading with none names nothing", () => {
