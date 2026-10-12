@@ -1,7 +1,5 @@
 import { spawnSync } from "node:child_process";
-import { realpathSync } from "node:fs";
 import { join } from "node:path";
-import { pathToFileURL } from "node:url";
 import { READY_LABEL, CLAIM_LABEL } from "../claim-labels.ts";
 import { todayIso, ANSWER_PREFIX } from "../waiting-condition.ts";
 import { subjectMention, subjectRef } from "../review-attribution.ts";
@@ -41,7 +39,7 @@ import { patchUnchangedSince, pipelineCodeownerReviewMissing, pipelineCodeownerR
   withPatchIds } from "./causes/pr-reviews.ts";
 import { REVIEW_STATE, reviewStateOf } from "./pr-state.ts";
 import { EXIT, branchesToReplace, conditionalFor, defaultRun, holdTickBudget, inRepo, isGhRun, readArming, readClaimedRowComments, readElsewherePrs, readOpenRows,
-  readPromotableRows, readPrs, readReadyRows, readWithFirstWaveTogether, repoNow, restReadsOfTick, runBatch, standingFor } from "./reads.ts";
+  readPromotableRows, readPrs, readReadyRows, readWithFirstWaveTogether, repoNow, restReadsOfTick, runBatch, standingFor, isGateProcess } from "./reads.ts";
 import { type Budget, budgetLine, restConditionalOn, tickBudget } from "../gh-conditional.ts";
 import { claimedRowAmendedOrders } from "./causes/rows-amended.ts";
 import { answerGivenOrders, answerGivenOrdersOrNone, answerOrders, bareAnswerLabelOrders, bareAnswerOrdersOrNone, blockedReferentOrders,
@@ -499,25 +497,11 @@ export function tickReadingLines(budget: Budget, rest: { asked: number; notModif
 }
 
 /**
- * Is this process the gate (`work-gate.ts`)? Importing this file is not running a tick: a CLI or a live run that imports the reads must never be capped or
- * write the tick's lines. Same test `work-gate.ts` makes of itself (`import.meta.url` against `argv[1]`).
- */
-function runningAsGate(): boolean {
-  if (process.argv[1] === undefined) return false;
-  try {
-    return pathToFileURL(realpathSync(process.argv[1])).href === new URL("../work-gate.ts", import.meta.url).href;
-  } catch {
-    // An argv[1] that cannot be resolved (`node -e`, a REPL) is not the gate; "cannot tell" must never switch a cap on.
-    return false;
-  }
-}
-
-/**
  * EACH TICK IS ITS OWN PROCESS, so import time is the start of the tick and `exit` is its end (`process.exit` paths included). Held at import and not in
  * `main`, which lives in `work-gate.ts`; the flag is read once here, so a change lands on the next tick and never mid-tick.
  */
 function holdBudgetForThisTick(): void {
-  if (!restConditionalOn() || !runningAsGate()) return;
+  if (!restConditionalOn() || !isGateProcess()) return;
   holdTickBudget(cutBackFirst(tickBudget));
   process.on("exit", () => process.stderr.write(`${tickReadingLines(tickBudget, restReadsOfTick()).join("\n")}\n`));
 }

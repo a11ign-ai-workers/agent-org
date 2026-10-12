@@ -10,6 +10,10 @@
  * AHEAD IS THE LOWER NUMBER. A pull request number is handed out at creation and only grows within a repository, so "opened first" is a
  * comparison of two integers and needs no timestamp that a later edit could move.
  *
+ * #1165, BEHIND `RECHECK_FLAG` (shipped OFF): ahead is ALSO an approved, green pull request whatever its number; a hold whose overlap has gone
+ * is released; and a DIRTY pull request is told to rebase now, not to hold. All three are read from the pull requests' CURRENT state each tick,
+ * so none of them can go stale.
+ *
  * FILED UNDER `pr-merge-conflict`, no new cause (a cause is four places: `CAUSES`, START/JUDGMENT, the worker-profile `PROFILES` and a
  * changeset): the audience is the same -- the owner of a pull request -- and so is the remedy the order ends in, a rebase. It arrives before
  * the conflict does, which is the whole point. The key says `shares`, so it never collides with a conflicted head's.
@@ -30,9 +34,15 @@ import { isAcceptancePath } from "../acceptance-file.ts";
 import { waitItemOf, declaredWaitsOf } from "../wait-condition.ts";
 import { labelsOf, sessionOf } from "../work-gate.ts";
 import { ownerOfPr, DEAD_OWNER_FALLBACK } from "./pr-orders.ts";
+import { mergeCandidates, reviewStateOf, REVIEW_STATE } from "./pr-state.ts";
 
 /** Where an order goes when nobody can be named as the later pull request's owner (the row's ruling; `ownerOfPr`'s own last rung is `ceo`). */
 const NO_OWNER_SESSION = "product-manager";
+/**
+ * #1165: THE FLAG FOR THE THREE RE-CHECKS BELOW. The caller reads it from `machinery-canary.json` and passes `recheck`; OFF (the default) is
+ * the ordering above, byte for byte, so nothing turns on until the flag does.
+ */
+export const RECHECK_FLAG = "holds.recheck";
 /** Changeset files are excluded on both sides, as B4 excludes them (`file-overlap-rule.ts`): every pull request adds its own, and a shared NAME is no shared change. */
 const isChangeset = (path: string) => path.startsWith(".changeset/") || isAcceptancePath(path); // ADR 0044: each pull request adds its own `.acceptance/` file
 const HASH_LENGTH = 10;
@@ -40,13 +50,16 @@ const HASH_LENGTH = 10;
 export type Overlap = { ahead: Compared, shared: string[] };
 export type Compared = { pr: any, files: Set<string> };
 
-/** @param [say] the diagnostic for a pull request left out; the gate's stderr by default */
-export function sharedFileOrders(prs: any[], say: (line: string) => void = (line) => process.stderr.write(line)): {
+/**
+ * @param [say] the diagnostic for a pull request left out; the gate's stderr by default
+ * @param [recheck] `RECHECK_FLAG` is on: the sequencing is read against the pull requests' CURRENT state (#1165), see `ordersWithin`
+ */
+export function sharedFileOrders(prs: any[], say: (line: string) => void = (line) => process.stderr.write(line), { recheck = false }: { recheck?: boolean } = {}): {
     session: string; fallback?: string; fallbackOnlyIfAbsent?: boolean; fallbackPrompt?: string; cause: string; subject: string;
     discriminator: string; prompt: string; causeKey: string;
 }[] {
   const compared = (prs ?? []).flatMap((pr) => comparedOf(pr, say));
-  return [...groupByRepo(compared).values()].flatMap(ordersWithin);
+  return [...groupByRepo(compared).values()].flatMap((group) => ordersWithin(group, recheck));
 }
 
 /** @returns none when the list is not the whole of the pull request's files */
@@ -69,14 +82,35 @@ function groupByRepo(compared: Compared[]) {
   return groups;
 }
 
-/** @param group one repository's pull requests */
-function ordersWithin(group: Compared[]) {
-  const ascending = [...group].sort((a, b) => Number(a.pr.number) - Number(b.pr.number));
+/**
+ * @param group one repository's pull requests
+ * @param recheck #1165, `RECHECK_FLAG` on: the sequencing is read against the CURRENT state, every tick, so it cannot go stale.
+ *   (2) an approved, green pull request is ahead of an overlapping one whatever its number; (1) a hold whose overlap has gone is released,
+ *   and (3) a DIRTY pull request is told to rebase, which `orderFor` says. OFF: ahead is the lower number, and a hold is never looked at again.
+ */
+function ordersWithin(group: Compared[], recheck: boolean) {
+  const ascending = [...group].sort((a, b) => rankOf(a, recheck) - rankOf(b, recheck) || Number(a.pr.number) - Number(b.pr.number));
   return ascending.flatMap((later, i) => {
-    const overlaps = ascending.slice(0, i).map((ahead) => overlapOf(ahead, later)).filter((o) => o !== null);
+    const earlier = ascending.slice(0, i);
+    const overlaps = earlier.map((ahead) => overlapOf(ahead, later)).filter((o) => o !== null);
     const unsequenced = (overlaps as Overlap[]).filter((o) => !sequencedBehind(later.pr, o.ahead.pr));
-    return unsequenced.length === 0 ? [] : [orderFor(later.pr, unsequenced)];
+    const released = recheck ? earlier.filter((ahead) => overlapOf(ahead, later) === null && sequencedBehind(later.pr, ahead.pr)) : [];
+    return [
+      ...(unsequenced.length === 0 ? [] : [orderFor(later.pr, unsequenced, recheck)]),
+      ...(released.length === 0 ? [] : [releaseOrderFor(later.pr, released)]),
+    ];
   });
+}
+
+/** 0 sorts ahead: with the flag on, an approved, green pull request; otherwise every pull request is one rank and the number decides. */
+const rankOf = (entry: Compared, recheck: boolean) => (recheck && approvedAndGreen(entry.pr) ? 0 : 1);
+
+/**
+ * GitHub's approval, and the gate's own "can go first" reading of this pull request (`mergeCandidates`: not a draft, not held, its checks
+ * settled green, not conflicting). The rollup is read in `pr-state.ts`, not here, which is where the red-state rule asks for it.
+ */
+function approvedAndGreen(pr: any): boolean {
+  return reviewStateOf(pr).code === REVIEW_STATE.APPROVED && mergeCandidates([pr]).length === 1;
 }
 
 function overlapOf(ahead: Compared, later: Compared): Overlap | null {
@@ -91,7 +125,8 @@ function sequencedBehind(pr: any, ahead: any) {
   return waits.some((w) => w.state === "merged" && w.number === Number(ahead.number) && (w.repo ?? null) === (ahead.repo ?? null));
 }
 
-function orderFor(pr: any, overlaps: Overlap[]) {
+/** @param recheck #1165: a DIRTY pull request is told to rebase NOW, not to hold, and an approved one ahead of it is named as such */
+function orderFor(pr: any, overlaps: Overlap[], recheck: boolean) {
   const { session: labelled, source } = ownerOfPr(pr);
   const unowned = source === "ceo";
   const byBot = source === "dependency-bot";
@@ -100,14 +135,14 @@ function orderFor(pr: any, overlaps: Overlap[]) {
   const session = unowned ? NO_OWNER_SESSION : labelled;
   const ref = `pr-${subjectRef(pr.repoKey, pr.number)}`;
   const digest = createHash("sha1").update(overlaps.map(keyPart).join(";")).digest("hex").slice(0, HASH_LENGTH);
-  const what = whatItSays(pr, overlaps);
+  const dirty = recheck && pr.mergeStateStatus === "DIRTY";
+  const what = whatItSays(pr, overlaps, { recheck, dirty });
   const holder = unowned ? "<its-owner>" : session; // an ownerless pull request is held by the session that takes it, not by the reader of this order
-  const prompt = `${what}${ownerSentence(pr, { unowned, byBot, byChairman, ownerGone })} ${remedy(pr, overlaps, holder)}`;
+  const then = dirty ? rebaseNow(pr, overlaps) : remedy(pr, overlaps, holder);
+  const prompt = `${what}${ownerSentence(pr, { unowned, byBot, byChairman, ownerGone })} ${then}`;
   return {
     session,
-    ...(session === DEAD_OWNER_FALLBACK ? {}
-      : { fallback: DEAD_OWNER_FALLBACK, fallbackOnlyIfAbsent: true,
-        fallbackPrompt: `${what}Its owner, \`${session}\`, NO LONGER EXISTS (no workspace carries that label), so this order reached you: put the label of a session that can act on it, then ${remedy(pr, overlaps, holder)}` }),
+    ...fallbackOf(session, what, then),
     cause: "pr-merge-conflict",
     subject: ref,
     discriminator: `shares-${digest}`,
@@ -116,13 +151,58 @@ function orderFor(pr: any, overlaps: Overlap[]) {
   };
 }
 
+/**
+ * #1165, (1): A HOLD WHOSE OVERLAP HAS GONE. The hold and its `Waiting-for: merged` were written for files the two pull requests shared, and
+ * they no longer share one, so the sequence is empty and the owner releases the hold. This does not hold anything itself: the hold is a label
+ * and a wait the owner's session put on, and only that session lifts them (`pr:release`, with its reason on the pull request).
+ */
+function releaseOrderFor(pr: any, aheads: Compared[]) {
+  const { session: labelled, source } = ownerOfPr(pr);
+  const session = source === "ceo" ? NO_OWNER_SESSION : labelled;
+  const ref = `pr-${subjectRef(pr.repoKey, pr.number)}`;
+  const digest = createHash("sha1").update(aheads.map(({ pr: ahead }) => `released:${ahead.number}`).join(";")).digest("hex").slice(0, HASH_LENGTH);
+  const named = aheads.map(({ pr: ahead }) => subjectMention(ahead)).join(", ");
+  const what = `${subjectMention(pr)} is held behind ${named} (\`Waiting-for: merged\`), but it no longer shares an open file with ${aheads.length === 1 ? "it" : "them"}, so the hold is not a sequence any more. `;
+  const key = pr.repoKey ? ` --repo-key=${pr.repoKey}` : "";
+  const then = `Release the hold: \`pnpm run pr:release ${pr.number}${key} --session=${session}\`, and write on the pull request that the files it shared are no longer shared, which a release by another session needs.`;
+  return {
+    session,
+    ...fallbackOf(session, what, then),
+    cause: "pr-merge-conflict",
+    subject: ref,
+    discriminator: `released-${digest}`,
+    prompt: `${what}${then}`,
+    causeKey: `${session}/pr-merge-conflict/${ref}/released/${digest}`,
+  };
+}
+
+/** The fallback an order to a session that may have ENDED carries: a dead owner's order reaches a live reader, once, as the other orders do. */
+function fallbackOf(session: string, what: string, then: string) {
+  return session === DEAD_OWNER_FALLBACK ? {}
+    : { fallback: DEAD_OWNER_FALLBACK, fallbackOnlyIfAbsent: true,
+      fallbackPrompt: `${what}Its owner, \`${session}\`, NO LONGER EXISTS (no workspace carries that label), so this order reached you: put the label of a session that can act on it, then ${then}` };
+}
+
 /** @param overlap what the key is made of: the pull request ahead and the files, so a file the later one adds is a new order */
 const keyPart = ({ ahead, shared }: Overlap) => `${ahead.pr.number}:${shared.join(",")}`;
 
-function whatItSays(pr: any, overlaps: Overlap[]) {
-  const lines = overlaps.map(({ ahead, shared }) => `  ${subjectMention(ahead.pr)}, which is ahead of it (opened first), on ${shared.map((p) => `\`${p}\``).join(", ")}`);
+/** #1165: an ahead pull request that is ahead BECAUSE it is approved and green says so; the number is not the reason then. */
+function whatItSays(pr: any, overlaps: Overlap[], { recheck, dirty }: { recheck: boolean; dirty: boolean }) {
+  const why = (ahead: any) => (recheck && approvedAndGreen(ahead) !== approvedAndGreen(pr) ? "approved and green, so it goes first" : "opened first");
+  const lines = overlaps.map(({ ahead, shared }) => `  ${subjectMention(ahead.pr)}, which is ahead of it (${why(ahead.pr)}), on ${shared.map((p) => `\`${p}\``).join(", ")}`);
   return `${subjectMention(pr)} changes files that ${overlaps.length === 1 ? "another open pull request also changes" : `${overlaps.length} open pull requests also change`}:\n${lines.join("\n")}\n`
-    + "Whichever merges second conflicts with the first, and today nothing says so until GitHub reports `DIRTY`, after the first has merged. ";
+    + (dirty ? "" : "Whichever merges second conflicts with the first, and today nothing says so until GitHub reports `DIRTY`, after the first has merged. ");
+}
+
+/**
+ * #1165, (3): a pull request GitHub reports DIRTY against `main` is already conflicting, and holding it never saves its rebase, so the order says
+ * rebase now. It names the files it shares with the pull requests ahead, which are where the rebase will meet them.
+ */
+function rebaseNow(pr: any, overlaps: Overlap[]) {
+  const files = [...new Set(overlaps.flatMap(({ shared }) => shared))].map((p) => `\`${p}\``).join(", ");
+  const ahead = overlaps.map(({ ahead }) => subjectMention(ahead.pr)).join(", ");
+  return `Rebase onto \`main\` now and push: GitHub reports ${subjectMention(pr)} \`DIRTY\` against \`main\`, and a hold behind ${ahead} would not save that rebase, so do not hold it. `
+    + `Resolve ${files} as you go, the files it shares with ${ahead}.`;
 }
 
 function ownerSentence(pr: any, { unowned, byBot, byChairman, ownerGone }: { unowned: boolean; byBot: boolean; byChairman: boolean; ownerGone: boolean; }) {
