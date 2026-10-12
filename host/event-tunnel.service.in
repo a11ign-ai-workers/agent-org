@@ -1,0 +1,40 @@
+[Unit]
+# THE EVENT RECEIVER'S TUNNEL -- a11ign/a11ign#5197 (the last mile of #5043). The receiver listens on LOOPBACK ONLY, by design, so nothing GitHub sends can reach it until something
+# serves that port on the internet. This unit does that with TAILSCALE FUNNEL (the chairman's ruling, 2026-10-12): `tailscale funnel --bg` mounts the receiver's port at
+# `events.publicUrl` and returns, and the node's Funnel keeps serving it. `src/event-tunnel.ts up` is what runs the `tailscale` command: the path and the port are read from the HOST's
+# declaration THERE, so this text carries neither and cannot disagree with `host.json`.
+#
+# SHIPPED ONLY ON A HOST THAT ASKS FOR IT: listed, installed and checked only when the host's declaration says `"events": { "tunnel": "tailscale-funnel", ... }` (`HOST_OPTIONAL_UNITS`).
+# THE REVERT IS ONE WORD, `"tunnel": "none"`, and `agent-org host:install`: the unit becomes an orphan the install removes, which STOPS it, and `ExecStop` (`down`) takes the path off Funnel.
+#
+# A ONESHOT THAT STAYS ACTIVE (`RemainAfterExit`), so `systemctl --user is-active` answers "is the path served". No clock starts it: `enable --now` on the SERVICE is what runs it
+# (`LONG_RUNNING_TEMPLATES`). It is started AFTER the receiver and does not require it: a Funnel path with nothing behind it answers 502, which GitHub records as a failed delivery.
+#
+# ONLY THIS PATH IS TOUCHED. The node's other serve mounts (the trace pages, on 8443, tailnet-only) are not named, and neither `reset` nor an unscoped `off` is ever run.
+# THE SIGNATURE, NOT THE PATH, IS THE GATE: the receiver refuses anything not signed with the secret (`src/event-receiver.ts`), and the path is public the moment Funnel serves it.
+Description=a11ign: serve the event receiver's loopback port at its Tailscale Funnel path (a11ign/a11ign#5197)
+Wants=@@prefix@@event-receiver.service
+After=network-online.target tailscaled.service @@prefix@@event-receiver.service
+
+[Service]
+Type=oneshot
+RemainAfterExit=yes
+WorkingDirectory=@@checkout@@
+
+# SAME REASON EVERY OTHER SHIPPED SERVICE DECLARES THEM: a systemd unit gets no login shell's PATH and no HOME.
+Environment=PATH=@@binDir@@:/usr/local/sbin:/usr/local/bin:/usr/sbin:/usr/bin:/sbin:/bin
+Environment=HOME=@@home@@
+
+# V8'S COMPILE CACHE GOES UNDER THE HOME, NOT /tmp -- #2458; `host-units.test.ts` pins it on every shipped service. This unit starts no node.
+Environment=NODE_COMPILE_CACHE=%h/.cache/node-compile-cache
+
+# THE WORKERS ACCOUNT, DECLARED THOUGH THIS UNIT MAKES NO `gh` CALL: a shipped service that names no account is a finding (#3643).
+Environment=GH_CONFIG_DIR=@@workersDir@@/gh
+
+# `-` on the stop: an already-removed path is the state `off` was asked for, not a failure of the stop.
+ExecStart=%h/.local/bin/node packages/agent-org/src/event-tunnel.ts up
+ExecStop=-%h/.local/bin/node packages/agent-org/src/event-tunnel.ts down
+TimeoutStartSec=60
+
+[Install]
+WantedBy=default.target

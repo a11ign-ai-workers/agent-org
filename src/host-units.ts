@@ -113,8 +113,10 @@ export const TOOL_ENTRIES = Object.freeze([
   "tmp-prune.service.in", "tmp-prune.timer.in", "a11ign-tmp.tmpfiles.conf.in",
   // a11ign/a11ign#4071: the OTel receiver's service, a long-running one (`LONG_RUNNING_TEMPLATES`) with no timer, as the chairman listener's is.
   "otel-receiver.service.in",
-  // agent-org#980: the GitHub event receiver's service, long-running with no timer, and OPTIONAL on the HOST's declaration (`HOST_OPTIONAL_UNITS`): shipped only for `events.source: webhook`.
+  // agent-org#980: the GitHub event receiver's service, long-running with no timer, and OPTIONAL on the HOST's declaration (`HOST_OPTIONAL_UNITS`): shipped only for `events.source: webhook`, or for a `poll` host that opens the funnel (the feed is proven before the gate reads it, a11ign/a11ign#5197).
   "event-receiver.service.in",
+  // a11ign/a11ign#5197: the receiver's Tailscale Funnel, a oneshot that stays active (`LONG_RUNNING_TEMPLATES`), OPTIONAL on the HOST's `events.tunnel`.
+  "event-tunnel.service.in",
   // a11ign/a11ign#4053: the drained kernel reboot's pair. The service runs `host-kernel.ts --reboot`; the timer is the hour `ceo` named and has NO `Requires=`, so `host:install` never reboots.
   "kernel-reboot.service.in", "kernel-reboot.timer.in",
   // a11ign#4879: the daily confidence reading's pair. The service runs `decision-confidence-post.ts`, which posts once per UTC day and dedupes itself; the timer is only a clock.
@@ -143,7 +145,9 @@ export const OPTIONAL_UNITS = (Object.freeze({
  * removes. A host with no `events` block is `poll`, the default, so the off switch is one line, `"source": "poll"`, and `host:install`.
  */
 export const HOST_OPTIONAL_UNITS = (Object.freeze({
-  "event-receiver.service.in": (events: Readonly<EventsDeclaration> | undefined) => events?.source === "webhook",
+  "event-receiver.service.in": (events: Readonly<EventsDeclaration> | undefined) => events?.source === "webhook" || events?.tunnel === "tailscale-funnel",
+  // a11ign/a11ign#5197: the funnel unit, on the one word that opens it. `none`, or no `events` block, ships nothing and the install removes an installed copy.
+  "event-tunnel.service.in": (events: Readonly<EventsDeclaration> | undefined) => events?.tunnel === "tailscale-funnel",
 }) as Readonly<Record<string, (events: Readonly<EventsDeclaration> | undefined) => boolean>>);
 
 // SERVICES NO CLOCK STARTS (#3025): see `LONG_RUNNING_TEMPLATES`, which lives in `host-config.ts` (#3443: `update-tool.ts` restarts them, and must not import this
@@ -435,6 +439,11 @@ const OTHER_TOOL_FORMS: Readonly<Record<string, ReadonlyArray<readonly [RegExp, 
   // THE GITHUB EVENT RECEIVER (agent-org#980): run from the tool's checkout, like the OTel receiver; the flags after the program are rendered from the host's declaration.
   "event-receiver.service.in": [
     [/^ExecStart=%h\/\.local\/bin\/node packages\/agent-org\/src\/event-receiver\.ts /m, "ExecStart=%h/.local/bin/node src/event-receiver.ts "],
+  ],
+  // THE EVENT RECEIVER'S FUNNEL (a11ign/a11ign#5197): `up` and `down` of `src/event-tunnel.ts`, which reads the path and the port from the host's declaration.
+  "event-tunnel.service.in": [
+    [/^ExecStart=%h\/\.local\/bin\/node packages\/agent-org\/src\/event-tunnel\.ts up$/m, "ExecStart=%h/.local/bin/node src/event-tunnel.ts up"],
+    [/^ExecStop=-%h\/\.local\/bin\/node packages\/agent-org\/src\/event-tunnel\.ts down$/m, "ExecStop=-%h/.local/bin/node src/event-tunnel.ts down"],
   ],
   // THE DRAINED KERNEL REBOOT (a11ign/a11ign#4053): run from the tool's checkout, like the receiver above.
   "kernel-reboot.service.in": [
