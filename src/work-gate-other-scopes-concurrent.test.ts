@@ -12,14 +12,28 @@
  *
  * THE POPULATION IS THE DECLARATION'S: one list per other declared code repository, so a third repository is covered the day it is declared.
  */
-import { test } from "node:test";
+import { after, test } from "node:test";
 import assert from "node:assert/strict";
 import { chmodSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
+import { SHADOW_COPY_MARKER, SHADOW_STATE_DIR_ENV, stateEntryPath } from "./host-config.ts";
+import { tmpDirForFile } from "./lib/tmp-fixture.ts";
 import { homeProjectDeclaration } from "./project-config.ts";
 import { BATCH_MAX_CALLS, readElsewherePrs, readOtherScopes, readScopeTrunkRed, readWithFirstWaveTogether, runBatch, scopesOf } from "./work-gate.ts";
 import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
+
+// agent-org#1147: THE STATE DIRECTORY IS THIS FILE'S OWN. `readTrunkRed` keeps a repository's "has no such workflow" marker in the host's state directory and does not ask
+// again for a day, so on a host that had met one 404 the `main` read below made 14 calls where this file counts 16, and the test passed in CI and nowhere the host had run.
+// `A11IGN_SHADOW_STATE_DIR` wins over `$HOME` and over a declared `stateDir`, so no host's markers reach this file and none of its `present` markers reaches the host.
+const STATE = tmpDirForFile("other-scopes-state-");
+writeFileSync(join(STATE, SHADOW_COPY_MARKER), "");
+const SHADOW_BEFORE = process.env[SHADOW_STATE_DIR_ENV];
+process.env[SHADOW_STATE_DIR_ENV] = STATE;
+after(() => {
+  if (SHADOW_BEFORE === undefined) delete process.env[SHADOW_STATE_DIR_ENV];
+  else process.env[SHADOW_STATE_DIR_ENV] = SHADOW_BEFORE;
+});
 
 type Call = { args: string[], repo: string | undefined };
 type Answer = { stdout: string } | { failed: true, stdout: string, stderr: string, status: number | null, code?: string };
@@ -57,6 +71,10 @@ function fakeBatch(batches: Call[][], refuse: (call: Call) => boolean = () => fa
 
 test("POSITIVE CONTROL: the declaration holds at least two other code repositories, so 'together' is not one call", () => {
   assert.ok(OTHER_CODE.length >= 2, `the declared other code repositories: ${OTHER_CODE.map((scope) => scope.key).join(", ")}`);
+});
+
+test("POSITIVE CONTROL: the trunk markers are read from this file's own state directory, so the host's are not (agent-org#1147)", () => {
+  assert.equal(stateEntryPath(""), STATE);
 });
 
 test("CONTROL: a run handed in is not batched -- its calls arrive one at a time, as before", () => {
