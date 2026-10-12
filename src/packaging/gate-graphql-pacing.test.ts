@@ -7,6 +7,8 @@
  *   - below the reserve the pool is paced, at the reserve it is not (the boundary is named, not implied);
  *   - a paced tick names what it did not read, and never names nothing;
  *   - a webhook tick reads a repository its events named, and one due a sweep, and no other;
+ *   - a repository an event-gated tick drops is REPORTED unread, with its reason, as a paced skip is;
+ *   - an event-gated tick that names neither the home repository nor a due sweep skips the primary's tracker lanes and `orgHealth`, and reports both;
  *   - the sweep is every `GRAPHQL_SWEEP_MINUTES`, and a repository read inside that window is not read again;
  *   - the memory of read times survives a write of another repository's, and a missing or malformed file reads every repository.
  */
@@ -15,9 +17,10 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { GRAPHQL_RESERVE, GRAPHQL_SWEEP_MINUTES, OTHER_SCOPES_MEMORY, PACING_FLAG, pacedUnread, pacingNow, pacingOn, readOtherScopesMemory, rememberOtherScopes, scopesToRead } from "../work-gate/pacing.ts";
+import { GRAPHQL_RESERVE, GRAPHQL_SWEEP_MINUTES, OTHER_SCOPES_MEMORY, PACING_FLAG, orgHealthSkipped, pacedUnread, pacingNow, pacingOn, primaryUnread, readOtherScopesMemory, rememberOtherScopes, scopesToRead } from "../work-gate/pacing.ts";
+import { defaultRun, otherScopesToRead, primaryDue, primaryLanes, unreadScopes, type GateFacts } from "../work-gate/reads.ts";
+import type { Scope as TickScope } from "../event-queue.ts";
 import type { Scope } from "../work-gate/vocabulary.ts";
-import { workGateSource } from "../lib/work-gate-source.ts";
 import { emptyCanaryState, withMachineryFlag } from "../org-health.ts";
 
 const MINUTE = 60_000;
@@ -142,14 +145,103 @@ test("the memory keeps every repository's read time, and a missing or malformed 
   }
 });
 
-test("the gate's source carries the wiring: the pool is read once inside `readLanesAfterOutageCheck`, orgHealth is skipped below the reserve, and the paced skips are named unread", () => {
-  const source = workGateSource();
-  assert.equal(source.match(/readLanesAfterOutageCheck\(\)/g)?.length, 1, "main still makes the one call the structure tests pin");
-  assert.match(source, /function tickPacing\(\): Pacing \{\n  tickPool \?\?= pacingNow\(defaultRun, pacingOn\(\)\);/);
-  assert.match(source, /const wanted = isAmbientRun\(run\) && tickPacing\(\)\.paced \? \[\] : otherScopesToRead\(run, scopes\);/);
-  assert.match(source, /const pacing = endGateSpan\("pacing", tickPacing\(\)\);/);
-  assert.match(source, /\.\.\.endGateSpan\("orgHealth", pacing\.paced \? \[\] : orgHealthTogether\(/);
-  assert.match(source, /const unread = unreadLanes\(\{ prs, readyRows, others: \[\.\.\.others, \.\.\.pacedSkips\] \}\);/);
-  // RED CONTROL: the unpaced source has no skip, so the orgHealth pattern above is what the flag changes
-  assert.doesNotMatch(source, /endGateSpan\("orgHealth", orgHealthTogether\(/);
+/**
+ * A WEBHOOK TICK, as the gate reads it: the event queue named `named`, the memory holds `memory` (each key's last whole read), and the flag is `on`.
+ * `dir` holds the two files the gate reads from disk, so the tick goes through `readTickScopes` and the memory reader, as it does live.
+ */
+function webhookTick(dir: string, { named, memory, on = true }: { named: TickScope[]; memory: Record<string, number>; on?: boolean; }): GateFacts {
+  const tickScopesPath = join(dir, "tick-scopes.json");
+  const memoryPath = join(dir, OTHER_SCOPES_MEMORY);
+  writeFileSync(tickScopesPath, JSON.stringify({ version: 1, scopes: named }));
+  writeFileSync(memoryPath, JSON.stringify({ version: 1, readAtMs: memory }));
+  return { on, webhook: true, tickScopesPath, memoryPath, nowMs: NOW };
+}
+
+/** A scratch directory for one test's files, removed when the test ends. */
+function withScratch(run: (dir: string) => void): void {
+  const dir = mkdtempSync(join(tmpdir(), "gate-webhook-"));
+  try {
+    run(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+}
+
+const HOME = scope("", "org/home-code", "org/home-rows");
+const SKIPPED_PRIMARY = { promotableRows: null, chairmanBlocked: null, openRowsRead: null };
+
+test("a webhook tick reads the repository its event named, and REPORTS the one no event named as unread, with its reason", () => {
+  withScratch((dir) => {
+    const scopes = [scope("a", "org/a-code", "org/a-rows"), scope("b", "org/b-code", null)];
+    const tick = webhookTick(dir, { named: [{ repo: "org/a-code", kind: "pr", number: 7 }], memory: { a: NOW - 2 * MINUTE, b: NOW - MINUTE } });
+    assert.deepEqual(otherScopesToRead(defaultRun, scopes, tick).map((s) => s.key), ["a"], "only the named repository is read");
+    const unread = unreadScopes(defaultRun, scopes, tick);
+    assert.equal(unread.length, 1, "the repository the events did not name is reported, not read as clean");
+    assert.match(unread[0], /org\/b-code/);
+    assert.match(unread[0], /no event named it/, "the report says why");
+    // RED CONTROL: the same tick with the flag OFF reads both and reports nothing, which is the current behaviour
+    const off = webhookTick(dir, { named: [{ repo: "org/a-code", kind: "pr", number: 7 }], memory: { a: NOW - 2 * MINUTE, b: NOW - MINUTE }, on: false });
+    assert.deepEqual(otherScopesToRead(defaultRun, scopes, off).map((s) => s.key), ["a", "b"]);
+    assert.deepEqual(unreadScopes(defaultRun, scopes, off), []);
+  });
+});
+
+test("a webhook tick reads a repository no event named once its sweep is due, so it is not reported unread", () => {
+  withScratch((dir) => {
+    const scopes = [scope("b", "org/b-code", null)];
+    const due = webhookTick(dir, { named: [], memory: { b: NOW - GRAPHQL_SWEEP_MINUTES * MINUTE } });
+    assert.deepEqual(otherScopesToRead(defaultRun, scopes, due).map((s) => s.key), ["b"]);
+    assert.deepEqual(unreadScopes(defaultRun, scopes, due), []);
+    // RED CONTROL: one minute before the sweep the same repository is dropped and reported
+    const fresh = webhookTick(dir, { named: [], memory: { b: NOW - (GRAPHQL_SWEEP_MINUTES * MINUTE - 1) } });
+    assert.deepEqual(otherScopesToRead(defaultRun, scopes, fresh), []);
+    assert.equal(unreadScopes(defaultRun, scopes, fresh).length, 1);
+  });
+});
+
+test("an event-gated tick that named neither the primary nor its sweep skips the primary's tracker lanes and orgHealth, and says so", () => {
+  withScratch((dir) => {
+    const tick = webhookTick(dir, { named: [{ repo: "org/a-code", kind: "pr", number: 7 }], memory: { "": NOW - MINUTE } });
+    let reads = 0;
+    const lanes = () => { reads += 1; return { promotableRows: [], chairmanBlocked: [], openRowsRead: [] }; };
+    assert.equal(primaryDue(defaultRun, HOME, tick), false);
+    assert.deepEqual(primaryLanes(defaultRun, HOME, lanes, SKIPPED_PRIMARY, tick), SKIPPED_PRIMARY, "the lanes are refused, as a refused read is");
+    assert.equal(reads, 0, "the tracker lanes are not asked");
+    assert.equal(orgHealthSkipped({ paced: false, remaining: null }, false), true, "orgHealth is skipped with them");
+    assert.deepEqual(primaryUnread({ paced: false, remaining: null }, false), ["the primary's tracker lanes (promotable rows, chairman-blocked rows, open rows)", "the org-health reads"]);
+    // RED CONTROL: the same tick naming the primary's tracker repository reads them, and orgHealth runs
+    const named = webhookTick(dir, { named: [{ repo: "org/home-rows", kind: "issue", number: 3 }], memory: { "": NOW - MINUTE } });
+    assert.equal(primaryDue(defaultRun, HOME, named), true);
+    assert.deepEqual(primaryLanes(defaultRun, HOME, lanes, SKIPPED_PRIMARY, named), { promotableRows: [], chairmanBlocked: [], openRowsRead: [] });
+    assert.equal(reads, 1);
+    assert.equal(orgHealthSkipped({ paced: false, remaining: null }, true), false);
+    assert.deepEqual(primaryUnread({ paced: false, remaining: null }, true), []);
+  });
+});
+
+test("the primary's sweep is due once it is GRAPHQL_SWEEP_MINUTES old, even when no event named it", () => {
+  withScratch((dir) => {
+    const stale = webhookTick(dir, { named: [], memory: { "": NOW - GRAPHQL_SWEEP_MINUTES * MINUTE } });
+    assert.equal(primaryDue(defaultRun, HOME, stale), true);
+    // RED CONTROL: a minute younger, nothing named, the primary is skipped
+    const fresh = webhookTick(dir, { named: [], memory: { "": NOW - (GRAPHQL_SWEEP_MINUTES * MINUTE - 1) } });
+    assert.equal(primaryDue(defaultRun, HOME, fresh), false);
+  });
+});
+
+test("flag OFF, or a named list that cannot be read, drops nothing and reads the primary: the gate is then the one it always was", () => {
+  withScratch((dir) => {
+    const scopes = [scope("b", "org/b-code", null)];
+    const off = webhookTick(dir, { named: [], memory: { "": NOW, b: NOW }, on: false });
+    assert.deepEqual(otherScopesToRead(defaultRun, scopes, off).map((s) => s.key), ["b"]);
+    assert.deepEqual(unreadScopes(defaultRun, scopes, off), []);
+    assert.equal(primaryDue(defaultRun, HOME, off), true);
+    // RED CONTROL: the same tick with the flag on and nothing named DOES drop it, so the flag is what the first assertion turns on
+    const on = webhookTick(dir, { named: [], memory: { "": NOW, b: NOW } });
+    assert.deepEqual(otherScopesToRead(defaultRun, scopes, on), []);
+    // an event file that cannot be read is `null`: every repository is read, as a poll tick reads them
+    const unreadable: GateFacts = { ...on, tickScopesPath: join(dir, "no-such-file.json") };
+    assert.deepEqual(otherScopesToRead(defaultRun, scopes, unreadable).map((s) => s.key), ["b"]);
+    assert.deepEqual(unreadScopes(defaultRun, scopes, unreadable), []);
+  });
 });
