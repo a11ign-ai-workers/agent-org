@@ -571,7 +571,7 @@ function repositoryNote(scope: Scope) {
  * #4386: `home` is the PRIMARY tracker's open rows and repository, which a scope with NO tracker of its own (agent-org's) takes its pull requests' owners from.
  * @returns `defects`: the pull requests the ladder could not own though they name a live claimant; `trunkRed`: the scope's `main` as read, for the failure ledger (#4475), and `repo`: the code repository it is the `main` of (agent-org#674: a green reading carries no repository of its own, and the ledger ends a standing red by it)
  */
-export function scopeTick(scope: Scope, drain: boolean, read: ReturnType<typeof readLanes> & { siblingPrs?: any[]; home?: HomeRows; } = readLanes(scope), readings: { code: typeof codeReadings; tracker: typeof trackerReadings; } = { code: codeReadings, tracker: trackerReadings }): { orders: any[]; blocked: any[]; refused: string[]; defects: ResolverDefect[]; trunkRed: ReturnType<typeof readScopeTrunkRed>; repo: string | undefined; } {
+export function scopeTick(scope: Scope, drain: boolean, read: ReturnType<typeof readLanes> & { siblingPrs?: any[]; home?: HomeRows; } = readLanes(scope), readings: { code: typeof codeReadings; tracker: (lists: { allOpen: any[]; rows: any[]; }) => Omit<ReturnType<typeof trackerReadings>, "chairmanRows"> & { chairmanRows?: Set<number>; }; } = { code: codeReadings, tracker: trackerReadings }): { orders: any[]; blocked: any[]; refused: string[]; defects: ResolverDefect[]; trunkRed: ReturnType<typeof readScopeTrunkRed>; repo: string | undefined; } {
   const { prs, readyRows, promotableRows, chairmanBlocked, openRows } = read;
   const refused = [
     ...(prs === null ? [`the pull-request list of ${scope.code?.repo}`] : []),
@@ -581,7 +581,7 @@ export function scopeTick(scope: Scope, drain: boolean, read: ReturnType<typeof 
   const rows = readyRows ?? [];
   const allOpen = openRows ?? [];
   const code = inRepo(read.codeRepo, () => readings.code(openPrs, scope));
-  const tracker = scope.tracker === null ? NO_TRACKER_READINGS : inRepo(read.trackerRepo, () => readings.tracker({ allOpen }));
+  const tracker = scope.tracker === null ? NO_TRACKER_READINGS : inRepo(read.trackerRepo, () => readings.tracker({ allOpen, rows }));
   const prFiles = comparablePrFiles([...openPrs, ...(read.siblingPrs ?? [])], { trackerRepo: scope.tracker?.repo });
   // WHAT THE TRACKER READINGS RETURN IS TAGGED HERE, not inside them: an epic or a closed row that carried no key would make `epic-7` and
   // `answer-owed/row-7` the primary's, whatever the reading that produced it.
@@ -591,6 +591,8 @@ export function scopeTick(scope: Scope, drain: boolean, read: ReturnType<typeof 
     chairmanBlocked: chairmanBlocked ?? [], prFiles, drain, required: code.required, baseTip: code.baseTip,
     epics: mark(tracker.epics), answerOwed: rowsOwingAnswers({ openRows: allOpen, openPrs, closedRows: mark(tracker.closedRows) }),
     openRows: allOpen, claimedComments: tracker.claimedComments, unarmed: code.unarmed, closings: tracker.closings, trunkRed: code.trunkRed,
+    // #1085: a keyed tracker's chairman rows are offered first, as a home row's are (#4524); a scope with no tracker has none to ask about
+    offerHierarchy: tracker.chairmanRows === undefined ? undefined : { chairmanRows: tracker.chairmanRows },
     key: scope.key, repo: scope.code?.repo ?? scope.tracker?.repo });
   return { orders: orders.map((order) => ({ ...order, prompt: `${order.prompt}${repositoryNote(scope)}` })),
     blocked: partitionUnclaimed(rows, prFiles, { rowBranches: null, openRows: allOpen }).blocked, refused, defects: owned.defects, trunkRed: code.trunkRed, repo: scope.code?.repo };
@@ -662,7 +664,7 @@ export function withEjections(prs: any[], ejections: Map<number, unknown> | unde
  * AMBIENT repository, which is the primary's, so asking would hand the primary's closed rows to a scope that has no such rows, and each would
  * come back as an `answer-owed` order naming a repository where the row does not exist (#3493).
  */
-const NO_TRACKER_READINGS = { claimedComments: [], epics: [], closedRows: [], closings: null };
+const NO_TRACKER_READINGS = { claimedComments: [], epics: [], closedRows: [], closings: null, chairmanRows: undefined };
 
 /**
  * #3095: THE OPEN PULL REQUESTS OF EVERY DECLARED CODE REPOSITORY BUT ONE -- the one `skip` names (the primary's own, `undefined`, or a
