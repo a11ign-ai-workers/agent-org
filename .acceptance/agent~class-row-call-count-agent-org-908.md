@@ -15,7 +15,7 @@ Acceptance: `bash -c 'cd ~/repos/agent-org && npx rstest run --config scripts/rs
 
 Closes a11ign/agent-org#908.
 
-Outside-Region: src/serve-by-run.test.ts -- its tripwire "the default class registry holds no class" is exactly what the first class falsifies; it now asserts the registry holds this one class and that it is `seat` without a seats file.
+Outside-Region: src/serve-by-run.test.ts — its tripwire "the default class registry holds no class" is exactly what the first class falsifies; it now asserts the registry holds this one class and that it is `seat` without a seats file.
 
 platform: n/a (a class module the registry already defines)
 
