@@ -34,6 +34,12 @@ Not here, and named:
 - The other-tracker blocker-cleared gap (a11ign/agent-org#1162). The population test covers blocker-cleared for home rows only.
 - The wakes-per-row reader's handling of a corrupt line (a11ign/agent-org#1163), found while reading the retro's input.
 
+Outside-Region: src/packaging/idle-claimant.test.ts — the #743 assertions that a green open pull request is counted or nudged; flipped to pr-owned by this row (agent-org#805).
+Outside-Region: src/idle-claimant-stopped.test.ts — the twin test for an open pull request held by a green holder, same expectation flipped (agent-org#805).
+Outside-Region: src/work-gate-claim-stalled.test.ts — the claim-stalled tick expectations for an open pull request, flipped to pr-owned (agent-org#805).
+Outside-Region: src/work-gate-idle-again-incident.test.ts — the idle-again incident expectations for an open pull request, flipped to pr-owned (agent-org#805).
+Outside-Region: src/worker-state.test.ts — the worker-state expectation for a holder with an open pull request, flipped to pr-owned (agent-org#805).
+
 Flag: none -- the defect is the typed wake itself, so a flag left on would keep the wrong nudge and a flag left off ships nothing; the release path is unchanged and what this stops is a nudge, so the bound is a revert.
 
 Health-signals: claims-refused, wakes-held
