@@ -8,11 +8,13 @@
 
 import assert from "node:assert/strict";
 import { test } from "node:test";
-import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, mkdtempSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { budgetLine, budgetOf, conditionalGate, meteredBatch, meteredRun, partitionUnchanged, restConditionalOn, seenOf, TICK_POINTS_CAP } from "./gh-conditional.ts";
 import { readValidators, saveValidators, type Validated } from "./trace/publish.ts";
+import { KEPT_READ_MAX_AGE_MS, defaultRun, holdTickBudget, readOpenRows, readPrs, runBatch } from "./work-gate/reads.ts";
+import { CAUSE_SHARE, CUT_BACK_FROM, cutBackFirst, tickReadingLines } from "./work-gate/tick.ts";
 
 const ETAG = 'W/"abc123"';
 const HEAD = { commit: { sha: "9f2c1d0" } };
@@ -186,4 +188,204 @@ test("(c) metered batch: a null budget sends the batch whole, as it always was",
   assert.equal(seen.length, 1);
   assert.equal(seen[0], calls, "the same calls, the same array, handed to send");
   assert.deepEqual(answers, ["ok", "ok"]);
+});
+
+// ---- a11ign/a11ign#5169: the gate's readers CALL the blocks above. The fake GitHub answers REST by the ETag it last gave (so what the reader SENDS is what is read)
+// and answers `gh` calls from the same world, so a claim about "does not re-read" is a claim about which `gh` calls were made.
+//   (d) readPrs / readOpenRows with the flag on: the stored ETag is sent, a 304 reads nothing from GraphQL, an unchanged pull request is not asked again;
+//   (e) flag off reads as today, and every failure is read as today;  (f) the tick's budget is held, and a cause over its share is cut back first.
+
+type World = { number: number; sha: string; updated: string; running?: boolean; };
+const REPO = "a11ign/example";
+const T0 = 1_000_000;
+const detailOf = (pr: World) => ({
+  number: pr.number, headRefOid: pr.sha, updatedAt: pr.updated, files: [], changedFiles: 0,
+  statusCheckRollup: [{ name: "ci", status: pr.running ? "IN_PROGRESS" : "COMPLETED", conclusion: pr.running ? "" : "SUCCESS" }],
+});
+const worldOf = (count: number): World[] => Array.from({ length: count }, (_, at) => ({ number: at + 1, sha: `sha${at + 1}`, updated: "2026-10-12T05:00:00Z" }));
+
+/** GitHub as the gate sees it: REST by validator, `gh` by arguments. `issues` are `[number, updated, isPullRequest]`. */
+function github(prs: World[], issues: [number, string, boolean?][] = []) {
+  const asked: { path: string; etag: string | null; }[] = [];
+  const calls: string[][] = [];
+  const bodyOf = (path: string) => (path.includes("/pulls?")
+    ? prs.map((pr) => ({ number: pr.number, head: { sha: pr.sha }, updated_at: pr.updated }))
+    : issues.map(([number, updated_at, isPr]) => ({ number, updated_at, ...(isPr ? { pull_request: {} } : {}) })));
+  const ask = (path: string, etag: string | null) => {
+    asked.push({ path, etag });
+    const body = bodyOf(path);
+    const tag = `W/"${JSON.stringify(body)}"`;
+    return etag === tag ? { status: 304, etag, body: null } : { status: 200, etag: tag, body };
+  };
+  const run = (args: string[]) => {
+    calls.push(args);
+    if (args[0] === "pr" && args[1] === "list") return JSON.stringify(prs.slice(0, Number(args[args.indexOf("--limit") + 1])).map(detailOf));
+    if (args[0] === "pr" && args[1] === "view") return JSON.stringify(detailOf(prs.find((pr) => pr.number === Number(args[2])) as World));
+    if (args[0] === "issue" && args[1] === "list") return JSON.stringify(issues.filter(([, , isPr]) => !isPr).map(([number, updatedAt]) => ({ number, updatedAt, labels: [] })));
+    throw new Error(`unexpected gh ${args.join(" ")}`);
+  };
+  return { prs, issues, ask, run, asked, calls };
+}
+
+const withStore = <T>(body: (dir: string) => T): T => {
+  const dir = scratch();
+  try {
+    return body(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+};
+const via = (world: { ask: ReturnType<typeof github>["ask"]; }, dir: string, now: number) => ({ ask: world.ask, dir, now, repo: REPO });
+const viewed = (calls: string[][]) => calls.filter((call) => call[1] === "view").map((call) => Number(call[2]));
+
+test("(d) readPrs with the flag on sends the stored ETag, and a 304 reads nothing from GraphQL", () => withStore((dir) => {
+  const world = github(worldOf(25));
+  const first = readPrs(world.run, via(world, dir, T0));
+  const callsAfterFirst = world.calls.length;
+  const again = readPrs(world.run, via(world, dir, T0 + 1));
+
+  assert.equal(world.asked[0].etag, null, "a cold store sends no validator");
+  assert.ok(typeof world.asked[1].etag === "string" && world.asked[1].etag.startsWith("W/"), "the second read must carry the ETag the first reply gave");
+  assert.equal(first?.length, 25);
+  assert.equal(world.calls.length, callsAfterFirst, "a 304 on an unchanged list is answered with no gh call at all");
+  assert.deepEqual(again, first);
+}));
+
+test("(d) an unchanged pull request is not re-read: only the ones whose updatedAt or head moved are viewed", () => withStore((dir) => {
+  const world = github(worldOf(25));
+  readPrs(world.run, via(world, dir, T0));
+  world.calls.length = 0;
+  world.prs[3].updated = "2026-10-12T05:09:00Z"; // #4: updatedAt moved
+  world.prs[8].sha = "sha9-moved"; // #9: head moved and updatedAt did not
+  const next = readPrs(world.run, via(world, dir, T0 + 1)) as any[];
+
+  assert.deepEqual(viewed(world.calls), [4, 9], "exactly the two that changed, and no list");
+  assert.equal(world.calls.filter((call) => call[1] === "list").length, 0);
+  assert.equal(next[3].updatedAt, "2026-10-12T05:09:00Z");
+  assert.equal(next[8].headRefOid, "sha9-moved");
+  assert.equal(next[0].headRefOid, "sha1", "the others are the kept detail");
+}));
+
+test("(d) positive control: a pull request with a check still running, or a kept detail past its age, is asked again though nothing moved", () => withStore((dir) => {
+  const world = github(worldOf(25));
+  world.prs[1].running = true;
+  readPrs(world.run, via(world, dir, T0));
+  world.calls.length = 0;
+  readPrs(world.run, via(world, dir, T0 + 1));
+  assert.deepEqual(viewed(world.calls), [2], "only the one whose check is running: its rollup moves no updated_at");
+
+  world.prs[1].running = false;
+  world.calls.length = 0;
+  readPrs(world.run, via(world, dir, T0 + KEPT_READ_MAX_AGE_MS));
+  assert.ok(world.calls.some((call) => call[1] === "list"), "past the age every kept detail is stale, which is more than a view's worth: the list is read whole");
+}));
+
+test("(e) flag off reads as today: one pr list, no REST ask, and nothing kept", () => withStore((dir) => {
+  const world = github(worldOf(5));
+  const prs = readPrs(world.run, null);
+
+  assert.equal(world.asked.length, 0);
+  assert.deepEqual(world.calls.map((call) => call.slice(0, 2).join(" ")), ["pr list"]);
+  assert.equal(prs?.length, 5);
+  assert.equal(existsSync(join(dir, "kept-reads.json")), false);
+}));
+
+test("(e) a REST read that fails is said and read as today; a refused list is null, never empty", () => withStore((dir) => {
+  const world = github(worldOf(5));
+  const said: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((line: string) => { said.push(line); return true; }) as typeof process.stderr.write;
+  try {
+    const read = readPrs(world.run, { ...via(world, dir, T0), ask: () => { throw new Error("gh api: HTTP 502"); } });
+    assert.equal(read?.length, 5, "the read as it always was");
+    assert.match(said.join(""), /conditional read of a11ign\/example's pull requests failed \(gh api: HTTP 502\)/);
+  } finally {
+    process.stderr.write = write;
+  }
+  const refusing = readPrs(() => { throw new Error("gate-budget: refused"); }, via(world, dir, T0));
+  assert.equal(refusing, null);
+}));
+
+test("(e) the first-wave rehearsal answers [] to every call, and that is never kept as the list", () => withStore((dir) => {
+  const world = github(worldOf(25));
+  const rehearsal = readPrs(() => "[]", via(world, dir, T0));
+  assert.deepEqual(rehearsal, []);
+
+  const real = readPrs(world.run, via(world, dir, T0 + 1));
+  assert.equal(real?.length, 25, "the store was not poisoned by the rehearsal");
+}));
+
+test("(e) a rehearsal's [] over a store that holds details never erases them, though most of the pull requests moved", () => withStore((dir) => {
+  const world = github(worldOf(25));
+  readPrs(world.run, via(world, dir, T0));
+  for (const at of [0, 1, 2, 3, 4, 5, 6, 7]) world.prs[at].updated = `2026-10-12T06:0${at}:00Z`; // 8 moved: past what viewing them one by one is worth
+  const rehearsal = readPrs(() => "[]", via(world, dir, T0 + 1));
+  assert.deepEqual(rehearsal, []);
+
+  const kept = JSON.parse(readFileSync(join(dir, "kept-reads.json"), "utf8"));
+  assert.equal(Object.keys(kept[REPO].prs).length, 25, "the details already held are still held");
+}));
+
+test("(d) readOpenRows: an unchanged listing is answered from the kept rows with no issue list; a moved row asks again", () => withStore((dir) => {
+  const world = github([], [[10, "2026-10-12T04:00:00Z"], [11, "2026-10-12T04:01:00Z"], [12, "2026-10-12T04:02:00Z", true]]);
+  const first = readOpenRows(world.run, via(world, dir, T0));
+  const again = readOpenRows(world.run, via(world, dir, T0 + 1));
+
+  assert.equal(world.calls.length, 1, "the second read is a 304 and asks GraphQL nothing");
+  assert.deepEqual(again, first);
+  assert.deepEqual((first as any[]).map((row) => row.number), [10, 11], "the pull request the issues list also carries is not a row");
+
+  world.issues[0][1] = "2026-10-12T04:30:00Z";
+  readOpenRows(world.run, via(world, dir, T0 + 2));
+  assert.equal(world.calls.length, 2, "a row that moved is asked again");
+  readOpenRows(world.run, via(world, dir, T0 + KEPT_READ_MAX_AGE_MS + 2));
+  assert.equal(world.calls.length, 3, "and so is a list kept past its age");
+}));
+
+test("(e) readOpenRows: flag off is one issue list and no REST ask; a rehearsal's [] is not kept", () => withStore((dir) => {
+  const world = github([], [[10, "2026-10-12T04:00:00Z"]]);
+  assert.equal(readOpenRows(world.run, null)?.length, 1);
+  assert.equal(world.asked.length, 0);
+
+  assert.deepEqual(readOpenRows(() => "[]", via(world, dir, T0)), []);
+  assert.equal(readOpenRows(world.run, via(world, dir, T0 + 1))?.length, 1, "the rehearsal's [] did not stand in for the rows");
+}));
+
+test("(f) a cause over its share is cut back first: refused past the line, while a cause under its share goes on to the cap", () => {
+  const budget = cutBackFirst(budgetOf());
+  const cap = TICK_POINTS_CAP;
+  const overShare = Math.floor(cap * CAUSE_SHARE) + 1;
+  const line = Math.floor(cap * CUT_BACK_FROM);
+  for (let spent = 0; spent < overShare; spent += 1) assert.equal(budget.spend("pr list", 1), true);
+  for (let spent = overShare; spent < line; spent += 1) assert.equal(budget.spend("api graphql", 1), true);
+
+  assert.equal(budget.spend("pr list", 1), false, "over its share and past the line: cut back first");
+  assert.equal(budget.spend("issue list", 1), true, "a cause still under its share is not");
+  let more = 0;
+  while (budget.spend("issue list", 1)) more += 1;
+  assert.equal(budget.summary().total, cap, "and it goes on until the cap, where everybody is refused");
+  assert.ok(more > 0);
+  assert.equal(budget.spend("api graphql", 1), false);
+});
+
+test("(f) the tick's lines carry the spend by cause and the 304 share, the lines the live hour is read from", () => {
+  const budget = budgetOf();
+  budget.spend("pr list", 2);
+  budget.spend("issue list", 1);
+  assert.deepEqual(tickReadingLines(budget, { asked: 8, notModified: 6 }), [
+    "gate-budget: 3/60 points (pr list 2, issue list 1)",
+    "gate-rest: 6 of 8 conditional reads answered 304",
+  ]);
+});
+
+test("(f) the held budget is charged by defaultRun and by runBatch, so a batched read cannot pass the cap", () => {
+  holdTickBudget(budgetOf({ cap: 0 }));
+  try {
+    assert.throws(() => defaultRun(["pr", "list"]), /gate-budget: refused `gh pr list`/);
+    const answers = runBatch([{ args: ["pr", "list"], repo: undefined }, { args: ["issue", "list"], repo: undefined }]);
+    assert.equal(answers.length, 2);
+    assert.ok(answers.every((answer) => "failed" in answer && /gate-budget: refused/.test(answer.stderr)), "each batched read is refused, and none was sent");
+  } finally {
+    holdTickBudget(null);
+  }
 });

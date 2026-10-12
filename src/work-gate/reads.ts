@@ -1,17 +1,20 @@
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, mkdirSync, writeFileSync, renameSync } from "node:fs";
-import { dirname } from "node:path";
+import { dirname, join } from "node:path";
 import { READY_LABEL, CLAIM_LABEL } from "../claim-labels.ts";
 import { waitingOn, todayIso } from "../waiting-condition.ts";
 import { newestPerName } from "../newest-check-run.ts";
 import { LS_REMOTE_ARGS, rowBranchesInListing } from "../row-claim/row-branch-rule.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
 import { stateEntryPath } from "../host-config.ts";
+import { type Budget, GATE_VALIDATORS_DIR, conditionalGate, meteredBatch, meteredRun, partitionUnchanged, restConditionalOn, seenOf } from "../gh-conditional.ts";
+import { type Ask, parseReply, readValidators, saveValidators } from "../trace/publish.ts";
 import { cachedReleaseBehind, readReleaseBehind, npmRegistryRead } from "../release-behind-main.ts";
 import { armedFromApi, openPullRequestsQueryArgs } from "../auto-arm-sweep.ts";
 import { REPO } from "../project-identity.ts";
 import { HOME_CHECKOUT, homeProjectDeclaration } from "../project-config.ts";
 import { BACKLOG_LABEL, NEEDS_CHAIRMAN_LABEL as CHAIRMAN_LABEL } from "../project-vocabulary.ts";
+import { conditionalGetArgs, pullViewArgs } from "../ticket-port/conditional-reads.ts";
 import { isRowsByLabelRead } from "../ticket-port/rows-by-label.ts";
 import { stillRunning } from "./pr-state.ts";
 import { NOT_STARTABLE, PARKED_LABEL, REVIEWER_STATE_DIR, ROW_BLOCKED_BY, ROW_LABELS, type Scope, type ScopeRepository, labelledRows, labelsOf,
@@ -111,8 +114,23 @@ export const ghWithin = (timeoutMs: number, { stdio, log = (line) => process.std
   }
 };
 
+/**
+ * a11ign#5169 (the wiring of #5128): THE TICK'S GRAPHQL BUDGET, held by the tick (`tick.ts` calls `holdTickBudget` when the process is the gate and
+ * `gate.restConditional` is on) and charged by every GraphQL read made through `defaultRun`, `capturedRun` and `runBatch`. `null` is the flag off, or a
+ * process that is not the gate (a live run, a CLI that imports this file): nothing is charged and `gh` runs as it always has.
+ */
+let heldBudget: Budget | null = null;
+
+export function holdTickBudget(budget: Budget | null): void {
+  heldBudget = budget;
+}
+
+/** `run`, charged to whatever budget is held WHEN IT IS CALLED, so the order in which modules load never decides whether a read is metered. */
+const metered = (run: (args: string[], repo?: string) => string) => (args: string[], repo?: string) =>
+  (heldBudget === null ? run(args, repo) : meteredRun(run, heldBudget)(args, repo));
+
 /** @param [repo] the repository to aim at; the ambient one when omitted */
-export const defaultRun = ghWithin(GH_READ_TIMEOUT_MS);
+export const defaultRun = metered(ghWithin(GH_READ_TIMEOUT_MS));
 
 /**
  * #4128: THE RELEASE-BEHIND-MAIN FACTS, at most once an hour (see the comment in `GH_READS`). Through `defaultRun`, the identity the tick already reads as and never another config.
@@ -133,7 +151,7 @@ const ghOptions = (repo: string | undefined): import("node:child_process").ExecF
   ({ encoding: "utf8", maxBuffer: 32 * 1024 * 1024, ...(repo === undefined ? {} : { env: { ...process.env, GH_REPO: repo } }) });
 
 /** `defaultRun` with `gh`'s stderr CAPTURED on the error instead of inherited: for a read whose refusal is an answer the caller handles (#3724). */
-const capturedRun = ghWithin(GH_READ_TIMEOUT_MS, { stdio: "pipe" });
+const capturedRun = metered(ghWithin(GH_READ_TIMEOUT_MS, { stdio: "pipe" }));
 
 /**
  * The reader a refusal-handling read asks through: the default one is swapped for the capturing one, and a test's `run` stands for `gh` as it is.
@@ -181,6 +199,11 @@ Promise.all(JSON.parse(process.argv[1]).map(one)).then((answers) => process.stdo
  * @returns one answer per call, in order
  */
 export function runBatch(calls: { args: string[]; repo: string | undefined; }[], env: NodeJS.ProcessEnv = process.env, callMs: number = GH_READ_TIMEOUT_MS): ({ stdout: string; } | { failed: true; stdout: string; stderr: string; status: number | null; code?: string; })[] {
+  return meteredBatch(calls, heldBudget, (sent) => runUnmetered(sent, env, callMs), (stderr) => ({ failed: true, stdout: "", stderr, status: null }));
+}
+
+/** `runBatch` without the budget: the calls it is handed are sent. */
+function runUnmetered(calls: { args: string[]; repo: string | undefined; }[], env: NodeJS.ProcessEnv, callMs: number) {
   const answers = [];
   for (let from = 0; from < calls.length; from += BATCH_MAX_CALLS) {
     const chunk = calls.slice(from, from + BATCH_MAX_CALLS);
@@ -399,7 +422,13 @@ function openPrsArgs(limit: number): string[] {
  * the org acts on it. Every caller below must keep the two apart. A refused SECOND read is `null` too: the first page alone is a list that may
  * be cut, which is the one answer a caller cannot tell from a whole one.
  */
-export function readPrs(run: (args: string[]) => string = defaultRun): any[] | null {
+export function readPrs(run: (args: string[]) => string = defaultRun, conditional: ConditionalReads | null = run === defaultRun ? conditionalFor(undefined) : null): any[] | null {
+  const answered = conditional === null ? undefined : conditionalPrs({ run, conditional });
+  return answered === undefined ? readPrsAsListed(run) : answered;
+}
+
+/** `readPrs` as the gate has always asked it, and what every fallback of the conditional read is: the flag off, a REST read that failed, a list that may be cut. */
+function readPrsAsListed(run: (args: string[]) => string): any[] | null {
   try {
     const first = JSON.parse(run(openPrsArgs(OPEN_PRS_FIRST_PAGE)));
     const parsed = Array.isArray(first) && first.length >= OPEN_PRS_FIRST_PAGE ? JSON.parse(run(openPrsArgs(OPEN_PRS_LIMIT))) : first;
@@ -407,6 +436,219 @@ export function readPrs(run: (args: string[]) => string = defaultRun): any[] | n
   } catch {
     return null;
   }
+}
+
+/**
+ * a11ign#5169, THE WIRING OF #5128: `readPrs` AND `readOpenRows` ASK GITHUB LESS WHEN `gate.restConditional` IS ON, and are what they always were when it is not.
+ *
+ * WHY THE LISTING IS REST. A GraphQL `pr list` is charged by the page and the connections each pull request carries (1 point at 20, 7 at 100, measured
+ * 2026-10-05, above), and a REST list of the same repository is a conditional GET: its `ETag` comes back `304` when nothing in it changed, which GitHub does
+ * not charge to the primary limit (documented, NOT measured here; the live hour is what says). The REST list carries only what CHANGES a pull request's
+ * detail (its head sha and `updated_at`), so it decides which pull requests' detail must be asked again, and everything else is kept.
+ *
+ * WHAT IS KEPT IS THE GRAPHQL ANSWER, NOT THE REST ONE (`gate-conditional/kept-reads.json`, beside the validators), because the gate reads
+ * `statusCheckRollup`, `reviewDecision` and `mergeStateStatus` and the REST list has none of them. Three of those do NOT move `updated_at`: a check
+ * finishing, a re-run, and `main` moving under a pull request (the #2209 conflict). So a kept detail is trusted only while (1) its head and `updatedAt` are
+ * unchanged, (2) no check in its rollup is still running (`withChecksPending`, the one reader of that meaning) and (3) it is under
+ * `KEPT_READ_MAX_AGE_MS` old. A pull request that fails any is asked again. (3) is the one place the flag makes a reading LATER than it was: a conflict is
+ * seen up to ten minutes after `main` moved, where it was seen on the next tick.
+ *
+ * NOTHING HERE IS ALLOWED TO MAKE A READ WORSE THAN THE FLAG-OFF ONE. Every failure (the REST call, its parse, a view, a store that will not read) is said
+ * on stderr and answered by the read as it always was; a list that fills its page may be cut, so it is asked as it always was too; and an answer is
+ * NEVER KEPT UNLESS IT AGREES WITH THE LISTING IT WAS VALIDATED AGAINST (open rows), or EMPTY (pull
+ * requests). That is what lets the first-wave rehearsal (`readWithFirstWaveTogether`, which answers every call `[]`) run these readers without a `[]` ever
+ * being kept in place of a list.
+ */
+export type ConditionalReads = { ask: Ask; dir: string; now: number; repo: string; };
+
+/**
+ * One GET of `path`, with the `If-None-Match` it is given. `-H` comes FIRST so the `gh` ledger (two words) counts the conditional reads apart (`api -H`).
+ * Made through `ghWithin`, the one place this file spawns `gh`, so the read is cut at the same bound and the call-site ratchet (agent-org#826) holds no new spawn;
+ * the arguments are the ticket port's (`conditionalGetArgs`), which is where a new call shape goes.
+ * `gh` exits 1 on a 304, so a numeric exit status is an ANSWER to parse; a timeout or a failure to start (no status) is thrown as it is.
+ */
+export const ghAskWithin = (timeoutMs: number): Ask => {
+  const run = ghWithin(timeoutMs, { stdio: "pipe" });
+  return (path, etag) => {
+    try {
+      return parseReply({ stdout: run(conditionalGetArgs(path, etag)), stderr: "", path, sent: etag });
+    } catch (error) {
+      const { status, stdout, stderr } = error as { status?: unknown; stdout?: unknown; stderr?: unknown; };
+      if (typeof status !== "number") throw error;
+      return parseReply({ stdout: String(stdout ?? ""), stderr: String(stderr ?? ""), path, sent: etag });
+    }
+  };
+};
+
+/**
+ * The conditional reads for `repo` (`undefined` is the ambient one), or `null` when `gate.restConditional` is off: the marker is read WHEN A READ IS MADE, so
+ * a tick sees one answer and a change lands on the next.
+ */
+export function conditionalFor(repo: string | undefined): ConditionalReads | null {
+  return restConditionalOn() ? { ask: ghAskWithin(GH_READ_TIMEOUT_MS), dir: stateEntryPath(GATE_VALIDATORS_DIR), now: Date.now(), repo: repo ?? repoNow() } : null;
+}
+
+/** How many REST reads this process asked and how many were answered `304`: the tick logs it, and the live hour's "304 share" is read from that line. */
+const restReads = { asked: 0, notModified: 0 };
+export const restReadsOfTick = () => ({ ...restReads });
+
+const REST_PAGE = 100;
+
+/** A kept detail is asked again at this age whatever else is true of it: `main` moving under a pull request moves nobody's `updated_at`. */
+export const KEPT_READ_MAX_AGE_MS = 10 * 60_000;
+
+/** What one `gh pr list` of a repository costs in GraphQL points, MEASURED 2026-10-05 (above): a first page of 20, and the full 100. */
+const PR_LIST_POINTS = { firstPage: 1, full: 7 };
+const listPoints = (count: number) => (count > OPEN_PRS_FIRST_PAGE ? PR_LIST_POINTS.full : PR_LIST_POINTS.firstPage);
+
+const KEPT_READS_FILE = "kept-reads.json";
+type KeptPr = { readAt: number; pr: any; };
+type KeptRepo = { prs?: Record<string, KeptPr>; rows?: { signature: string; readAt: number; rows: any[]; }; };
+
+const said = (cause: unknown) => String((cause as { message?: string; })?.message ?? cause).split("\n")[0];
+
+/** The kept details. Absent, unreadable or ill-shaped is NONE, said on stderr when it was there: the worst a bad store does is cost the reads it would have saved. */
+function readKept(dir: string): Record<string, KeptRepo> {
+  const path = join(dir, KEPT_READS_FILE);
+  if (!existsSync(path)) return {};
+  try {
+    const kept = JSON.parse(readFileSync(path, "utf8"));
+    return kept !== null && typeof kept === "object" && !Array.isArray(kept) ? kept : {};
+  } catch (cause) {
+    process.stderr.write(`NOTE: ${path} is unreadable (${said(cause)}); the gate reads as it always has\n`);
+    return {};
+  }
+}
+
+/** A temporary file and a rename, so a tick killed mid-write leaves the old store and never half of one. */
+function saveKept(dir: string, kept: Record<string, KeptRepo>): void {
+  const path = join(dir, KEPT_READS_FILE);
+  mkdirSync(dir, { recursive: true });
+  writeFileSync(`${path}.tmp`, JSON.stringify(kept));
+  renameSync(`${path}.tmp`, path);
+}
+
+/** Runs `read` with a conditional GET over the kept validators, and writes them back (and counts the 304s) whether `read` finished or threw. */
+function restPages({ ask, dir, now }: ConditionalReads, read: (get: (path: string, reduce: (body: any) => any) => any) => void): void {
+  const held = readValidators(dir);
+  const reader = conditionalGate({ held, ask, now });
+  try {
+    read(reader.read);
+  } finally {
+    restReads.asked += reader.reads.asked;
+    restReads.notModified += reader.reads.notModified;
+    saveValidators({ out: dir, held, now });
+  }
+}
+
+type Listed = { number: number; headRefOid: string; updatedAt: string; };
+
+/** The open pull requests' head and `updatedAt`, from ONE REST page; `null` when the page is full, which may be a cut one. */
+function listOpenPrs(conditional: ConditionalReads): Listed[] | null {
+  let listed: Listed[] = [];
+  restPages(conditional, (get) => {
+    listed = get(`repos/${conditional.repo}/pulls?state=open&per_page=${REST_PAGE}`, (body) => {
+      if (!Array.isArray(body)) throw new Error("the pull request list was not a list");
+      return body.map((pr) => ({ number: pr.number, headRefOid: pr.head.sha, updatedAt: pr.updated_at }));
+    });
+  });
+  return listed.length >= OPEN_PRS_LIMIT ? null : listed;
+}
+
+/** `true` when a kept detail can no longer be trusted: a check still running, or old enough that nothing but time could have changed it. */
+const stillMoving = (kept: KeptPr, now: number): boolean => now - kept.readAt >= KEPT_READ_MAX_AGE_MS || withChecksPending([kept.pr])[0].checksPending;
+
+const isDetailOf = (kept: KeptPr | undefined): kept is KeptPr =>
+  kept !== undefined && typeof kept.pr?.number === "number" && typeof kept.pr.headRefOid === "string" && typeof kept.pr.updatedAt === "string" && Number.isFinite(kept.readAt);
+
+/** One pull request's detail, with the fields the open list asks (so a view and a list can never disagree about shape). */
+function viewPr(number: number, run: (args: string[]) => string): any {
+  const pr = JSON.parse(run(pullViewArgs(number, openPrsArgs(OPEN_PRS_FIRST_PAGE).at(-1) as string)));
+  if (pr?.number !== number) throw new Error(`gh pr view ${number} answered something else`);
+  return pr;
+}
+
+/**
+ * The open pull requests, asked of GraphQL only for those that CHANGED. `undefined` is "could not, ask as always"; `null` is REFUSED, never empty (#1286).
+ * Reading the changed ones one by one costs a point each, so a list that would cost no more than that is read whole (`listPoints`): below twenty open
+ * pull requests that is any change at all, and the saving is the tick on which NOTHING changed.
+ */
+function conditionalPrs({ run, conditional }: { run: (args: string[]) => string; conditional: ConditionalReads; }): any[] | null | undefined {
+  try {
+    const listed = listOpenPrs(conditional);
+    if (listed === null) return undefined;
+    return listed.length === 0 ? [] : keptOrAsked({ run, conditional, listed });
+  } catch (cause) {
+    process.stderr.write(`NOTE: the conditional read of ${conditional.repo}'s pull requests failed (${said(cause)}); read as the gate always has\n`);
+    return undefined;
+  }
+}
+
+function keptOrAsked({ run, conditional, listed }: { run: (args: string[]) => string; conditional: ConditionalReads; listed: Listed[]; }): any[] | null {
+  const { dir, now, repo } = conditional;
+  const all = readKept(dir);
+  const held = Object.fromEntries(Object.entries(all[repo]?.prs ?? {}).filter(([, kept]) => isDetailOf(kept)));
+  const { reread, unchanged } = partitionUnchanged(listed, seenOf(Object.values(held).map((kept) => kept.pr)));
+  const mustRead = new Set([...reread, ...unchanged.filter((pr) => stillMoving(held[pr.number], now))].map((pr) => pr.number));
+  if (mustRead.size >= listPoints(listed.length)) return readWholeAndKeep({ run, conditional, all });
+  const fresh = new Map<number, any>();
+  for (const number of mustRead) fresh.set(number, viewPr(number, run));
+  const prs = listed.map(({ number }) => fresh.get(number) ?? held[number].pr);
+  saveKept(dir, { ...all, [repo]: { ...all[repo], prs: Object.fromEntries(prs.map((pr) => [pr.number, { readAt: fresh.has(pr.number) ? now : held[pr.number].readAt, pr }])) } });
+  return withPagedFiles(prs, { run });
+}
+
+/**
+ * The whole list, as always asked, and kept unless it came back EMPTY: it is reached only when the REST listing named pull requests, so an empty answer
+ * is a refusal's cousin or the rehearsal's `[]`, and keeping it would erase every detail already held. A partial one is safe to keep, because each kept
+ * detail is checked against the listing by number, head and `updatedAt` before it is trusted.
+ */
+function readWholeAndKeep({ run, conditional: { dir, now, repo }, all }: { run: (args: string[]) => string; conditional: ConditionalReads; all: Record<string, KeptRepo>; }): any[] | null {
+  const whole = readPrsAsListed(run);
+  if (whole !== null && whole.length > 0) {
+    saveKept(dir, { ...all, [repo]: { ...all[repo], prs: Object.fromEntries(whole.map((pr) => [pr.number, { readAt: now, pr }])) } });
+  }
+  return whole;
+}
+
+/** The open ISSUES' numbers and `updated_at`, read page by page (pull requests, which this list also carries, are left out); `null` when every page was full, which may be a cut one. */
+function listOpenIssues(conditional: ConditionalReads): { numbers: number[]; signature: string; } | null {
+  const stamps: string[] = [];
+  let whole = false;
+  restPages(conditional, (get) => {
+    for (let page = 1; page <= OPEN_ROWS_LIMIT / REST_PAGE && !whole; page += 1) {
+      const answer = get(`repos/${conditional.repo}/issues?state=open&per_page=${REST_PAGE}&page=${page}`, (body) => {
+        if (!Array.isArray(body)) throw new Error("the issue list was not a list");
+        return { count: body.length, stamps: body.filter((issue) => issue.pull_request === undefined).map((issue) => `${issue.number}@${issue.updated_at}`) };
+      });
+      stamps.push(...answer.stamps);
+      whole = answer.count < REST_PAGE;
+    }
+  });
+  return whole ? { numbers: stamps.map((stamp) => Number(stamp.split("@")[0])), signature: stamps.join(",") } : null;
+}
+
+/**
+ * The open rows, kept while the REST listing is the one they were read under. Nothing is asked of GraphQL on a tick where no row moved, and a row that
+ * moved has the whole list asked again: `blockedBy` and `subIssuesSummary` are GraphQL's alone, so a changed row cannot be read any narrower.
+ */
+function conditionalOpenRows({ run, conditional }: { run: (args: string[]) => string; conditional: ConditionalReads; }): any[] | null {
+  const { dir, now, repo } = conditional;
+  let listing: ReturnType<typeof listOpenIssues> = null;
+  try {
+    listing = listOpenIssues(conditional);
+  } catch (cause) {
+    process.stderr.write(`NOTE: the conditional read of ${repo}'s open rows failed (${said(cause)}); read as the gate always has\n`);
+  }
+  const all = readKept(dir);
+  const kept = all[repo]?.rows;
+  if (listing !== null && kept !== undefined && Array.isArray(kept.rows) && kept.signature === listing.signature && now - kept.readAt < KEPT_READ_MAX_AGE_MS) return kept.rows;
+  const rows = readOpenRowsAsListed(run);
+  if (listing !== null && rows !== null) {
+    const named = new Set(rows.map((row) => row?.number));
+    if (listing.numbers.every((number) => named.has(number))) saveKept(dir, { ...all, [repo]: { ...all[repo], rows: { signature: listing.signature, readAt: now, rows } } });
+  }
+  return rows;
 }
 
 /** Where a truncated pull request's paged file list is remembered between ticks: each tick is a fresh process, so memory would not outlive one. */
@@ -885,7 +1127,12 @@ export function claimedCommentsForClock(openRows: any[], claimedComments: any[] 
  *
  * @returns `null` when refused, never `[]`
  */
-export function readOpenRows(run: (args: string[]) => string = defaultRun): any[] | null {
+export function readOpenRows(run: (args: string[]) => string = defaultRun, conditional: ConditionalReads | null = run === defaultRun ? conditionalFor(undefined) : null): any[] | null {
+  return conditional === null ? readOpenRowsAsListed(run) : conditionalOpenRows({ run, conditional });
+}
+
+/** `readOpenRows` as the gate has always asked it: ONE `issue list`, whose literal `500` `packaging/work-gate.test.ts` pins. */
+function readOpenRowsAsListed(run: (args: string[]) => string): any[] | null {
   try {
     // ONE READ, SEVERAL CAUSES. `answer-owed` needs the labels and `blocked-without-a-referent` needs
     // `body` and `blockedBy` as well; asking once and filtering twice keeps the unconditional call

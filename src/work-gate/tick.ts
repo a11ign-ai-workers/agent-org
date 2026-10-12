@@ -1,5 +1,7 @@
 import { spawnSync } from "node:child_process";
+import { realpathSync } from "node:fs";
 import { join } from "node:path";
+import { pathToFileURL } from "node:url";
 import { READY_LABEL, CLAIM_LABEL } from "../claim-labels.ts";
 import { todayIso, ANSWER_PREFIX } from "../waiting-condition.ts";
 import { subjectMention, subjectRef } from "../review-attribution.ts";
@@ -38,8 +40,9 @@ import { readEjections, readReenqueueState, requeueEjected } from "./causes/pr-e
 import { patchUnchangedSince, pipelineCodeownerReviewMissing, pipelineCodeownerReviewOrders, refusalCommitOf, reviewBlocked, withEvidenceLabelAges,
   withPatchIds } from "./causes/pr-reviews.ts";
 import { REVIEW_STATE, reviewStateOf } from "./pr-state.ts";
-import { EXIT, branchesToReplace, defaultRun, inRepo, readArming, readClaimedRowComments, readElsewherePrs, readOpenRows, readPromotableRows, readPrs,
-  readReadyRows, readWithFirstWaveTogether, repoNow, runBatch } from "./reads.ts";
+import { EXIT, branchesToReplace, conditionalFor, defaultRun, holdTickBudget, inRepo, readArming, readClaimedRowComments, readElsewherePrs, readOpenRows,
+  readPromotableRows, readPrs, readReadyRows, readWithFirstWaveTogether, repoNow, restReadsOfTick, runBatch } from "./reads.ts";
+import { type Budget, budgetLine, restConditionalOn, tickBudget } from "../gh-conditional.ts";
 import { claimedRowAmendedOrders } from "./causes/rows-amended.ts";
 import { answerGivenOrders, answerGivenOrdersOrNone, answerOrders, bareAnswerLabelOrders, bareAnswerOrdersOrNone, blockedReferentOrders,
   endedSessionLabels, liveWorkspaceLabels, rowsOwingAnswers } from "./causes/rows-answers.ts";
@@ -465,6 +468,60 @@ export function anyBlockerClearingCandidate(rows: any[], today: string = todayIs
 }
 
 /**
+ * a11ign#5169 (the wiring of #5128): THE TICK HOLDS THE GRAPHQL BUDGET AND SAYS WHAT IT SPENT. `gate.restConditional` is the marker file
+ * (`restConditionalOn`); off, nothing here runs and the gate's reads are the ones it has always made.
+ *
+ * A CAUSE OVER ITS SHARE IS CUT BACK FIRST. The cap is one number for the whole tick, so without more one cause's runaway (a `pr list` per repository, say)
+ * would spend what the others needed and the refusals would land on whoever asked last. A cause that already holds more than `CAUSE_SHARE` of the cap is
+ * refused once the tick has spent `CUT_BACK_FROM` of it, so the last quarter is for causes still under their share; below that line nobody is refused for
+ * the share, and at the cap everybody is (`budgetOf`).
+ */
+export const CAUSE_SHARE = 0.5;
+export const CUT_BACK_FROM = 0.75;
+
+export function cutBackFirst(budget: Budget): Budget {
+  return {
+    ...budget,
+    spend(cause: string, points: number): boolean {
+      const { total, cap, byCause } = budget.summary();
+      const overShare = (byCause[cause] ?? 0) > cap * CAUSE_SHARE;
+      if (overShare && total + points > cap * CUT_BACK_FROM) return false;
+      return budget.spend(cause, points);
+    },
+  };
+}
+
+/** The two lines the tick leaves for the live hour (#5169): the GraphQL spend by cause, and how many of the REST reads came back `304`. */
+export function tickReadingLines(budget: Budget, rest: { asked: number; notModified: number; }): string[] {
+  return [budgetLine(budget.summary()), `gate-rest: ${rest.notModified} of ${rest.asked} conditional reads answered 304`];
+}
+
+/**
+ * Is this process the gate (`work-gate.ts`)? Importing this file is not running a tick: a CLI or a live run that imports the reads must never be capped or
+ * write the tick's lines. Same test `work-gate.ts` makes of itself (`import.meta.url` against `argv[1]`).
+ */
+function runningAsGate(): boolean {
+  if (process.argv[1] === undefined) return false;
+  try {
+    return pathToFileURL(realpathSync(process.argv[1])).href === new URL("../work-gate.ts", import.meta.url).href;
+  } catch {
+    // An argv[1] that cannot be resolved (`node -e`, a REPL) is not the gate; "cannot tell" must never switch a cap on.
+    return false;
+  }
+}
+
+/**
+ * EACH TICK IS ITS OWN PROCESS, so import time is the start of the tick and `exit` is its end (`process.exit` paths included). Held at import and not in
+ * `main`, which lives in `work-gate.ts`; the flag is read once here, so a change lands on the next tick and never mid-tick.
+ */
+function holdBudgetForThisTick(): void {
+  if (!restConditionalOn() || !runningAsGate()) return;
+  holdTickBudget(cutBackFirst(tickBudget));
+  process.on("exit", () => process.stderr.write(`${tickReadingLines(tickBudget, restReadsOfTick()).join("\n")}\n`));
+}
+holdBudgetForThisTick();
+
+/**
  * THE ENUMERATION: what one scope's two lanes answered. `readPrs` and `readOpenRows` (and the Ready, backlog and chairman
  * reads beside them) were the reads that assumed one repository; here each is asked of the scope's own, through `run`, which
  * is handed the repository as a second argument. EACH LANE IS `null` WHEN ITS READ WAS REFUSED and `[]` when the scope has no
@@ -475,13 +532,15 @@ export function readLanes(scope: Scope, run: (args: string[], repo?: string) => 
   const codeRepo = aimOf(scope, scope.code);
   const trackerRepo = aimOf(scope, scope.tracker);
   const aimed = (repo: string | undefined): (args: string[]) => string => (args) => run(args, repo);
+  // #5169: a `run` that is not the gate's own stands for `gh` (a test's), and is never given a REST read it did not make.
+  const conditional = (repo: string | undefined) => (run === defaultRun ? conditionalFor(repo) : null);
   const lane = (part: ScopeRepository | null, read: (run: (args: string[]) => string) => any[] | null) => (part === null ? [] : tagged(read(aimed(aimOf(scope, part))), scope.key, aimOf(scope, part)));
   return {
-    prs: lane(scope.code, (aim) => readPrs(aim)),
+    prs: lane(scope.code, (aim) => readPrs(aim, conditional(codeRepo))),
     readyRows: lane(scope.tracker, (aim) => readReadyRows(aim)),
     promotableRows: lane(scope.tracker, (aim) => readPromotableRows(aim)),
     chairmanBlocked: lane(scope.tracker, (aim) => readChairmanBlocked(aim)),
-    openRows: lane(scope.tracker, (aim) => readOpenRows(aim)),
+    openRows: lane(scope.tracker, (aim) => readOpenRows(aim, conditional(trackerRepo))),
     codeRepo, trackerRepo,
   };
 }
