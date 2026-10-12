@@ -27,6 +27,7 @@ export const COMMANDS = {
   "host:check": "host-units.ts",
   "host:install": "host-units.ts",
   "hygiene:report": "control-plane-hygiene.ts",
+  "machinery:flag": "machinery-flag.ts",
   "messaging:chats": "messaging/chats.ts",
   "messaging:listen": "messaging/listen.ts",
   "messaging:pair": "messaging/providers/telegram/pair.ts",
