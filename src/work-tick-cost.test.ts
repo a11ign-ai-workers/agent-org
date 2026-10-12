@@ -14,8 +14,8 @@ import { existsSync, mkdirSync, mkdtempSync, readdirSync, readFileSync, rmSync, 
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
-import { EXIT, TICK_COST_BYTES, TICK_COST_FILE, appendTickCost, childrenCpuMs, createMeter, readUnitFacts, tickCostPath } from "./work-tick.ts";
-import { CENSUS_ENV, currentCensusPhase, describeSpawn, summariseCensus } from "./lib/spawn-census.ts";
+import { EXIT, TICK_COST_BYTES, TICK_COST_FILE, appendTickCost, childrenCpuMs, createMeter, gateSpansOf, readUnitFacts, tickCostPath } from "./work-tick.ts";
+import { CENSUS_ENV, GATE_SPANS_ENV, currentCensusPhase, describeSpawn, endGateSpan, largestSpans, readGateSpans, summariseCensus } from "./lib/spawn-census.ts";
 import { sandboxGitEnv } from "./lib/git-env.ts";
 import { readElsewherePrs } from "./work-gate.ts";
 import { claimRow } from "./row-claim.ts";
@@ -565,4 +565,125 @@ test("#920: the tick-cost line a tick writes carries prestartSteps (null off sys
   assert.equal(lines.length, 1);
   assert.ok("prestartSteps" in lines[0], `the line has the field: ${Object.keys(lines[0])}`);
   assert.equal(lines[0].prestartSteps, null, "off systemd the steps are unknown, not an empty list");
+});
+
+// ---- agent-org#1050: THE GATE'S FIVE LARGEST SPANS ---------------------------------------------------------------------------------------------
+
+const span = (name: string, wallMs: number, cpuMs: number | null = 0) => ({ name, wallMs, cpuMs, ghCalls: null });
+
+/** A gate stub that ends the given spans through the real `endGateSpan`, each after `ms` of real wall, and then exits `code`. */
+const spanningGate = (steps: [string, number][], code = 0, before = ""): string =>
+  `import { endGateSpan } from "./lib/spawn-census.ts";\n${before}`
+  + steps.map(([name, ms]) => `await new Promise((resolve) => setTimeout(resolve, ${ms})); endGateSpan(${JSON.stringify(name)}, 0);\n`).join("")
+  + `process.exit(${code});\n`;
+
+test("#1050 POSITIVE: the five largest spans come out largest wall first, CPU breaking a tie and the gate's order the next", () => {
+  const spans = [span("a", 10), span("b", 500), span("c", 70, 5), span("d", 70, 9), span("e", 3), span("f", 200), span("g", 70, 9), span("h", 40)];
+  assert.deepEqual(largestSpans(spans).map(({ name }) => name), ["b", "f", "d", "g", "c"]);
+  assert.deepEqual(largestSpans([span("only", 4)]).map(({ name }) => name), ["only"], "fewer than five are all kept");
+});
+
+test("#1050: a tick whose gate ended spans carries `gateSpans`: at most five, largest first, each with name, wallMs and cpuMs", () => {
+  const steps: [string, number][] = [["tiny", 0], ["slow", 250], ["mid", 120], ["small", 30], ["smaller", 10], ["quick", 1], ["last", 60]];
+  const { ran, lines } = runTick({ gate: spanningGate(steps) });
+  assert.equal(ran.status, EXIT.QUIET, ran.stderr);
+  const { gateSpans } = lines[0];
+  assert.equal(gateSpans.length, 5);
+  const names = gateSpans.map((entry: { name: string }) => entry.name);
+  assert.ok(["slow", "mid", "last"].every((name) => names.includes(name)), `the three longest waits are kept: ${names}`);
+  assert.ok(!names.includes("quick") && !names.includes("smaller"), `the two shortest are dropped (the first span, from process start, is the gate's startup too): ${names}`);
+  for (const entry of gateSpans) assert.deepEqual(Object.keys(entry).sort(), ["cpuMs", "ghCalls", "name", "wallMs"]);
+  assert.ok(gateSpans.every((entry: { wallMs: number }, at: number) => at === 0 || gateSpans[at - 1].wallMs >= entry.wallMs), "largest wall first");
+  assert.ok(gateSpans[0].wallMs >= 250 && typeof gateSpans[0].cpuMs === "number", JSON.stringify(gateSpans[0]));
+});
+
+test("#1050: the spans partition the gate's wall, so they sum to the call (the first begins at the process's start, not at the first step)", () => {
+  const { lines } = runTick({ gate: spanningGate([["one", 100], ["two", 100]]) });
+  const [line] = lines;
+  const sum = line.gateSpans.reduce((total: number, entry: { wallMs: number }) => total + entry.wallMs, 0);
+  assert.ok(sum >= 200 && sum <= line.phases.gate.wallMs, `spans ${sum} ms within the gate phase's ${line.phases.gate.wallMs} ms`);
+  assert.ok(line.gateSpans.find((entry: { name: string }) => entry.name === "one").wallMs >= 100);
+});
+
+test("#1050 NEGATIVE CONTROL: a gate that reported no span carries `gateSpans: null`, never `[]`, and the tick is otherwise unchanged", () => {
+  const { ran, lines } = runTick({ gate: "process.exit(0);" });
+  assert.equal(ran.status, EXIT.QUIET, ran.stderr);
+  assert.ok("gateSpans" in lines[0], "the key is on every line");
+  assert.equal(lines[0].gateSpans, null);
+});
+
+test("#1050: output the tick does not recognise as spans is ignored -- the file's other lines never become a span and never fail the tick", () => {
+  const before = `import { appendFileSync } from "node:fs";\nfor (const junk of ["not json", "null", '"text"', '{"name":7,"wallMs":1}', '{"name":"x"}', '{"name":"y","wallMs":"3"}', ""]) appendFileSync(process.env.${GATE_SPANS_ENV}, junk + "\\n");\n`;
+  const junkOnly = runTick({ gate: `${before}process.exit(0);\n` });
+  assert.equal(junkOnly.ran.status, EXIT.QUIET, junkOnly.ran.stderr);
+  assert.equal(junkOnly.lines[0].gateSpans, null, "a file of nothing but junk is a gate that did not report");
+  const mixed = runTick({ gate: spanningGate([["real", 20]], 0, before) });
+  assert.deepEqual(mixed.lines[0].gateSpans.map((entry: { name: string }) => entry.name), ["real"]);
+});
+
+test("#1050: the gate's orders reach `wake` byte-identical with and without the reporting", () => {
+  const order = JSON.stringify({ to: "ceo", text: "an order", n: 1 });
+  const wake = `process.stdout.write("IN:" + (await import("node:fs")).readFileSync(0, "utf8"));`;
+  const printing = `process.stdout.write(${JSON.stringify(`${order}\n`)});\n`;
+  const without = runTick({ gate: `${printing}process.exit(1);\n`, wake });
+  const withSpans = runTick({ gate: spanningGate([["a", 5], ["b", 5]], 1, printing), wake });
+  assert.equal(without.ran.status, withSpans.ran.status);
+  assert.equal(withSpans.ran.stdout, without.ran.stdout);
+  assert.ok(withSpans.ran.stdout.endsWith(`IN:${order}\n`), withSpans.ran.stdout);
+  assert.equal(withSpans.ran.stderr.replace(/\d+ ms/g, "N ms"), without.ran.stderr.replace(/\d+ ms/g, "N ms"), "nothing is added to the gate's stderr either");
+});
+
+test("#1050: a span counts the `gh` calls that started inside it and not the tick's earlier ones, and its CPU is the gate's own plus its children's", () => {
+  const before = `import { execFileSync } from "node:child_process";\n`
+    + `const reads = () => { for (let i = 0; i < 3; i += 1) { try { execFileSync("gh", ["pr", "list"]); } catch {} } };\n`
+    + `endGateSpan("startup", 0);\nreads();\nendGateSpan("reads", 0);\n`;
+  const gate = `import { endGateSpan } from "./lib/spawn-census.ts";\n${before}`
+    + `import { execFileSync as run } from "node:child_process";\nrun(process.execPath, ["-e", ${JSON.stringify(burnCpu(150))}]);\nendGateSpan("burn", 0);\nendGateSpan("empty", 0);\nprocess.exit(0);\n`;
+  const { lines } = runTick({ gate });
+  const byName = Object.fromEntries(lines[0].gateSpans.map((entry: { name: string }) => [entry.name, entry]));
+  assert.equal(byName.reads.ghCalls, 3);
+  assert.equal(byName.startup.ghCalls, 0, "the first span begins at the gate's start, after the tick's own phases");
+  assert.equal(byName.empty.ghCalls, 0);
+  assert.ok(byName.burn.cpuMs >= 100, `a child that burned 150 ms of CPU is in the span's CPU: ${JSON.stringify(byName.burn)}`);
+});
+
+test("#1050: a span is written only when the tick names a file, writes nothing to stdout, and hands back what it was given", () => {
+  const before = process.env[GATE_SPANS_ENV];
+  delete process.env[GATE_SPANS_ENV];
+  try {
+    const value = { orders: [1, 2] };
+    assert.equal(endGateSpan("anything", value), value, "no file named: the value, and no side effect");
+    const dir = mkdtempSync(join(tmpdir(), "gate-spans-"));
+    try {
+      const file = join(dir, "spans.jsonl");
+      process.env[GATE_SPANS_ENV] = file;
+      assert.equal(endGateSpan("named", value), value);
+      assert.equal(readGateSpans(file)?.[0].name, "named");
+      assert.equal(readGateSpans(join(dir, "missing.jsonl")), null, "a file that is not there is `null`, which is not a free gate");
+    } finally {
+      rmSync(dir, { recursive: true, force: true });
+    }
+  } finally {
+    if (before === undefined) delete process.env[GATE_SPANS_ENV];
+    else process.env[GATE_SPANS_ENV] = before;
+  }
+});
+
+test("#1050: a gate killed at its budget adds the span it was in, named for the last step that ended, and a gate that reported nothing is still `null`", () => {
+  const ended = [span("readPrs", 3000), span("followUps", 20000)];
+  const [first, ...rest] = gateSpansOf(ended, 300_100) ?? [];
+  assert.equal(first.name, "unfinished after followUps");
+  assert.equal(first.wallMs, 300_100 - 23_000);
+  assert.deepEqual([first.cpuMs, first.ghCalls], [null, null], "unread, not zero");
+  assert.deepEqual(rest.map(({ name }) => name), ["followUps", "readPrs"]);
+  assert.deepEqual(gateSpansOf(ended)?.map(({ name }) => name), ["followUps", "readPrs"], "a gate that finished has no unfinished span");
+  assert.equal(gateSpansOf(null, 300_100), null);
+});
+
+test("#1050: the real gate ends a span at the reads the row names, and `main` still hands the tick no span of its own", () => {
+  const source = workGateSource();
+  for (const name of ["startup", "readPrs", "readReadyRows", "followUps", "decide", "orgHealth", "performActions", "settleOrders"]) {
+    assert.match(source, new RegExp(`endGateSpan\\("${name}"[,)]`), `the gate ends a span named ${name}`);
+  }
+  assert.ok(!/stdout\.write\([^)]*endGateSpan/.test(source), "a span is never part of what the gate prints");
 });

@@ -40,7 +40,7 @@ import { toolVersionLine } from "./lib/tool-version.ts";
 import { refreshTickSnapshot, type TickEvents } from "./tick-snapshot.ts";
 import { clearOwnMarker, deliverTickOrders, killedTickOrders, readKilledTick, slowThresholdSeconds, slowTickOrders, tickMarkerPath,
   writeStartMarker } from "./work-tick-health.ts";
-import { CENSUS_ENV, childrenCpuMs, installSpawnCensus, readCensus, setCensusPhase, summariseCensus } from "./lib/spawn-census.ts";
+import { CENSUS_ENV, GATE_SPANS_ENV, childrenCpuMs, installSpawnCensus, largestSpans, readCensus, readGateSpans, setCensusPhase, summariseCensus } from "./lib/spawn-census.ts";
 
 // Where the reader now lives (the census times each spawn's CPU with it); the tick's tests and callers still import it from here.
 export { childrenCpuMs };
@@ -291,7 +291,7 @@ export function appendTickCost(path: string, line: object) {
 /**
  * What one tick carries from its start to `finish`: where it records, the meter, how many wakes `wake` reported, and how to run `wake` for the two reports a tick makes about itself (`work-tick-health.ts`).
  */
-export type Run = { recordPath: string, costPath: string, censusPath: string, markerPath: string, wakeCommand: { node: string, args: string[] }, meter: ReturnType<typeof createMeter>, wakes: number };
+export type Run = { recordPath: string, costPath: string, censusPath: string, gateSpansPath: string, markerPath: string, wakeCommand: { node: string, args: string[] }, meter: ReturnType<typeof createMeter>, wakes: number, gateKilled: boolean };
 
 /**
  * THE CENSUS STARTS HERE, before the first spawn, and reaches every process the tick starts two ways: this process is patched in place (it runs the
@@ -305,8 +305,21 @@ function startRun(ledgerPath: string, wakeArgs: string[]): Run {
   process.env[CENSUS_ENV] = censusPath;
   process.env.NODE_OPTIONS = [process.env.NODE_OPTIONS, preload].filter(Boolean).join(" ");
   installSpawnCensus(censusPath);
-  return { recordPath: completionPath(ledgerPath), costPath: tickCostPath(ledgerPath), censusPath, markerPath: tickMarkerPath(ledgerPath),
-    wakeCommand: { node: process.execPath, args: wakeArgs }, meter: createMeter(), wakes: 0 };
+  const gateSpansPath = join(dirname(ledgerPath), `tick-gate-spans.${process.pid}.jsonl`); // handed to the gate alone (`GATE_SPANS_ENV`), never put in this process's environment
+  return { recordPath: completionPath(ledgerPath), costPath: tickCostPath(ledgerPath), censusPath, gateSpansPath, markerPath: tickMarkerPath(ledgerPath),
+    wakeCommand: { node: process.execPath, args: wakeArgs }, meter: createMeter(), wakes: 0, gateKilled: false };
+}
+
+/**
+ * THE GATE'S FIVE LARGEST SPANS for the cost line (agent-org#1050), or `null` when the gate reported none: `[]` would say the gate was free. A gate
+ * killed at its budget never ended the span it was in, which is the largest on the tick that matters, so its wall (the gate phase's, `killedWallMs`)
+ * beyond the spans that did end is added as one span named for the last step that finished, with no CPU or `gh` count (unread, not zero).
+ * @param {import("./lib/spawn-census.ts").GateSpan[] | null} spans @param {number | undefined} killedWallMs set only for a gate the tick killed
+ */
+export function gateSpansOf(spans: import("./lib/spawn-census.ts").GateSpan[] | null, killedWallMs?: number) {
+  if (spans === null) return null;
+  const unfinished = killedWallMs === undefined ? [] : [{ name: `unfinished after ${spans[spans.length - 1].name}`, wallMs: Math.max(0, Math.round(killedWallMs - spans.reduce((sum, span) => sum + span.wallMs, 0))), cpuMs: null, ghCalls: null }];
+  return largestSpans([...spans, ...unfinished]);
 }
 
 /**
@@ -316,7 +329,8 @@ function startRun(ledgerPath: string, wakeArgs: string[]): Run {
 function tickCostLine(exit: number, run: Run) {
   const reading = run.meter.reading();
   const { commands, ghRepos, subcommands, phaseCalls, slowest, hottest } = summariseCensus(readCensus(run.censusPath));
-  return { v: 1, at: Date.now(), exit, load1: loadavg()[0], ...reading, ...readUnitFacts(), wakes: run.wakes, spawns: commands, ghRepos, subcommands, phaseCalls, slowest, hottest };
+  const gateSpans = gateSpansOf(readGateSpans(run.gateSpansPath), run.gateKilled ? reading.phases.gate?.wallMs : undefined);
+  return { v: 1, at: Date.now(), exit, load1: loadavg()[0], ...reading, ...readUnitFacts(), wakes: run.wakes, spawns: commands, ghRepos, subcommands, phaseCalls, slowest, hottest, gateSpans };
 }
 
 /**
@@ -335,6 +349,7 @@ function recordCost(exit: number, run: Run): ReturnType<typeof tickCostLine> | n
     return null;
   } finally {
     rmSync(run.censusPath, { force: true });
+    rmSync(run.gateSpansPath, { force: true });
   }
 }
 
@@ -764,10 +779,12 @@ function main() {
   // THEN THE SNAPSHOT (#4148): after the seats and the chairman's path (they read nothing it would change), before the first read the gate or any child of it makes.
   process.stderr.write(`${meter.phase("snapshot", refreshSnapshotOrSay)}\n`);
 
+  rmSync(run.gateSpansPath, { force: true }); // a file a killed tick of the same pid left would be read as this gate's spans
   const gate = meter.phase("gate", () => spawnSync(process.execPath, [...CRASH_PRELOAD, here("./work-gate.ts")],
-    { encoding: "utf8", timeout: GATE_BUDGET_MS, killSignal: "SIGTERM" }));
+    { encoding: "utf8", timeout: GATE_BUDGET_MS, killSignal: "SIGTERM", env: { ...process.env, [GATE_SPANS_ENV]: run.gateSpansPath } }));
   // A GATE KILLED AT ITS BUDGET IS ETIMEDOUT, NOT A GATE THAT COULD NOT RUN (#1080): the two read differently in the journal and in the next step.
   const overBudget = (gate.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
+  run.gateKilled = overBudget;
   if (gate.error && !overBudget) {
     process.stderr.write(`CANNOT ASK: could not run work-gate (${gate.error.message}).\n`);
     finish(EXIT.CANNOT_ASK, run);
