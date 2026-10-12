@@ -14,6 +14,7 @@ import { join } from "node:path";
 import { PROJECT_ROOT } from "./packaging/host-units-project.ts";
 import { tmpDir } from "./lib/tmp-fixture.ts";
 import { parseHostConfig } from "./host-config.ts";
+import { HostConfigRefusal } from "./host-config.ts";
 import { countsAsProof, identityProofFile, identityProofs, recordIdentityProof, widenIdentity, type IdentityProofReading } from "./host-units.ts";
 
 const CANARY = "a11ign/agent-org";
@@ -126,4 +127,17 @@ test("#1247 RECORD: a present proof file that does not parse is refused and is n
   assert.throws(() => recordIdentityProof("reviewer", reading({ pr: 1248 }), { file }), /does not parse as a map of role to readings/);
   assert.equal(readFileSync(file, "utf8"), "{ not json", "the unreadable record is left as it was");
   assert.throws(() => widenIdentity("reviewer", { host, canary: CANARY, file }), /does not parse/);
+});
+
+test("#1247 RECORD: a proof file whose role value is not an array of readings is refused by the gate and the writer, and is not overwritten", () => {
+  const root = tmpDir("identity-canary-1247-shape-");
+  const host = hostWithReviewerApp(root);
+  const file = identityProofFile({ host, home: root, env: {} });
+  recordIdentityProof("reviewer", reading(), { file }); // creates the file and its directory
+  for (const garbled of ['{"reviewer":{}}', '{"reviewer":"APPROVED"}', "[]", "null"]) {
+    writeFileSync(file, garbled);
+    assert.throws(() => widenIdentity("reviewer", { host, canary: CANARY, file }), HostConfigRefusal, `widening refuses ${garbled}`);
+    assert.throws(() => recordIdentityProof("reviewer", reading(), { file }), HostConfigRefusal, `the writer refuses ${garbled}`);
+    assert.equal(readFileSync(file, "utf8"), garbled, "the record is left as it was");
+  }
 });

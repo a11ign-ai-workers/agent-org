@@ -2178,11 +2178,18 @@ export function identityProofFile(where: { host?: HostConfig; home?: string; env
 export function identityProofs(file: string, read: typeof readFileSync = readFileSync): Partial<Record<GithubRole, IdentityProofReading[]>> {
   const text = textOf(file, read);
   if (text === null) return {};
+  const refusal = new HostConfigRefusal("identity-canary-proofs", "the proof file is present and does not parse as a map of role to readings, so it is refused rather than overwritten", file);
+  let parsed: unknown;
   try {
-    const parsed = JSON.parse(text);
-    if (parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)) return parsed;
-  } catch { /* refused below: the message names the file */ }
-  throw new HostConfigRefusal("identity-canary-proofs", "the proof file is present and does not parse as a map of role to readings, so it is refused rather than overwritten", file);
+    parsed = JSON.parse(text);
+  } catch {
+    throw refusal;
+  }
+  // A role's value must be an array of readings: any other shape is refused here, so nothing downstream reads a value it cannot iterate.
+  const shaped = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
+    && Object.values(parsed).every((readings) => Array.isArray(readings));
+  if (!shaped) throw refusal;
+  return parsed as Partial<Record<GithubRole, IdentityProofReading[]>>;
 }
 
 /**
