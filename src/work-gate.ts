@@ -577,7 +577,7 @@ function main() {
     // nothing in progress pays nothing; a busy one pays exactly one, whatever the size of the queue.
     claimedComments: claimedComments ?? [],
     // #2470: the SAME comments, read once, and the raw `null` kept for the reader that must tell "refused" from "none".
-    ...endGateSpan("claimStalls", withClosedClaims(claimStallsWithFacts(openRowsRead, claimedComments, prs, otherScopes), closedClaims)), // #3451: the orders AND the facts they were built from
+    ...endGateSpan("claimStalls", withClosedClaims(claimStallsWithFacts(openRowsRead, claimedComments, prs, otherScopes, {}, waitReads?.facts ?? null), closedClaims)), // #3451: the orders AND the facts they were built from
     // #1969: CONDITIONAL, and the condition is answered for free from the list already in hand.
     // `shouldBeMerging` reads `openPrs`; only if it finds a green, unheld, non-draft PR is the
     // merge-queue call made at all.

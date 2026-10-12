@@ -21,6 +21,7 @@ import { FAILURE_LEDGER_FILE } from "../failure-ledger.ts";
 import { readAgents, readAgentSessions } from "../herdr-agents.ts";
 import { NEEDS_CHAIRMAN_LABEL as CHAIRMAN_LABEL, SESSION_PREFIX } from "../project-vocabulary.ts";
 import { waitingOn, fleetWaitingOn, describeWaiting, answersOwedBy } from "../waiting-condition.ts";
+import { declaredWaitsOf, waitItemOf, conditionHolds, type WaitFacts } from "../wait-condition.ts";
 import { WORKER_STATE_DIR, readDeclarations, lastDeliveredTo, declarationReading } from "../worker-state.ts";
 import { homeProjectDeclaration } from "../project-config.ts";
 import { existsSync, readFileSync, writeFileSync } from "node:fs";
@@ -44,8 +45,8 @@ export const LIVE_HOST_READS: import("../claim-stall.ts").HostReads = { git: git
  * declared waits would exempt exactly the rows this cause exists for. An `answer:` owed by ANOTHER session (`answer:product-manager` on a
  * row an orchestrator holds) is the holder waiting on a ruling, and is respected.
  */
-function declaredWait(row: any, holder: string): string | null {
-  return declaredWaitOf(row, holder)?.phrase ?? null;
+function declaredWait(row: any, holder: string, waitFacts: WaitFacts | null): string | null {
+  return declaredWaitOf(row, holder, waitFacts)?.phrase ?? null;
 }
 
 /**
@@ -53,12 +54,28 @@ function declaredWait(row: any, holder: string): string | null {
  * row has a wait field", so the idle reading and the clock reading cannot disagree about a row. `blocked` (the label) is not a kind: it names
  * no referent. `fleet-hold` is a `Fleet-hold-until:` line, whose second meaning -- a claim on the workers -- nothing else reads.
  */
-function declaredWaitOf(row: any, holder: string): { kind: string; phrase: string; } | null {
+function declaredWaitOf(row: any, holder: string, waitFacts: WaitFacts | null): { kind: string; phrase: string; } | null {
   if (labelsOf(row).includes(CHAIRMAN_LABEL)) return { kind: "chairman", phrase: `waiting on the chairman (${CHAIRMAN_LABEL})` };
   const waiting = waitingOn({ ...row, blockedBy: { nodes: [] } }) ?? fleetWaitingOn(row);
-  if (waiting === null || (waiting.kind === "answer" && waiting.session === holder)) return null;
-  const kind = waiting.kind === "date" ? "not-before" : waiting.kind === "row" ? "blocked-by" : waiting.kind;
-  return { kind, phrase: describeWaiting(waiting) };
+  if (waiting !== null && !(waiting.kind === "answer" && waiting.session === holder)) {
+    const kind = waiting.kind === "date" ? "not-before" : waiting.kind === "row" ? "blocked-by" : waiting.kind;
+    return { kind, phrase: describeWaiting(waiting) };
+  }
+  return waitingForOf(row, waitFacts);
+}
+
+/**
+ * A `Waiting-for:` line in the row's body whose condition is NOT yet true (#1183). The body's own line is read here because `waitingOn` reads only
+ * the fields above, so a holder that declared its wait in the body was nudged as though it had declared none. The line is read against the SAME facts
+ * the work gate reads for ready rows (`waitFacts`), and a condition that is unknown (`null`: an unread reference, `manual`, an unreadable line) is NOT a
+ * declared wait -- a failed read never excuses a quiet holder. A met condition returns `null` on the same tick, so the holder is nudged again.
+ *
+ * `kind` stays out of `WAIT_RELEASE_KINDS`: a holder with work is not released by it, and one with no work is kept `waiting`, as every unknown kind is.
+ */
+function waitingForOf(row: any, waitFacts: WaitFacts | null): { kind: string; phrase: string; } | null {
+  if (waitFacts === null) return null;
+  const unmet = declaredWaitsOf(waitItemOf(row, "row")).waits.find((wait) => conditionHolds(wait, waitFacts) === false);
+  return unmet === undefined ? null : { kind: "waiting-for", phrase: `Waiting-for: ${unmet.text}` };
 }
 
 /**
@@ -149,6 +166,8 @@ export function claimStallTick({ io = LIVE_HOST_READS, repo = REPO_CHECKOUT, now
         stateDir?: string; log?: (line: string) => void; ledger?: () => string;
         read?: typeof readStallState; write?: typeof writeStallState; onFacts?: OnClaimFacts; record?: typeof recordStalledNudges;
         trackers?: TrackerClaims[]; labelEventsOf?: LabelEventsOf;
+        /** #1183: the facts a body `Waiting-for:` is read against; absent or `null` reads no body wait (the gate's own rule for ready rows). */
+        waitFacts?: WaitFacts | null;
     }): import("../claim-stall.ts").StallOrder[] {
   try {
     return evaluateClaims({ labelEventsOf: io === LIVE_HOST_READS ? readLabelEvents : undefined, ...inputs, io, repo, now, stateDir, log, read, write });
@@ -169,12 +188,12 @@ export function claimStallTick({ io = LIVE_HOST_READS, repo = REPO_CHECKOUT, now
  * which is how `wake.ts` reads the holder's `session:` label, comments and declines in THAT tracker's repository and not the home one's.
  * `onFacts` stays the home tracker's: `blockerClearedOrders` keys those facts by bare row number.
  */
-function evaluateClaims({ rows, claimedComments, openPrs, mergedPrs, elsewhere, restartAt, agents, agentSessions, ledger, io, repo, now, stateDir, log, read, write, onFacts, record = recordStalledNudges, trackers = [], labelEventsOf }: {
+function evaluateClaims({ rows, claimedComments, openPrs, mergedPrs, elsewhere, restartAt, agents, agentSessions, ledger, io, repo, now, stateDir, log, read, write, onFacts, record = recordStalledNudges, trackers = [], labelEventsOf, waitFacts = null }: {
         rows: any[]; claimedComments: any[] | null; openPrs: any[]; mergedPrs: any[] | null; restartAt?: number | null;
         elsewhere?: import("../claim-stall.ts").ElsewherePrs; agents?: { label: string; status: string; }[] | null; agentSessions?: Map<string, string> | null;
         ledger?: () => string; io: import("../claim-stall.ts").HostReads; repo: string; now: number; stateDir: string;
         log: (line: string) => void; read: typeof readStallState; write: typeof writeStallState; onFacts?: OnClaimFacts; record?: typeof recordStalledNudges;
-        trackers?: TrackerClaims[]; labelEventsOf?: LabelEventsOf;
+        trackers?: TrackerClaims[]; labelEventsOf?: LabelEventsOf; waitFacts?: WaitFacts | null;
     }) {
   const held = rows.filter((r) => labelsOf(r).includes(CLAIM_LABEL));
   const homeUnread = held.length > 0 && claimedComments === null;
@@ -204,11 +223,12 @@ function evaluateClaims({ rows, claimedComments, openPrs, mergedPrs, elsewhere, 
     agents: agentsFor(everyHeld, agents), heldBy: rowsPerSession(everyHeld) };
   const homeBefore = unscoped(before);
   const home = homeUnread ? { readings: [], skipped: new Map<number, string>() }
-    : readClaims({ ...shared, held, byRow: commentsByRow(claimedComments), key: "", trackerRepo: homeProjectDeclaration().tracker[0].repo, io, before: homeBefore });
+    : readClaims({ ...shared, held, byRow: commentsByRow(claimedComments), key: "", trackerRepo: homeProjectDeclaration().tracker[0].repo, io, before: homeBefore, waitFacts });
   if (!homeUnread) onFacts?.(movesOfTick(home));
   const others = readable.map((unit) => {
     const { key, repo: trackerRepo } = unit.tracker;
-    const read = readClaims({ ...shared, held: unit.held, byRow: commentsByRow(unit.tracker.claimedComments), key, trackerRepo,
+    // #1183: the facts are the HOME repository's, keyed by bare `#n`, so another tracker's body waits are read against none (unknown, so no excuse)
+    const read = readClaims({ ...shared, held: unit.held, byRow: commentsByRow(unit.tracker.claimedComments), key, trackerRepo, waitFacts: null,
       io: { ...io, labelEvents: labelEventsOf === undefined ? undefined : (row: number) => labelEventsOf(row, trackerRepo) } as typeof io,
       before: scopedView(before, `${key}#`) });
     if (unit.held.length > 0) log(`claim-stall: tracker \`${key}\` (${trackerRepo}): ${unit.held.length} claimed rows, ${read.readings.length} evaluated.\n`);
@@ -362,13 +382,15 @@ function rowsPerSession(held: any[]): Map<string, number> {
   return counts;
 }
 
-function readClaims({ held, byRow, openPrs, mergedPrs, elsewhere, io, repo, now, restart, agents, before, log, ledger, declarations, key, trackerRepo, heldBy }: {
+function readClaims({ held, byRow, openPrs, mergedPrs, elsewhere, io, repo, now, restart, agents, before, log, ledger, declarations, key, trackerRepo, heldBy, waitFacts }: {
         held: any[]; byRow: Map<number, any[]>; openPrs: any[]; mergedPrs: any[] | null;
         elsewhere?: import("../claim-stall.ts").ElsewherePrs; io: import("../claim-stall.ts").HostReads; repo: string; now: number; restart: number | null;
         agents: { label: string; status: string; }[] | null;
         before: import("../claim-stall.ts").StallState; log: (line: string) => void; ledger: () => string; declarations: ReturnType<typeof readDeclarations>;
         /** the tracker's declared key (`""` is the home tracker's), its `owner/repo`, and how many claimed rows each session holds across every tracker read */
         key: string; trackerRepo: string; heldBy: Map<string, number>;
+        /** #1183: the home repository's wait facts (`null` for another tracker, whose bare `#n` are not these), read against each row's body `Waiting-for:` */
+        waitFacts: WaitFacts | null;
     }): { readings: { facts: import("../claim-stall.ts").ClaimFacts; reading: import("../claim-stall.ts").Reading; }[]; skipped: Map<number, string>; } {
   const readings: { facts: import("../claim-stall.ts").ClaimFacts; reading: import("../claim-stall.ts").Reading; }[] = [];
   // the rows whose facts could not be built, with the reason `claimFactsFrom` gave (#3451)
@@ -383,8 +405,8 @@ function readClaims({ held, byRow, openPrs, mergedPrs, elsewhere, io, repo, now,
       continue;
     }
     const session = sessions[0].slice(SESSION_PREFIX.length);
-    const built = claimFactsFrom({ row: row.number, title: row.title, session, waiting: declaredWait(row, session),
-      waitKind: declaredWaitOf(row, session)?.kind ?? null, blockedBy: openBlockers(row), comments: byRow.get(Number(row.number)) ?? [], openPrs: withChecksPending(openPrs), mergedPrs,
+    const built = claimFactsFrom({ row: row.number, title: row.title, session, waiting: declaredWait(row, session, waitFacts),
+      waitKind: declaredWaitOf(row, session, waitFacts)?.kind ?? null, blockedBy: openBlockers(row), comments: byRow.get(Number(row.number)) ?? [], openPrs: withChecksPending(openPrs), mergedPrs,
       trackerRepo, sessionRows: heldBy.get(session), now,
       ...(elsewhere === undefined ? {} : { elsewhere: { ...elsewhere, open: elsewhere.open === null ? null : withChecksPending(elsewhere.open) } }), repo }, io);
     if ("skip" in built) {
@@ -443,9 +465,9 @@ function ledgerText(path: string) {
  * review as one with no PR at all (nudged, or, with a `blockedBy` edge, released), and a refused row read would empty the nudge memory.
  */
 export function claimStallsNow(rows: any[] | null, claimedComments: any[] | null, prs: any[] | null, { tick = claimStallTick, merged = readMergedPrs, elsewhere = readElsewherePrs,
-  log = (line) => process.stderr.write(line), onFacts, trackers }: {
+  log = (line) => process.stderr.write(line), onFacts, trackers, waitFacts }: {
         tick?: typeof claimStallTick; merged?: typeof readMergedPrs; elsewhere?: typeof readElsewherePrs; log?: (line: string) => void;
-        onFacts?: OnClaimFacts; trackers?: () => TrackerClaims[];
+        onFacts?: OnClaimFacts; trackers?: () => TrackerClaims[]; waitFacts?: WaitFacts | null;
     } = {}) {
   if (rows === null || prs === null) {
     log(`claim-stall: the ${rows === null ? "open rows" : "open pull requests"} could not be read -- NO claim was evaluated this tick.\n`);
@@ -457,7 +479,7 @@ export function claimStallsNow(rows: any[] | null, claimedComments: any[] | null
   const others = trackers === undefined ? [] : trackers();
   const anyClaimed = rows.some((r) => labelsOf(r).includes(CLAIM_LABEL)) || others.some((t) => (t.rows ?? []).some((r) => labelsOf(r).includes(CLAIM_LABEL)));
   return tick({ rows, claimedComments, openPrs: prs, mergedPrs: anyClaimed ? merged() : null, ...(anyClaimed ? { elsewhere: elsewhere() } : {}),
-    ...(onFacts === undefined ? {} : { onFacts }), ...(others.length === 0 ? {} : { trackers: others }) });
+    ...(onFacts === undefined ? {} : { onFacts }), ...(others.length === 0 ? {} : { trackers: others }), ...(waitFacts === undefined ? {} : { waitFacts }) });
 }
 
 /**
