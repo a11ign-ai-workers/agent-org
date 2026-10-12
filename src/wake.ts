@@ -45,7 +45,8 @@ import { haikuBriefTail } from "./haiku-brief.ts";
 import type { BlockingRecord } from "./blocking-impact.ts";
 import { HAIKU_DEFAULT_CI_FAILURES, haikuDefaultOn, routeEngineer, type Routed } from "./engineer-route.ts";
 import { DEFAULT_CAPS, ESCALATION_KIND, ESCALATION_USE, claimFacts, escalationLogLine, escalationNote, haikuStarts, isHaiku, shouldEscalate, transcriptCounts } from "./engineer-escalation.ts";
-import { decisionLogPathFrom, decisionSwitchesPath } from "./decision-provider.ts";
+import { decisionLogPathFrom, decisionSwitchesPath, readSwitches } from "./decision-provider.ts";
+import { printDiagnostic, processState } from "./triage-provider.ts";
 import { classifyCiFailure, classLine, classNote, notesTheOrder, readCiFailure, type Gh } from "./ci-failure-class.ts";
 import { depthEffort, depthLine, readDepthState, reviewDepth, type Depth } from "./review-depth.ts";
 import { profileFor, agentArgs, haikuTierProfile, type TierProfile, armOf, ARM, CALM_FINISH_PARAGRAPH, tripsArmOf, TRIPS_ARM, ROUND_TRIPS_PARAGRAPH } from "./worker-profile.ts";
@@ -1048,10 +1049,10 @@ export function whyNoBrief(isFile: (path: string) => boolean = isRegularFile): s
  *   in herdr's default directory and nothing is claimed (the pre-#2405 spawn, kept for a caller that has no claim)
  */
 function spawnWorker(order: { session: string; causeKey: string; cause?: string; title?: string; replaces?: { branch: string; }[]; as?: string; startFresh?: boolean; }, agents: { label: string; status: string; }[], roster: string[], { run = defaultRun, env = spawnEnvironment(), drained = [],
-  claimable, claimer, memory, claimRefused, isFile = isRegularFile }: {
+  claimable, claimer, memory, claimRefused, toolchain, isFile = isRegularFile }: {
         run?: (args: string[]) => string; env?: Record<string, string>; drained?: readonly string[]; isFile?: (path: string) => boolean;
         claimable?: (order: { causeKey: string; startFresh?: boolean; }) => string | null; claimer?: SpawnClaimer;
-        memory?: () => string | null; claimRefused?: ClaimRefused;
+        memory?: () => string | null; claimRefused?: ClaimRefused; toolchain?: ToolchainGate;
     } = {}): {
     label: string; workspace: string; profile: { kind: string; model: string; effort: string; };
     claimed?: ClaimedRow;
@@ -1076,6 +1077,13 @@ function spawnWorker(order: { session: string; causeKey: string; cause?: string;
   /** @param [workspace] a workspace this call opened, to close with it */
   const unwound = (refusal: string, workspace?: string) => `${refusal}${workspace ? closedNote(run, workspace) : ""}`
     + `${claimed && claimer ? claimer.release(claimed, role.role, env) : ""}`;
+  // agent-org#1169: A CLAIMED TREE IS NOT HANDED TO ITS WORKER UNTIL `typescript` RESOLVES FROM IT. Only a caller that passes a gate asks (`worktree.rebuildCheck`, ON);
+  // a refusal here is undone like every refusal after the claim, so the row is free again and the next tick asks once more.
+  const unready = toolchain !== undefined && claimed !== undefined ? toolchain.reason(claimed.worktree) : null;
+  if (toolchain !== undefined && unready !== null) {
+    toolchain.refused(order, unready);
+    return { refusal: unwound(`no spawn: ${unready}`) };
+  }
   const pane = openPane(run, role.role, env, claimed?.worktree);
   // `openPane` closes a workspace it opened and could not use, so only the claim is left to undo here.
   if ("refusal" in pane) return { refusal: unwound(pane.refusal) };
@@ -5269,7 +5277,7 @@ function targetFor(order: {
         relane?: { deferredSince: Map<string, number>; now: number; }; goneSeats?: ReadonlyMap<string, string>;
         env?: Record<string, string>; registerSpawn?: (role: string) => void; drained?: readonly string[];
         claimable?: (order: { causeKey: string; startFresh?: boolean; }) => string | null; claimer?: SpawnClaimer; hostLoad?: () => HostLoad;
-        claimRefused?: ClaimRefused; oneShot?: OrchestratorOneShot; ceoOneShot?: CeoOneShot;
+        claimRefused?: ClaimRefused; oneShot?: OrchestratorOneShot; ceoOneShot?: CeoOneShot; toolchain?: ToolchainGate;
     } & ReviewerDeps): {
     label: string; profile?: { kind: string; model: string; effort: string; }; claimed?: ClaimedRow;
     workspace?: string; reviewer?: true; order?: { prompt: string; };
@@ -5314,7 +5322,7 @@ function targetFor(order: {
   if (claimer !== undefined && "refusal" in claimer) return { refusal: `${routed.refusal}; no spawn: ${claimer.refusal}` };
   const spawn = spawnWorker(order, live, roster,
     { run: deps.run, env: deps.env, drained: deps.drained, claimable: deps.claimable, claimer,
-      memory: deps.memory, claimRefused: deps.claimRefused });
+      memory: deps.memory, claimRefused: deps.claimRefused, toolchain: deps.toolchain });
   if ("refusal" in spawn) return { refusal: `${routed.refusal}; ${spawn.refusal}` };
   // REGISTERED BEFORE THE PROMPT, because a refused prompt leaves the process running (see `deliver`).
   deps.registerSpawn?.(spawn.label);
@@ -5686,7 +5694,7 @@ function noteClaimOrders(claimOrders: ClaimOrders | undefined, { gateOrder, targ
  */
 export function deliver(orders: readonly { session: string; causeKey: string; prompt: string; cause?: string; title?: string; replaces?: { branch: string; }[]; resume?: boolean; outageNow?: boolean; startFresh?: boolean; briefRole?: string; }[], agents: { label: string; status: string; }[], roster: string[],
   { run = defaultRun, record, counts, ineligibleReason, env, registerSpawn, drained, claimable, claimer, memory, hostLoad, claimRefused, oneShot, ceoOneShot,
-    launch, reviewerEnv, registerReviewer, checkout, registry, unavailable, sleep, contextRoot, codexConfig, clock, relane, goneSeats, claimOrders,
+    launch, reviewerEnv, registerReviewer, checkout, registry, unavailable, sleep, contextRoot, codexConfig, clock, relane, goneSeats, claimOrders, toolchain,
     now = Date.now, serve }: {
           run?: (args: string[]) => string; record?: (key: string, recipient?: string, noClear?: boolean, at?: number) => void;
           serve?: (order: { causeKey: string; }) => ServedRecord | null;
@@ -5696,7 +5704,7 @@ export function deliver(orders: readonly { session: string; causeKey: string; pr
           memory?: () => string | null; hostLoad?: () => HostLoad; launch?: LaunchFacts; unavailable?: (label: string) => string | null;
           sleep?: (ms: number) => void; contextRoot?: string; clock?: OrderClock;
           relane?: { deferredSince: Map<string, number>; now: number; }; goneSeats?: ReadonlyMap<string, string>; now?: () => number;
-          claimOrders?: ClaimOrders;
+          claimOrders?: ClaimOrders; toolchain?: ToolchainGate;
       } & Partial<ReviewerDeps> = {}): { sent: string[]; refused: string[]; stuck: string[]; outaged: string[]; settled: string[]; goneSeats: Map<string, string>; } {
   const sent = [];
   const refused = [];
@@ -5733,7 +5741,7 @@ export function deliver(orders: readonly { session: string; causeKey: string; pr
       continue;
     }
     const target = targetFor(order, live, roster, { run: spawnRun, spawned, ineligibleReason, env, registerSpawn, drained, startHold: starts.hold,
-      claimable, claimer, memory, hostLoad, claimRefused, oneShot, ceoOneShot, reviewerEnv, registerReviewer, checkout, registry, codexConfig, relane, goneSeats: gone });
+      claimable, claimer, memory, hostLoad, claimRefused, oneShot, ceoOneShot, reviewerEnv, registerReviewer, checkout, registry, codexConfig, relane, goneSeats: gone, toolchain });
     if ("refusal" in target) {
       const left = endedSeatLine(order, gone);
       if (left === null) refused.push(`${order.causeKey}: ${target.refusal}`); else settled.push(left);
@@ -6519,6 +6527,54 @@ export function sayClaimRefusal({ run = defaultGh, post = guardedGh, warn = (lin
     if (order.startFresh !== true || ref === null || ref.key !== "") return;
     const key = `claim:${createHash("sha256").update(refusal).digest("hex").slice(0, 8)}`;
     sayOnChairmanRow(ref.number, { reason: refusal, waits: false, key }, { run, post, warn });
+  };
+}
+
+// --- agent-org#1169: A REBUILT WORKTREE IS NOT HANDED TO ITS WORKER UNTIL `typescript` RESOLVES FROM IT ---
+
+/** The key in `decisions.json` that turns the rebuild check ON. Absent, or any value but `true`, is OFF: a claimed tree is handed over as it is, as before. */
+export const REBUILD_CHECK_SWITCH = "worktree.rebuildCheck";
+
+/**
+ * Whether the rebuild check is ON. `readSwitches` types its keys as decision uses and this key is not one, so the key is read by name here; the file's
+ * contract (booleans only) is what makes that safe.
+ */
+export function rebuildCheckOn(path: string = decisionSwitchesPath(PRIMARY_CHECKOUT)): boolean {
+  const switches: Record<string, unknown> = readSwitches(path, { diagnostic: printDiagnostic, state: processState, read: readFileSync });
+  return switches[REBUILD_CHECK_SWITCH] === true;
+}
+
+/**
+ * The reason a claimed tree is NOT ready for its worker, or `null` when it is. A tree with no `package.json` has no toolchain to resolve, so it is not refused.
+ * `exists` follows links, so a `node_modules` link that resolves nothing reads as absent, and that is the cause named.
+ */
+export function worktreeToolchainReason(tree: string, { exists = existsSync }: { exists?: (path: string) => boolean } = {}): string | null {
+  if (!exists(join(tree, "package.json"))) return null;
+  if (exists(join(tree, "node_modules", "typescript", "package.json"))) return null;
+  return `\`typescript\` does not resolve from ${join(tree, "node_modules")}: the worktree's node_modules is absent, or a link that resolves nothing`;
+}
+
+/** The gate `spawnWorker` asks about a claimed tree, and the writer it tells when it refuses ({@link sayToolchainRefusal}). */
+export type ToolchainGate = { reason: (tree: string) => string | null; refused: (order: { causeKey: string; startFresh?: boolean; }, reason: string) => void; };
+
+/**
+ * A ROW WHOSE WORKTREE IS REFUSED IS WRITTEN ON THE ROW, once per cause, so its owner reads why it was not started instead of finding a silent skip (#1169).
+ * A KEYED ROW IS NOT WRITTEN ON, for the reason {@link sayClaimRefusal} gives: {@link rowComments} reads the first tracker's repository.
+ */
+export function sayToolchainRefusal({ run = defaultGh, post = guardedGh, warn = (line) => { process.stderr.write(`${line}\n`); } }: {
+  run?: (args: string[]) => string; post?: (args: string[]) => string; warn?: (line: string) => void; } = {}): ToolchainGate["refused"] {
+  return (order, reason) => {
+    const ref = rowRefOfOrder(order);
+    if (ref === null || ref.key !== "") return;
+    const marker = `<!-- worktree-not-ready:${ref.number}:${createHash("sha256").update(reason).digest("hex").slice(0, 8)} -->`;
+    try {
+      if (rowComments(ref.number, marker, run).some((c) => c.marked)) return;
+      post(["issue", "comment", String(ref.number), "--body", `${marker}\n**This \`ready\` row was NOT started this tick: its worktree is not ready for a worker.** ${reason}\n\n`
+        + "The wake checks the worktree before it starts a worker in it, and offers the row again every tick; a worker starts on the first tick the check passes. "
+        + "This is written once for this cause."]);
+    } catch (err) {
+      warn(`wake: could not write #${ref.number}'s worktree refusal on the row (${firstLine(err)}) -- the journal line stands and the next tick tries again.`);
+    }
   };
 }
 
@@ -8568,6 +8624,7 @@ async function main() {
     claimOrders: claimOrdersIn(claimOrdersPath(ledgerPath)),
     counts: deliveryCounts(ledgerPath), ineligibleReason: poolEngineerReason(poolEligibility(spares, drained), unavailable),
     registerSpawn: (role) => registerSpawn(spares, role), drained, claimable: spawnClaimability(), claimRefused: sayClaimRefusal(),
+    toolchain: rebuildCheckOn() ? { reason: (tree) => worktreeToolchainReason(tree), refused: sayToolchainRefusal() } : undefined,
     oneShot: createOrchestratorOneShot({ readRow: readRowForTier }), ceoOneShot: createCeoOneShot({ readRow: readRowForTier }),
     memory: spawnMemoryGate(), hostLoad: readHostLoad, claimer: claimerFor(spares, ledgerPath, hostLayout, escalatedRoutes(claimOrdersText(ledgerPath), routes)), launch: hostLayout,
     registerReviewer: (session) => registerReviewer(reviewerPathsFrom(ledgerPath), session),
