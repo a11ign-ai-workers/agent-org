@@ -4,7 +4,7 @@ Acceptance:
 
 ```bash
 grep -c "held-then-released" src/org-retro.ts
-bash -c 'cd ~/repos/agent-org && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/org-retro-shared-failure.test.ts'
+bash -c 'cd "$(git rev-parse --show-toplevel)" && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/org-retro-shared-failure.test.ts'
 ```
 
 Closes a11ign/a11ign#997
