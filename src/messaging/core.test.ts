@@ -11,6 +11,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { after, describe, test } from "node:test";
 
+import { MESSAGING_AUDIENCE_MISUSE_KIND } from "../failure-ledger.ts";
+import { HALF } from "./audit.ts";
 import { composeDigest, composeText, createMessenger, planNotification, resolveConfig } from "./core.ts";
 import { createFakeProvider } from "./fake-provider.ts";
 import { createLedger, describeError, readLedgerLines, redact } from "./ledger.ts";
@@ -25,15 +27,20 @@ after(() => rmSync(scratch, { recursive: true, force: true }));
 let nextLedger = 0;
 
 /** A messenger on a clock the test owns. `restart()` is a NEW process over the SAME ledger file. */
-function harness({ config, capabilities } = /** @type {{config?: any, capabilities?: any}} */ ({})) {
+function harness({ config, capabilities, refuses = false } = /** @type {{config?: any, capabilities?: any, refuses?: boolean}} */ ({})) {
   let at = START;
   const clock = { now: () => at, advance: (/** @type {number} */ ms: number) => { at += ms; }, set: (/** @type {number} */ ms: number) => { at = ms; } };
   const path = join(scratch, `ledger-${nextLedger += 1}.jsonl`);
   const provider = createFakeProvider({ capabilities: { edit: false, pin: false, ...capabilities } });
-  const build = () => createMessenger({ provider, ledger: createLedger({ path, now: clock.now }), now: clock.now, config });
+  /** @type {any[]} the failure-ledger events the guard reported (agent-org#1222) */
+  const misuses: any[] = [];
+  const build = () => createMessenger({
+    provider, ledger: createLedger({ path, now: clock.now }), now: clock.now, config,
+    refusesAskingAnnouncements: refuses, onMisuse: (event) => misuses.push(event),
+  });
   const lines = () => readLedgerLines(path);
   let messenger = build();
-  return { clock, provider, lines, path, tick: (/** @type {unknown[]} */ events: unknown[]) => messenger.tick(events), restart() { messenger = build(); } };
+  return { clock, provider, lines, path, misuses, tick: (/** @type {unknown[]} */ events: unknown[]) => messenger.tick(events), restart() { messenger = build(); } };
 }
 
 /** @param {number} number @param {Record<string, unknown>} [more] */
@@ -495,5 +502,109 @@ describe("an event's actions reach a provider that draws buttons (a11ign/a11ign#
     const run = harness();
     const decisions = await run.tick([request(904, { actions: [{ label: "x" }] }), request(905)]);
     assert.deepEqual(decisions.map((decision) => decision.action), ["invalid", "sent"]);
+  });
+});
+
+/** An announcement, held past its hold-down so the first observation is due (the default incident hold is 30 minutes). @param {Record<string, unknown>} [more] */
+function announcement(more: Record<string, unknown> = {}) {
+  return incident({ firstSeenAt: START - 2 * HOUR, ...more });
+}
+
+describe("the audience guard refuses an announcement that asks, before any send (agent-org#1222, a11ign#5112)", () => {
+  test("positive control: a plain announcement with the guard ON is sent", async () => {
+    const run = harness({ refuses: true });
+    const [decision] = await run.tick([announcement({ key: "incident:trunk", text: "trunk is red" })]);
+    assert.equal(decision.action, "sent");
+    assert.equal(run.provider.sent.length, 1);
+  });
+
+  test("'Can you power it on?' is refused: nothing is sent, and the ledger holds the refusal", async () => {
+    const run = harness({ refuses: true });
+    const [decision] = await run.tick([announcement({ key: "incident:power", text: "Can you power it on?" })]);
+    assert.equal(decision.action, "invalid");
+    assert.equal(run.provider.sent.length, 0, "a refused announcement reaches no provider");
+    const [line] = run.lines();
+    assert.equal(line.status, "invalid");
+    assert.equal(line.misuse, HALF.question);
+    assert.match(line.error, /needs:chairman/, "the refusal names the remedy");
+    assert.match(line.error, /#3409/);
+  });
+
+  test("an announcement whose line ends in '?' is refused, however the rest reads", async () => {
+    const run = harness({ refuses: true });
+    const [decision] = await run.tick([announcement({ key: "incident:fix", text: "Trunk is red again.\nIs it fixed?" })]);
+    assert.equal(decision.action, "invalid");
+    assert.equal(run.provider.sent.length, 0);
+  });
+
+  test("a request marker outside a release key is refused", async () => {
+    const run = harness({ refuses: true });
+    const [decision] = await run.tick([announcement({ key: "incident:rota", text: "rota gap, needs:chairman today" })]);
+    assert.equal(decision.action, "invalid");
+    assert.equal(run.provider.sent.length, 0);
+  });
+
+  test("a release quoting answer:ceo is NOT refused, and its text is the same bytes as with the guard OFF", async () => {
+    const text = "v1.2 is out; its answer:ceo label was removed";
+    const on = harness({ refuses: true });
+    const off = harness({ refuses: false });
+    const [decisionOn] = await on.tick([announcement({ key: "release:v1.2", kind: "release", text, firstSeenAt: START })]);
+    const [decisionOff] = await off.tick([announcement({ key: "release:v1.2", kind: "release", text, firstSeenAt: START })]);
+    assert.equal(decisionOn.action, "sent");
+    assert.equal(decisionOff.action, "sent");
+    assert.equal(on.provider.sent.length, 1, "positive control: the release went out");
+    assert.equal(on.provider.sent[0].text, off.provider.sent[0].text, "the guard changes nothing for a release");
+    assert.deepEqual(on.misuses, []);
+  });
+
+  test("a plain announcement is delivered byte-for-byte as it is with the guard OFF", async () => {
+    const event = announcement({ key: "incident:trunk", text: "trunk is red" });
+    const on = harness({ refuses: true });
+    const off = harness({ refuses: false });
+    await on.tick([event]);
+    await off.tick([event]);
+    assert.equal(on.provider.sent.length, 1);
+    assert.deepEqual(on.provider.sent, off.provider.sent);
+    assert.deepEqual(on.misuses, []);
+  });
+
+  test("with the guard OFF (the default), 'Can you power it on?' is sent as it always was", async () => {
+    const run = harness();
+    const [decision] = await run.tick([announcement({ key: "incident:power", text: "Can you power it on?" })]);
+    assert.equal(decision.action, "sent");
+    assert.equal(run.provider.sent.length, 1);
+    assert.equal(run.misuses.length, 0, "the flag OFF reports nothing");
+  });
+
+  test("the same refused text across 5 ticks writes ONE refusal line and ONE failure-ledger event", async () => {
+    const run = harness({ refuses: true });
+    const event = announcement({ key: "incident:power", text: "Can you power it on?" });
+    const actions: string[] = [];
+    for (let tick = 0; tick < 5; tick += 1) {
+      const [decision] = await run.tick([event]);
+      actions.push(decision.action);
+      run.clock.advance(MINUTE);
+    }
+    assert.deepEqual(actions, ["invalid", "duplicate", "duplicate", "duplicate", "duplicate"]);
+    assert.equal(run.lines().filter((line) => line.status === "invalid").length, 1);
+    assert.equal(run.misuses.length, 1);
+  });
+
+  test("a restart does not write the refusal again: the ledger is the memory", async () => {
+    const run = harness({ refuses: true });
+    const event = announcement({ key: "incident:power", text: "Can you power it on?" });
+    await run.tick([event]);
+    run.restart();
+    const [decision] = await run.tick([event]);
+    assert.equal(decision.action, "duplicate");
+    assert.equal(run.lines().filter((line) => line.status === "invalid").length, 1);
+  });
+
+  test("the failure-ledger event is under the existing kind, and names the held key", async () => {
+    const run = harness({ refuses: true });
+    await run.tick([announcement({ key: "incident:power", text: "Can you power it on?" })]);
+    assert.equal(run.misuses.length, 1);
+    assert.equal(run.misuses[0].classKey, MESSAGING_AUDIENCE_MISUSE_KIND);
+    assert.match(run.misuses[0].ref, /^incident:power announcement-question "Can you power it on\?"$/);
   });
 });

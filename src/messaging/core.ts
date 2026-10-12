@@ -22,7 +22,9 @@
 // WHAT THE CORE NEVER DOES: invent a message the ledger does not hold. A held-down or duplicate observation writes no line (it is not
 // an attempt, and 100 ticks must not write 100 lines); a deferral, a failure and a digest overflow each write one.
 
+import { HALF, asksSomething, excerptOf, markersOf, refusalEventOf } from "./audit.ts";
 import { askFields, createAsks, firstLineOf, refusalFor } from "./asks.ts";
+import type { FailureEvent } from "../failure-ledger.ts";
 import { normalizeEvent, stateFingerprint } from "./event.ts";
 import type { MessagingEvent } from "./event.ts";
 import { STATUS, deliveredTimestamps, deliveryLine, describeError, foldLedger, applyLine } from "./ledger.ts";
@@ -35,6 +37,13 @@ const HOUR_MS = 3_600_000;
 const ELLIPSIS = "…";
 const DIGEST_KEY_PREFIX = "digest:";
 const DIGEST_ENTRY_LIMIT = 200;
+
+/**
+ * THE AUDIENCE GUARD (a11ign#5112, agent-org#1222): with the flag ON, `deliver()` refuses an announcement whose text asks the chairman something, before any send.
+ * `asksSomething` with `markersOf` is the one predicate (`audit.ts`), so the guard and the detector cannot disagree about what an ask is. OFF, nothing is refused and the
+ * detector alone records, as it always did. A machinery flag (`machinery-flag.ts`), read by the caller, which passes the answer in: this module reads no state file.
+ */
+export const REFUSE_ASKING_ANNOUNCEMENTS_FLAG = "messaging.refuseAskingAnnouncements";
 
 export const DEFAULT_CONFIG = Object.freeze({
   kinds: Object.freeze({
@@ -177,11 +186,16 @@ type Decision = { key: string; action: string; };
 /**
  * `now` returns epoch milliseconds. Nothing else in the core reads the clock, the filesystem path or the network.
  */
-export function createMessenger({ provider, ledger, now, config: overrides }: { provider: any; ledger: ReturnType<typeof createLedger>; now: () => number; config?: Parameters<typeof resolveConfig>[0]; }) {
+export function createMessenger({ provider, ledger, now, config: overrides, refusesAskingAnnouncements = false, onMisuse = () => {} }: {
+  provider: any; ledger: ReturnType<typeof createLedger>; now: () => number; config?: Parameters<typeof resolveConfig>[0];
+  refusesAskingAnnouncements?: boolean; onMisuse?: (event: FailureEvent) => void;
+}) {
   const resolved = resolveConfig(overrides);
   const maxText = provider.capabilities.maxText;
   const history = ledger.read();
   const state = foldLedger(history);
+  // The event is still open after a refusal, so the next tick asks again: the refusals already written are read back, and one held text is one line.
+  const refusedBefore = new Set(history.filter((line) => line.misuse === HALF.question).map((line) => `${line.key}\t${line.stateHash}`));
   const asks = createAsks({
     provider, history, now, noteDelivered: () => limiter.noteDelivered(), append: (fields) => record(fields),
     audienceOf: (key) => resolved.kinds[key.split(":")[0]]?.audience,
@@ -232,6 +246,22 @@ export function createMessenger({ provider, ledger, now, config: overrides }: { 
   }
 
   /**
+   * An announcement that asks is refused with the flag on (agent-org#1222), and the refusal names the remedy: an ask has a row and a record, an announcement has
+   * neither. Written ONCE per held text and counted once in the failure ledger, under the kind the audit uses.
+   */
+  function refuseAsking(event: MessagingEvent): Decision {
+    const stateHash = stateFingerprint({ state: event.text });
+    if (refusedBefore.has(`${event.key}\t${stateHash}`)) return { key: event.key, action: "duplicate" };
+    refusedBefore.add(`${event.key}\t${stateHash}`);
+    record({
+      key: event.key, status: STATUS.invalid, misuse: HALF.question, stateHash, held: excerptOf(event.text),
+      error: `announcement not sent: ${JSON.stringify(event.key)} asks the chairman something, and an announcement asks nothing. Put the ask on a row with needs:chairman and a BRIEF (#3409), so it has a row and a record to be ticked against.`,
+    });
+    onMisuse(refusalEventOf(event.key, event.text));
+    return { key: event.key, action: "invalid" };
+  }
+
+  /**
    * A resolved ask is TICKED where it stands and sends nothing (#4745). When it cannot be (no provider edit, no message the ledger knows, or the edit
    * failed and said so on a line), the old "cleared" message is the answer, so a resolved ask is never left unticked AND unannounced.
    */
@@ -243,6 +273,7 @@ export function createMessenger({ provider, ledger, now, config: overrides }: { 
   async function deliver(event: MessagingEvent, plan: Extract<Plan, { action: "send"; }>): Promise<Decision> {
     const { audience } = plan;
     if (audience === undefined || !AUDIENCES.includes(audience)) return refuseUndeclared(event);
+    if (refusesAskingAnnouncements && audience === AUDIENCE.announcement && asksSomething(event.text, markersOf({ key: event.key }))) return refuseAsking(event);
     const policy = config.kinds[event.kind];
     const asked = audience === AUDIENCE.ask;
     const refusal = asked ? refusalFor({ key: event.key, rowLess: policy.rowLess }) : null;

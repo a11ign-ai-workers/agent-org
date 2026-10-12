@@ -36,7 +36,7 @@
 // the rules; a watch ends when its final state has been TOLD, which the ledger shows, so nothing here removes anything.
 
 import { execFile } from "node:child_process";
-import { readFileSync } from "node:fs";
+import { existsSync, readFileSync } from "node:fs";
 import { homedir } from "node:os";
 import { dirname, join, resolve } from "node:path";
 import { pathToFileURL } from "node:url";
@@ -45,7 +45,7 @@ import { promisify } from "node:util";
 import { MessagingConfigRefusal, PROJECT_FILE, readMessagingConfig } from "./config.ts";
 import type { MessagingOn } from "./config.ts";
 import { requestActions, snoozedUntil, walkActions } from "./answers.ts";
-import { createMessenger } from "./core.ts";
+import { REFUSE_ASKING_ANNOUNCEMENTS_FLAG, createMessenger } from "./core.ts";
 import { createLedger, describeError, foldLedger } from "./ledger.ts";
 import type { KeyRecord } from "./ledger.ts";
 import type { Readers } from "./placeholders.ts";
@@ -63,8 +63,9 @@ import { observeSummary } from "./sources/summary.ts";
 import { parseRequestKey, readRequests } from "./sources/requests.ts";
 import { createWatchReaders, hostFiles } from "./watch-list.ts";
 import { walkPosition } from "./walk.ts";
-import { FAILURE_LEDGER_FILE } from "../failure-ledger.ts";
+import { FAILURE_LEDGER_FILE, recordFailures, type FailureEvent } from "../failure-ledger.ts";
 import { readUnitsDeclaration, stateEntryPath } from "../host-config.ts";
+import { CANARY_STATE_FILE, machineryFlagOn, parseCanaryState } from "../org-health.ts";
 import { HOME_CHECKOUT } from "../project-config.ts";
 import { readAgents } from "../herdr-agents.ts";
 import { completionPath } from "../lib/tick-completion.ts";
@@ -420,18 +421,22 @@ async function gather(context: SourceContext, sources: readonly Source[]): Promi
  */
 export async function runWatch({
   github, provider, ledger, now, repo, readers, summary, releaseRepos = [], milestonesPath = null, watchReaders, log = () => {},
-  sources = sourcesFor({ summary, readers, releaseRepos, milestonesPath, watchReaders }), coreConfig,
+  sources = sourcesFor({ summary, readers, releaseRepos, milestonesPath, watchReaders }), coreConfig, refusesAskingAnnouncements = false, failureLogPath = null,
 }: {
         github: any; provider: any; ledger: ReturnType<typeof createLedger>; now: () => number; repo: string; readers?: Record<string, any>;
         summary: { at: string; timezone: string; } | null; releaseRepos?: readonly string[]; milestonesPath?: string | null;
         watchReaders?: Readers; log?: (line: string) => void; sources?: readonly Source[];
-        coreConfig?: object;
+        coreConfig?: object; refusesAskingAnnouncements?: boolean; failureLogPath?: string | null;
     }): Promise<{ decisions: { key: string; action: string; }[]; failures: string[]; }> {
   const history = ledger.read();
   const openKeys = openRequestKeys(foldLedger(history));
   const { events, notes, failures } = await gather({ github, repo, now: now(), openKeys, summary, readers: readers ?? {}, history, releaseRepos, milestonesPath, watchReaders }, sources);
   recordNotes({ notes, ledger, history, log });
-  const messenger = createMessenger({ provider, ledger, now, config: coreConfig as Parameters<typeof createMessenger>[0]["config"] });
+  // A refused announcement is also a failure-ledger entry under the audit's kind (agent-org#1222). The ledger path is null when the guard is off, and nothing is written then.
+  const onMisuse = (event: FailureEvent) => { if (failureLogPath !== null) recordFailures({ logPath: failureLogPath, events: [event], now: now(), report: log }); };
+  const messenger = createMessenger({
+    provider, ledger, now, config: coreConfig as Parameters<typeof createMessenger>[0]["config"], refusesAskingAnnouncements, onMisuse,
+  });
   const decisions = await messenger.tick(withoutSnoozed(events, { history, nowMs: now() }));
   for (const failure of failures) log(failure);
   return { decisions, failures };
@@ -502,6 +507,20 @@ function hostReaders({ root, home, now, err, github }: { root: string; home: str
 }
 
 /**
+ * Whether a machinery flag is ON in the canary state (agent-org#1222). Read here, in `main`, and handed to the core as a boolean, because the core reads no
+ * file. An absent state is OFF; an unreadable one is OFF too, with a line saying so, so a broken state file keeps the guard off and never stops the watch.
+ */
+function canaryFlagOn(name: string, err: (line: string) => void): boolean {
+  try {
+    const path = stateEntryPath(CANARY_STATE_FILE);
+    return machineryFlagOn(parseCanaryState(existsSync(path) ? readFileSync(path, "utf8") : null), name);
+  } catch (error) {
+    err(`messaging:watch: ${CANARY_STATE_FILE} is unreadable (${String((error as Error).message).split("\n")[0]}); ${name} reads OFF.`);
+    return false;
+  }
+}
+
+/**
  * The Telegram provider for a `messaging` key that is on: the token, the chairman's chat id and, when `announcementsFile` is declared, the channel's are read HERE,
  * at the moment of building, so a file that has gone wrong since `messaging:check` is refused on the run that needed it. `listen.ts` reads the first two the same
  * way. The channel is GIVEN to the provider here and nowhere else in `messaging:watch`: without it every announcement still lands in the chairman's chat (#603).
@@ -538,9 +557,9 @@ const DEFAULT_DEPS = () => ({
 export async function main(deps: {
     root?: string; env?: Record<string, string | undefined>; home?: string; now?: () => number; github?: any; readers?: Record<string, any>; watchReaders?: Readers;
     providers?: Record<string, (config: any, context: { fetch: typeof fetch; log: (line: string) => void; }) => any>; fetch?: typeof fetch;
-    out?: (line: string) => void; err?: (line: string) => void;
+    out?: (line: string) => void; err?: (line: string) => void; refusesAskingAnnouncements?: boolean;
 } = {}): Promise<number> {
-  const { root, env, home, now, github, readers, watchReaders, providers, fetch: fetchImpl, out, err } = { ...DEFAULT_DEPS(), ...deps };
+  const { root, env, home, now, github, readers, watchReaders, providers, fetch: fetchImpl, out, err, refusesAskingAnnouncements } = { ...DEFAULT_DEPS(), ...deps };
   const config = loadConfig(root, home, err);
   if (config === null) return EXIT.refused;
   // OFF IS SILENT AND CONSTRUCTS NOTHING: no reader, no provider, no ledger directory.
@@ -553,7 +572,10 @@ export async function main(deps: {
   const provider = await buildProvider({ config, providers, fetch: fetchImpl, err });
   if (provider === null) return EXIT.failed;
   const reader = github ?? createGhReader();
+  // The flag is read from the state only for a real host, as the readers are: a test that injects `github` says what it means with `refusesAskingAnnouncements`.
+  const refuses = refusesAskingAnnouncements ?? (github === undefined && canaryFlagOn(REFUSE_ASKING_ANNOUNCEMENTS_FLAG, err));
   const result = await runWatch({
+    refusesAskingAnnouncements: refuses, failureLogPath: refuses ? stateEntryPath(FAILURE_LEDGER_FILE) : null,
     github: reader, provider, repo: trackerRepo(root), summary: config.summary, releaseRepos: github === undefined ? declaredCodeRepos(root) : [], milestonesPath: config.milestones,
     readers: readers ?? (github === undefined ? hostReaders({ root, home, now, err, github: reader }) : undefined),
     watchReaders: watchReaders ?? (github === undefined ? createWatchReaders(trackerRepo(root), now, await hostFiles({ root, err: (line) => err(`messaging:watch: ${line}`) })) : undefined),
