@@ -421,6 +421,19 @@ export function rulingOrdersNow({ prsRead, openRowsRead, now }: { prsRead: any[]
  */
 const mergeRepositories = (): string[] => [repoNow(), ...scopesOf([homeProjectDeclaration()]).flatMap((scope) => (scope.key !== "" && scope.code !== null ? [scope.code.repo] : []))];
 
+/**
+ * EVERY REPOSITORY THE ORG RELEASES (agent-org#887): the project's own, then each `dora` repository the declaration lists, each once. Every one of them calls `release-per-merge.yml` from its
+ * `release.yml` (measured 2026-10-12: the eight `dora` entries do, and `a11ign/.github`, which is no entry, has no `release.yml`). A declaration that will not parse leaves the project's own, which is
+ * what was read before: a stated narrowing, and the declaration's own refusal is said by the reads that need it.
+ */
+export function releaseRepositories(): string[] {
+  try {
+    return [...new Set([repoNow(), ...homeProjectDeclaration().dora.map(({ repo }) => repo)])];
+  } catch {
+    return [repoNow()];
+  }
+}
+
 /** The facts a last-merge read becomes: a bare time (what a caller that names no repository hands back) or `{ at, repo }`. */
 const lastMerge = (read: number | { at: number; repo: string; } | null): { lastMergedAt: number | null; lastMergedIn: string | null; } => (read !== null && typeof read === "object" ? { lastMergedAt: read.at, lastMergedIn: read.repo } : { lastMergedAt: read, lastMergedIn: null });
 
@@ -454,6 +467,8 @@ export function orgHealthNow({ prsRead, keyedPrsRead = [], readyRead, openRowsRe
       release?: typeof releaseHoldViaModule; readHolderAgents?: typeof readAgents; readToolAgreement?: typeof import("../org-health.ts").readToolAgreement; readNodeStrips?: typeof import("../node-strips-types.ts").readNodeStrips;
       readMilestoneMoves?: typeof readMilestoneMoves;
       readReleaseRuns?: () => import("../org-health.ts").ReleaseRuns | null | undefined;
+      readReleaseFailures?: () => import("../org-health.ts").ReleaseFailureRead[] | null | undefined;
+      raiseReleaseIncidents?: (reads: import("../org-health.ts").ReleaseFailureRead[]) => void;
       readFleetBuildIncident?: () => import("../org-health.ts").FleetBuildIncident[] | null | undefined;
       readReleaseBehind?: () => import("../release-behind-main.ts").RepoFact[] | null | undefined;
       readClassRepeat?: () => import("../class-repeat.ts").ClassRepeatFact | null | undefined;
@@ -461,7 +476,7 @@ export function orgHealthNow({ prsRead, keyedPrsRead = [], readyRead, openRowsRe
       readBoardTruth?: (input: BoardTruthInput) => ReturnType<typeof boardTruthAudit> | null | undefined;
   } = {}) {
   const { now = Date.now(), lastMergedAt = () => readLatestMerge(defaultRun, mergeRepositories()), readCaptures = (at) => readFleetCaptures({ now: at }), log, readCopies, readRefusals,
-    readLabJobs = dispatchedLabJobsOrSay, readWaits = waitTickFacts, release, readHolderAgents = readAgents, readToolAgreement = () => undefined, readNodeStrips = () => undefined, readReleaseRuns = () => undefined, readFleetBuildIncident = () => undefined, readReleaseBehind = () => undefined, readClassRepeat = () => undefined,
+    readLabJobs = dispatchedLabJobsOrSay, readWaits = waitTickFacts, release, readHolderAgents = readAgents, readToolAgreement = () => undefined, readNodeStrips = () => undefined, readReleaseRuns = () => undefined, readReleaseFailures = () => undefined, raiseReleaseIncidents = () => {}, readFleetBuildIncident = () => undefined, readReleaseBehind = () => undefined, readClassRepeat = () => undefined,
     teamAccess = () => readTeamAccess(defaultRun), readBoardTruth = () => undefined,
     readMilestoneMoves: readMoves = io.lastMergedAt === undefined ? readMilestoneMoves : undefined } = io; // #4295: the real exact-start read exactly when the merge read is real
   const { prs, required, primaryDrift, claimRefusals, claimFacts } = decideArgs;
@@ -471,6 +486,9 @@ export function orgHealthNow({ prsRead, keyedPrsRead = [], readyRead, openRowsRe
   const { holdStands, stale } = waitStanding(waits, now);
   const shelved = prsRead === null || readyRead === null ? null : shelvingListOf(decideArgs); // ONCE: `partitionUnclaimed` reads each ready row's Region from the tree
   const milestoneClock = openRowsRead === undefined ? undefined : milestoneClockFact({ openRowsRead, prsRead, keyedPrsRead, now, declaration: homeProjectDeclaration() });
+  const releaseRuns = readReleaseRuns(); // #4001: FIRST, because the gate's per-repository read reuses the project's runs this one kept
+  const releaseFailures = readReleaseFailures(); // agent-org#887: read ONCE, because the facts and the incident are the same reads
+  if (Array.isArray(releaseFailures)) raiseReleaseIncidents(releaseFailures);
   const facts = {
     now,
     ...lastMerge(lastMergedAt()),
@@ -491,7 +509,8 @@ export function orgHealthNow({ prsRead, keyedPrsRead = [], readyRead, openRowsRe
     ...(pools !== undefined && { pools: pools.length > 0 ? pools : null }),
     ...toolAgreementFact(readToolAgreement()),
     ...nodeStripsFact(readNodeStrips()), // #4390
-    ...releaseRunsFact(readReleaseRuns()), // #4001
+    ...releaseRunsFact(releaseRuns), // #4001
+    ...(releaseFailures !== undefined && { releaseFailures }), // agent-org#887: one reading per released repository, which replaces the one above
     ...fleetBuildIncidentFact(readFleetBuildIncident()), // #4405
     ...releaseBehindFact(readReleaseBehind()), // #4128
     ...classRepeatFact(readClassRepeat()), // #4126

@@ -1,0 +1,17 @@
+A failed `release.yml` run on any repository the org releases raises an incident naming the run's first error line within one tick, and a second consecutive failure wakes `ceo` (a11ign/agent-org#885 class 1, agent-org#887). **The incident:** five failed releases of agent-org's own `main` from 2026-10-11T08:42Z went unseen for 50+ minutes because `release-run-failed` was asked of the project's repository only (`readReleaseRuns(defaultRun, repoNow())`).
+
+**What changes.**
+- *One reading per repository.* `releaseRepositories()` is the project's own and every `dora` entry (eight; each calls `release-per-merge.yml`, measured). Each trips under `release-run-failed@<repo>@<first failed run of the streak>`, so one repository's failure neither hides nor re-keys another's and a later success clears only its own. A repository whose list was refused, or in which no run concluded, is `unknown`, never clear, and does not hide another's trip.
+- *The first error line.* The failed job's log is read once (`firstErrorLine`): the first error-looking line of the step that failed, found from GitHub's `##[error]` marker back to the step's group and forward past its echoed command. Checked against the real log of agent-org's run 38128035401 (2026-10-11T09:20Z): `ERR_PNPM_RECURSIVE_EXEC_FIRST_FAIL  Command "changeset" not found`. A log that cannot be read is said in the detail and does not turn the trip into an unknown.
+- *Incident, then order.* A first failure is an incident only: an `incident` item in the tracker (`Incident: incident:release-run-failed`, `Release-failure: <repo>@<run>`), filed once per streak and closed when that repository releases again. The second consecutive failure is also an order to `ceo`, keyed on the streak, so a third is the same order and not another page.
+- *Compatibility.* A caller that gives `orgHealthReadings` only `releaseRuns` still gets the project-only reading `org-health-release-failed.test.ts` pins; the gate passes both and the per-repository one replaces it.
+
+Mutation: thirteen, each run by hand, each red in its own test and its restore byte-identical (copy in the scratchpad, `cmp`): wake on the first failure (3 red); never wake (3); one discriminator for every repository (5); keyed on the newest run and not the streak (5); read only the first repository (1); quote the `##[error]` line (3); scan the whole log (2); start the step's output at its group line (2); file every tick (2); never close (1); close whatever repository released (1); refile what a person closed (1); an unreadable repository read as clear (1); the gate asks for no incident (1).
+
+Evidence: `src/release-failure-alarm.test.ts` 21 of 21 (one reading per repository, own discriminators, a later success clearing only its own, the first error line quoted, a single failure the incident only, a second the order to `ceo`, the reader's four-call path, the incident filed once and closed, the gate wired). `tsc --noEmit` is clean. `src/org-health-release-failed.test.ts`, `src/close-rows-sweep.test.ts` and `src/packaging/gh-call-inventory.test.ts` pass except one test of the first, which fails identically on a clean `origin/main` on this host (it reads the host's own claim-refusal ledger, which is in a storm).
+
+Acceptance: `node --test src/release-failure-alarm.test.ts`
+
+Closes: a11ign/agent-org#887
+
+platform: GitHub's REST API for the runs, jobs and logs (no webhook: the gate already ticks every two minutes), and `incident`-labelled issues, the item kind `fleet-watch` and the machinery canary already file.
