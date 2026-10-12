@@ -18,6 +18,7 @@ import { deliver as settlingDeliver } from "./wake.ts";
 import { startedPanes } from "./packaging/started-pane.ts";
 import { leaseItem, leasePath } from "./decision-run/apply.ts";
 import { loadClasses, type DecisionClass } from "./decision-run/registry.ts";
+import { seatModeOf } from "./seat-mode.ts";
 import { causeOfOrder, itemOfKey, serveByRun, serveOrdersByRun, servedByRunPathFrom, type ServeByRunDeps, type ServeOrder } from "./serve-by-run.ts";
 import { servedWakeEvents } from "./trace/trace.ts";
 import type { ItemRef, TicketItem, TicketPort } from "./ticket-port/port.ts";
@@ -414,8 +415,15 @@ test("laneReason, ROUTED_TO, FLEET_LAB_PATTERNS and SPAWN_CAUSES are byte-identi
   assert.ok(/(?:const|function)\s+ROUTED_TO\b/.test("const ROUTED_TO = 1;"), "the marker recognises a declaration it is looking for");
 });
 
-test("the default class registry holds no class, so merging this row changes nothing", async () => {
+test("the default class registry changes nothing until a project says `run`: every shipped class is served by its seat when no seats file names it", async () => {
   const { CLASSES_DIR } = await import("./serve-by-run.ts");
-  assert.equal(existsSync(CLASSES_DIR), false, "no class file ships with the seam: a class is a later row, and it is what makes a `run` setting mean something");
-  assert.equal((await loadClasses(CLASSES_DIR)).size, 0);
+  const classes = await loadClasses(CLASSES_DIR);
+  const dir = mkdtempSync(join(tmpdir(), "serve-by-run-default-"));
+  try {
+    for (const cause of classes.keys()) {
+      assert.equal(seatModeOf(cause, { known: classes, path: join(dir, "seats.json") }), "seat", cause);
+    }
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
 });
