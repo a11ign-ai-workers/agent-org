@@ -13,17 +13,19 @@ import { mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import orgHealth, {
-  ALLOWED, ESCALATE, RECORD_ITEM, ROLE_EXCERPT, ROLE_EXCERPT_CAP_BYTES, TIER_DEFAULT, TIER_LARGER, actionsFor, buildQuestion, itemOf, tierQuestion,
+  ALLOWED, ESCALATE, RECORD_ID, recordItem, ROLE_EXCERPT, ROLE_EXCERPT_CAP_BYTES, TIER_DEFAULT, TIER_LARGER, actionsFor, buildQuestion, itemOf, tierQuestion,
 } from "./org-health.ts";
 import { loadClasses, whyNotClass, type DecisionOrder } from "../registry.ts";
 import { serveByRun, type ServeOrder } from "../../serve-by-run.ts";
-import type { TicketItem, TicketPort } from "../../ticket-port/port.ts";
+import { TABLE_ROW } from "../../board-truth-audit.ts";
+import type { ItemRef, TicketItem, TicketPort } from "../../ticket-port/port.ts";
 
 const ROOT = mkdtempSync(join(tmpdir(), "org-health-906-"));
 after(() => rmSync(ROOT, { recursive: true, force: true }));
 let made = 0;
 const fresh = (): string => { const dir = join(ROOT, `case-${made += 1}`); mkdirSync(dir, { recursive: true }); return dir; };
 
+const RECORD_ITEM = recordItem() as ItemRef;
 const ORDER: ServeOrder = {
   session: "ceo", cause: "org-health", causeKey: "ceo/org-health/board-disagrees@2026-10-12",
   prompt: "THE BOARD DISAGREES WITH REALITY. Read the day's table and post it.",
@@ -63,6 +65,8 @@ test("POSITIVE CONTROL: the file is a loadable class, the role excerpt is under 
   assert.ok(Buffer.byteLength(ROLE_EXCERPT, "utf8") <= ROLE_EXCERPT_CAP_BYTES, "under the named cap");
   assert.match(ROLE_EXCERPT, /you never do/);
   assert.deepEqual(tierQuestion(), { text: tierQuestion().text, default: TIER_DEFAULT, allowed: [TIER_DEFAULT, TIER_LARGER] });
+  assert.equal(String(RECORD_ID), TABLE_ROW, "the record issue is the one the gate posts its table on");
+  assert.equal(RECORD_ITEM.id, RECORD_ID);
   assert.deepEqual(itemOf(ORDER), RECORD_ITEM);
   assert.equal(itemOf({ causeKey: "ceo/answer-owed/row-12" }), null);
 });
