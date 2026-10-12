@@ -77,6 +77,7 @@ export const ORG_HEALTH_CLASSES: Readonly<Record<string, { severity: "page"; } |
   "row-without-exactly-one-state": DIGEST,
   "wait-without-reason": DIGEST,
   "board-disagrees-with-reality": DIGEST,
+  "flag-without-a-switch": DIGEST, // agent-org#1135: a list named once a day to its first reader, `product-manager`, who files each switch row; `ceo` reading it again adds a turn and not a decision
 });
 
 type Suppression = { at: number, class: string, key: string, count: number, why: string };

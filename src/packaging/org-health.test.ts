@@ -499,7 +499,9 @@ test("THE GATE AS A PROCESS runs the question: a refused merge read is said on s
   const ran = gateAsAProcess();
   assert.match(ran.stderr, /org-health: no-merge-while-work-exists UNKNOWN -- the last merge could not be read/, ran.stderr);
   const orders = ran.stdout.split("\n").filter(Boolean).map((l) => JSON.parse(l) as Order);
-  assert.deepEqual(orders.filter((o) => o.cause === "org-health"), [], "a refusal is not evidence of a stall");
+  // The gate here reads the declarations of whichever project runs the suite, and `flag-without-a-switch` (agent-org#1135) is a count of what THAT project has not set, not a reading of the
+  // refused merge read this test is about: it is left out so the test says the same thing on a project that has set every flag and on one that has not.
+  assert.deepEqual(orders.filter((o) => o.cause === "org-health" && o.subject !== SIGNALS.FLAG_WITHOUT_SWITCH), [], "a refusal is not evidence of a stall");
   assert.deepEqual(SIGNALS.NO_MERGE, "no-merge-while-work-exists");
 });
 
