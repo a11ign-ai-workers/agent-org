@@ -129,12 +129,13 @@ test("#1247 RECORD: a present proof file that does not parse is refused and is n
   assert.throws(() => widenIdentity("reviewer", { host, canary: CANARY, file }), /does not parse/);
 });
 
-test("#1247 RECORD: a proof file whose role value is not an array of readings is refused by the gate and the writer, and is not overwritten", () => {
+test("#1247 RECORD: a proof file whose role value or reading entry is malformed is refused by the gate and the writer, and is not overwritten", () => {
   const root = tmpDir("identity-canary-1247-shape-");
   const host = hostWithReviewerApp(root);
   const file = identityProofFile({ host, home: root, env: {} });
   recordIdentityProof("reviewer", reading(), { file }); // creates the file and its directory
-  for (const garbled of ['{"reviewer":{}}', '{"reviewer":"APPROVED"}', "[]", "null"]) {
+  const partial = JSON.stringify({ reviewer: [{ who: REVIEWER_BOT }] });
+  for (const garbled of ['{"reviewer":{}}', '{"reviewer":"APPROVED"}', '{"reviewer":[null]}', partial, "[]", "null"]) {
     writeFileSync(file, garbled);
     assert.throws(() => widenIdentity("reviewer", { host, canary: CANARY, file }), HostConfigRefusal, `widening refuses ${garbled}`);
     assert.throws(() => recordIdentityProof("reviewer", reading(), { file }), HostConfigRefusal, `the writer refuses ${garbled}`);

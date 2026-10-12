@@ -2185,11 +2185,20 @@ export function identityProofs(file: string, read: typeof readFileSync = readFil
   } catch {
     throw refusal;
   }
-  // A role's value must be an array of readings: any other shape is refused here, so nothing downstream reads a value it cannot iterate.
+  // A role's value must be an array of readings, and each reading must have the fields it is read by: any other shape is refused here, so nothing downstream reads a value it cannot use.
   const shaped = parsed !== null && typeof parsed === "object" && !Array.isArray(parsed)
-    && Object.values(parsed).every((readings) => Array.isArray(readings));
+    && Object.values(parsed).every((readings) => Array.isArray(readings) && readings.every(isIdentityProofReading));
   if (!shaped) throw refusal;
   return parsed as Partial<Record<GithubRole, IdentityProofReading[]>>;
+}
+
+/** Whether a parsed value has every field of an `IdentityProofReading`, each of its type. A `null` or a partial object is not a reading. */
+function isIdentityProofReading(value: unknown): value is IdentityProofReading {
+  if (value === null || typeof value !== "object") return false;
+  const reading = value as Record<string, unknown>;
+  const decision = (field: unknown) => field === null || typeof field === "string";
+  return typeof reading.who === "string" && typeof reading.repository === "string" && typeof reading.pr === "number"
+    && decision(reading.reviewDecisionBefore) && decision(reading.reviewDecisionAfter) && typeof reading.at === "string";
 }
 
 /**
