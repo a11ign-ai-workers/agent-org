@@ -14,7 +14,7 @@ Mutation: never count a pin row (positive control and the pattern test red); alw
 
 Evidence: the Acceptance command below passes, 10 of 10, at this head. `pnpm run typecheck` exits 0. The full rstest run (`pnpm run test`, 11004 tests in 649 files) lists my 10 tests as passing and 4 failing elsewhere (host-install launcher, live-tree-independence x2, release-tag-on-merge): none imports this module, and the release-tag failure is about `pnpm-lock.yaml`, which `origin/main` tracks.
 
-Acceptance: `bash -c 'cd ~/repos/agent-org && node --import=./src/lib/crash-exit.ts --test src/pin-bump-measure.test.ts'`
+Acceptance: `bash -c 'cd ~/repos/wt-agent-org-1172 && node --import=./src/lib/crash-exit.ts --test src/pin-bump-measure.test.ts'`
 
 platform: n/a (a count over tracker rows and PRs; no platform feature computes a weekly pin count)
 
