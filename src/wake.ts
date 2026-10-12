@@ -62,6 +62,7 @@ import { HOME_CHECKOUT, homeProjectDeclaration } from "./project-config.ts";
 import { stateEntryPath, hostConfigPath, readHostConfig, HOST_CONFIG_ENV } from "./host-config.ts"; // #2799; the other two for #2969's `clones`, read by host-config since #2991
 import { REPO } from "./project-identity.ts";
 import { roleBriefPath } from "./project-roles.ts";
+import { serveOrdersByRun, type ServedRecord } from "./serve-by-run.ts";
 import { engineerBriefSentence, briefRoleSentence } from "./spawn-role-brief.ts"; // #828: the sentence that sends a spawned seat to a role brief
 // #832: a `lane:orchestrator` row as a one-shot seat's, behind `workers.orchestratorOneShot`; its cause is a sibling of `SPAWN_CAUSES`, never a member
 import { ONE_SHOT_SPAWN_CAUSES, createOrchestratorOneShot, isOneShotOrder, standInClaimer, withOrchestratorOneShot, type OrchestratorOneShot } from "./orchestrator-one-shot.ts";
@@ -5683,8 +5684,9 @@ function noteClaimOrders(claimOrders: ClaimOrders | undefined, { gateOrder, targ
 export function deliver(orders: readonly { session: string; causeKey: string; prompt: string; cause?: string; title?: string; replaces?: { branch: string; }[]; resume?: boolean; outageNow?: boolean; startFresh?: boolean; briefRole?: string; }[], agents: { label: string; status: string; }[], roster: string[],
   { run = defaultRun, record, counts, ineligibleReason, env, registerSpawn, drained, claimable, claimer, memory, hostLoad, claimRefused, oneShot,
     launch, reviewerEnv, registerReviewer, checkout, registry, unavailable, sleep, contextRoot, codexConfig, clock, relane, goneSeats, claimOrders,
-    now = Date.now }: {
+    now = Date.now, serve }: {
           run?: (args: string[]) => string; record?: (key: string, recipient?: string, noClear?: boolean, at?: number) => void;
+          serve?: (order: { causeKey: string; }) => ServedRecord | null;
           counts?: Map<string, number>; ineligibleReason?: (label: string) => string | null;
           env?: Record<string, string>; registerSpawn?: (role: string) => void; drained?: readonly string[];
           claimable?: (order: { causeKey: string; startFresh?: boolean; }) => string | null; claimer?: SpawnClaimer; claimRefused?: ClaimRefused; oneShot?: OrchestratorOneShot;
@@ -5716,6 +5718,15 @@ export function deliver(orders: readonly { session: string; causeKey: string; pr
     const already = counts?.get(order.causeKey) ?? 0;
     if (already >= MAX_DELIVERIES) {
       recordCapped({ stuck, outaged }, order, already);
+      continue;
+    }
+    // agent-org#904: AN ORDER A RUN SERVED THIS TICK IS NOT PROMPTED TO ITS SEAT. `serve` is the answer `serveOrdersByRun` already holds (a run is asynchronous and this loop is not),
+    // and it is absent, or `null` for an order, unless the project set that order's class to `run` and the run APPLIED its decision. The delivery is recorded like any other, so the
+    // gate does not derive the cause again for the wake window and the cap above counts it; every other order, and every fallback, goes on to the seat below unchanged.
+    const servedByRun = serve?.(order) ?? null;
+    if (servedByRun !== null) {
+      record?.(order.causeKey, undefined, undefined, now());
+      sent.push(`${order.session} <- ${order.causeKey} (SERVED BY RUN ${servedByRun.runId} at ${servedByRun.tier})`);
       continue;
     }
     const target = targetFor(order, live, roster, { run: spawnRun, spawned, ineligibleReason, env, registerSpawn, drained, startHold: starts.hold,
@@ -8529,8 +8540,23 @@ async function main() {
   // #832: a ready `lane:orchestrator` row becomes a one-shot run's order HERE, after the ledger's reads, when `workers.orchestratorOneShot` is on; off, `ready` is the same array.
   const ready = withOrchestratorOneShot(await withReviewDepth(await withCiFailureClass(todo, { host, ledgerPath }), { host, ledgerPath }));
   const routes = await routesForStarts(ready, { host, ledgerPath });
+  // agent-org#904: AN ORDER WHOSE CLASS THE PROJECT SET TO `run` IS SERVED HERE, BEFORE `deliver`, because `deliver` is synchronous and a run is not. A project with no `.agent-org/seats.json`,
+  // or whose classes are all `seat`, gets an empty map after one file read, and `deliver` below is then called exactly as it was.
+  const served = await serveOrdersByRun(ready, {
+    ledgerPath, projectDir: PRIMARY_CHECKOUT, gh: guardedGh,
+    scopeOf: (key) => (key === "" ? REPO : trackerRepositoryOf(key)),
+    roleBrief: (session) => {
+      try {
+        return readFileSync(roleBriefPath(`${session}.md`).absolute, "utf8");
+      } catch {
+        return null;
+      }
+    },
+    decisionDeps: { host, switchesPath: decisionSwitchesPath(PRIMARY_CHECKOUT), logPath: decisionLogPathFrom(ledgerPath) },
+  });
   // A SEAT THE FIRST DELIVERY FOUND ENDED IS ENDED FOR THE SECOND (#3568): one `agent_not_found` per label per tick, not one per order.
   const { sent, refused: gateRefused, stuck, outaged, settled } = deliver(ready, free, roster, { record, unavailable, clock, relane: relaneFacts(ledgerPath),
+    serve: (order) => served.get(order.causeKey) ?? null,
     goneSeats: handed.goneSeats,
     claimOrders: claimOrdersIn(claimOrdersPath(ledgerPath)),
     counts: deliveryCounts(ledgerPath), ineligibleReason: poolEngineerReason(poolEligibility(spares, drained), unavailable),
