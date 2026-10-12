@@ -11,7 +11,7 @@ import { after, test } from "node:test";
 import { DEFERRAL_LOG_FILE } from "../deferral-log.ts";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import {
-  advance, checkAndRaise, episodeFileFor, freshnessLine, INCIDENT_CLASS, INCIDENT_ROW, incidentOrder, NO_EPISODE, newestMessageAt, newestTurnAt, sessionsWorking, STALE_AFTER_MS, storeFreshness, transcriptRoots,
+  advance, checkAndRaise, episodeFileFor, freshnessLine, incidentComment, INCIDENT_CLASS, INCIDENT_ROW, incidentOrder, ingestThenCheck, NO_EPISODE, newestMessageAt, newestTurnAt, sessionsWorking, STALE_AFTER_MS, storeFreshness, transcriptRoots,
 } from "./freshness.ts";
 import type { Effects } from "./freshness.ts";
 import { readStore } from "./store.ts";
@@ -332,6 +332,46 @@ test("a refused effect is tried again next run and the one that landed is not se
   assert.deepEqual(second.raised, ["comment"]);
   await checkAndRaise({ storePath: h.storePath, now: NOW + 10 * MINUTE, working: true, effects });
   assert.deepEqual([sent.comment.length, sent.order.length], [1, 1]);
+});
+
+/** One run of the unit with a clock that the ingest moves: `INGEST_TOOK` passes between the clock's one reading and the check, as a real ingest's seconds do. The ingest is a stand-in: the hold-back itself is `store.ts`'s and is tested there. */
+const INGEST_TOOK = 20 * 1000;
+async function runUnit(h: ReturnType<typeof home>, messageAgeAtIngestStart: number) {
+  let clock = NOW;
+  let reads = 0;
+  writeStore(h.storePath, [turn("t1", NOW - 11 * MINUTE)]); // the newest turn is old: only the working rule keeps this from being stale
+  writeFileSync(h.transcript, `${message("assistant", NOW - messageAgeAtIngestStart)}\n`);
+  setMtime(h.transcript, NOW - messageAgeAtIngestStart);
+  const { sent, effects } = recorder();
+  const ran = await ingestThenCheck({
+    storePath: h.storePath, roots: transcriptRoots(h.dir), effects,
+    clock: () => { reads += 1; return clock; },
+    ingest: () => { clock += INGEST_TOOK; return "ingested"; },
+  });
+  return { ...ran, sent, reads, checkedAt: clock };
+}
+
+test("a11ign/agent-org#1091: a message 4:58 old when the ingest STARTED, held back by it, is 5:18 old at the check and is not stale", async () => {
+  const h = home();
+  const ran = await runUnit(h, 4 * MINUTE + 58 * 1000);
+  assert.equal(ran.checkedAt - NOW, INGEST_TOOK, "POSITIVE CONTROL: the ingest moved the clock, so a clock read after it would see the message past the hold-back");
+  assert.ok(ran.checkedAt - (NOW - 4 * MINUTE - 58 * 1000) >= 5 * MINUTE, "the message is past the hold-back at the check (5:18)");
+  assert.equal(ran.reads, 1, "the clock is read once, before the ingest");
+  assert.equal(ran.ingested, "ingested", "the ingest's own result is handed back for the exit code");
+  assert.equal(ran.reading.working, false, "the ingest held the message back, so it was not owed a turn");
+  assert.equal(ran.reading.stale, false);
+  assert.deepEqual(ran.raised, []);
+  assert.deepEqual(ran.sent.comment, [], "no incident is posted for a message the ingest held back by design");
+  assert.equal(existsSync(episodeFileFor(h.storePath)) && JSON.parse(readFileSync(episodeFileFor(h.storePath), "utf8")).open, false);
+});
+
+test("a11ign/agent-org#1091 POSITIVE CONTROL: a message 5:02 old when the ingest started was owed a turn and has none, so the same run reads STALE", async () => {
+  const h = home();
+  const ran = await runUnit(h, 5 * MINUTE + 2 * 1000);
+  assert.equal(ran.reading.working, true, "past the hold-back at the ingest's start, inside the window");
+  assert.equal(ran.reading.stale, true, "the check is not made blind to make the held-back case pass");
+  assert.deepEqual(ran.raised, ["comment", "order"]);
+  assert.match(incidentComment(ran.reading, NOW), /STALE/);
 });
 
 test("the episode is written before the effects, so a run killed in them raises again and does not lose the incident", async () => {

@@ -18,6 +18,7 @@
 // session that goes quiet and then speaks again has messages NEWER than the store's newest turn that no turn can exist for yet: 37 were held back at 05:53:12Z while the store was current, and
 // the 05:58 ingest turned them. The check therefore counts a message as work the ingest is OWED a turn for only once it is past the hold-back. A message still inside the hold-back is not
 // evidence of an outage, however recent, so such a burst reads not stale until one of its messages is five minutes old. A healthy store reads about five minutes old right after an ingest.
+// THE CLOCK IS READ BEFORE THE INGEST (a11ign/agent-org#1091, see `ingestThenCheck`): the ingest held a message back against ITS start, so the check judges "past the hold-back" against that same reading.
 //
 // ONE INCIDENT PER EPISODE. An episode OPENS the first run the store is stale and ENDS only when a `turn` is inside the window again: a run that finds the store old and nobody
 // working changes nothing, so an outage that spans a quiet hour is one incident and not two. Each of the two effects (the comment on the standing row, the order to the owning seat)
@@ -294,16 +295,31 @@ function hostEffects(log: (line: string) => void): Effects {
   };
 }
 
+/**
+ * ONE RUN OF THE UNIT: the clock is read ONCE, BEFORE the ingest, and that reading is the `now` of both `sessionsWorking` and `storeFreshness` (a11ign/agent-org#1091). The ingest
+ * holds a message back against the clock it started on, so a message is "owed a turn" only if it was `QUIET_MS` old at THAT reading. A `now` taken after the ingest returns is later by
+ * what the ingest took, and a message that was held back by design (4:58 old at the start) is 5:18 old at the check and is counted as owed: a false STALE for a session that spoke once after
+ * a quiet spell, whose worst-case turn latency (the hold-back plus the five-minute timer) is already the whole ten-minute window. The reading is therefore as of the ingest's start; an
+ * ingest that runs long makes it older, and the next run, five minutes on, reads again. `clock` and `ingest` are injected so a test can move time during the ingest.
+ */
+export async function ingestThenCheck<Ingested>({ storePath, roots, effects, ingest, clock = Date.now }: { storePath: string; roots: TranscriptRoot[]; effects: Effects; ingest: () => Ingested; clock?: () => number; }): Promise<{ reading: Freshness; raised: string[]; ingested: Ingested; }> {
+  const now = clock();
+  const ingested = ingest();
+  const { reading, raised } = await checkAndRaise({ storePath, now, working: sessionsWorking({ roots, now }), effects });
+  return { reading, raised, ingested };
+}
+
 /** The unit: ingest, then check. The exit code is the ingest's, so a unit that cannot ingest shows FAILED; a stale store is reported by the incident and is not a failed unit. */
 async function main() {
   const given = process.argv.slice(2).filter((word) => word !== "--");
   const store = given.indexOf("--store");
   const { defaultStore } = await import("./otel-receiver.ts");
   const storePath = store >= 0 ? given[store + 1] : defaultStore();
-  const ingest = spawnSync(process.execPath, [TRACE, "--", "--ingest", "--store", storePath], { stdio: "inherit", timeout: INGEST_TIMEOUT_MS });
-  const now = Date.now();
   const log = (line: string) => process.stderr.write(`${line}\n`);
-  const { reading, raised } = await checkAndRaise({ storePath, now, working: sessionsWorking({ roots: transcriptRoots(), now }), effects: hostEffects(log) });
+  const { reading, raised, ingested: ingest } = await ingestThenCheck({
+    storePath, roots: transcriptRoots(), effects: hostEffects(log),
+    ingest: () => spawnSync(process.execPath, [TRACE, "--", "--ingest", "--store", storePath], { stdio: "inherit", timeout: INGEST_TIMEOUT_MS }),
+  });
   process.stdout.write(`${freshnessLine(reading)}${raised.length > 0 ? `; raised: ${raised.join(", ")}` : ""}\n`);
   if (ingest.error || ingest.status !== 0) {
     log(`trace freshness: the ingest ${ingest.error ? `could not run (${ingest.error.message})` : `exited ${ingest.status ?? `by ${ingest.signal}`}`}`);
