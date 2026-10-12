@@ -6,7 +6,7 @@ Class `answer-owed` (agent-org#905, Move 3 of a11ign/a11ign#4505): a worker's sc
 - **Assumption, said so:** the class is handed an order and no tracker scope, so `SCOPES` maps the two tracker keys this project declares to their repositories; an unknown key is no item and so no action. `actionsFor` is not given the item, so `buildQuestion` records what it read per `causeKey` for it.
 - The tier thresholds are the provider's: `serveByRun` already moves to Sonnet on a pick or an answer under the floor; the class names the two tiers and its default.
 
-**Baseline** (Done-when 3), measured: `outcomeSplit` over `readStore(~/.cache/a11ign/trace/events.ndjson)`, window 2026-10-05T00:00Z to 2026-10-12T00:00Z: `answer-owed` 759 wakes, 698 wrote (92.0%), 2 no-op, 0 escalated, 59 null, 0 unsettled (all causes: 6,115 wakes, 5,020 wrote). Read-only; no ingest was run.
+Measured: (done-when 3) `outcomeSplit` over `readStore(~/.cache/a11ign/trace/events.ndjson)`, window 2026-10-05T00:00Z to 2026-10-12T00:00Z: `answer-owed` 759 wakes, 698 wrote (92.0%), 2 no-op, 0 escalated, 59 null, 0 unsettled (all causes: 6,115 wakes, 5,020 wrote). Read-only; no ingest was run.
 
 Mutation: flag check never firing (1 red, the gone-flag case) and always firing (3 red); ruling check dropped (1 red); `answered`-only guard `chosen !== RELABEL` dropped (1 red); Haiku default moved to Sonnet (1 red); each restore byte-identical (copy in the scratchpad, `diff`).
 
@@ -16,7 +16,7 @@ Acceptance:
 ```bash
 git grep -q "POSITIVE CONTROL" -- src/decision-run/classes/answer-owed.test.ts
 git grep -q "NEGATIVE CONTROL" -- src/decision-run/classes/answer-owed.test.ts
-bash -c 'cd ~/repos/agent-org && npx rstest run --config scripts/rstest/rstest.config.ts src/decision-run/classes/answer-owed.test.ts'
+bash -c 'cd "$(git rev-parse --show-toplevel)" && npx rstest run --config scripts/rstest/rstest.config.ts src/decision-run/classes/answer-owed.test.ts'
 ```
 
 Closes a11ign/agent-org#905.
