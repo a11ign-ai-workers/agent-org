@@ -22,7 +22,7 @@ const { PROJECT_ROOT } = await import("./packaging/host-units-project.ts");
 const { HOST_OPTIONAL_UNITS, LONG_RUNNING_TEMPLATES, SHIPPED_DIR, TOOL_ENTRIES, hostUnitsInstall, shippedUnitText, shippedUnits, unclassifiedEntries } = await import("./host-units.ts");
 const { HostConfigRefusal, parseHostConfig, renderTemplate, templateValues } = await import("./host-config.ts");
 const { tmpDir } = await import("./lib/tmp-fixture.ts");
-const { EventTunnelFailure, SUBSCRIBED_EVENTS, declaredTunnel, deliveryLine, ensureSecretFile, funnelArguments, main, recentDeliveries, registerWebhook } = await import("./event-tunnel.ts");
+const { EventTunnelFailure, SUBSCRIBED_EVENTS, changeFunnel, declaredTunnel, deliveryLine, ensureSecretFile, funnelArguments, main, pathIsServed, recentDeliveries, registerWebhook } = await import("./event-tunnel.ts");
 
 const TEMPLATE = "event-tunnel.service.in";
 const UNIT = "a11ign-event-tunnel.service";
@@ -252,6 +252,75 @@ test("#5197: the command refuses an unknown subcommand with usage, and a host th
   const ran: string[][] = [];
   assert.equal(await main(["up"], { out: () => undefined, run: (args) => { ran.push(args); } }), 1, "`up` on a host that declares no funnel refuses, and runs no `tailscale`");
   assert.deepEqual(ran, []);
+});
+
+// What `tailscale serve status --json` prints for a node that serves the receiver at its funnel path AND keeps the trace pages (a file-path handler) on 8443.
+const SERVED = {
+  TCP: { "443": { HTTPS: true }, "8443": { HTTPS: true } },
+  Web: {
+    "agents.example.ts.net:443": { Handlers: { "/webhook": { Proxy: "http://127.0.0.1:8787" } } },
+    "agents.example.ts.net:8443": { Handlers: { "/": { Path: "/home/h/.cache/a11ign/trace-pages" } } },
+  },
+  AllowFunnel: { "agents.example.ts.net:443": true },
+};
+const MOUNT = { publicUrl: PUBLIC_URL, port: 8787 };
+const TRACE_PAGES_ONLY = { TCP: SERVED.TCP, Web: { "agents.example.ts.net:8443": SERVED.Web["agents.example.ts.net:8443"] } };
+
+test("#5197: the path counts as served only when the loopback port is proxied at it AND the host's 443 is open to the internet", () => {
+  assert.equal(pathIsServed(SERVED, MOUNT), true, "POSITIVE CONTROL: the whole shape reads as served, so each refusal below is its own field's doing");
+  assert.equal(pathIsServed(TRACE_PAGES_ONLY, MOUNT), false, "the trace pages alone are not the receiver");
+  assert.equal(pathIsServed({}, MOUNT), false, "an empty serve config");
+  assert.equal(pathIsServed(null, MOUNT), false);
+  assert.equal(pathIsServed({ ...SERVED, AllowFunnel: {} }, MOUNT), false, "proxied but tailnet-only is NOT exposed to GitHub");
+  assert.equal(pathIsServed({ ...SERVED, AllowFunnel: { "agents.example.ts.net:443": false } }, MOUNT), false);
+  assert.equal(pathIsServed(SERVED, { ...MOUNT, port: 9100 }), false, "a different loopback port is a different mount");
+  assert.equal(pathIsServed(SERVED, { ...MOUNT, publicUrl: "https://agents.example.ts.net/other" }), false, "a different path is a different mount");
+  assert.equal(pathIsServed(SERVED, { ...MOUNT, publicUrl: "https://other.example.ts.net/webhook" }), false, "a different host is a different mount");
+  const filePath = { ...SERVED, Web: { "agents.example.ts.net:443": { Handlers: { "/webhook": { Path: "/srv/files" } } } } };
+  assert.equal(pathIsServed(filePath, MOUNT), false, "a file-path handler at the same path is not the receiver");
+  const slashed = { ...SERVED, Web: { "agents.example.ts.net:443": { Handlers: { "/webhook": { Proxy: "http://127.0.0.1:8787/" } } } } };
+  assert.equal(pathIsServed(slashed, MOUNT), true, "a trailing slash on the stored target is the same target");
+});
+
+test("#5197: `up` and `down` read first and change nothing when the path is already as asked, and read after and refuse when it is not", () => {
+  const harness = (statuses: unknown[], { runFails = false }: { runFails?: boolean } = {}) => {
+    const ran: string[][] = [];
+    const out: string[] = [];
+    const queue = [...statuses];
+    return {
+      ran, out,
+      deps: {
+        out: (line: string) => { out.push(line); },
+        run: (args: string[]) => { ran.push(args); if (runFails) throw new Error("Command failed: tailscale funnel: 401 Unauthorized"); },
+        readStatus: () => queue.shift(),
+      },
+    };
+  };
+  const unchanged = harness([SERVED]);
+  changeFunnel("up", MOUNT, unchanged.deps);
+  assert.deepEqual(unchanged.ran, [], "already served: `tailscale funnel` is NOT run, so a path mounted once by root keeps the unit active as the agent");
+  assert.match(unchanged.out.join("\n"), /already served/);
+
+  const mounted = harness([TRACE_PAGES_ONLY, SERVED]);
+  changeFunnel("up", MOUNT, mounted.deps);
+  assert.deepEqual(mounted.ran, [funnelArguments(MOUNT).up], "POSITIVE CONTROL: not served, so `up` runs exactly the one scoped command");
+
+  const refusedAfter = harness([TRACE_PAGES_ONLY, TRACE_PAGES_ONLY]);
+  assert.throws(() => changeFunnel("up", MOUNT, refusedAfter.deps), /is still NOT served/, "a command that returned and left the path unmounted is a failure, not a success");
+
+  const cannot = harness([TRACE_PAGES_ONLY], { runFails: true });
+  assert.throws(() => changeFunnel("up", MOUNT, cannot.deps), /401 Unauthorized/, "tailscaled's refusal reaches the unit's journal and is not swallowed");
+
+  const gone = harness([TRACE_PAGES_ONLY]);
+  changeFunnel("down", MOUNT, gone.deps);
+  assert.deepEqual(gone.ran, [], "already off: `down` runs nothing");
+
+  const removed = harness([SERVED, TRACE_PAGES_ONLY]);
+  changeFunnel("down", MOUNT, removed.deps);
+  assert.deepEqual(removed.ran, [funnelArguments(MOUNT).down]);
+
+  const stillPublic = harness([SERVED, SERVED]);
+  assert.throws(() => changeFunnel("down", MOUNT, stillPublic.deps), /is still served/, "a stop that left the path public says so rather than reporting the unit down over it");
 });
 
 test("#5197: the chairman's subscription list is the ten the row names", () => {
