@@ -1343,13 +1343,15 @@ function draftOrder(pr: any, required: string[] | null = null, baseTip: { sha: s
  * Every order the open pull requests earn: each one's own (`draftOrder`), the checkless ones (#3092), the ones GitHub holds for review that
  * NO order reached (#4002), the later one of each pair that changes one file (#3480), then the set-wide one for labelled pull requests nobody
  * has explained (#2416).
- * @param [nowMs] omitted is `Date.now()`
+ * @param [now] the clock, omitted is `Date.now()`; or `{ nowMs, recheck }` (agent-org#1187), which is how `RECHECK_FLAG`'s reading reaches `sharedFileOrders` without a 5th
+ *   positional parameter (`max-params`). `recheck` omitted is OFF, so a caller that passes a bare clock, as every caller did before, gets the ordering it always got.
  */
-export function perPullRequestOrders(prs: any[], required: string[] | null, baseTip?: any, nowMs: number = Date.now()) {
+export function perPullRequestOrders(prs: any[], required: string[] | null, baseTip?: any, now: number | { nowMs?: number; recheck?: boolean; } = Date.now()) {
+  const { nowMs = Date.now(), recheck = false } = typeof now === "number" ? { nowMs: now } : now;
   const asked = prs.map((pr) => ({ pr, order: draftOrder(pr, required, baseTip) }));
   const unreached = asked.filter(({ pr, order }) => order === null && !isCheckless(pr, nowMs)).map(({ pr }) => pr);
   return [...asked.flatMap(({ order }) => order ?? []), ...checklessPrOrders(prs, nowMs), ...unorderedPrOrders(unreached, required, nowMs),
-    ...sharedFileOrders(prs), ...awaitingEvidenceStaleOrders(prs)];
+    ...sharedFileOrders(prs, undefined, { recheck }), ...awaitingEvidenceStaleOrders(prs)];
 }
 
 /**

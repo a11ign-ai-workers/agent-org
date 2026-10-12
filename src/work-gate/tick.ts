@@ -4,7 +4,8 @@ import { READY_LABEL, CLAIM_LABEL } from "../claim-labels.ts";
 import { todayIso, ANSWER_PREFIX } from "../waiting-condition.ts";
 import { subjectMention, subjectRef } from "../review-attribution.ts";
 import { REPEAT_TICKS, normaliseLine, type RepeatingGroup } from "../repeating-lines.ts";
-import { redSinceOf, type CanaryState } from "../org-health.ts";
+import { machineryFlagOn, redSinceOf, type CanaryState } from "../org-health.ts";
+import { RECHECK_FLAG } from "./shared-file-orders.ts";
 import { ghQueueTick } from "../gh-ledger.ts";
 import { isBrokenRed } from "../red-pr.ts";
 import { holdersOf } from "../pr-hold-state.ts";
@@ -254,13 +255,15 @@ export function blockerClearedReading(rows: any[], today: string = todayIso(), n
  *        `claimRefusals` is `claimRefusalStreaksNow(offerable)` (#2845) -- each offered row's consecutive-refusal streak. OMITTED MEANS
  *        NOT ASKED, so no `ready-row-unclaimable` order, and `unclaimableRowOrders` carries the absence handling for `rowBranches`'s reason.
  *        `nowMs` is the clock `chairmanOrders` windows on (#2989); omitted is `Date.now()`, so only a test passes it.
+ *        `recheck` is `RECHECK_FLAG`'s reading (agent-org#1187): OMITTED READS THE FLAG (`recheckFlagOn`), and a test or a replay passes it so the answer does not depend on the host's state directory.
+ *        It carries no `= ...` default for `rowBranches`'s reason.
  *        `claimFacts` is the claim-stall tick's reading of every claimed row (#3451) -- what `blockerClearedOrders` drops an order on. OMITTED MEANS NOT ASKED, so no drop;
  *        `null` is a tick that read no claim. It carries no `= undefined` default for `rowBranches`'s reason.
  */
 export function decide({ prs, readyRows, promotableRows = [], chairmanBlocked = [], prFiles = [],
   drain = false, required = null, epics = [], answerOwed = [], openRows = [], unarmed = null,
-  claimedComments = [], rowBranches, branchPrs, hostDrift, primaryDrift, closings, claimFacts, trunkRed, baseTip, claimStalls, offBoard, key, repo, callCountSignals, bareAnswerLabels, labJobs, claimRefusals, nowMs, answerGiven, engineerStarts, projectDeclaration, shareLog, shareMemory, offerHierarchy, waitFacts }: {
-        prs: any[]; readyRows: any[]; promotableRows?: any[]; chairmanBlocked?: any[]; nowMs?: number;
+  claimedComments = [], rowBranches, branchPrs, hostDrift, primaryDrift, closings, claimFacts, trunkRed, baseTip, claimStalls, offBoard, key, repo, callCountSignals, bareAnswerLabels, labJobs, claimRefusals, nowMs, recheck, answerGiven, engineerStarts, projectDeclaration, shareLog, shareMemory, offerHierarchy, waitFacts }: {
+        prs: any[]; readyRows: any[]; promotableRows?: any[]; chairmanBlocked?: any[]; nowMs?: number; recheck?: boolean;
         prFiles?: { number: number; files: string[]; changedFiles: number; }[];
         drain?: boolean; required?: string[] | null; epics?: any[]; answerOwed?: any[];
         key?: string; repo?: string; openRows?: any[]; unarmed?: number[] | UnarmedFacts | null;
@@ -301,7 +304,7 @@ export function decide({ prs, readyRows, promotableRows = [], chairmanBlocked = 
   // #2470/#2711/#2729: A CLAIM THAT DOES NOT MOVE, A BARE `answer:` LABEL ON IT, OR A LAB JOB IT DISPATCHED THAT HAS ENDED -- all address the row's own holder, so all outrank every cause offering NEW work.
   orders.push(...stallOrdersOrNone(claimStalls), ...bareAnswerOrdersOrNone(bareAnswerLabels), ...answerGivenOrdersOrNone(answerGiven), ...labJobFinishedOrders(openRows, labJobs, Date.now()));
 
-  orders.push(...perPullRequestOrders(prs, required, baseTip, nowMs), ...closesUnresolvedOrders(prs)); // #2823 beside them; #3092 the checkless
+  orders.push(...perPullRequestOrders(prs, required, baseTip, { nowMs, recheck: recheckFlagOn(recheck) }), ...closesUnresolvedOrders(prs)); // #2823 beside them; #3092 the checkless
   // #2031: AHEAD OF THE OFFER, AND IT IS THE SAME READING THAT WITHHELD IT. `partitionUnclaimed` shelves
   // the row on `rowBranches` and this emits the cause that names the branch -- one condition, one read,
   // said once as a withholding and once as a question. Ahead of `rowOrders` for the ordering reason the
@@ -401,6 +404,18 @@ export function decide({ prs, readyRows, promotableRows = [], chairmanBlocked = 
  * a host that was looked at and is correct. Both produce silence here and they are NOT the same claim --
  * `hostDriftOrders` keeps them apart, and `driftReport` keeps them apart for the CLI's reader.
  */
+/**
+ * agent-org#1187: `RECHECK_FLAG` (`holds.recheck`), READ WHERE THE ORDERS ARE DECIDED. It is a machinery flag, so its switch is `machinery:flag`, which writes the canary state and not a
+ * declaration, and `perPullRequestOrders` passed nothing to `sharedFileOrders`: the re-check shipped OFF with nothing able to turn it on (#1165). Read HERE, in `decide`, because the
+ * primary tick and every other scope's tick (`scopeTick`) both end in `decide`, so one read covers both and neither call site can be the one that forgot.
+ * @param [asked] the reading a caller already has; a test or a replay passes it so the answer does not move with the host's state directory
+ * @param [read] the flag's state; absent, unreadable or malformed is OFF (`readReenqueueState`). Its line about an unreadable file names `queue.reenqueueEjected`, which the
+ *   gate's own read of the same file already said once this tick, so it is dropped here rather than repeated per scope under another flag's name.
+ */
+export function recheckFlagOn(asked?: boolean, read: () => CanaryState = () => readReenqueueState(REVIEWER_STATE_DIR, () => undefined)): boolean {
+  return asked ?? machineryFlagOn(read(), RECHECK_FLAG);
+}
+
 export function readHostDrift(): { unit: string; problem: string; detail: string; }[] | null {
   const run = spawnSync(process.execPath, [hostUnitsEntry(), "--json"], { encoding: "utf8" });
   if (run.status !== 0 || typeof run.stdout !== "string") return null;
