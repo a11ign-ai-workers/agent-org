@@ -121,3 +121,14 @@ test("the retro files both counts through recordFailures in dailyRetrospective, 
   assert.match(src, /recordFailures\(\{[^}]*events: sharedFailureEvents\(report\.sharedFailures\)/);
   assert.match(src, /name: "closed shared-failure rows"/);
 });
+
+test("a closed row whose comments run past the first page is refused, so its closing comment is never missed as 0", () => {
+  const raw = (comments: object) => [{ number: 900, closedAt: new Date(NOW - HOUR).toISOString(), comments }];
+  const whole = raw({ totalCount: 1, nodes: [{ body: NOT_SAME }] });
+  assert.deepEqual(retro.readableClosedSharedRows(whole as any)?.map((row) => row.comments), [[{ body: NOT_SAME }]], "one page holds every comment: counted");
+  const past = Array.from({ length: 100 }, () => ({ body: "Closed: fixed on main." }));
+  assert.equal(retro.readableClosedSharedRows(raw({ totalCount: 101, nodes: past }) as any), null, "101 comments, 100 read: the closing comment may be the 101st");
+  assert.equal(retro.readableClosedSharedRows(raw({ nodes: [{ body: NOT_SAME }] }) as any), null, "no count of comments means the read cannot be checked");
+  const ceiling = Array.from({ length: 500 }, (_, i) => ({ number: i, closedAt: null, comments: { totalCount: 0, nodes: [] } }));
+  assert.equal(retro.readableClosedSharedRows(ceiling as any), null, "500 rows is the list's ceiling, refused");
+});

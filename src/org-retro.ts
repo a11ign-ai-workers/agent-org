@@ -1025,15 +1025,30 @@ const readDeclaredDora = (now: number): ReturnType<typeof readDora> => readDora(
 const CLOSED_SHARED_ROWS_LIMIT = 500;
 
 /**
- * THE CLOSED SHARED-FAILURE ROWS, each with its comments, for the "not the same failure" count (agent-org#997). `null` when the read is refused, or when the list
- * is at its ceiling. A refusal is `unknown` in the report, not 0.
+ * The closed shared-failure rows as read, or `null` when they cannot be counted whole (agent-org#997). A row whose comments run past the first page has a closing
+ * comment this read may not have seen, so the list is refused rather than counted as 0 for that row; so is a list at its ceiling.
+ * @param {Record<string, unknown>[]} raw the rows as `readRowsByLabel` returned them, comments still in their connection shape
+ * @returns {any[] | null}
+ */
+export function readableClosedSharedRows(raw: Record<string, unknown>[]): any[] | null {
+  if (raw.length >= CLOSED_SHARED_ROWS_LIMIT) return null;
+  const whole = raw.every((row) => {
+    const comments = row.comments as { totalCount?: unknown; nodes?: unknown[]; } | null | undefined;
+    return typeof comments?.totalCount === "number" && (comments.nodes?.length ?? 0) >= comments.totalCount;
+  });
+  return whole ? raw.map(asListJson) : null;
+}
+
+/**
+ * THE CLOSED SHARED-FAILURE ROWS, each with its comments, for the "not the same failure" count (agent-org#997). `null` when the read is refused, or when the rows
+ * cannot be read whole (`readableClosedSharedRows`). A refusal is `unknown` in the report, not 0.
  * @returns {any[] | null}
  */
 const readClosedSharedRows = (): any[] | null => {
   try {
-    const rows = readRowsByLabel({ label: SHARED_FAILURE_LABEL, state: "CLOSED", repo: homeProjectDeclaration().repo,
-      select: "number closedAt comments(first:100){nodes{body}}", run: runThrough(ghJson) }).map(asListJson);
-    return rows.length >= CLOSED_SHARED_ROWS_LIMIT ? null : rows;
+    const raw = readRowsByLabel({ label: SHARED_FAILURE_LABEL, state: "CLOSED", repo: homeProjectDeclaration().repo,
+      select: "number closedAt comments(first:100){totalCount nodes{body}}", run: runThrough(ghJson) });
+    return readableClosedSharedRows(raw);
   } catch {
     return null; // a refused read is `unknown`, as `ghJson` says
   }
