@@ -37,7 +37,7 @@ Also run: `rstest` on the seven owner and pull-request-owner test files (`pr-own
 ## Not in this PR
 
 - The failure-class index step (`guard` for `owner-unresolved` naming the new rung, and clearing the `guardNote` sentence that says a no-label pull request "falls to the `ceo` rung"). That is `ceo`'s follow-up on a11ign/a11ign, after this merges, and the class is not closed before it does.
-- No changeset. `.changeset/` is outside the row's Region; a patch entry is a one-line add if `ceo` wants the release note.
+- The changeset (`.changeset/a-writer-authored-automation-pull-request-names-ceo-on-its-own-rung.md`, a patch entry for `agent-org`) is in this PR because `changeset-required` fails without one. It sits outside the row's Region and was added after the first push.
 - `src/work-gate/shared-file-orders.ts` (`ownerSentence`) is outside the Region and was not changed. For this source it reaches the `!unowned` branch and says "It is yours (its session label, or the row it closes, names you)", which is wrong for a writer's pull request. It is addressed to `ceo`, so the wrong sentence is the only defect; the order's session is right. No row is filed for it yet: it needs one in the lane that owns `shared-file-orders.ts`, named here for `ceo` to route.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
