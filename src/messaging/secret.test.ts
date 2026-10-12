@@ -50,7 +50,9 @@ describe("the permission rule (done-when 2)", () => {
       const error = refusal(() => readSecretFile(path));
       assert.match(error.message, new RegExp(mode.toString(8).padStart(4, "0")));
       assert.ok(error.message.includes(path), "the path is named");
-      for (const leaked of [TOKEN, TOKEN.slice(0, 3), "987", "AAH"]) assert.ok(!error.message.includes(leaked), `leaked ${leaked}`);
+      // the scratch directory's random name may itself contain digits or letters of the token, so the path is taken out before the leak check
+      const unnamed = error.message.split(path).join("<path>");
+      for (const leaked of [TOKEN, TOKEN.slice(0, 3), "987", "AAH"]) assert.ok(!unnamed.includes(leaked), `leaked ${leaked}`);
     });
   }
 
@@ -58,7 +60,7 @@ describe("the permission rule (done-when 2)", () => {
     const path = fileWith(`${TOKEN}\n`, 0o600);
     const error = refusal(() => readSecretFile(path, { uid: owner + 1 }));
     assert.match(error.message, new RegExp(`owned by uid ${owner}, not the running user \\(uid ${owner + 1}\\)`));
-    assert.ok(!error.message.includes(TOKEN.slice(0, 3)));
+    assert.ok(!error.message.split(path).join("<path>").includes(TOKEN.slice(0, 3)));
   });
 
   test("a symbolic link is refused even when its target is a perfect 0600 file", () => {
