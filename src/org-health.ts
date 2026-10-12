@@ -765,9 +765,13 @@ const DIRTY_WINDOW_MS = APPROVED_DIRTY_MINUTES * MS_PER_MINUTE;
 function isApprovedDirty(pr: DirtyPr): boolean {
   return pr.approved && pr.mergeStateStatus === "DIRTY";
 }
+/** Past the window, but whether its head was pushed inside it is not known: an unread push time is not a push-free head, so it is unknown and never a finding. */
+function pushUnknown(pr: DirtyPr, now: number): boolean {
+  return isApprovedDirty(pr) && pr.dirtySince !== null && now - pr.dirtySince > DIRTY_WINDOW_MS && pr.headPushedAt === null;
+}
 function dirtyFinding(pr: DirtyPr, now: number): boolean {
   if (!isApprovedDirty(pr) || pr.dirtySince === null || now - pr.dirtySince <= DIRTY_WINDOW_MS) return false;
-  return pr.headPushedAt === null || pr.headPushedAt <= now - DIRTY_WINDOW_MS;
+  return pr.headPushedAt !== null && pr.headPushedAt <= now - DIRTY_WINDOW_MS;
 }
 
 /** SIGNAL A: AN APPROVED PULL REQUEST IS DIRTY AND NOBODY IS REBASING IT. `org-health` never read the merge state, so #1130 and #1131 sat approved and DIRTY behind a red PR and no signal named them. */
@@ -777,7 +781,9 @@ export function approvedDirtyReading({ now, prs }: { now: number; prs: DirtyPr[]
   const tripped = prs.filter((pr) => dirtyFinding(pr, now)).sort((a, b) => (a.dirtySince as number) - (b.dirtySince as number));
   if (tripped.length === 0) {
     const undated = prs.filter((pr) => isApprovedDirty(pr) && pr.dirtySince === null);
-    return undated.length === 0 ? clear(signal) : unknown(signal, `${undated.length} approved PR(s) are DIRTY and no tick has seen when they went DIRTY, so how long they have been DIRTY is not known`);
+    if (undated.length > 0) return unknown(signal, `${undated.length} approved PR(s) are DIRTY and no tick has seen when they went DIRTY, so how long they have been DIRTY is not known`);
+    const unpushed = prs.filter((pr) => pushUnknown(pr, now));
+    return unpushed.length === 0 ? clear(signal) : unknown(signal, `${unpushed.length} approved PR(s) have been DIRTY over ${APPROVED_DIRTY_MINUTES} min and their head push time is not known, so whether they were pushed inside the window is not known`);
   }
   const first = (tripped[0].dirtySince as number) + DIRTY_WINDOW_MS;
   const named = tripped.slice(0, MAX_NAMED).map((pr) => `#${pr.number} (DIRTY ${ageText(pr.dirtySince as number, now)})`);

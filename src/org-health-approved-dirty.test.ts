@@ -52,6 +52,19 @@ test("a DIRTY PR that no tick has dated is unknown, not a finding", () => {
   assert.equal(reading.status, "unknown");
 });
 
+test("a DIRTY PR past the window whose head push time is unread is unknown, not a finding", () => {
+  const reading = approvedDirtyReading({ now: NOW, prs: [pr({ headPushedAt: null })] });
+  assert.equal(reading.status, "unknown");
+  assert.doesNotMatch(reading.detail, /#1131/);
+});
+
+test("an unread push time does not hide a PR whose known push is outside the window", () => {
+  const reading = approvedDirtyReading({ now: NOW, prs: [pr({ number: 1130, headPushedAt: null }), pr({ number: 1131, headPushedAt: ago(90) })] });
+  assert.equal(reading.status, "tripped");
+  assert.match(reading.detail, /#1131/);
+  assert.doesNotMatch(reading.detail, /#1130/);
+});
+
 test("a refused read of the open PRs is unknown, not clear", () => {
   assert.equal(approvedDirtyReading({ now: NOW, prs: null }).status, "unknown");
 });
