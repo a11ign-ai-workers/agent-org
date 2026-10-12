@@ -6,7 +6,7 @@ import { holdersOf } from "../../pr-hold-state.ts";
 import { decidedBy } from "../../claim-stall.ts";
 import { worktreeOwner } from "../../worktree-owner.ts";
 import { HOLD_RED_JOBS } from "../pr-orders.ts";
-import { BLOCKING_REVIEW_STATES, REVIEW_STATE, blockingChecks, checksSettledGreen, mergeCandidates, reviewStateOf } from "../pr-state.ts";
+import { BLOCKING_REVIEW_STATES, REVIEW_STATE, blockingChecks, checksSettledGreen, draftCandidates, mergeCandidates, reviewStateOf } from "../pr-state.ts";
 import { PROJECT_GIT, capturingStderr, defaultRun, defaultSpawn, repoNow } from "../reads.ts";
 import { HOUR_MS, labelsOf, sessionOf } from "../vocabulary.ts";
 
@@ -47,6 +47,7 @@ export function patchUnchangedSince(pr: any, oid: string | null): boolean | null
  * subject rather than an oversight: a draft belongs to `draft-awaiting-verdict`, a red one to
  * `pr-checks-failing`, and a held one is not merging BY DECISION. What is left is the state nothing in this
  * repository could see before -- not a draft, not held, green on every required check, and blocked anyway.
+ * The one draft admitted (#958) is a refusal at its current head: the author owes the rework whether or not it is ready for review.
  *
  * EACH ENTRY CARRIES THE FACTS ROUTING NEEDS (#2283): the PR's `session:` label (`null` when it has none), the
  * head, and -- for a refusal -- the commit the refusing review was posted at. The label is what lets
@@ -66,7 +67,12 @@ export function reviewBlocked(prs: any[], required: string[] | null = null): {
     number: number; code: string; why: string; session: string | null; head: string;
     refusedAt: string | null; patchUnchanged: boolean | null; refusalLifted: boolean;
 }[] {
-  return mergeCandidates(prs, required)
+  return [
+    ...mergeCandidates(prs, required),
+    // #958: A DRAFT IS IN THIS POPULATION ONLY WHEN A REVIEWER REFUSED IT AT THE HEAD IT HAS. A draft with no verdict is `draft-awaiting-verdict`'s
+    // (asking its reviewer for one), and a draft refused at an OLDER head is outside it as it always was: `withStaleRefusals` reads only `mergeCandidates`.
+    ...draftCandidates(prs, required).filter((pr) => reviewStateOf(pr).code === REVIEW_STATE.REFUSED && refusalCommitOf(pr) === String(pr.headRefOid ?? "")),
+  ]
     // agent-org#489: A REFUSAL THE GATE HAS RECORDED AS POSTED AT AN OLDER HEAD IS NOBODY'S ORDER (`withStaleRefusals` stamps it, and only after the record landed).
     // The stamp names the commit it was made for, so a newer refusal on the same pull request is not hidden by it.
     .filter((pr) => pr.staleRefusal === undefined || pr.staleRefusal !== refusalCommitOf(pr))
