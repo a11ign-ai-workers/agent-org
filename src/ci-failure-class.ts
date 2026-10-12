@@ -164,7 +164,7 @@ const MAIN_RUNS_LISTED = 10;
 const LOG_LINES_KEPT = 200;
 /** A line of a job log worth quoting: an error, a failed assertion or test. The log's own noise (the checkout, the cache, `##[group]`) is not. */
 // No word boundaries: `AssertionError` and `TypeError` are the lines that matter, and a boundary after `error` would skip both.
-const ERROR_LINE = /error|errno|fail|assert|not ok|exception|timed? ?out|rate limit|cancell?ed|\u2716|\u2717/i;
+export const ERROR_LINE = /error|errno|fail|assert|not ok|exception|timed? ?out|rate limit|cancell?ed|\u2716|\u2717/i;
 const RATE_LIMIT_OR_RUNNER_LOST = /rate limit|runner has received a shutdown signal|lost communication with the server|hosted runner .* lost|runner .* (?:was|has been) (?:lost|terminated)/i;
 // #1166: the lines that say a TEST failed. `##[error]` is deliberately not one: the runner's own lost-runner message is an `##[error]` line.
 const FAILING_ASSERTION = /AssertionError|^\s*(?:not ok\b|FAIL\b|✖|✗)/;
@@ -353,10 +353,10 @@ const AGGREGATOR_CHECK = /(^|[\s/])gate$/i;
 const AGGREGATOR_STEP = /^every job (?:that )?ran\b/i;
 const AGGREGATOR_LINE = /##\[group\]Run for result in|\ba job reported\b|\breported '[^']*', not success/;
 /** Lines that match {@link ERROR_LINE} and are not the failure: a package manager's warning, a command echoed by the runner, and the exit code every failed step ends on. */
-const NOT_THE_FAILURE = /^(?:WARN\b|warn(?:ing)?\b|##\[(?:group|endgroup|command|warning)\]|##\[error\]Process completed with exit code)/i;
+export const NOT_THE_FAILURE = /^(?:WARN\b|warn(?:ing)?\b|##\[(?:group|endgroup|command|warning)\]|##\[error\]Process completed with exit code)/i;
 /** What a test runner prints for the test that failed, which names the file: rstest/vitest `FAIL file > name`, TAP `not ok`. */
 const TEST_FAILURE = /^(?:##\[error\]|FAIL\b|not ok\b)/;
-const LOG_TIMESTAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z\s*/;
+export const LOG_TIMESTAMP = /^\d{4}-\d\d-\d\dT[\d:.]+Z\s*/;
 const FILE_WINDOW_LINES = 30;
 const SOURCE_FILE = /((?:[\w@.-]+\/)*[\w@.-]+\.(?:tsx?|mts|cts|jsx?|mjs|cjs|py|rb|go|rs|sh|ya?ml|json))\b/;
 /** A hold older than this with no CLAIMED incident row wakes its holder (#5098): 15 minutes is the time an engineer has to take the row. */
