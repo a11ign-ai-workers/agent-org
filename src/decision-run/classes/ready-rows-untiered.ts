@@ -12,6 +12,7 @@
 // WHAT THE PORT CANNOT SHOW: a `Tier:` line in a COMMENT, and the `tier:haiku` label (`TicketFlag` has no such flag, so `flagsOf` drops it). "The gap is gone" is therefore read
 // from the state (no longer `ready`), the body and any flag the item does show; the apply's staleness check (any event newer than the read) is what covers the rest.
 import type { ItemRef, TicketFlag } from "../../ticket-port/port.ts";
+import { READY_LABEL } from "../../claim-labels.ts";
 import { hasTierDecision } from "../../untiered-ready-rows.ts";
 import { HAIKU_TIER_LABEL } from "../../worker-profile.ts";
 import type { BriefQuestion } from "../brief.ts";
@@ -37,7 +38,7 @@ export const REASON_MAX_CHARS = 240;
 export const ROLE_EXCERPT_CAP_BYTES = 1400;
 
 export const ROLE_EXCERPT = [
-  "## ready-rows-untiered: a `ready` row has made no tier decision",
+  `## ready-rows-untiered: a \`${READY_LABEL}\` row has made no tier decision`,
   "- You decide ONE row, the first listed. Put the reason in `text`, ONE clause, no code fence, no line break.",
   "- `sonnet-line`: the default. A row needs judgment, or its Acceptance is not a command. The reason is why.",
   "- `haiku-label`: ONLY a mechanical row whose Acceptance is a command you can read in its fenced block. `tier:haiku` is a reasoned override, never routine.",
@@ -92,15 +93,15 @@ export function buildQuestion(order: DecisionOrder, port: Parameters<DecisionCla
   const item = ref === null ? null : port.readItem(ref);
   const decided = item !== null && (item.flags as readonly string[]).includes(HAIKU_TIER_LABEL)
     || (item !== null && hasTierDecision({ number: item.ref.id, body: item.body, labels: [], comments: [] }));
-  const open = item !== null && item.state === "ready" && !decided;
+  const open = item !== null && item.state === READY_LABEL && !decided;
   const checkable = open && acceptanceIsCommand(item.body);
   read.set(order.causeKey, { ref, open, checkable });
   const allowed = !open ? [ESCALATE] : checkable ? [...ALLOWED] : [SONNET_LINE, ESCALATE];
   const text = [
-    `A \`ready\` row has made no tier decision. The order said: ${order.prompt ?? "(no text)"}`,
+    `A \`${READY_LABEL}\` row has made no tier decision. The order said: ${order.prompt ?? "(no text)"}`,
     "Decide the FIRST row listed only. Post `Tier: sonnet -- <reason>` (`sonnet-line`, the default; the reason, one clause, in `text`), or label it `tier:haiku` " +
       "(`haiku-label`, with the reason) when it is mechanical and its Acceptance is a command, or return it to the standing seat (`escalate`).",
-    ...(!open ? ["This item must be `escalate`: " + (item === null ? "the row could not be read." : "it is no longer `ready` without a tier decision, so there is nothing to decide.")] : []),
+    ...(!open ? ["This item must be `escalate`: " + (item === null ? "the row could not be read." : `it is no longer \`${READY_LABEL}\` without a tier decision, so there is nothing to decide.`)] : []),
     ...(open && !checkable ? ["`haiku-label` is not allowed: the row's Acceptance is not a command in a fenced block."] : []),
   ].join("\n");
   return { text, default: SONNET_LINE, allowed };
