@@ -450,7 +450,7 @@ const lastMerge = (read: number | { at: number; repo: string; } | null): { lastM
 export function orgHealthNow({ prsRead, keyedPrsRead = [], readyRead, openRowsRead, claimedComments, decideArgs, decided, held, pools }: { prsRead: any[] | null; keyedPrsRead?: any[]; readyRead: any[] | null; openRowsRead: any[] | null; claimedComments?: any[] | null; decideArgs: any; decided: any[]; held?: { subject: string; }[]; pools?: import("../org-health.ts").PoolReading[]; },
   io: {
       now?: number; lastMergedAt?: () => number | { at: number; repo: string; } | null; readCaptures?: (now: number) => ReturnType<typeof readFleetCaptures>;
-      log?: (line: string) => void; readCopies?: () => null; readLabJobs?: () => string[] | null; readWaits?: typeof waitTickFacts;
+      log?: (line: string) => void; readCopies?: () => null; readRefusals?: () => import("../org-health.ts").ClaimRefusal[] | null; readLabJobs?: () => string[] | null; readWaits?: typeof waitTickFacts;
       release?: typeof releaseHoldViaModule; readHolderAgents?: typeof readAgents; readToolAgreement?: typeof import("../org-health.ts").readToolAgreement; readNodeStrips?: typeof import("../node-strips-types.ts").readNodeStrips;
       readMilestoneMoves?: typeof readMilestoneMoves;
       readReleaseRuns?: () => import("../org-health.ts").ReleaseRuns | null | undefined;
@@ -460,7 +460,7 @@ export function orgHealthNow({ prsRead, keyedPrsRead = [], readyRead, openRowsRe
       teamAccess?: () => import("../org-health.ts").TeamAccessFact | undefined;
       readBoardTruth?: (input: BoardTruthInput) => ReturnType<typeof boardTruthAudit> | null | undefined;
   } = {}) {
-  const { now = Date.now(), lastMergedAt = () => readLatestMerge(defaultRun, mergeRepositories()), readCaptures = (at) => readFleetCaptures({ now: at }), log, readCopies,
+  const { now = Date.now(), lastMergedAt = () => readLatestMerge(defaultRun, mergeRepositories()), readCaptures = (at) => readFleetCaptures({ now: at }), log, readCopies, readRefusals,
     readLabJobs = dispatchedLabJobsOrSay, readWaits = waitTickFacts, release, readHolderAgents = readAgents, readToolAgreement = () => undefined, readNodeStrips = () => undefined, readReleaseRuns = () => undefined, readFleetBuildIncident = () => undefined, readReleaseBehind = () => undefined, readClassRepeat = () => undefined,
     teamAccess = () => readTeamAccess(defaultRun), readBoardTruth = () => undefined,
     readMilestoneMoves: readMoves = io.lastMergedAt === undefined ? readMilestoneMoves : undefined } = io; // #4295: the real exact-start read exactly when the merge read is real
@@ -498,7 +498,8 @@ export function orgHealthNow({ prsRead, keyedPrsRead = [], readyRead, openRowsRe
     ...teamAccessFact(teamAccess()),
     ...boardTruthFact({ openRowsRead, claimedComments, waitFacts: waits?.facts ?? null, now }, readBoardTruth), // #4045
   };
-  const proxyReadings = orgHealthTick(facts, { ...(log && { log }), ...(readCopies && { readCopies }) });
+  // #5157: the ledger is the HOST'S unless a caller hands over its own; the lab-jobs test passes `() => []`, so a busy host cannot trip it
+  const proxyReadings = orgHealthTick(facts, { ...(log && { log }), ...(readCopies && { readCopies }), ...(readRefusals && { readRefusals }) });
   const readings = exactMilestoneClock({ orders: proxyReadings, fact: milestoneClock, now, merge: facts, readMoves, log });
   const { held: heldOnSatisfied, rest } = splitHeldOnSatisfied(stale);
   const cap = { limit: MAX_ROW_ORDERS_PER_TICK };

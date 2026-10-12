@@ -15,8 +15,12 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
+import { existsSync, mkdtempSync, rmSync } from "node:fs";
+import { tmpdir } from "node:os";
+import { join } from "node:path";
 import { emptyCanaryState, withMachineryFlag } from "../org-health.ts";
 import {
+  CLOSED_UNDER_HALF_FILE, CLOSED_UNDER_HALF_FLAG, closedUnderHalfOrders, rowsClosedUnderOpenHalf,
   REENQUEUE_EJECTED_FLAG, failedEntriesSincePush, jobFailuresOf, mergeGroupGreenSince, ownershipOfFailure, readArmingOf, requeueEjected, type ArmingPort, type EjectionEvidence,
 } from "../work-gate.ts";
 import { stalledPrOrders } from "../work-gate/pr-orders.ts";
@@ -47,6 +51,8 @@ type World = {
   /** `pr merge` is accepted but the pull request then reads unarmed. */
   armRefused?: boolean;
   body?: string;
+  /** The labels the pull request carries: none is the holder-less shape (a11ign#5115), `hold:<who>` is a hold. */
+  labels?: string[];
 };
 
 const GREEN_AFTER = [{ head_branch: "gh-readonly-queue/main/pr-5123-aaa", conclusion: "success", created_at: "2026-10-11T17:30:00Z" }];
@@ -91,6 +97,8 @@ function fakeGh(world: World = {}) {
     }
     if (args[0] === "run" && args[1] === "view") return logFailed(world.log ?? tapFailure(PIN_GUARD));
     if (args[0] === "pr" && args[1] === "merge") { armed = true; return ""; }
+    // `blockerVerdict` asks each closing row for its blocked-by edges before the arm: a CLOSED row answers like an open one.
+    if (args[0] === "issue" && args[1] === "view") return JSON.stringify({ blockedBy: { nodes: [], totalCount: 0 } });
     throw new Error(`fake gh: unexpected ${line.slice(0, 120)}`);
   };
   return { run, calls };
@@ -109,7 +117,7 @@ function fakePort() {
 const prOf = (world: World = {}) => {
   const files = world.changed ?? ["src/unrelated.ts"];
   return {
-    number: world.number ?? 5124, isDraft: false, labels: [], headRefOid: "deadbeef", body: world.body ?? "Closes: none -- test", files: files.map((path) => ({ path })), changedFiles: files.length,
+    number: world.number ?? 5124, isDraft: false, labels: (world.labels ?? []).map((name) => ({ name })), reviewDecision: "APPROVED", headRefOid: "deadbeef", body: world.body ?? "Closes: none -- test", files: files.map((path) => ({ path })), changedFiles: files.length,
     comments: world.recorded === true ? [{ body: `<!-- ejected-unqueued: ${REMOVED_AT} -->` }] : [],
     statusCheckRollup: [{ name: "gate", status: "COMPLETED", conclusion: "SUCCESS" }],
   };
@@ -156,6 +164,23 @@ test("a PR ejected by its own test wakes its holder with the failing test, and i
   assert.equal(tick({ changed: ["src/unrelated.ts"] }).arming.ejections.size, 0);
   // ... and the PR's own test file is own by the file's name too.
   assert.equal(tick({ changed: [PIN_GUARD] }).arming.ejections.size, 1);
+});
+
+test("the #5115 shape: ejected, its row CLOSED by a sibling pull request in the other repository, NO holder, green and approved, is re-queued within one tick", () => {
+  // a11ign#5115: the row (#5109) was closed at 17:30 by agent-org#1007, so the pull request lost the session that held it, and three orders went to managers and none re-queued it.
+  // The re-queue is the gate's own act: it asks no session, so a pull request with nobody on it is re-queued by the same call as one with a holder.
+  const body = "Closes #5109\n\nAcceptance: see .acceptance/agent~pm-brief-tests-first-5109.md";
+  for (const [what, labels] of [["no label at all", []], ["a `session:` label of a session that no longer exists", ["session:worker-5109"]]] as const) {
+    const { arming, gh, port, orders } = tick({ number: 5115, body, labels: [...labels], changed: [".agent-org/roles/product-manager.md", ".acceptance/agent~pm-brief-tests-first-5109.md"] });
+    assert.deepEqual(armCalls(gh), [["pr", "merge", "5115", "--repo", HOME, "--auto", "--merge"]], `${what}: armed once, by the gate`);
+    assert.equal(arming.ejections.size, 0, `${what}: it left the ejected set`);
+    assert.deepEqual(orders, [], `${what}: no manager is woken`);
+    assert.deepEqual(port.comments.map((c) => c.decision.kind), ["pr-ejected-requeued"], `${what}: and the record says so`);
+  }
+  // THE CONTROL: a HOLD (`hold:<who>`) is what keeps a pull request out of the candidates, and it is not the absence of a holder. The re-queue does not override one.
+  const held = tick({ number: 5115, body, labels: ["hold:orchestrator"] });
+  assert.deepEqual(armCalls(held.gh), [], "a held pull request is not armed by the gate");
+  assert.equal(held.arming.ejections.size, 0, "it is not a candidate at all: the hold's own release is what brings it back");
 });
 
 // --- every other branch: reachable from the same call ------------------------------------------------------------------------------------------
@@ -272,3 +297,72 @@ test("ownershipOfFailure: one own file is own, an unnamed one is unknown, and on
   assert.equal(verdict({ ts: PIN_GUARD }, null), "unknown", "a diff that could not be listed");
   assert.equal(verdict({}, ["README.md"]), "unknown", "no failing job but the roll-up");
 });
+
+// --- a row closed under an open half of itself (the row's reopened clause 2) ----------------------------------------------------------------------
+
+const AGENT_ORG = "a11ign/agent-org";
+/** a11ign#5115 as the tick's list carries it: the half that stayed open, naming a row (#5109) agent-org#1007's merge closed. */
+const HALF_5115 = { number: 5115, isDraft: false, body: "Closes #5109\n\nAcceptance: see .acceptance/agent~pm-brief-tests-first-5109.md" };
+const openRowsWithout = (...gone: number[]) => [5100, 5109, 5120, 5125].filter((n) => !gone.includes(n)).map((number) => ({ number }));
+
+test("a row closed under an open half is found: a11ign#5115 still names #5109, which is no longer on the tracker's open list", () => {
+  const found = rowsClosedUnderOpenHalf({ prs: [HALF_5115], trackers: [{ repo: HOME, rows: openRowsWithout(5109) }], homeRepo: HOME });
+  assert.deepEqual(found, [{ row: `${HOME}#5109`, half: `${HOME}#5115` }]);
+  // THE CROSS-REPOSITORY FORM: the half is an agent-org pull request naming the row by its owner/repo.
+  const named = { number: 1007, isDraft: false, repo: AGENT_ORG, body: `Closes ${HOME}#5109` };
+  assert.deepEqual(rowsClosedUnderOpenHalf({ prs: [named], trackers: [{ repo: HOME, rows: openRowsWithout(5109) }], homeRepo: HOME }), [{ row: `${HOME}#5109`, half: `${AGENT_ORG}#1007`, halfKey: "agent-org" }]);
+  // THE CONTROLS, each the same pull request with one thing changed, so the finding above is the open list's absence alone:
+  const none = (over: object, rows: readonly any[] | null = openRowsWithout(5109)) => rowsClosedUnderOpenHalf({ prs: [{ ...HALF_5115, ...over }], trackers: [{ repo: HOME, rows }], homeRepo: HOME });
+  assert.deepEqual(none({}, openRowsWithout()), [], "the row is open: nothing to say");
+  assert.deepEqual(none({}, null), [], "the list was REFUSED: absence from a list nobody read is not closure");
+  assert.deepEqual(none({}, Array.from({ length: 500 }, (_, at) => ({ number: at + 1 }))), [], "a list at the read's limit may be cut");
+  assert.deepEqual(none({ isDraft: true }), [], "a draft is not a half that has been put forward");
+  assert.deepEqual(none({ body: "Closes: none -- first half of #5109" }), [], "a pull request that declares it closes nothing names no row");
+  assert.deepEqual(rowsClosedUnderOpenHalf({ prs: [HALF_5115], trackers: [{ repo: AGENT_ORG, rows: [] }], homeRepo: HOME }), [], "a row of a tracker nobody listed is not read as closed");
+});
+
+test("the order goes to product-manager once per (row, half), names both and the reopen, and the flag OFF reads and writes nothing", () => {
+  const dir = mkdtempSync(join(tmpdir(), "closed-under-half-"));
+  try {
+    checkOrders(dir);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the order's subject is the half's repository KEY, not the basename of its repository (reviewer-agent-org-1060)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "closed-under-half-key-"));
+  try {
+    const HALF_ON = withMachineryFlag(emptyCanaryState(), { name: CLOSED_UNDER_HALF_FLAG, on: true });
+    // key `layer` for `acme/other`, and a second repository with the SAME basename under another owner and another key: the two must not share a routing identity.
+    const half = (key: string, repo: string, closes: number) => ({ number: 7, isDraft: false, repo, repoKey: key, body: `Closes ${HOME}#${closes}` });
+    const prs = [half("layer", "acme/other", 5101), half("layer2", "elsewhere/other", 5102)];
+    const orders = closedUnderHalfOrders({ prs, trackers: [{ repo: HOME, rows: [] }], homeRepo: HOME, stateDir: dir, state: HALF_ON, log: () => {} });
+    assert.deepEqual(orders.map((order) => order.subject).sort(), ["pr-layer#7", "pr-layer2#7"]);
+    assert.equal(new Set(orders.map((order) => order.causeKey)).size, 2, "two halves, two routing identities");
+    assert.match(orders.find((order) => order.subject === "pr-layer#7")!.prompt, /acme\/other#7/, "the prompt keeps the full repository");
+    // THE CONTROL: the primary's own half stays the bare number, and carries no key.
+    const own = rowsClosedUnderOpenHalf({ prs: [HALF_5115], trackers: [{ repo: HOME, rows: openRowsWithout(5109) }], homeRepo: HOME });
+    assert.equal("halfKey" in own[0], false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+function checkOrders(dir: string): void {
+  const said: string[] = [];
+  const HALF_ON = withMachineryFlag(emptyCanaryState(), { name: CLOSED_UNDER_HALF_FLAG, on: true });
+  const ask = (state: typeof ON, prs: object[] = [HALF_5115]) =>
+    closedUnderHalfOrders({ prs, trackers: [{ repo: HOME, rows: openRowsWithout(5109) }], homeRepo: HOME, stateDir: dir, state, log: (line) => said.push(line) });
+  assert.deepEqual(ask(ON), [], "flag OFF (the re-queue flag is on, and is another flag): no order");
+  assert.equal(existsSync(join(dir, CLOSED_UNDER_HALF_FILE)), false, "flag OFF: nothing written");
+  const first = ask(HALF_ON);
+  assert.equal(first.length, 1, said.join(" | "));
+  assert.equal(first[0].session, "product-manager");
+  assert.equal(first[0].subject, "pr-5115");
+  assert.match(first[0].prompt, new RegExp(`Row ${HOME}#5109 is CLOSED, and ${HOME}#5115 .* still .Closes. it`));
+  assert.match(first[0].prompt, new RegExp(`gh issue reopen 5109 --repo ${HOME}`));
+  assert.deepEqual(ask(HALF_ON), [], "the next tick says nothing: once per row and half");
+  assert.deepEqual(ask(HALF_ON, []), [], "the half merged or closed: nothing standing");
+  assert.equal(ask(HALF_ON).length, 1, "and a half that stands again is a new reading, because the record was pruned of what no longer stood");
+}

@@ -46,7 +46,7 @@ import type { BlockingRecord } from "./blocking-impact.ts";
 import { HAIKU_DEFAULT_CI_FAILURES, haikuDefaultOn, routeEngineer, type Routed } from "./engineer-route.ts";
 import { DEFAULT_CAPS, ESCALATION_KIND, ESCALATION_USE, claimFacts, escalationLogLine, escalationNote, haikuStarts, isHaiku, shouldEscalate, transcriptCounts } from "./engineer-escalation.ts";
 import { decisionLogPathFrom, decisionSwitchesPath } from "./decision-provider.ts";
-import { classifyCiFailure, classLine, classNote, readCiFailure, type Gh } from "./ci-failure-class.ts";
+import { classifyCiFailure, classLine, classNote, notesTheOrder, readCiFailure, type Gh } from "./ci-failure-class.ts";
 import { depthEffort, depthLine, readDepthState, reviewDepth, type Depth } from "./review-depth.ts";
 import { profileFor, agentArgs, haikuTierProfile, type TierProfile, armOf, ARM, CALM_FINISH_PARAGRAPH, tripsArmOf, TRIPS_ARM, ROUND_TRIPS_PARAGRAPH } from "./worker-profile.ts";
 import { JUDGMENT_CAUSES, ANSWER_PREFIX, LAUNCH_PLACEHOLDER, REVIEWER_REGISTRY_FILE, readReviewerRegistry, scopesOf,
@@ -5553,7 +5553,9 @@ export function claimOrdersPath(ledgerPath: string) {
 /**
  * THE CLAIM-ORDERS RECORD, READ: how many gate orders each claim has been sent, and the way to write the next line. A line that does not parse is SKIPPED
  * WITH A WARNING, not dropped silently: a skipped continuation undercounts, which lets a claim take one more order than the cap, and the warning is how
- * that is seen. A missing file is an empty record; any other read failure propagates.
+ * that is seen. NUL bytes are PADDING, not content: a power loss or an fs crash can leave a run of them before an entry that was written whole (#1065), so
+ * they are stripped before the line is parsed, and a line that is only padding is skipped without a warning. A missing file is an empty record; any other
+ * read failure propagates.
  */
 export function claimOrdersIn(path: string, { read = readFileSync, append = appendFileSync, warn = (line) => process.stderr.write(line) }: { read?: typeof readFileSync; append?: typeof appendFileSync; warn?: (line: string) => void; } = {}): ClaimOrders {
   const counts: Map<string, number> = new Map();
@@ -5564,8 +5566,10 @@ export function claimOrdersIn(path: string, { read = readFileSync, append = appe
     if (err?.code !== "ENOENT") throw new Error(`cannot read ${path}`, { cause: err });
   }
   for (const line of raw.split("\n").filter(Boolean)) {
+    const text = line.replaceAll("\0", "");
+    if (text.trim() === "") continue;
     try {
-      const entry = JSON.parse(line);
+      const entry = JSON.parse(text);
       if (entry.kind === "continuation") counts.set(entry.claim, (counts.get(entry.claim) ?? 0) + 1);
     } catch (err: any) {
       warn(`claim-orders: skipped an unreadable line in ${path} (${firstLine(err)}); its claim may be undercounted\n`);
@@ -6153,10 +6157,14 @@ function startSeat(run: (args: string[]) => string, { name, brief, refusal, ...l
  * repeats on the next tick and `host:check` names the same seat, which is what makes the gate offer it. A seat whose start was refused repeats
  * the same way, and nothing is left half-open.
  *
+ * THE STARTS SHARE THE TICK'S START BUDGET (agent-org#1052, the budget agent-org#1025 put on `deliver`). After a herdr restart every seat reads
+ * absent, and each `agent start` may wait its whole 30 s, so N seats would hold the `seats` phase for N x 30 s. A seat whose start would BEGIN with the
+ * budget spent is left absent and named `SEATS DEFERRED`; the next tick reads it absent again and starts it, so no queue is kept.
  *
- * @returns one line per seat acted on or not checked, `[]` when every persistent seat is present
+ *
+ * @returns one line per seat acted on, deferred or not checked, `[]` when every persistent seat is present
  */
-export function startAbsentSeats({ run = defaultRun, env = spawnEnvironment(), checkout = HOME_CHECKOUT, sessionsPath = SESSIONS_FILE }: { run?: (args: string[]) => string; env?: Record<string, string>; checkout?: string; sessionsPath?: string | URL; } = {}): string[] {
+export function startAbsentSeats({ run = defaultRun, env = spawnEnvironment(), checkout = HOME_CHECKOUT, sessionsPath = SESSIONS_FILE, now = Date.now }: { run?: (args: string[]) => string; env?: Record<string, string>; checkout?: string; sessionsPath?: string | URL; now?: () => number; } = {}): string[] {
   let seats;
   try {
     seats = persistentEntries(sessionsPath);
@@ -6171,7 +6179,18 @@ export function startAbsentSeats({ run = defaultRun, env = spawnEnvironment(), c
     return [`SEATS NOT STARTED: ${[...absent].join(", ")} read absent, but herdr's listing does not show the standing panes, so it may be partial; `
       + "a start now could be a second seat under one name."];
   }
-  return seats.filter((s) => absent.has(s.name)).map((seat) => startSeat(run, seat, { env, checkout }));
+  // agent-org#1052: ONLY `agent start` IS TIMED, so the readings and the pane open around each start cost the budget nothing.
+  const starts = startBudgetOf(now);
+  const startRun = starts.timed(run);
+  const lines: string[] = [];
+  for (const seat of seats.filter((s) => absent.has(s.name))) {
+    if (starts.hold() !== null) {
+      lines.push(`SEATS DEFERRED: ${seat.name} waits for the next tick: this tick's agent starts have used their ${START_BUDGET_MS / 1000} s start budget.`);
+      continue;
+    }
+    lines.push(startSeat(startRun, seat, { env, checkout }));
+  }
+  return lines;
 }
 
 /** The most the self-test's tick call may take: it never waits for a seat (it remembers a queued entry), so this is a herdr call or two and a hung child is killed, not waited on. */
@@ -6750,8 +6769,8 @@ function redPullRequestOf(order: Enrichable): { repo: string; number: number; he
 }
 
 /**
- * `ci-failure-class` (#4632) for each settled-red order. The class and the route go in the journal line whoever chose; the ORDER's text gains them only when the PROVIDER chose, so with
- * no provider the order is the gate's, byte for byte. `read` and `classify` are seams for a test.
+ * `ci-failure-class` (#4632) for each settled-red order. The class and the route go in the journal line whoever chose; the ORDER's text gains them only when the PROVIDER chose, or when a rule
+ * says WAIT for a pin bump (#5151, `notesTheOrder`), so otherwise with no provider the order is the gate's, byte for byte. `read` and `classify` are seams for a test.
  */
 export async function withCiFailureClass<T extends Enrichable>(orders: readonly T[], deps: EnrichDeps & { read?: typeof readCiFailure; classify?: typeof classifyCiFailure; now?: number }): Promise<T[]> {
   const { gh = defaultGh, read = readCiFailure, classify = classifyCiFailure, now = Date.now() } = deps;
@@ -6762,7 +6781,7 @@ export async function withCiFailureClass<T extends Enrichable>(orders: readonly 
       if (failure === null) return;
       const decision = await classify(failure, enrichDecisionDeps(deps, order.causeKey));
       process.stderr.write(`wake: ${order.causeKey} ${classLine(decision)}\n`);
-      if (decision.via === "jev") notes.set(order.causeKey, classNote(decision));
+      if (notesTheOrder(decision)) notes.set(order.causeKey, classNote(decision));
     } catch (err) {
       process.stderr.write(`wake: could not classify ${order.causeKey} (${firstLine(err)}) -- the order as the gate wrote it.\n`);
     }

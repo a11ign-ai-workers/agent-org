@@ -55,6 +55,13 @@ export const EMERGENCY_PRIORITY_NOT_HONOURED_KIND = "emergency-priority-not-hono
  */
 export const CLAIM_REFUSED_KIND = "claim-refused";
 
+/**
+ * The event kind of ONE SPEC-LINT REFUSAL, one line per finding: `<kind>\t<ts ms>\t#<row> <field> <rule>` (agent-org#1017), so a count of lines is a count of
+ * refused findings. Not seeded in `FAILURE_KINDS`, for the reason `CLAIM_REFUSED_KIND` gives. Written by `row-file.ts`'s `recordSpecLintRefusals` and read by the
+ * retro's "Rows refused by the spec lint (24h)" line (`org-retro.ts`): it lives here so both can name it without the other.
+ */
+export const SPEC_LINT_REFUSED_KIND = "spec-lint-refused";
+
 export type FailureEntry ={ classKey: string, at: number, ref: string };
 /** `at` is epoch ms; absent means the tick's own `now` (an event dated by its source, such as a hand fix, carries its own) */
 export type FailureEvent = { classKey: string, ref: string, at?: number };

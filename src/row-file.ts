@@ -124,6 +124,12 @@ import { blastRadiusGate, ghBlastReads, type BlastVerdict } from "./blast-radius
 import { sweepFilingAtFiling } from "./sweep-window.ts"; // #4603
 import { appendDistinctFrom, DISTINCT_FROM_FLAG, duplicateRowCheck } from "./duplicate-row.ts"; // #4634
 import { homeHostConfig, stateEntryPath } from "./host-config.ts";
+import { decide, decisionLogPathFrom, decisionSwitchesPath, type DecisionDeps } from "./decision-provider.ts"; // agent-org#1017: Jev reads a spec that was promoted
+import { FAILURE_LEDGER_FILE, SPEC_LINT_REFUSED_KIND, recordFailure } from "./failure-ledger.ts"; // agent-org#1017: a spec-lint refusal is one line of the ledger the claim refusals use
+import { answerLabelRefusal } from "./answer-label-guard.ts"; // a11ign#4679: every writer of `answer:<session>` asks it first
+import { testsFirstOf } from "./merge-guard.ts"; // a11ign#5109: the one reader of a row's `Tests-first:` line
+import { githubTicketAdapter, TRACKER as TICKET_TRACKER } from "./ticket-port/github-adapter.ts"; // agent-org#1017: the comment on the row goes through the port, not a new `gh` call here
+import { SPEC_REVIEW_LABEL, SPEC_REVIEW_WAKE, lintRowBody, machineDeps, reviewSpec, specBlocksOf, specLintFlagOf, specLintRefusalReason, type LintDeps, type ReviewVerdict } from "./spec-lint.ts";
 // #2111: both labels from the leaf module that OWNS them (#804), never the strings retyped -- a promotion
 // must refuse a row that is already claimed, and it writes `ready` four times. `ready-label-audit.test.ts`
 // enforces exactly this: a fresh local declaration of any of the four, anywhere in this directory, is a
@@ -2305,7 +2311,7 @@ export function createIssue(argv: string[], deps: {
     return 1;
   }
   // #4603: A SESSION HOLDING A CLAIMED SWEEP FILES NO FOLLOW-UP INTO ITS AREA UNTIL THE MERGE, refused before the create call like the duplicate title above -- the one filing path that can read both the session and the sweep.
-  const sweepHeld = sweepFilingAtFiling({ session, body: (body as string), reads: { run: (args) => run("gh", args), repo: tracker.repo, repos: declaration.code } });
+  const sweepHeld = sweepFilingAtFiling({ session, body: (body as string), reads: { run: ghRunner(run), repo: tracker.repo, repos: declaration.code } });
   if (sweepHeld) {
     process.stderr.write(`${sweepHeld}\n`);
     return 1;
@@ -2614,6 +2620,102 @@ export function promoteArgvRefusal(argv: string[]): string | null {
     + "Nothing was changed.";
 }
 
+// ---------------------------------------------------------------------------------------------------
+// agent-org#1017 (a11ign#5117): THE SPEC LINT AT PROMOTION, AND THE LOG OF WHAT IT REFUSED.
+// `spec-lint.ts` owns the rules, the question and the verdict, and is pure; this is the call that makes a promotion ASK it.
+// BEHIND `rows.specLint` in `.agent-org/project.json`, ABSENT MEANING OFF: with the flag off nothing below runs, and the
+// promotion is what it was. The revert is the flag.
+// ---------------------------------------------------------------------------------------------------
+
+/**
+ * `SPEC_LINT_REFUSED_KIND` is defined in `failure-ledger.ts`, where the retro reads it without importing this CLI; re-exported here so the
+ * promotion's importers keep their name (the `OUT_OF_RELEASE` pattern above).
+ */
+export { SPEC_LINT_REFUSED_KIND };
+
+/** What a promotion asks of the lint. Every field is injectable; absent, it is this machine's. */
+export type SpecLintAtPromotion = {
+  /** `rows.specLint`. Absent, this checkout's declaration says ({@link readSpecLintFlag}). */
+  enabled?: boolean;
+  /** The lint's three machine questions. Absent, {@link specLintDeps}. */
+  deps?: LintDeps;
+  /** Told each refusal's findings. The act sites pass {@link recordSpecLintRefusals}; a bare verdict records nothing. */
+  record?: (issueNumber: number, findings: readonly { field: string; rule: string; }[]) => void;
+};
+
+/** `rows.specLint` as `checkout`'s declaration says it. A checkout with no declaration is a project that never declared it: OFF. */
+export function readSpecLintFlag(checkout: string = HOME_CHECKOUT): boolean {
+  try {
+    return specLintFlagOf(readFileSync(`${checkout}/.agent-org/project.json`, "utf8"));
+  } catch (cause) {
+    void cause; // no declaration at this checkout is a project that never declared the flag: OFF
+    return false;
+  }
+}
+
+const SOURCE_FILE = /\.(?:[cm]?[jt]sx?|py|go|rs|sh)$/i;
+const TEST_FILE_NAME = /(?:\.(?:test|spec)\.[a-z]+$|(?:^|\/)test_[^/]+$|_test\.[a-z]+$)/i;
+/** A row that says it carries a spec: the fence's opening (a block never closed included, so it is refused as missing and not read as none), a `Spec` heading, or `Spec:`. */
+const SPEC_MARKER = /^[ \t]*(?:```spec\b|#{1,6}[ \t]*spec\b|(?:\*\*|__)?spec:)/im;
+
+/**
+ * IS THIS A BUILD ROW, which is the CALLER's question (`specLintRefusalReason` takes it as `requireBlock`)? A Region that names a source file, and a body that says
+ * `Tests-first:` or carries a spec marker. A decomposition, investigation or fleet row names no source file or no marker, and is exempt by saying nothing (a11ign#5109).
+ */
+function requiresSpecBlock(body: string): boolean {
+  const names = regionPathTokens(body).map((token) => splitRegionEntry(token).path);
+  const buildsSource = names.some((path) => SOURCE_FILE.test(path) && !TEST_FILE_NAME.test(path));
+  return buildsSource && (testsFirstOf(body).marked || SPEC_MARKER.test(body));
+}
+
+/** The checkout on this disk of each repository prefix (`""` is the row's own) a Region can name; a repository with none is absent. */
+function machineRoots(): Record<string, string> {
+  const roots: Record<string, string> = {};
+  for (const key of ["", ...homeProjectDeclaration().code.map((entry) => entry.key)]) {
+    const checkout = checkoutOfKey(key);
+    if (checkout !== null && existsSync(checkout)) roots[key] = checkout;
+  }
+  return roots;
+}
+
+/**
+ * The lint's three questions from this machine, with ONE change from `machineDeps`: a file is looked for on `origin/main` of the repository's checkout, as
+ * `absentRegionTopDirReason` does, and not in its working tree, which lags `origin/main` on a host nobody pulls in. A refusal for a file that exists is the failure
+ * this lint cannot afford. A repository with no checkout on this disk has no root, so its prefix is `null` (could not tell), never a refusal.
+ */
+export function specLintDeps(roots: Record<string, string> = machineRoots()): LintDeps {
+  return {
+    ...machineDeps(roots),
+    // `repoHasTopLevelDir` is `git ls-tree origin/main -- <path>`, and answers for any path; `null` when git cannot say.
+    fileExists: (entry) => {
+      const { key, path } = splitRegionEntry(entry);
+      const root = roots[key];
+      return root === undefined ? null : repoHasTopLevelDir(root, path);
+    },
+  };
+}
+
+/** The (field, rule) of each finding of a body the lint refused. A row refused for having no block has no finding of the lint's, and is `spec` / `no-block`. */
+function refusedFindings(body: string, deps: LintDeps): { field: string; rule: string; }[] {
+  const linted = lintRowBody(body, deps);
+  return linted.status === "linted" ? linted.findings.map(({ field, rule }) => ({ field, rule })) : [{ field: "spec", rule: "no-block" }];
+}
+
+/** THE LINT'S VERDICT AT PROMOTION, `null` meaning proceed. Off, it is `null` without reading anything. */
+function specLintPromotionReason(body: string, issueNumber: number, { enabled = readSpecLintFlag(), deps, record }: SpecLintAtPromotion): string | null {
+  if (!enabled) return null;
+  const lintDeps = deps ?? specLintDeps();
+  const reason = specLintRefusalReason(body, issueNumber, lintDeps, { requireBlock: requiresSpecBlock(body) });
+  if (reason !== null) record?.(issueNumber, refusedFindings(body, lintDeps));
+  return reason;
+}
+
+/** One ledger line per finding (row, field, rule). Never throws: `recordFailure` says an append it could not make on stderr, and the refusal is what it was. */
+export function recordSpecLintRefusals(issueNumber: number, findings: readonly { field: string; rule: string; }[],
+  { logPath = stateEntryPath(FAILURE_LEDGER_FILE), now = Date.now() }: { logPath?: string; now?: number; } = {}): void {
+  for (const { field, rule } of findings) recordFailure({ logPath, classKey: SPEC_LINT_REFUSED_KIND, ref: `#${issueNumber} ${field} ${rule}`, now });
+}
+
 /**
  * #2111 clause 2: IS THE ROW STILL CLAIMABLE AS IT STANDS? Asked of the row's EXISTING body, through the
  * two rules that already own this question -- `templateFieldsReason` (the claim side's own refusal,
@@ -2632,14 +2734,15 @@ export function promoteArgvRefusal(argv: string[]): string | null {
  * @returns {string | null}
  */
 export function promoteRefusalReason(body: string | null, issueNumber: number,
-  absentDeps: Parameters<typeof absentRegionTopDirReason>[1] = {}): string | null {
+  absentDeps: Parameters<typeof absentRegionTopDirReason>[1] = {}, specLint: SpecLintAtPromotion = {}): string | null {
   const fields = templateFieldsReason(body ?? "", issueNumber);
   if (fields) return `row-file: REFUSING to promote -- ${fields}`;
   const filing = fileRefusalReason(body);
   if (!filing) {
     // #877: the `--ready` filing refusal for a Region directory the repository lacks (#855), which a backlog row promoted here never met.
     const absent = absentRegionTopDirReason(body ?? "", { ...absentDeps, act: "promote" });
-    return absent === null ? null : `row-file: ${absent}\n  Asked of #${issueNumber}'s EXISTING body at promotion time. Nothing was changed.`;
+    if (absent !== null) return `row-file: ${absent}\n  Asked of #${issueNumber}'s EXISTING body at promotion time. Nothing was changed.`;
+    return specLintPromotionReason(body ?? "", issueNumber, specLint); // agent-org#1017: last, so a row that fails the cheap rules above is not also linted
   }
   return `${filing}\n  Asked of #${issueNumber}'s EXISTING body at promotion time, in the filing rule's own `
     + "wording: a body that could not be FILED as it stands must not be made Ready either, because Ready "
@@ -2708,6 +2811,16 @@ export function labelSetArgs(issueNumber: number, labels: string[]) {
     ...labels.flatMap((label) => ["-f", `labels[]=${label}`])];
 }
 
+/** THE ONE WRITE of a row's whole label list in this file: one `PUT` that SETS it (see {@link labelSetArgs}). The promotion and the spec review's warning both go through it. */
+function writeLabelSet(run: typeof defaultRun, issueNumber: number, labels: string[]): void {
+  run("gh", labelSetArgs(issueNumber, labels));
+}
+
+/** `run` as the ticket port's adapter takes it (arguments only), so a caller hands it `run` and names no `gh` of its own. */
+function ghRunner(run: typeof defaultRun): (args: string[]) => string {
+  return (args) => run("gh", args);
+}
+
 /**
  * #2111: what a FRESH read fails to confirm about a promotion -- named, never a boolean, for the reason
  * `unverifiedFilingFields` gives: a reader repairing a half-promoted row needs to know WHICH of the three
@@ -2743,9 +2856,9 @@ export function unverifiedPromotionFields(after: { labels: string[]; boardStatus
  * write, because a set write computed from a read this old could erase a label added since (#2111 rework).
  * @returns {{ refusal: string | null }}
  */
-function promoteGate(issueNumber: number, deps: { run: typeof defaultRun; fetchLabels: typeof fetchIssueLabels; }): { refusal: string | null; } {
+function promoteGate(issueNumber: number, deps: { run: typeof defaultRun; fetchLabels: typeof fetchIssueLabels; specLint?: SpecLintAtPromotion; }): { refusal: string | null; } {
   const state = openUnclaimedGate(issueNumber, deps);
-  return state.refusal === null ? { refusal: claimableBodyRefusal(issueNumber, deps.run) } : { refusal: state.refusal };
+  return state.refusal === null ? { refusal: claimableBodyRefusal(issueNumber, deps.run, deps.specLint) } : { refusal: state.refusal };
 }
 
 /**
@@ -2784,15 +2897,21 @@ function openUnclaimedGate(issueNumber: number, { run, fetchLabels }: { run: typ
 }
 
 /** #4456: the other half of `promoteGate` -- is the row's body one a session could claim? `null` is yes. */
-function claimableBodyRefusal(issueNumber: number, run: typeof defaultRun): string | null {
+function claimableBodyRefusal(issueNumber: number, run: typeof defaultRun, specLint: SpecLintAtPromotion = {}): string | null {
   let body: string;
   try {
-    body = run("gh", ["issue", "view", String(issueNumber), "--repo", REPO, "--json", "body", "--jq", ".body"]);
+    body = rowBodyOf(issueNumber, run);
   } catch (error) {
     return `row-file: REFUSING to promote -- #${issueNumber}'s body could not be read, so the `
       + `claimability check below could not be asked. ${(error as Error).message}`;
   }
-  return promoteRefusalReason(body, issueNumber);
+  // agent-org#1017: a promotion records what the spec lint refused; a bare `promoteRefusalReason` call records nothing.
+  return promoteRefusalReason(body, issueNumber, {}, { record: recordSpecLintRefusals, ...specLint });
+}
+
+/** A row's body, as `gh` prints it. THE ONE READ of it in this file's promotion path: the claimability check and Jev's reading of the spec both go through it. */
+function rowBodyOf(issueNumber: number, run: typeof defaultRun): string {
+  return run("gh", ["issue", "view", String(issueNumber), "--repo", REPO, "--json", "body", "--jq", ".body"]);
 }
 
 /**
@@ -2886,7 +3005,7 @@ function writePromotionLabels(issueNumber: number, deps: {
     // refusal, and `--force` makes the creation idempotent. Kept ahead of the set write because it is
     // unknown whether this endpoint mints a missing name, and that is not a question to answer live.
     ensureLabels([READY_LABEL], { run });
-    run("gh", labelSetArgs(issueNumber, wanted));
+    writeLabelSet(run, issueNumber, wanted);
   } catch (error) {
     return { ok: false, code: 2, message: `row-file: #${issueNumber}'s Status is now "${READY_STATUS}" but `
       + `the label write FAILED -- ${(error as Error).message}\n  The labels are UNTOUCHED: one `
@@ -2956,7 +3075,7 @@ function writePromotion(issueNumber: number, session: string | null, deps: {
 function promoteAndVerify(issueNumber: number, session: string | null, deps: {
         run: typeof defaultRun; fetchBoardStatus: typeof fetchIssueBoardStatus;
         fetchLabels: typeof fetchIssueLabels; moveStatus: typeof moveTrackerStatus;
-        ensureLabels: typeof ensureLabelsOn;
+        ensureLabels: typeof ensureLabelsOn; specLint?: SpecLintAtPromotion;
     }): { ok: true; message: string; } | { ok: false; code: number; message: string; } {
   const gate = promoteGate(issueNumber, deps);
   if (gate.refusal !== null) return { ok: false, code: 1, message: gate.refusal };
@@ -2975,7 +3094,7 @@ function promoteAndVerify(issueNumber: number, session: string | null, deps: {
 export function promoteRow(argv: string[], deps: {
     run?: typeof defaultRun; fetchBoardStatus?: typeof fetchIssueBoardStatus;
     fetchLabels?: typeof fetchIssueLabels; moveStatus?: typeof moveTrackerStatus;
-    ensureLabels?: typeof ensureLabelsOn;
+    ensureLabels?: typeof ensureLabelsOn; specLint?: SpecLintAtPromotion;
 } = {}): number {
   const merged = { run: defaultRun, fetchBoardStatus: fetchIssueBoardStatus, fetchLabels: fetchIssueLabels,
     moveStatus: moveTrackerStatus, ensureLabels: ensureLabelsOn, ...deps };
@@ -2997,6 +3116,95 @@ export function promoteRow(argv: string[], deps: {
   }
   process.stdout.write(`${result.message}\n`);
   return 0;
+}
+
+// ---------------------------------------------------------------------------------------------------
+// agent-org#1017: JEV'S READING OF A SPEC THAT WAS PROMOTED. A WARNING, NEVER A BLOCK.
+// Asked AFTER the promotion landed and its lint passed (`main` calls it on exit 0), so it cannot change what the promotion did. A score under
+// `SPEC_REVIEW_THRESHOLD` puts `spec:review` on the row and wakes `product-manager` the way every ruling is asked for: a comment that asks, then
+// `answer:product-manager`. No provider, the use switched off, a refusal or a fallback is no reading and adds nothing (`reviewSpec`).
+// ---------------------------------------------------------------------------------------------------
+
+export type SpecReviewDeps = {
+  /** `rows.specLint`. Absent, this checkout's declaration says. */
+  enabled?: boolean;
+  run?: typeof defaultRun;
+  fetchLabels?: typeof fetchIssueLabels;
+  ensureLabels?: typeof ensureLabelsOn;
+  /** Jev as `reviewSpec` asks it. Absent, `decide("spec-review", ...)`. */
+  ask?: Parameters<typeof reviewSpec>[1];
+  /** The decision seam's own deps (a test's fake network). Absent, this host's provider, switches and log. */
+  decision?: DecisionDeps;
+};
+
+/** `decide`, bound as `reviewSpec`'s `ask`. A host with no declaration throws here, which `reviewSpec` reads as no reading. */
+function providerAsk(issueNumber: number, given?: DecisionDeps): Parameters<typeof reviewSpec>[1] {
+  return async (question, specText) => {
+    let deps = given;
+    if (deps === undefined) {
+      const host = homeHostConfig();
+      const projectDir = host.projects.find((project) => project.id === host.primary)?.checkout ?? process.cwd(); // `.agent-org/decisions.json` is the primary project's
+      deps = { host, switchesPath: decisionSwitchesPath(projectDir), logPath: decisionLogPathFrom(stateEntryPath("wake-ledger")) };
+    }
+    const decision = await decide("spec-review", { spec: specText }, { spec: question }, { id: `${REPO}#${issueNumber}`, ...deps });
+    const answer = decision.answers.spec;
+    return answer === undefined ? null : { value: answer.value, fellBack: answer.fellBack };
+  };
+}
+
+/**
+ * The warning's two writes: the comment that ASKS (first, because `answerLabelRefusal` wants the newest comment to ask the session something), then ONE label
+ * write carrying `spec:review` and `answer:product-manager`. A row that already carries `spec:review` was warned about once, and a second `--promote` of it
+ * (the act is idempotent) does not comment or wake again. The comment goes through the ticket port, so this file gains no `gh` call.
+ */
+function raiseSpecReview(issueNumber: number, verdict: { reason: string; score: number; }, deps: Required<Pick<SpecReviewDeps, "run" | "fetchLabels" | "ensureLabels">>): boolean {
+  const { run, fetchLabels, ensureLabels } = deps;
+  const have = fetchLabels(issueNumber, { run }).labels;
+  if (have.includes(SPEC_REVIEW_LABEL)) return false;
+  const wakeLabel = `${ANSWER_PREFIX}${SPEC_REVIEW_WAKE}`;
+  const text = `Jev read #${issueNumber}'s spec at promotion and scored it ${verdict.score} of 5. ${verdict.reason}\n\n`
+    + `${SPEC_REVIEW_WAKE}: should the spec be tightened before a worker claims it? The row stays Ready; this is a warning, not a refusal (agent-org#1017).`;
+  const refused = answerLabelRefusal({ state: "OPEN", lastComment: { body: text }, session: SPEC_REVIEW_WAKE });
+  githubTicketAdapter({ run: ghRunner(run), scope: REPO })
+    .postDecision({ tracker: TICKET_TRACKER, scope: REPO, id: issueNumber }, { role: "jev", runId: `spec-review-${issueNumber}`, kind: "spec-review", text });
+  const wanted = [SPEC_REVIEW_LABEL, ...(refused === null ? [wakeLabel] : [])];
+  ensureLabels(wanted);
+  writeLabelSet(run, issueNumber, [...have, ...wanted.filter((label) => !have.includes(label))]);
+  return true;
+}
+
+/**
+ * Jev's reading of #`issueNumber`'s `spec` block, after its promotion. `null` is nothing asked: the flag off, or a row with no block. NEVER THROWS and never
+ * changes the promotion: a write that fails is said on stderr and the row stays Ready.
+ */
+export async function reviewPromotedSpec(issueNumber: number, deps: SpecReviewDeps = {}): Promise<ReviewVerdict | null> {
+  const { enabled = readSpecLintFlag(), run = defaultRun, fetchLabels = fetchIssueLabels, ensureLabels = ensureLabelsOn } = deps;
+  if (!enabled) return null;
+  try {
+    const [specText] = specBlocksOf(rowBodyOf(issueNumber, run));
+    if (specText === undefined) return null; // no block, nothing to read: a decomposition row
+    const verdict = await reviewSpec(specText, deps.ask ?? providerAsk(issueNumber, deps.decision));
+    if (verdict.warn) raiseSpecReview(issueNumber, verdict, { run, fetchLabels, ensureLabels });
+    return verdict;
+  } catch (error) {
+    process.stderr.write(`row-file: #${issueNumber} is promoted, and Jev's reading of its spec could not be acted on (${String((error as Error)?.message ?? error).split("\n")[0]}); no warning was raised.\n`);
+    return null;
+  }
+}
+
+/**
+ * THE PROMOTE ACT, THEN JEV'S READING OF WHAT IT PROMOTED: the one call `main` makes for `--promote=`. The exit code is `promoteRow`'s, whatever Jev says: the warning
+ * is printed and never changes it, and a promotion that refused (non-zero) is not read at all. The reading shares the act's `run`, `fetchLabels`, `ensureLabels` and
+ * `specLint.enabled` unless `review` overrides them, so a caller's fakes reach both.
+ */
+export async function promoteAndReviewRow(argv: string[], deps: Parameters<typeof promoteRow>[1] & { review?: SpecReviewDeps; } = {}): Promise<number> {
+  const { review, ...promote } = deps;
+  const code = promoteRow(argv, promote);
+  const promoted = code === 0 ? promoteFromArgv(argv) : null;
+  if (promoted === null) return code;
+  const verdict = await reviewPromotedSpec(promoted, { enabled: promote.specLint?.enabled, run: promote.run, fetchLabels: promote.fetchLabels, ensureLabels: promote.ensureLabels, ...review });
+  if (verdict?.warn) process.stderr.write(`row-file: warning -- #${promoted} is Ready and now carries \`${SPEC_REVIEW_LABEL}\`: ${verdict.reason}\n`);
+  return code;
 }
 
 // ---------------------------------------------------------------------------------------------------
@@ -3182,7 +3390,9 @@ async function main() {
   const argv = process.argv.slice(2);
   const present = (flag: string) => argv.some((a) => a.startsWith(flag));
   if (present(BOARD_FLAG)) process.exitCode = boardRow(argv);
-  else if (present(PROMOTE_FLAG)) process.exitCode = promoteRow(argv);
+  else if (present(PROMOTE_FLAG)) {
+    process.exitCode = await promoteAndReviewRow(argv);
+  }
   else process.exitCode = (await semanticDuplicateExit(argv)) ?? createIssue(argv);
 }
 
