@@ -389,13 +389,16 @@ export { ANSWER_PREFIX };
  * the largest pull requests -- the ones most likely to be a row's whole build.
  * #2493: a pull request carrying a `hold:` label does not count -- see the body.
  */
-function rowsWithOpenPr(openPrs: any[] | null | undefined): Set<number> {
+function rowsWithOpenPr(openPrs: any[] | null | undefined): (row: any) => boolean {
   // #2493: A HELD PR IS NOT AN ACT, IT IS A DECLARED WAIT. `hold:` is the owner saying "do not merge me yet", and the
   // wait behind it is a `blockedBy` edge (#2400 section 2) -- so the holder of a held PR is exactly who must hear
   // that the last edge closed. Counting it as "resumed" silenced the one wake the ruling relies on: #2376's owner
   // had an open PR naming #2359 and would never have been told #2399 merged.
-  return new Set((openPrs ?? []).filter((pr) => holdersOf(labelsOf(pr)).length === 0)
-    .flatMap((pr) => declaredClosedRows(pr?.body)));
+  // agent-org#1162: a reference is read against the tracker the ROW is in, not the primary one. `Closes a11ign/agent-org#806` closes
+  // another tracker's row #806, and a bare `#806` is that row only when the pull request is in the same repository.
+  const open = (openPrs ?? []).filter((pr) => holdersOf(labelsOf(pr)).length === 0);
+  return (row) => open.some((pr) => declaredClosedRows(pr?.body, { prRepo: pr?.repo, trackerRepo: row.repoKey ? row.repo : undefined })
+    .includes(Number(row.number)));
 }
 
 /**
