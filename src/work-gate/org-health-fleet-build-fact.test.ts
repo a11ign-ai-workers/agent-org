@@ -76,5 +76,6 @@ test("a reader that returns null is a stated unknown in the log, and is neither 
 test("the gate's call site passes the real reader and the read is counted, so the signal is not dead for want of a fact (#2980's lesson)", () => {
   assert.ok(GH_READS.unconditional.some((r: string) => r.includes("readFleetBuildIncidents") && r.includes("labels=incident")), "the read is counted where reads are counted");
   const gate = workGateSource();
-  assert.match(gate, /readFleetBuildIncident: \(\) => readFleetBuildIncidents\(defaultRun, repoNow\(\)\)/);
+  assert.match(gate, /readFleetBuildIncidents\(run, gh\.repo\)/);
+  assert.match(gate, /readFleetBuildIncident: \(\) => reads\.fleetBuild/);
 });

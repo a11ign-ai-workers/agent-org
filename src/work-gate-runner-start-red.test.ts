@@ -98,6 +98,6 @@ test("DONE-WHEN 4: a red the gate cannot classify is NOT excused -- an unreadabl
 
 test("the gate's `main` hands orgHealthNow the hold's own `held`, so the chain above is the one that runs", () => {
   const source = workGateSource();
-  const call = /orgHealthNow\(\{[^}]*\}/.exec(source)?.[0] ?? "";
+  const call = /orgHealthTogether\(\{[^}]*\}/.exec(source)?.[0] ?? "";
   assert.match(call, /\bheld: incident\.held\b/, "main must pass the held orders; without it a held red trips the red-PR signal again");
 });

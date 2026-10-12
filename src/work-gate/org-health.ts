@@ -29,7 +29,7 @@ import { roleBriefPath } from "../project-roles.ts";
 import { waitingOn, fleetWaitingOn, notBeforeDate, todayIso } from "../waiting-condition.ts";
 import { ANSWER_PREFIX, NEEDS_CHAIRMAN_LABEL, SESSION_PREFIX, LANE_PREFIX } from "../project-vocabulary.ts";
 import { FLEET_IDLE_HOURS, PRIMARY_MILESTONE_LINE, readLatestMerge, orgHealthTick,
-  primaryStandingSince, readTeamAccess, SIGNALS, MILESTONE_CLOCK_MINUTES, milestoneClockReading, orgHealthOrders, shelvedCircles } from "../org-health.ts";
+  primaryStandingSince, readTeamAccess, readReleaseRuns, readReleaseFailures, readFleetBuildIncidents, SIGNALS, MILESTONE_CLOCK_MINUTES, milestoneClockReading, orgHealthOrders, shelvedCircles } from "../org-health.ts";
 import { declaredClosedRows } from "../row-claim/file-overlap-rule.ts";
 import { holdersOf, holdExcused } from "../pr-hold-state.ts";
 import { withoutHold } from "../red-pr.ts";
@@ -41,7 +41,7 @@ import { referencesOf, releaseReferencesOf, waitItemOf, staleWaits, bareWaits, m
 import { stallReasonOf, ownerOfPr } from "./pr-orders.ts";
 import { claimedScopesOf, scopeAddedReadings, scopeAddedOrders } from "./scope-added-orders.ts"; // #4759
 import { idleHoldIncidents, idleHoldOrders } from "./idle-hold-incidents.ts"; // #571
-import { forgetReads } from "./reads.ts"; // agent-org#1145: the child's write makes the memo's answers stale
+import { forgetReads, readWithFirstWaveTogether } from "./reads.ts"; // agent-org#1145: the child's write makes the memo's answers stale
 import { readFileSync } from "node:fs";
 import { spawnSync } from "node:child_process";
 import { fileURLToPath } from "node:url";
@@ -745,6 +745,51 @@ export function postBoardTruth(audit: ReturnType<typeof boardTruthAudit>, { now,
   } catch (error) {
     log(`board-truth: the day's table was not posted (${error instanceof Error ? error.message.split("\n")[0] : error}); the next tick asks again`);
   }
+}
+
+/**
+ * agent-org#1225: THE BOARD'S GH READS, ASKED AHEAD OF THE LIFTS. `readBoardFacts` makes the closed rows, the merged pull requests and the herdr listing; it only CARRIES
+ * `waitFacts`, so that input (which waits on the lifts, an effect) is left out here and given to `boardTruthOf`. `agents` is the listing the caller already read, so the wave's rehearsal does not read herdr twice.
+ */
+export function readBoardGh({ openRowsRead, claimedComments, now, repo, run, agents }: { openRowsRead: any[]; claimedComments?: any[] | null; now: number; repo: string; run: (args: string[]) => string; agents: () => ReturnType<typeof readAgents>; }) {
+  const { openRows, commentsComplete } = boardRowsOf(openRowsRead, claimedComments);
+  return { commentsComplete, facts: readBoardFacts(repo, { run, agents, now, openRows, waitFacts: null }) };
+}
+
+/** agent-org#1225: THE AUDIT `readBoardTruthAudit` returns, from the reads `readBoardGh` made and the `waitFacts` the lifts left (the same two choices: no comments complete, no live sessions). */
+export function boardTruthOf({ commentsComplete, facts }: ReturnType<typeof readBoardGh>, waitFacts: BoardTruthInput["waitFacts"]) {
+  const read = { ...facts, waitFacts };
+  return boardTruthAudit(commentsComplete ? read : { ...read, liveSessions: null });
+}
+
+/** agent-org#1225: the board truth step `boardTruthNow` always was, from the reads: the audit, then the post. */
+export function boardTruthEffect(gh: ReturnType<typeof readBoardGh>, { now, waitFacts }: BoardTruthInput, { repo = repoNow() }: { repo?: string; } = {}) {
+  const audit = boardTruthOf(gh, waitFacts);
+  postBoardTruth(audit, { now, repo });
+  return audit;
+}
+
+/**
+ * agent-org#1225: THE GH READS `orgHealthNow` makes that are not effects, ASKED TOGETHER by `readWithFirstWaveTogether` (the wave `readLanes` uses). The effects stay
+ * inside `orgHealthNow`, AFTER these reads and on the data they read, each once: the release incidents (`raiseReleaseIncidents`), the hold releases the lifts make, and the board
+ * post. Class repeat is an effect (it files rows), so it stays out of the wave. `releaseFailures` takes the project's runs the wave just read (`known`), as it always did.
+ * `onReleaseRuns` hands the project's runs to the canary, which costs no second call.
+ */
+export function orgHealthTogether(args: Parameters<typeof orgHealthNow>[0], io: Parameters<typeof orgHealthNow>[1], gh: { repo: string; openRowsRead: any[] | null | undefined; claimedComments?: any[] | null; now: number; onReleaseRuns?: (runs: import("../org-health.ts").ReleaseRuns | null) => void; }) {
+  const herdr = gh.openRowsRead == null ? null : readAgents(); // ONCE, outside the rehearsal: `readBoardFacts` would list the herdr agents again inside it
+  const reads = readWithFirstWaveTogether((run) => {
+    const releaseRuns = readReleaseRuns(run, gh.repo);
+    const releaseFailures = readReleaseFailures(run, releaseRepositories(), { known: { [gh.repo]: releaseRuns } });
+    const fleetBuild = readFleetBuildIncidents(run, gh.repo);
+    const teamAccess = readTeamAccess(run);
+    const lastMerge = readLatestMerge(run, mergeRepositories());
+    const board = gh.openRowsRead == null ? undefined : readBoardGh({ openRowsRead: gh.openRowsRead, claimedComments: gh.claimedComments, now: gh.now, repo: gh.repo, run, agents: () => herdr });
+    return { releaseRuns, releaseFailures, fleetBuild, teamAccess, lastMerge, board };
+  });
+  gh.onReleaseRuns?.(reads.releaseRuns);
+  return orgHealthNow(args, { ...io, lastMergedAt: () => reads.lastMerge, readMilestoneMoves, readReleaseRuns: () => reads.releaseRuns, readReleaseFailures: () => reads.releaseFailures,
+    readFleetBuildIncident: () => reads.fleetBuild, teamAccess: () => reads.teamAccess,
+    readBoardTruth: (input) => (reads.board === undefined ? undefined : boardTruthEffect(reads.board, input, { repo: gh.repo })) });
 }
 
 /**

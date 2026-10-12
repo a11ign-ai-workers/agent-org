@@ -506,7 +506,7 @@ test("the tick posts through boardTruthNow once, a failed post never stops the t
   assert.equal(failing.findings.length, 1, "the audit is returned all the same");
   assert.match(said.join(""), /not posted \(HTTP 502\); the next tick asks again/);
   const gate = workGateSource();
-  assert.match(gate, /orgHealthNow\([^]*readBoardTruth: boardTruthNow/, "a gate that never passed it would leave the signal dead, as #2980's fleet facts did");
+  assert.match(gate, /orgHealthTogether\([^]*repo: repoNow\(\), openRowsRead,/, "a gate that never passed it would leave the signal dead, as #2980's fleet facts did");
 });
 
 test("no test above reached a remote: the recording gh was never called", () => {

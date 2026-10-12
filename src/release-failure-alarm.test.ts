@@ -351,7 +351,7 @@ test("the replacement is by ASKING: the project-only read still orders as it did
 
 test("the gate's call site passes the per-repository read and the incident, and the reads are counted, so the signal is not dead for want of a fact (#2980's lesson)", () => {
   const gate = workGateSource();
-  assert.match(gate, /readReleaseFailures: \(\) => readReleaseFailures\(defaultRun, releaseRepositories\(\), \{ known: \{ \[repoNow\(\)\]: releaseSeen\.runs \} \}\)/);
+  assert.match(gate, /readReleaseFailures\(run, releaseRepositories\(\), \{ known: \{ \[gh\.repo\]: releaseRuns \} \}\)/);
   assert.match(gate, /raiseReleaseIncidents: \(reads\) => \{ fileReleaseIncidents\(reads, \{ run: defaultRun, tracker: repoNow\(\) \}\); \}/);
   assert.ok(GH_READS.unconditional.some((r: string) => r.includes("readReleaseRuns") && r.includes("release.yml/runs")));
 });
