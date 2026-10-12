@@ -9,8 +9,8 @@
  * THE FLAG IS A MARKER FILE, as `draining` is (`work-gate/reads.ts`): `touch` turns the REST path on for the next tick, `rm` turns it off,
  * and nothing needs a unit-file edit. With the marker absent the reads are the ones the gate has always made.
  *
- * THE CAP IS A GUARD, NOT A MEASUREMENT. The points a caller charges to each cause are its own estimates; the live one-hour measurement (the
- * row's Acceptance) reads the `gate-budget` lines the tick writes, and that is where the estimates are checked.
+ * THE CAP IS A GUARD, NOT A MEASUREMENT. The points a caller charges to each cause are its own estimates; the live one-hour measurement (#5169)
+ * reads the `gate-budget` lines the tick writes once the gate's reads go through this module, and that is where the estimates are checked.
  */
 import { existsSync } from "node:fs";
 import { stateEntryPath } from "./host-config.ts";

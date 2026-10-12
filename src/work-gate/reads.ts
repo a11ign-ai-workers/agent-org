@@ -7,7 +7,6 @@ import { newestPerName } from "../newest-check-run.ts";
 import { LS_REMOTE_ARGS, rowBranchesInListing } from "../row-claim/row-branch-rule.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
 import { stateEntryPath } from "../host-config.ts";
-import { budgetLine, meteredBatch, meteredRun, restConditionalOn, tickBudget } from "../gh-conditional.ts";
 import { cachedReleaseBehind, readReleaseBehind, npmRegistryRead } from "../release-behind-main.ts";
 import { armedFromApi, openPullRequestsQueryArgs } from "../auto-arm-sweep.ts";
 import { REPO } from "../project-identity.ts";
@@ -112,15 +111,8 @@ export const ghWithin = (timeoutMs: number, { stdio, log = (line) => process.std
   }
 };
 
-/**
- * THE FLAG `gate.restConditional` (a11ign#5128), read ONCE at import: each tick is a fresh process, so this is that tick's answer and a
- * change lands on the next tick, never mid-tick. Off, `defaultRun` is the `gh` it has always been.
- */
-const TICK_METERED = restConditionalOn() ? tickBudget : null;
-if (TICK_METERED !== null) process.on("exit", () => process.stderr.write(`${budgetLine(TICK_METERED.summary())}\n`));
-
 /** @param [repo] the repository to aim at; the ambient one when omitted */
-export const defaultRun = meteredRun(ghWithin(GH_READ_TIMEOUT_MS), TICK_METERED);
+export const defaultRun = ghWithin(GH_READ_TIMEOUT_MS);
 
 /**
  * #4128: THE RELEASE-BEHIND-MAIN FACTS, at most once an hour (see the comment in `GH_READS`). Through `defaultRun`, the identity the tick already reads as and never another config.
@@ -141,7 +133,7 @@ const ghOptions = (repo: string | undefined): import("node:child_process").ExecF
   ({ encoding: "utf8", maxBuffer: 32 * 1024 * 1024, ...(repo === undefined ? {} : { env: { ...process.env, GH_REPO: repo } }) });
 
 /** `defaultRun` with `gh`'s stderr CAPTURED on the error instead of inherited: for a read whose refusal is an answer the caller handles (#3724). */
-const capturedRun = meteredRun(ghWithin(GH_READ_TIMEOUT_MS, { stdio: "pipe" }), TICK_METERED);
+const capturedRun = ghWithin(GH_READ_TIMEOUT_MS, { stdio: "pipe" });
 
 /**
  * The reader a refusal-handling read asks through: the default one is swapped for the capturing one, and a test's `run` stands for `gh` as it is.
@@ -189,11 +181,6 @@ Promise.all(JSON.parse(process.argv[1]).map(one)).then((answers) => process.stdo
  * @returns one answer per call, in order
  */
 export function runBatch(calls: { args: string[]; repo: string | undefined; }[], env: NodeJS.ProcessEnv = process.env, callMs: number = GH_READ_TIMEOUT_MS): ({ stdout: string; } | { failed: true; stdout: string; stderr: string; status: number | null; code?: string; })[] {
-  return meteredBatch(calls, TICK_METERED, (sent) => runUnmetered(sent, env, callMs), (stderr) => ({ failed: true, stdout: "", stderr, status: null }));
-}
-
-/** `runBatch` without the budget: the calls it is handed are sent. */
-function runUnmetered(calls: { args: string[]; repo: string | undefined; }[], env: NodeJS.ProcessEnv, callMs: number) {
   const answers = [];
   for (let from = 0; from < calls.length; from += BATCH_MAX_CALLS) {
     const chunk = calls.slice(from, from + BATCH_MAX_CALLS);
