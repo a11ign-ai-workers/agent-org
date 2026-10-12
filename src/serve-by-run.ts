@@ -7,7 +7,8 @@
 //
 // EVERY DOUBT IS A FALLBACK, and so is every step this module cannot take on its own word: an item that cannot be read, a lease another run holds, a brief that is too large, a run that
 // failed, timed out or answered outside its schema, an answer the class turns into no post, an apply that found the item `stale`, `unreadable` or the answer `refused`. A decision is
-// written only when `applyDecision` reports `applied`, so a fallback has written nothing and the seat is prompted with the original order.
+// written only when `applyDecision` reports `applied`. An answer that names several rows writes them in turn, so a fallback part-way has written the rows before it: its reason
+// says how many, and the seat is prompted with the original order either way.
 //
 // `deliver` (`wake.ts`) is SYNCHRONOUS and a run is not, so the run happens in the tick BEFORE `deliver` ({@link serveOrdersByRun}) and `deliver`'s per-order loop asks a synchronous
 // `serve` for the answer already in hand. Nothing here is reached when no class is `run`: the seats file's absence, a malformed file and `seat` all read `seat`, and
@@ -106,6 +107,8 @@ export type ServeByRunDeps = Readonly<{
   decisionDeps?: DecisionDeps;
   /** `applyDecision`, injected so a test can name what it is given. */
   apply?: (port: TicketPort, input: Parameters<typeof applyDecision>[1]) => ApplyResult;
+  /** The rows the class named in its answer, beyond the served item (which is always named). Absent is the served item alone. */
+  namedItems?: (order: ServeOrder, answer: unknown) => readonly ItemRef[];
   /** Told of each served wake, once, after the decision was applied: appends the {@link ServedRecord}. */
   recordServed?: (record: ServedRecord) => void;
   now?: () => number;
@@ -153,14 +156,28 @@ async function tierFor(cls: DecisionClass, order: ServeOrder, port: TicketPort, 
   }
 }
 
-/** One post and at most one change, on the item the order is about: what `applyDecision` takes. Anything else is `null`, and the order is the seat's. */
-function applicable(actions: readonly DecisionAction[], ref: ItemRef): { kind: string; text: string; change: StateChange } | null {
-  const sameItem = (item: ItemRef): boolean => item.tracker === ref.tracker && item.scope === ref.scope && item.id === ref.id;
+/** One row's decision: its post, and the change to that row's own state (`{}` for none). What `applyDecision` takes, once per row. */
+type RowPlan = Readonly<{ item: ItemRef; kind: string; text: string; change: StateChange }>;
+
+const sameItem = (a: ItemRef, b: ItemRef): boolean => a.tracker === b.tracker && a.scope === b.scope && a.id === b.id;
+
+/**
+ * One post per row and at most one change on it, every row among `named`: what `applyDecision` takes, row by row. It is checked whole, before the first row is applied, so a
+ * refusal writes nothing. Anything else is `null`, and the order is the seat's: no post, two posts on one row, a change on a row with no post, or a row the class did not name.
+ */
+function applicable(actions: readonly DecisionAction[], named: readonly ItemRef[]): RowPlan[] | null {
   const posts = actions.filter((action): action is Extract<DecisionAction, { type: "post" }> => action.type === "post");
   const changes = actions.filter((action): action is Extract<DecisionAction, { type: "change" }> => action.type === "change");
-  if (posts.length !== 1 || changes.length > 1 || posts.length + changes.length !== actions.length) return null;
-  if (!sameItem(posts[0].item) || (changes[0] !== undefined && !sameItem(changes[0].item))) return null;
-  return { kind: posts[0].kind, text: posts[0].text, change: changes[0]?.change ?? {} };
+  if (posts.length === 0 || posts.length + changes.length !== actions.length) return null;
+  const plans: RowPlan[] = [];
+  for (const post of posts) {
+    if (!named.some((item) => sameItem(item, post.item)) || plans.some((plan) => sameItem(plan.item, post.item))) return null;
+    const own = changes.filter((action) => sameItem(action.item, post.item));
+    if (own.length > 1) return null;
+    plans.push({ item: post.item, kind: post.kind, text: post.text, change: own[0]?.change ?? {} });
+  }
+  if (changes.some((action) => !plans.some((plan) => sameItem(plan.item, action.item)))) return null;
+  return plans;
 }
 
 /** Serves ONE order by a run, or says why it did not. Never throws; never retries; writes nothing on a fallback. */
@@ -223,13 +240,18 @@ async function serveLeased(order: ServeOrder, cls: DecisionClass, ref: ItemRef, 
   if (ran.runId === "") return fallback("no-run-id");
   const answer = isRecord(ran.decision) ? ran.decision.answer : undefined;
   if (typeof answer !== "string") return fallback("no-answer");
-  const plan = applicable(cls.actionsFor(ran.decision, order), ref);
-  if (plan === null) return fallback("no-action");
-  const applied = (deps.apply ?? applyDecision)(port, {
-    ref, sinceAt, allowed: cls.allowed, role: order.session, runId: ran.runId,
-    decision: { answer, text: plan.text, kind: plan.kind }, actions: plan.change,
-  });
-  if (applied.outcome !== "applied") return fallback(`apply:${applied.outcome}`);
+  const named = [ref, ...(deps.namedItems?.(order, ran.decision) ?? [])];
+  const plans = applicable(cls.actionsFor(ran.decision, order), named);
+  if (plans === null) return fallback("no-action");
+  let written = 0;
+  for (const plan of plans) {
+    const applied = (deps.apply ?? applyDecision)(deps.port(plan.item), {
+      ref: plan.item, sinceAt, allowed: cls.allowed, role: order.session, runId: ran.runId,
+      decision: { answer, text: plan.text, kind: plan.kind }, actions: plan.change,
+    });
+    if (applied.outcome !== "applied") return fallback(`apply:${applied.outcome}, ${written} of ${plans.length} written`);
+    written += 1;
+  }
   const record: ServedRecord = { servedBy: "run", at: now(), session: order.session, cause: cls.cause, causeKey: order.causeKey, runId: ran.runId, tier, outcome: "wrote" };
   try {
     deps.recordServed?.(record);
