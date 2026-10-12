@@ -5553,7 +5553,9 @@ export function claimOrdersPath(ledgerPath: string) {
 /**
  * THE CLAIM-ORDERS RECORD, READ: how many gate orders each claim has been sent, and the way to write the next line. A line that does not parse is SKIPPED
  * WITH A WARNING, not dropped silently: a skipped continuation undercounts, which lets a claim take one more order than the cap, and the warning is how
- * that is seen. A missing file is an empty record; any other read failure propagates.
+ * that is seen. NUL bytes are PADDING, not content: a power loss or an fs crash can leave a run of them before an entry that was written whole (#1065), so
+ * they are stripped before the line is parsed, and a line that is only padding is skipped without a warning. A missing file is an empty record; any other
+ * read failure propagates.
  */
 export function claimOrdersIn(path: string, { read = readFileSync, append = appendFileSync, warn = (line) => process.stderr.write(line) }: { read?: typeof readFileSync; append?: typeof appendFileSync; warn?: (line: string) => void; } = {}): ClaimOrders {
   const counts: Map<string, number> = new Map();
@@ -5564,8 +5566,10 @@ export function claimOrdersIn(path: string, { read = readFileSync, append = appe
     if (err?.code !== "ENOENT") throw new Error(`cannot read ${path}`, { cause: err });
   }
   for (const line of raw.split("\n").filter(Boolean)) {
+    const text = line.replaceAll("\0", "");
+    if (text.trim() === "") continue;
     try {
-      const entry = JSON.parse(line);
+      const entry = JSON.parse(text);
       if (entry.kind === "continuation") counts.set(entry.claim, (counts.get(entry.claim) ?? 0) + 1);
     } catch (err: any) {
       warn(`claim-orders: skipped an unreadable line in ${path} (${firstLine(err)}); its claim may be undercounted\n`);
