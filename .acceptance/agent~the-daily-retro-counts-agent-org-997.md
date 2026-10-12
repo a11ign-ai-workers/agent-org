@@ -7,7 +7,7 @@ grep -c "held-then-released" src/org-retro.ts
 bash -c 'cd ~/repos/agent-org && AGENT_ORG_HOST=/home/agent/repos/a11y-witness/.agent-org/host.json npx rstest run --config scripts/rstest/rstest.config.ts src/org-retro-shared-failure.test.ts'
 ```
 
-Closes agent-org#997
+Closes a11ign/a11ign#997
 
 Measured: the test command above printed `VERDICT pass: 10 tests in 1 file` in the worktree, and the grep printed `1`. Mutations, each run and reverted byte-identical: all six were caught by the tests.
 
