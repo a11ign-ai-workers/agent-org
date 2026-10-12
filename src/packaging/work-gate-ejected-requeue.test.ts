@@ -22,6 +22,7 @@ import { emptyCanaryState, withMachineryFlag } from "../org-health.ts";
 import {
   CLOSED_UNDER_HALF_FILE, CLOSED_UNDER_HALF_FLAG, closedUnderHalfOrders, rowsClosedUnderOpenHalf,
   REENQUEUE_EJECTED_FLAG, failedEntriesSincePush, jobFailuresOf, mergeGroupGreenSince, ownershipOfFailure, readArmingOf, requeueEjected, type ArmingPort, type EjectionEvidence,
+  CAUSES, JUDGMENT_CAUSES,
 } from "../work-gate.ts";
 import { stalledPrOrders } from "../work-gate/pr-orders.ts";
 import type { Decision, ItemRef } from "../ticket-port/port.ts";
@@ -344,6 +345,23 @@ test("the order's subject is the half's repository KEY, not the basename of its 
     // THE CONTROL: the primary's own half stays the bare number, and carries no key.
     const own = rowsClosedUnderOpenHalf({ prs: [HALF_5115], trackers: [{ repo: HOME, rows: openRowsWithout(5109) }], homeRepo: HOME });
     assert.equal("halfKey" in own[0], false);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("the order carries its own cause, row-closed-under-open-half, and never ready-row-unclaimable (agent-org#1060)", () => {
+  const dir = mkdtempSync(join(tmpdir(), "closed-under-half-cause-"));
+  try {
+    const HALF_ON = withMachineryFlag(emptyCanaryState(), { name: CLOSED_UNDER_HALF_FLAG, on: true });
+    const orders = closedUnderHalfOrders({ prs: [HALF_5115], trackers: [{ repo: HOME, rows: openRowsWithout(5109) }], homeRepo: HOME, stateDir: dir, state: HALF_ON, log: () => {} });
+    assert.equal(orders.length, 1);
+    assert.equal(orders[0].cause, "row-closed-under-open-half");
+    assert.notEqual(orders[0].cause, "ready-row-unclaimable", "a refused claim and a closed row are two causes, and the trace reads them apart");
+    // THE CONTROL: the new cause is declared as a judgment finish cause, and `ready-row-unclaimable` is still declared as it was.
+    assert.ok(CAUSES.includes("row-closed-under-open-half"));
+    assert.ok(JUDGMENT_CAUSES.includes("row-closed-under-open-half"), "durable, so wake's expiry does not re-ask it");
+    assert.ok(JUDGMENT_CAUSES.includes("ready-row-unclaimable"), "its one meaning, a refused claim, is unchanged");
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }

@@ -65,7 +65,7 @@ function closedUnderHalfOrder({ row, half, halfKey }: ClosedUnderHalf): Blocking
   const [rowRepo, rowNumber] = row.split("#");
   const slug = `${row}-${half}`.replace(/[^\w.-]+/g, "-");
   const subject = `pr-${subjectRef(halfKey, halfNumber)}`; // the established spelling (`pr-1014`, `pr-agent-org#1037`), which the KEY spells and the basename may not
-  return { session: CLOSED_UNDER_HALF_SESSION, cause: "ready-row-unclaimable", subject, discriminator: slug, causeKey: `${CLOSED_UNDER_HALF_SESSION}/closed-under-half/${slug}`, prompt:
+  return { session: CLOSED_UNDER_HALF_SESSION, cause: "row-closed-under-open-half", subject, discriminator: slug, causeKey: `${CLOSED_UNDER_HALF_SESSION}/closed-under-half/${slug}`, prompt:
     `Row ${row} is CLOSED, and ${half} -- an open pull request -- still \`Closes\` it (a11ign#5125): another pull request's merge closed the row while this half is unmerged, so ${half}'s merge will close nothing `
     + `and the row reads done with this half's work outstanding. Reopen it: \`gh issue reopen ${rowNumber} --repo ${rowRepo} --comment "closed by another half's merge; ${half} is still open"\`, and if the pull request `
     + `that merged was not meant to finish the row, say so on the row. The gate cannot reopen it (the ticket port has no such operation: ADR 0046). This is told once for this row and this half.` };
