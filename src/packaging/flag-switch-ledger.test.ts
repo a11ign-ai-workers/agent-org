@@ -61,11 +61,11 @@ function tree(label: string, files: Record<string, string>): string {
   return root;
 }
 
-test("(1) POSITIVE CONTROL: the registry finds the seven keys of the row's open-check in this tree, and the registry is not a list typed here", () => {
+test("(1) POSITIVE CONTROL: the registry finds the eight keys of the rows' open-checks in this tree, and the registry is not a list typed here", () => {
   const found = discoverFlags();
   assert.ok(found !== null, "src/ of this tool can be listed");
   const keys = found.map((flag) => flag.key);
-  for (const key of ["workers.haikuBrief", "workers.orchestratorOneShot", "rows.specLint", "rows.autoUnpark", "queue.chainWaitWake", "queue.reenqueueEjected", "rows.closedUnderOpenHalf"]) {
+  for (const key of ["workers.haikuBrief", "workers.orchestratorOneShot", "rows.specLint", "rows.autoUnpark", "queue.chainWaitWake", "queue.reenqueueEjected", "rows.closedUnderOpenHalf", "queue.queueEntryNoRun"]) {
     assert.ok(keys.includes(key), `${key} is found (found: ${keys.join(", ")})`);
   }
   assert.equal(found.find((flag) => flag.key === "rows.autoUnpark")?.name, "AUTO_UNPARK_FLAG");

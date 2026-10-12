@@ -126,6 +126,7 @@ import { chairmanAsksNow, chairmanReadsRefused } from "./work-gate/causes/rows-c
 import { offeredRefusalStreaks, partitionUnclaimed } from "./work-gate/causes/rows-claims.ts";
 import { closedClaimDebris, closedClaimLabelsWhenListed } from "./work-gate/causes/rows-claims-closed.ts";
 import { closedUnderHalfOrders } from "./work-gate/causes/rows-closed-under-half.ts";
+import { queueEntryNoRunOrders } from "./work-gate/causes/queue-entry-no-run.ts";
 import { epicRowsOf } from "./work-gate/causes/rows-epics.ts";
 import { partitionFleetBatch } from "./work-gate/causes/rows-fleet-batch.ts";
 import { engineerShareReads } from "./work-gate/causes/rows-offer.ts";
@@ -629,6 +630,7 @@ function main() {
   orders.push(...endGateSpan("chainWait", chainWaitOrders({ prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], rows: allOpen, stateDir: REVIEWER_STATE_DIR, state: readReenqueueState(), now: Date.now(), log: (line) => process.stderr.write(line) }))); // a11ign#5126: flag `queue.chainWaitWake`, OFF by default
   orders.push(...endGateSpan("closedUnderHalf", closedUnderHalfOrders({ prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], homeRepo: repoNow(), stateDir: REVIEWER_STATE_DIR, state: readReenqueueState(), log: (line) => process.stderr.write(line),
     trackers: [{ repo: repoNow(), rows: openRowsRead }, ...otherScopes.flatMap(({ scope, read }) => (scope.tracker === null ? [] : [{ repo: scope.tracker.repo, rows: read.openRows }]))] }))); // a11ign#5125: a row closed under an open half is said once; `null` rows are a refused read and say nothing
+  orders.push(...endGateSpan("queueEntryNoRun", queueEntryNoRunOrders({ prs: [...openPrs, ...pullRequestsOfOthers(otherScopes)], scope: repoNow(), run: defaultRun, state: readReenqueueState(), stateDir: REVIEWER_STATE_DIR, now: Date.now(), log: (line) => process.stderr.write(line) }))); // agent-org#1195: flag `queue.queueEntryNoRun`, OFF by default; reads and writes nothing while it is
   const releaseSeen: { runs?: ReleaseRuns | null } = {}; // a11ign#5100: the release read `orgHealthNow` makes, kept for the canary, so it costs no second call
   orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", orgHealthNow({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips, readReleaseRuns: () => (releaseSeen.runs = readReleaseRuns(defaultRun, repoNow())),
     readReleaseFailures: () => readReleaseFailures(defaultRun, releaseRepositories(), { known: { [repoNow()]: releaseSeen.runs } }), // agent-org#887: every repository the org releases; the project's runs are the ones read just above

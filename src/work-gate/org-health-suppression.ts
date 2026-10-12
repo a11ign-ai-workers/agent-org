@@ -80,6 +80,8 @@ export const ORG_HEALTH_CLASSES: Readonly<Record<string, { severity: "page"; } |
   "tick-record-unwritten": DIGEST, // agent-org#1208: one line that rides the next order while a slow tick's record cannot be written; the tick retries by itself, so it is never a wake of its own
   "tick-wall-high": DIGEST, // agent-org#1208: the tick wall's p95 past the limit, named once a day with p50/p95 and the wakes per day; `ceo` reads the trend daily, so it rides the next order
   "flag-without-a-switch": DIGEST, // agent-org#1135: a list named once a day to its first reader, `product-manager`, who files each switch row; `ceo` reading it again adds a turn and not a decision
+  "queue-entry-no-run": DIGEST, // agent-org#1195: the day's count of re-queues, and an incident for a repeat; `product-manager` reads it first and is not quieted, and a queue that stays stuck also pages `no-merge-while-work-exists`
+  "queue-head-age": DIGEST, // agent-org#1195: the position-1 entry past ten minutes, one order per day and pull request; it rides the next order rather than waking `ceo`, because a queue that stays stuck also pages `no-merge-while-work-exists`
 });
 
 type Suppression = { at: number, class: string, key: string, count: number, why: string };
