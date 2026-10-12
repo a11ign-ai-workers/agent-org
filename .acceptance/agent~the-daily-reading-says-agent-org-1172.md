@@ -1,4 +1,4 @@
-Closes: none -- first half of a11ign/agent-org#1172
+Closes a11ign/agent-org#1172
 
 The count the daily reading needs for #5153 item 5: hand-filed pin or bump rows in the last 7 days, and per repository the open Renovate PRs older than 60 min and those with a red last check. `src/pin-bump-measure.ts` is a pure leaf that the caller feeds; a refused read is `unknown`, never 0.
 
