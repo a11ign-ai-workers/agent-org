@@ -7,6 +7,9 @@
  * cause and `briefRole: "ceo"`, and the prompt names `ceo.md` and not `engineer.md`; a fleet-or-lab row is held while one ceo run is live and spawned when none is; `SPAWN_CAUSES`
  * is still exactly one cause; the spawn path writes a record of the spawn BEFORE the claim and the REAL `laneReason` honours the very record it wrote (a standing non-ceo session is
  * still refused); a refused claim takes the record back; with the flag off nothing is written; and `ROUTED_TO`, `FLEET_LAB_PATTERNS` and `fleetOrLabAcceptance` are the text they were.
+ *
+ * AND, for #914: a `lane:ceo` PATH row converts and a DECISION row does not, the body being the only difference; the filter fails closed without a reader; and the ceo and the orchestrator
+ * build their orders from ONE factory, so the orchestrator module holds no order literal of its own.
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
@@ -35,8 +38,16 @@ const GATE_ORDER_LITERAL = '{"session":"ceo","cause":"ready-row-unclaimed","caus
   + '"subject":"row-agent-org-914","title":"A lane:ceo row that carries a path runs as a one-shot session","discriminator":"agent-org#914",'
   + '"prompt":"Ready row agent-org#914 is unclaimed: A lane:ceo row that carries a path runs as a one-shot session. Claim it as `<you>`.\\n"}';
 const SEAT = "worker-agent-org-914";
-const PLAIN_BODY = "## Acceptance\n\n```bash\nnpx rstest run src/x.test.ts\n```\n";
-const FLEET_BODY = "## Acceptance\n\n```bash\npnpm run lab:status\n```\n";
+const PLAIN_BODY = "## Region\n\nREADME.md\n\n## Acceptance\n\n```bash\nnpx rstest run src/x.test.ts\n```\n";
+const FLEET_BODY = "## Region\n\nREADME.md\n\n## Acceptance\n\n```bash\npnpm run lab:status\n```\n";
+/** A DECISION row: its Region says the deliverable is not a commit, so there is no path to follow and the standing seat keeps it (#914). */
+const DECISION_BODY = "## Region\n\nIts deliverable is not a commit: the ceo decides whether to take the funding.\n\n## Acceptance\n\n```bash\nnpx rstest run src/x.test.ts\n```\n";
+/** A row whose body has no Region section at all: nothing to follow, so it is a decision too. */
+const NO_REGION_BODY = "## Acceptance\n\n```bash\nnpx rstest run src/x.test.ts\n```\n";
+/** The row the gate order is about, as `wake.ts`'s `rowRefOfOrder` names it. */
+const ROW = { key: "agent-org", number: 914 };
+/** The root files a test names, so the path rule is read without the project's tree. */
+const ROOT_FILES = new Set(["README.md"]);
 
 /** A scratch directory and its record file; removed by the caller's `finally`. */
 function scratch() {
@@ -69,7 +80,7 @@ function drive(orders: readonly object[], { path, body = PLAIN_BODY, live = [], 
     release: () => "", tier: () => null,
   };
   const oneShot = createCeoOneShot({ readRow: () => ({ body }), path, write });
-  const ready = withCeoOneShot(orders as { session: string; cause?: string }[], { enabled: () => enabled });
+  const ready = withCeoOneShot(orders as { session: string; cause?: string }[], { enabled: () => enabled, rowOf: () => ROW, rootFiles: ROOT_FILES, readRow: () => ({ body }) });
   const got = deliver(ready as never, [...held, ...live], STANDING, { run: h.run, claimer, ceoOneShot: oneShot, claimable: () => null });
   return { ...h, got, ready, heldAtClaim };
 }
@@ -93,7 +104,7 @@ test("flag OFF: the order is byte-identical to the order at origin/main, and so 
 });
 
 test("flag ON: the order is addressed to engineers with the sibling cause and briefRole ceo, and the prompt names ceo.md and not engineer.md", () => {
-  const on = withCeoOneShot([GATE_ORDER], { enabled: () => true })[0] as typeof GATE_ORDER & { briefRole: string };
+  const on = withCeoOneShot([GATE_ORDER], { enabled: () => true, rowOf: () => ROW, rootFiles: ROOT_FILES, readRow: () => ({ body: PLAIN_BODY }) })[0] as typeof GATE_ORDER & { briefRole: string };
   assert.equal(on.session, "engineers");
   assert.equal(on.cause, CEO_ONE_SHOT_SPAWN_CAUSES[0]);
   assert.equal(on.briefRole, "ceo");
@@ -144,7 +155,7 @@ test("flag ON: an IDLE standing engineer is never given the one-shot order; the 
     const h = herdr();
     const claimer: SpawnClaimer = { claim: () => ({ row: 914, key: "agent-org", branch: "agent/b", worktree: "/tmp/wt-agent-org-914", launchDir: "/tmp" }), release: () => "", tier: () => null };
     const oneShot = createCeoOneShot({ readRow: () => ({ body: PLAIN_BODY }), path: s.path });
-    const ready = withCeoOneShot([GATE_ORDER], { enabled: () => true });
+    const ready = withCeoOneShot([GATE_ORDER], { enabled: () => true, rowOf: () => ROW, rootFiles: ROOT_FILES, readRow: () => ({ body: PLAIN_BODY }) });
     const got = deliver(ready as never, [{ label: "worker-capture", status: "idle" }, ...held.slice(1)], STANDING, { run: h.run, claimer, ceoOneShot: oneShot, claimable: () => null });
     assert.deepEqual(got.sent, [`${SEAT} <- ${KEY} (STARTED sonnet/high)`], JSON.stringify(got));
     assert.equal(h.prompt("worker-capture"), undefined, "the idle standing seat was not typed into");
@@ -289,4 +300,41 @@ test("ROUTED_TO, FLEET_LAB_PATTERNS and fleetOrLabAcceptance are byte-identical 
   assert.equal(loosened.ROUTED_TO, PINNED.ROUTED_TO);
   const rebound = untouchedRules(workGate, acceptance.replace("resourcePatternsFrom(RESOURCES);", "resourcePatternsFrom([]);"));
   assert.notEqual(rebound["FLEET_LAB_PATTERNS binding"], PINNED["FLEET_LAB_PATTERNS binding"]);
+});
+
+test("#914: a lane:ceo PATH row converts to the one-shot order; a DECISION row keeps the gate's order, and the row's body is the only difference", () => {
+  const withBody = (body: string) => withCeoOneShot([GATE_ORDER], { enabled: () => true, rowOf: () => ROW, rootFiles: ROOT_FILES, readRow: () => ({ body }) });
+  const path = withBody(PLAIN_BODY)[0] as typeof GATE_ORDER & { briefRole: string };
+  assert.equal(path.session, "engineers", "a path row is converted");
+  assert.equal(path.cause, CEO_ONE_SHOT_SPAWN_CAUSES[0]);
+  assert.equal(path.briefRole, "ceo");
+  // a decision: its Region says the deliverable is not a commit, or the row has no Region at all
+  for (const body of [DECISION_BODY, NO_REGION_BODY]) {
+    const kept = withBody(body)[0];
+    assert.equal(kept.session, "ceo", "a decision row keeps the gate's session, so the standing seat reads it");
+    assert.equal(kept.cause, "ready-row-unclaimed");
+  }
+});
+
+test("#914: the filter fails closed: no row reader, no row, or a row that cannot be read keeps the gate's order; with the flag OFF the SAME array comes back", () => {
+  const base = { enabled: () => true, rowOf: () => ROW, rootFiles: ROOT_FILES };
+  assert.equal(withCeoOneShot([GATE_ORDER], base)[0].session, "ceo", "no reader");
+  assert.equal(withCeoOneShot([GATE_ORDER], { ...base, readRow: () => ({ body: PLAIN_BODY }), rowOf: () => null })[0].session, "ceo", "no row");
+  const unread = withCeoOneShot([GATE_ORDER], { ...base, readRow: () => { throw new Error("gh: could not resolve"); } });
+  assert.equal(unread[0].session, "ceo", "a row that cannot be read is not guessed a path");
+  const off = [GATE_ORDER];
+  assert.equal(withCeoOneShot(off, { ...base, enabled: () => false, readRow: () => ({ body: PLAIN_BODY }) }), off, "flag OFF: the very array");
+});
+
+test("#914: the ceo and the orchestrator build their orders from ONE factory; a fixture copy of the duplicate body fails the check", () => {
+  const orchestrator = readFileSync(new URL("./orchestrator-one-shot.ts", import.meta.url), "utf8");
+  const ceo = readFileSync(new URL("./ceo-one-shot.ts", import.meta.url), "utf8");
+  // the check: the module calls the factory and writes no one-shot order literal of its own
+  const builtFromFactory = (src: string) => src.includes("oneShotFactory(") && !/session: "engineers"/.test(src);
+  assert.ok(builtFromFactory(orchestrator), "orchestrator-one-shot.ts builds its lane from oneShotFactory and writes no order of its own");
+  assert.ok(ceo.includes("export function oneShotFactory("), "the factory is defined in ceo-one-shot.ts");
+  assert.equal(ceo.split('session: "engineers"').length - 1, 1, "the order literal is written once, in the factory");
+  const duplicate = 'export function withOrchestratorOneShot(orders) { return orders.map((order) => ({ ...order, session: "engineers", cause: ONE_SHOT_SPAWN_CAUSES[0] })); }';
+  assert.equal(builtFromFactory(duplicate), false, "a fixture copy of the duplicate body fails the check");
+  assert.equal(builtFromFactory(orchestrator + "\n" + duplicate), false, "and a copy appended to the real module fails it too");
 });
