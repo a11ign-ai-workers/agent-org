@@ -13,7 +13,7 @@ Old code, run directly: the HEAD version of `src/close-rows-sweep.ts`, with a fa
 
 Measured: `node --test src/close-rows-sweep-retry.test.ts` gives `pass 9, fail 0`. `pnpm run typecheck` exits 0. `pnpm exec rstest run --config scripts/rstest/rstest.config.ts --changed=origin/main` exits 0 with `VERDICT pass: 64 tests in 5 files`. No lint script or eslint config exists in this repository, so no lint was run.
 
-Not here, and named: the switch is an environment variable, not `sweep.retryTransient` in the machinery flag store, and nothing sets it in CI, so the shipped behaviour is unchanged until that follow-up lands. No changeset: the fix ships OFF, so no pinned project sees a behaviour change.
+Not here, and named: the switch is an environment variable, not `sweep.retryTransient` in the machinery flag store, and nothing sets it in CI, so the shipped behaviour is unchanged until that follow-up lands. Changeset: `.changeset/close-rows-sweep-retries-a-transient-5xx.md` (patch) is added, because `src/close-rows-sweep.ts` is releasable and the changeset gate requires one; the retry itself ships OFF.
 
 Closes a11ign/agent-org#1175
 
