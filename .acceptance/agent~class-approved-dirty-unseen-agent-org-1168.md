@@ -1,6 +1,6 @@
 An approved pull request that has been DIRTY for more than 30 minutes, with no push to its head inside that window, is a named org-health finding with its age, and clears when the PR rebases or merges. The three readings (`approved-pr-dirty`, `holds-per-pr`, `rerun-failed-the-same-way`) sit behind `health.approvedDirty`, which ships OFF: with the flag off they return nothing. The reading takes `dirtySince` from the caller, because GitHub gives no DIRTY timestamp; an undated DIRTY PR is unknown, not clear.
 
-Acceptance: `bash -c 'cd /home/agent/repos/wt-wt-agent-org-1168 && node --test src/org-health-approved-dirty.test.ts'`
+Acceptance: `bash -c 'cd /home/agent/repos/wt-agent-org-1168 && node --test src/org-health-approved-dirty.test.ts'`
 
 Mutation: dropping the over-30-min check failed 1 test (the 29-min negative control); always tripping failed 5; ignoring the flag failed 2; ignoring the head push failed 1; a holds threshold of 1 failed 1; a rerun that ignores same-ness failed 1. `src/org-health.ts` restored byte-identical each time (`cmp` against a scratch copy).
 
