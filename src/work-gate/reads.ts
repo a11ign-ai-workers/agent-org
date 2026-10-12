@@ -6,9 +6,11 @@ import { waitingOn, todayIso } from "../waiting-condition.ts";
 import { newestPerName } from "../newest-check-run.ts";
 import { LS_REMOTE_ARGS, rowBranchesInListing } from "../row-claim/row-branch-rule.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
-import { stateEntryPath } from "../host-config.ts";
+import { DEFAULT_RECONCILE_MINUTES, homeHostConfig, stateEntryPath } from "../host-config.ts";
 import { type Budget, GATE_VALIDATORS_DIR, conditionalGate, meteredBatch, meteredRun, partitionUnchanged, restConditionalOn, seenOf } from "../gh-conditional.ts";
 import { type Ask, parseReply, readValidators, saveValidators } from "../trace/publish.ts";
+import { narrowedPrList, readPrList, writePrList } from "../pr-list-memory.ts";
+import { readTickScopes } from "../tick-scopes.ts";
 import { cachedReleaseBehind, readReleaseBehind, npmRegistryRead } from "../release-behind-main.ts";
 import { armedFromApi, openPullRequestsQueryArgs } from "../auto-arm-sweep.ts";
 import { REPO } from "../project-identity.ts";
@@ -16,6 +18,7 @@ import { HOME_CHECKOUT, homeProjectDeclaration } from "../project-config.ts";
 import { BACKLOG_LABEL, NEEDS_CHAIRMAN_LABEL as CHAIRMAN_LABEL } from "../project-vocabulary.ts";
 import { conditionalGetArgs, pullViewArgs } from "../ticket-port/conditional-reads.ts";
 import { isRowsByLabelRead } from "../ticket-port/rows-by-label.ts";
+import { recordDueInstants } from "./due-index-write.ts";
 import { stillRunning } from "./pr-state.ts";
 import { NOT_STARTABLE, PARKED_LABEL, REVIEWER_STATE_DIR, ROW_BLOCKED_BY, ROW_LABELS, type Scope, type ScopeRepository, labelledRows, labelsOf,
   scopesOf, sessionOf, tagged } from "./vocabulary.ts";
@@ -143,6 +146,18 @@ export const isGhRun = (run: object): boolean => standsForGh.has(run);
 export function standingFor<W extends object>(run: object, wrapper: W): W {
   if (standsForGh.has(run)) standsForGh.add(wrapper);
   return wrapper;
+}
+
+/**
+ * WHICH `run` READS THE CHECKOUT'S OWN REPOSITORY, with no repository aimed (a11ign/a11ign#5043, agent-org#1093). The narrowing and the due-index are keyed by the
+ * repository a read is of, and a lane's `aimed` wrapper (`readLanes`) is a `run` that stands for `gh` and is aimed at another one, so `isGhRun` cannot say
+ * it: the gate's `defaultRun`, and the first wave's wrappers made of an ambient `run`, are the ones that take `repoNow()`.
+ */
+const ambientRuns = new WeakSet<object>([defaultRun]);
+export const isAmbientRun = (run: object): boolean => ambientRuns.has(run);
+function ambientStandingFor<W extends object>(run: object, wrapper: W): W {
+  if (ambientRuns.has(run)) ambientRuns.add(wrapper);
+  return standingFor(run, wrapper);
 }
 
 /**
@@ -335,7 +350,7 @@ export function readWithFirstWaveTogether<T>(read: (run: (args: string[], repo?:
   if (batch === undefined) return read(run);
   const asked: Map<string, { args: string[]; repo: string | undefined; }> = new Map();
   try {
-    read(standingFor(run, (args: string[], repo = activeRepo) => { asked.set(callKey(args, repo), { args, repo }); return "[]"; }));
+    read(ambientStandingFor(run, (args: string[], repo = activeRepo) => { asked.set(callKey(args, repo), { args, repo }); return "[]"; }));
   } catch (err) {
     log(`NOTE: a reader threw on the rehearsal's empty answers, so its calls run one by one: ${err instanceof Error ? err.message : String(err)}\n`);
     return read(run);
@@ -359,7 +374,7 @@ export function readWithFirstWaveTogether<T>(read: (run: (args: string[], repo?:
     else notFolded.push(call);
   }
   askTogether({ calls: notFolded, batch, waiting, log });
-  return read(standingFor(run, (args: string[], repo = activeRepo) => {
+  return read(ambientStandingFor(run, (args: string[], repo = activeRepo) => {
     const key = callKey(args, repo);
     const answer = waiting.get(key);
     if (answer === undefined) return run(args, repo);
@@ -384,10 +399,9 @@ export const OPEN_PRS_FIRST_PAGE = 20;
 /** How many open pull requests one repository's list can hold before the gate stops seeing the oldest (as it always has: `gh`'s own `--limit`). */
 export const OPEN_PRS_LIMIT = 100;
 
-/** @returns `gh`'s arguments for the open list, newest `limit` first */
-function openPrsArgs(limit: number): string[] {
-  return ["pr", "list", "--state", "open", "--limit", String(limit), "--json",
-      "number,isDraft,headRefOid,baseRefName,statusCheckRollup,author,comments,labels,files,changedFiles,body,"
+/** @returns the `--json` fields of a pull request: the open list's, and one pull request's alike */
+function prFields(): string {
+  return "number,isDraft,headRefOid,baseRefName,statusCheckRollup,author,comments,labels,files,changedFiles,body,"
       // #2084: `reviewDecision` IS WHAT GITHUB ITSELF MERGES ON, AND NO QUEUE READ HERE TOUCHED IT.
       // Measured at `468a74f1b`: `git grep -l reviewDecision -- '*.mjs'` returns exactly ONE file, and it
       // is not a queue read -- `row-claim/own-pr-health-rule.ts` (#2126, merged the same day #2084 was
@@ -424,7 +438,12 @@ function openPrsArgs(limit: number): string[] {
       // #2823: `closingIssuesReferences` (what GitHub will close) and `createdAt` (how long the condition has stood), on the
       // same call, so `closesUnresolvedOrders` reads the Closes condition without a second request.
       // #2996: `updatedAt`, the QUIET SINCE of a wait with no stated reason, on the same call.
-      + "closingIssuesReferences,createdAt,updatedAt"];
+      + "closingIssuesReferences,createdAt,updatedAt";
+}
+
+/** @returns `gh`'s arguments for the open list, newest `limit` first */
+function openPrsArgs(limit: number): string[] {
+  return ["pr", "list", "--state", "open", "--limit", String(limit), "--json", prFields()];
 }
 
 /**
@@ -435,7 +454,28 @@ function openPrsArgs(limit: number): string[] {
  * the org acts on it. Every caller below must keep the two apart. A refused SECOND read is `null` too: the first page alone is a list that may
  * be cut, which is the one answer a caller cannot tell from a whole one.
  */
-export function readPrs(run: (args: string[]) => string = defaultRun, conditional: ConditionalReads | null = isGhRun(run) ? conditionalFor(undefined) : null): any[] | null {
+export function readPrs(run: (args: string[]) => string = defaultRun, conditional: ConditionalReads | null = isGhRun(run) ? conditionalFor(undefined) : null, { home = isAmbientRun(run), tickScopesPath = process.env[TICK_SCOPES_VARIABLE], memoryPath, nowMs = Date.now() }: { home?: boolean; tickScopesPath?: string; memoryPath?: string; nowMs?: number; } = {}): any[] | null {
+  const scopes = home && tickScopesPath !== undefined ? readTickScopes(tickScopesPath) : null;
+  if (scopes === null) return readPrsWhole(run, conditional);
+  // resolved here and not as a default: poll mode never asks the host declaration for a path, so one it cannot read changes nothing there
+  memoryPath ??= stateEntryPath(OPEN_PRS_MEMORY);
+  const repo = repoNow();
+  const memory = readPrList({ path: memoryPath, repo, nowMs, maxAgeMs: MAX_UNCHANGED_SECONDS * 1000 });
+  const narrowed = narrowedPrList({ repo, memory, scopes, view: (number) => JSON.parse(run(pullViewArgs(number, `${prFields()},state`))) });
+  if (narrowed.mode === "narrowed") {
+    rememberOpenPrs({ memoryPath, repo, prs: narrowed.prs, readAtMs: narrowed.readAtMs });
+    return withPagedFiles(narrowed.prs, { run });
+  }
+  process.stderr.write(`work-gate: the open list is read whole (${narrowed.reason}: ${narrowed.detail})\n`);
+  const whole = readPrsWhole(run, conditional);
+  // An EMPTY list is never remembered: the first-wave rehearsal answers every call `[]`, and a remembered `[]` would be served as the repository's list
+  // (every pull request but the named ones gone). A repository with no open pull requests reads whole each tick, which is one cheap call.
+  if (whole !== null && whole.length > 0) rememberOpenPrs({ memoryPath, repo, prs: whole, readAtMs: nowMs });
+  return whole;
+}
+
+/** The open list read whole: through the conditional reader when it is on, and as `readPrsAsListed` asks it when it is not or it fell back. `null` when refused. */
+function readPrsWhole(run: (args: string[]) => string, conditional: ConditionalReads | null): any[] | null {
   const answered = conditional === null ? undefined : conditionalPrs({ run, conditional });
   return answered === undefined ? readPrsAsListed(run) : answered;
 }
@@ -586,7 +626,7 @@ const isDetailOf = (kept: KeptPr | undefined): kept is KeptPr =>
 
 /** One pull request's detail, with the fields the open list asks (so a view and a list can never disagree about shape). */
 function viewPr(number: number, run: (args: string[]) => string): any {
-  const pr = JSON.parse(run(pullViewArgs(number, openPrsArgs(OPEN_PRS_FIRST_PAGE).at(-1) as string)));
+  const pr = JSON.parse(run(pullViewArgs(number, prFields())));
   if (Array.isArray(pr)) return null; // `gh pr view` answers an object: a list is a stand-in (the first wave's `[]`), and says so
   if (pr?.number !== number) throw new Error(`gh pr view ${number} answered something else`);
   return pr;
@@ -675,6 +715,24 @@ function conditionalOpenRows({ run, conditional }: { run: (args: string[]) => st
     if (listing.numbers.every((number) => named.has(number))) saveKept(dir, { ...all, [repo]: { ...all[repo], rows: { signature: listing.signature, readAt: now, rows } } });
   }
   return rows;
+}
+
+/** Where the whole open list is remembered per repository, so a webhook tick re-reads only the pull requests its scopes name (`pr-list-memory.ts`). */
+const OPEN_PRS_MEMORY = "open-prs-memory.json";
+
+/** The variable `work-tick.ts` names the tick's scopes in (`TICK_SCOPES_VARIABLE`): this file reads it without importing the tick. */
+const TICK_SCOPES_VARIABLE = "A11Y_TICK_SCOPES_FILE";
+
+/** A remembered list older than this is read whole again: the reconcile that catches what no event named. */
+export const MAX_UNCHANGED_SECONDS = DEFAULT_RECONCILE_MINUTES * 60;
+
+/** A list that cannot be remembered is said, and the tick still has its list: the next webhook tick then reads whole, which is the safe answer. */
+function rememberOpenPrs({ memoryPath, repo, prs, readAtMs }: { memoryPath: string; repo: string; prs: any[]; readAtMs: number; }): void {
+  try {
+    writePrList({ path: memoryPath, repo, prs, readAtMs });
+  } catch (error) {
+    process.stderr.write(`work-gate: the open list could not be remembered (${String((error as Error).message).split("\n")[0]}); the next webhook tick reads whole\n`);
+  }
 }
 
 /** Where a truncated pull request's paged file list is remembered between ticks: each tick is a fresh process, so memory would not outlive one. */
@@ -1153,8 +1211,36 @@ export function claimedCommentsForClock(openRows: any[], claimedComments: any[] 
  *
  * @returns `null` when refused, never `[]`
  */
-export function readOpenRows(run: (args: string[]) => string = defaultRun, conditional: ConditionalReads | null = isGhRun(run) ? conditionalFor(undefined) : null): any[] | null {
-  return conditional === null ? readOpenRowsAsListed(run) : conditionalOpenRows({ run, conditional });
+export function readOpenRows(run: (args: string[]) => string = defaultRun, conditional: ConditionalReads | null = isGhRun(run) ? conditionalFor(undefined) : null, { home = isAmbientRun(run), webhook = home && webhookMode(), dueIndexPath }: { home?: boolean; webhook?: boolean; dueIndexPath?: string; } = {}): any[] | null {
+  const rows = conditional === null ? readOpenRowsAsListed(run) : conditionalOpenRows({ run, conditional });
+  // a11ign/a11ign#5043: the rows are in hand, so the dated waits they carry are recorded where the tick reads them. NOT from an empty list (the first-wave
+  // rehearsal answers `[]`, and recording it would forget every wait), and NOT from one at the cap, which may be cut.
+  if (webhook && rows !== null && rows.length > 0 && rows.length < OPEN_ROWS_LIMIT) {
+    recordDueInstantsOrSay({ path: dueIndexPath ?? stateEntryPath(DUE_INDEX_ENTRY), repo: repoNow(), rows });
+  }
+  return rows;
+}
+
+/** The due-index file under the state directory: `work-tick.ts`'s `DUE_INDEX_ENTRY`, named again here because this file does not import the tick (a test holds the two equal). */
+export const DUE_INDEX_ENTRY = "due-index.json";
+
+/** Whether this host declares `webhook` events. A host whose declaration cannot be read polls, as the tick does, so it records nothing. */
+function webhookMode(): boolean {
+  try {
+    return homeHostConfig().events?.source === "webhook";
+  } catch (error) {
+    void error; // no readable declaration is `poll`
+    return false;
+  }
+}
+
+/** A failed write is said and the rows are still returned: the tick then reads an index that is older than the rows, which only makes it read more, never less than it did. */
+function recordDueInstantsOrSay(args: { path: string; repo: string; rows: any[]; }): void {
+  try {
+    recordDueInstants(args);
+  } catch (error) {
+    process.stderr.write(`work-gate: the due instants could not be recorded (${String((error as Error).message).split("\n")[0]})\n`);
+  }
 }
 
 /** `readOpenRows` as the gate has always asked it: ONE `issue list`, whose literal `500` `packaging/work-gate.test.ts` pins. */
