@@ -13,7 +13,7 @@ import assert from "node:assert/strict";
 import { mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { DUE_INDEX_ENTRY as GATE_DUE_INDEX_ENTRY, MAX_UNCHANGED_SECONDS, OPEN_ROWS_LIMIT, readOpenRows, readPrs } from "../work-gate/reads.ts";
+import { DUE_INDEX_ENTRY as GATE_DUE_INDEX_ENTRY, MAX_UNCHANGED_SECONDS, OPEN_ROWS_LIMIT, defaultRun, isAmbientRun, isGhRun, readOpenRows, readPrs, readWithFirstWaveTogether, standingFor } from "../work-gate/reads.ts";
 import { readPrList, writePrList, type PrEntry } from "../pr-list-memory.ts";
 import { writeTickScopes } from "../tick-scopes.ts";
 import { dueRepos, readDueIndex, writeDueIndex, type DueEntry } from "../due-index.ts";
@@ -75,7 +75,7 @@ test("POSITIVE CONTROL: a webhook tick naming one remembered pull request views 
   const memoryPath = seeded(root, [pr(7), pr(5)]);
   const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "pr", number: 5 }]);
   const { run, calls } = recorder({ list: [], views: { 5: { ...pr(5, { title: "moved" }), state: "OPEN" } } });
-  const prs = readPrs(run, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
+  const prs = readPrs(run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
   // Mutation: readPrs ignores the scopes and reads whole -> a `pr list` call appears here and the test is red.
   assert.deepEqual(calls.map((args) => args.slice(0, 3)), [["pr", "view", "5"]]);
   assert.deepEqual(prs?.map((entry) => [entry.number, entry.title]), [[7, "PR 7"], [5, "moved"]]);
@@ -86,7 +86,7 @@ test("a pull request that closed or merged leaves the remembered list", () => {
   const memoryPath = seeded(root, [pr(7), pr(5)]);
   const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "pr", number: 5 }]);
   const { run } = recorder({ list: [], views: { 5: { ...pr(5), state: "MERGED" } } });
-  const prs = readPrs(run, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
+  const prs = readPrs(run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
   // Mutation: a merged entry kept in the list -> [7, 5] and the test is red.
   assert.deepEqual(prs?.map((entry) => entry.number), [7]);
 });
@@ -96,7 +96,7 @@ test("a pull request opened since the list was read joins it", () => {
   const memoryPath = seeded(root, [pr(7)]);
   const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "pr", number: 9 }]);
   const { run } = recorder({ list: [], views: { 9: { ...pr(9), state: "OPEN" } } });
-  const prs = readPrs(run, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
+  const prs = readPrs(run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
   // Mutation: only entries already in the memory are patched -> [7] and the test is red.
   assert.deepEqual(prs?.map((entry) => entry.number), [9, 7]);
 });
@@ -106,7 +106,7 @@ test("a tick with no remembered list reads whole, and remembers what it read", (
   const memoryPath = join(root, "open-prs.json");
   const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "pr", number: 3 }]);
   const { run, calls } = recorder({ list: [pr(3)], views: {} });
-  const prs = readPrs(run, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
+  const prs = readPrs(run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
   assert.equal(calls.length, 1);
   assert.deepEqual(calls[0].slice(0, 4), ["pr", "list", "--state", "open"]);
   assert.deepEqual(prs?.map((entry) => entry.number), [3]);
@@ -121,7 +121,7 @@ test("a remembered list older than the reconcile is read whole", () => {
   const memoryPath = seeded(root, [pr(7)], NOW - MAX_AGE_MS - 1);
   const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "pr", number: 7 }]);
   const { run, calls } = recorder({ list: [pr(7), pr(4)], views: {} });
-  const prs = readPrs(run, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
+  const prs = readPrs(run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
   // Mutation: the age is not checked -> the single `pr view` appears and the test is red.
   assert.deepEqual(calls.map((args) => args.slice(0, 2)), [["pr", "list"]]);
   assert.deepEqual(prs?.map((entry) => entry.number), [7, 4]);
@@ -132,7 +132,7 @@ test("a commit scope names no remembered pull request, so the list is read whole
   const memoryPath = seeded(root, [pr(7)]);
   const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "sha", sha: "deadbeef" }]);
   const { run, calls } = recorder({ list: [pr(7)], views: {} });
-  readPrs(run, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
+  readPrs(run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
   // Mutation: a sha scope is treated as nothing to read -> no `pr list`, and the test is red.
   assert.deepEqual(calls.map((args) => args.slice(0, 2)), [["pr", "list"]]);
 });
@@ -142,7 +142,7 @@ test("a view that fails reads the whole list, never the half-patched memory", ()
   const memoryPath = seeded(root, [pr(7)]);
   const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "pr", number: 5 }]);
   const { run, calls } = recorder({ list: [pr(5), pr(7)], views: {} });
-  const prs = readPrs(run, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
+  const prs = readPrs(run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
   // Mutation: a failed view answers the memory unpatched -> [7] and no second call, and the test is red.
   assert.deepEqual(calls.map((args) => args.slice(0, 2)), [["pr", "view"], ["pr", "list"]]);
   assert.deepEqual(prs?.map((entry) => entry.number), [5, 7]);
@@ -153,7 +153,7 @@ test("NEGATIVE CONTROL: poll mode (no scopes file) reads whole exactly as before
   const memoryPath = seeded(root, [pr(7)]);
   scopesFile(root, [{ repo: REPO, kind: "pr", number: 5 }]);
   const { run, calls } = recorder({ list: [pr(8)], views: { 5: { ...pr(5), state: "OPEN" } } });
-  const prs = readPrs(run, { home: true, memoryPath, nowMs: NOW });
+  const prs = readPrs(run, null, { home: true, memoryPath, nowMs: NOW });
   // Mutation: the scoped path runs without a scopes file -> a `pr view` appears here and the test is red.
   assert.deepEqual(calls.map((args) => args.slice(0, 6)), [["pr", "list", "--state", "open", "--limit", "20"]]);
   assert.deepEqual(prs?.map((entry) => entry.number), [8]);
@@ -167,7 +167,7 @@ test("NEGATIVE CONTROL: another repository's read stays whole even when a scopes
   const memoryPath = seeded(root, [pr(7)]);
   const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "pr", number: 7 }]);
   const { run, calls } = recorder({ list: [pr(7)], views: {} });
-  readPrs(run, { home: false, tickScopesPath, memoryPath, nowMs: NOW });
+  readPrs(run, null, { home: false, tickScopesPath, memoryPath, nowMs: NOW });
   // Mutation: the home check is dropped -> the memory answers with no call and the test is red.
   assert.deepEqual(calls.map((args) => args.slice(0, 2)), [["pr", "list"]]);
 });
@@ -180,7 +180,7 @@ test("the tick's variable is read from the environment, under the name the tick 
   process.env[TICK_SCOPES_VARIABLE] = tickScopesPath;
   try {
     const { run, calls } = recorder({ list: [], views: { 5: { ...pr(5), state: "OPEN" } } });
-    readPrs(run, { home: true, memoryPath, nowMs: NOW });
+    readPrs(run, null, { home: true, memoryPath, nowMs: NOW });
     // Mutation: the gate reads a different variable name than `work-tick.ts` hands it -> a whole `pr list` appears here and the test is red.
     assert.deepEqual(calls.map((args) => args.slice(0, 2)), [["pr", "view"]]);
   } finally {
@@ -237,7 +237,7 @@ test("a scope list of [] serves the remembered list as it is, with no call", () 
   const memoryPath = seeded(root, [pr(7), pr(5)]);
   const tickScopesPath = scopesFile(root, []);
   const { run, calls } = recorder({ list: [], views: {} });
-  const got = readPrs(run, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
+  const got = readPrs(run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
   // Mutation: an empty scope list is read as "unknown" -> a whole `pr list` is asked for and both assertions are red.
   assert.deepEqual(calls, []);
   assert.deepEqual(got?.map((each: any) => each.number).sort(), [5, 7]);
@@ -247,11 +247,11 @@ test("a refused read is null, never an empty list, on the whole path and after a
   const root = dir();
   const refuse = (): string => { throw new Error("HTTP 403: rate limit"); };
   // no remembered list: the whole read is asked for and refused
-  assert.equal(readPrs(refuse, { home: true, tickScopesPath: scopesFile(root, [{ repo: REPO, kind: "pr", number: 5 }]), memoryPath: join(root, "none.json"), nowMs: NOW }), null);
+  assert.equal(readPrs(refuse, null, { home: true, tickScopesPath: scopesFile(root, [{ repo: REPO, kind: "pr", number: 5 }]), memoryPath: join(root, "none.json"), nowMs: NOW }), null);
   // a remembered list, a view that is refused, and the whole read refused too
   const memoryPath = seeded(root, [pr(5)]);
   // Mutation: a refused whole read after a failed view returns the remembered list -> a stale list is served as a reading and this is red.
-  assert.equal(readPrs(refuse, { home: true, tickScopesPath: scopesFile(root, [{ repo: REPO, kind: "pr", number: 5 }]), memoryPath, nowMs: NOW }), null);
+  assert.equal(readPrs(refuse, null, { home: true, tickScopesPath: scopesFile(root, [{ repo: REPO, kind: "pr", number: 5 }]), memoryPath, nowMs: NOW }), null);
 });
 
 test("the port holds the view the narrowed read asks for, and the gate spawns none of its own", () => {
@@ -259,7 +259,7 @@ test("the port holds the view the narrowed read asks for, and the gate spawns no
   const memoryPath = seeded(root, [pr(12), pr(5)]);
   const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "pr", number: 12 }]);
   const { run, calls } = recorder({ list: [], views: { 12: { ...pr(12), state: "OPEN" } } });
-  readPrs(run, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
+  readPrs(run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
   // pull request 12 is read and no other, and the call is the port's: `pr view 12 --json <fields>,state`, with no `--repo` of its own.
   assert.deepEqual(calls.map((args) => args.slice(0, 3)), [["pr", "view", "12"]]);
   assert.match(calls[0]![4]!, /,state$/);
@@ -279,7 +279,7 @@ test("the due-index file the gate names is the one the tick reads", () => {
 test("POSITIVE CONTROL: in webhook mode the open rows the gate reads reach the due-index, and the tick's dueRepos reads them back", () => {
   const root = dir();
   const dueIndexPath = join(root, "due-index.json");
-  const rows = readOpenRows(rowsRun(DATED), { webhook: true, dueIndexPath });
+  const rows = readOpenRows(rowsRun(DATED), null, { webhook: true, dueIndexPath });
   assert.equal(rows?.length, 1);
   const read = readDueIndex(dueIndexPath);
   assert.equal(read.status, "ok");
@@ -295,7 +295,7 @@ test("NEGATIVE CONTROL: poll mode makes the same call, returns the same rows and
   const root = dir();
   const dueIndexPath = join(root, "due-index.json");
   // Mutation: the write ignores the mode -> the file exists and this is red.
-  assert.deepEqual(readOpenRows(rowsRun(DATED), { webhook: false, dueIndexPath }), DATED);
+  assert.deepEqual(readOpenRows(rowsRun(DATED), null, { webhook: false, dueIndexPath }), DATED);
   assert.equal(readDueIndex(dueIndexPath).status, "missing");
 });
 
@@ -305,7 +305,7 @@ test("a list at the row cap may be cut, so it records nothing and keeps what an 
   writeDueIndex({ path: dueIndexPath, repo: REPO, entries: [{ number: 9, dueAtMs: 7, kind: "not-before" }] });
   const cut = Array.from({ length: OPEN_ROWS_LIMIT }, (_, index) => ({ number: index + 1, title: "t", labels: [], body: "", createdAt: "2026-10-01T00:00:00Z" }));
   // Mutation: the cap check is dropped -> the cut list replaces the entries with none and this is red.
-  assert.equal(readOpenRows(rowsRun(cut), { webhook: true, dueIndexPath })?.length, OPEN_ROWS_LIMIT);
+  assert.equal(readOpenRows(rowsRun(cut), null, { webhook: true, dueIndexPath })?.length, OPEN_ROWS_LIMIT);
   assert.deepEqual(readDueIndex(dueIndexPath).index?.[REPO], [{ number: 9, dueAtMs: 7, kind: "not-before" }]);
 });
 
@@ -317,10 +317,62 @@ test("a due-index that cannot be written is said and the rows are still returned
   try {
     // a parent that is a file: the directory cannot be made, and nothing is left beside the path
     writeFileSync(join(root, "blocker"), "");
-    const rows = readOpenRows(rowsRun(DATED), { webhook: true, dueIndexPath: join(root, "blocker", "due-index.json") });
+    const rows = readOpenRows(rowsRun(DATED), null, { webhook: true, dueIndexPath: join(root, "blocker", "due-index.json") });
     assert.equal(rows?.length, 1);
   } finally {
     process.stderr.write = write;
   }
   assert.match(said.join(""), /the due instants could not be recorded/);
+});
+
+test("the gate's own reads are ambient, and a lane aimed at another repository is not, so only the checkout's repository is narrowed or recorded", () => {
+  // Mutation: the first wave's wrappers are not marked ambient -> the production path (`readTrackerLanes` reads through them) never narrows or records, and this is red.
+  const seen: ((args: string[], repo?: string) => string)[] = [];
+  readWithFirstWaveTogether((read) => { seen.push(read); return null; }, defaultRun, (calls) => calls.map(() => ({ stdout: "[]" })));
+  assert.equal(seen.length, 2, "the rehearsal and the real pass");
+  assert.deepEqual(seen.map(isAmbientRun), [true, true]);
+  assert.equal(isAmbientRun(defaultRun), true);
+  // an aimed lane stands for `gh` (`standingFor`, as `readLanes` makes it) but is not ambient; a test's `run` is neither
+  const aimed = standingFor(defaultRun, (args: string[]) => defaultRun(args, "other/repo"));
+  assert.equal(isGhRun(aimed), true);
+  assert.equal(isAmbientRun(aimed), false);
+  assert.equal(isAmbientRun(() => "[]"), false);
+});
+
+test("NEGATIVE CONTROL: an empty list of rows (the first wave's rehearsal answer) records nothing and keeps what an earlier pass wrote", () => {
+  const root = dir();
+  const dueIndexPath = join(root, "due-index.json");
+  writeDueIndex({ path: dueIndexPath, repo: REPO, entries: [{ number: 9, dueAtMs: 7, kind: "not-before" }] });
+  // Mutation: the emptiness check is dropped -> the stand-in `[]` replaces the entries with none and this is red.
+  assert.deepEqual(readOpenRows(rowsRun([]), null, { webhook: true, dueIndexPath }), []);
+  assert.deepEqual(readDueIndex(dueIndexPath).index?.[REPO], [{ number: 9, dueAtMs: 7, kind: "not-before" }]);
+});
+
+test("NEGATIVE CONTROL: an empty whole list is never remembered, so a stand-in `[]` cannot be served as the repository's list", () => {
+  const root = dir();
+  const memoryPath = join(root, "open-prs.json");
+  const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "pr", number: 5 }]);
+  const { run } = recorder({ list: [], views: {} });
+  // Mutation: the emptiness check is dropped -> the memory holds `[]` for the repository and this is red.
+  assert.deepEqual(readPrs(run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW }), []);
+  const memory = readPrList({ path: memoryPath, repo: REPO, nowMs: NOW, maxAgeMs: MAX_AGE_MS });
+  assert.equal(memory.ok, false);
+});
+
+test("the narrowed path never consults the conditional reader, and the whole path hands it the read as before", () => {
+  const root = dir();
+  const memoryPath = seeded(root, [pr(7), pr(5)]);
+  const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "pr", number: 5 }]);
+  const asked: string[] = [];
+  const conditional = { ask: (path: string) => { asked.push(path); throw new Error("no REST read on the narrowed path"); }, dir: root, now: NOW, repo: REPO };
+  const { run, calls } = recorder({ list: [pr(8)], views: { 5: { ...pr(5), state: "OPEN" } } });
+  const narrowed = readPrs(run, conditional, { home: true, tickScopesPath, memoryPath, nowMs: NOW });
+  assert.deepEqual(narrowed?.map((entry) => entry.number), [7, 5].sort((a, b) => b - a));
+  assert.deepEqual(asked, []);
+  assert.deepEqual(calls.map((args) => args.slice(0, 2)), [["pr", "view"]]);
+  // no memory: whole, and the conditional reader is asked (its failure falls back to the listing it always made)
+  const stale = join(root, "none.json");
+  const whole = recorder({ list: [pr(8)], views: {} });
+  assert.deepEqual(readPrs(whole.run, conditional, { home: true, tickScopesPath, memoryPath: stale, nowMs: NOW })?.map((entry) => entry.number), [8]);
+  assert.notDeepEqual(asked, []);
 });
