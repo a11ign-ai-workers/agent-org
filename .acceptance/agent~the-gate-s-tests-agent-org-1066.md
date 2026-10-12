@@ -15,7 +15,7 @@ The gate's pinning tests read its source through one helper, `workGateSource()`,
 - `recursive` dropped: the nested-file control goes red (1 failing).
 - entry placed last: all four go red.
 
-**Failing set.** `npx rstest run --config scripts/rstest/rstest.config.ts` over the whole suite, measured with the rstest JSON report: base `843df8a7` fails 15 of 10396 tests in 592 files; this branch fails 15 of 10400 in 593 files (the four new tests), and the two lists of failing test names are identical (`diff` empty). All 15 are environmental (`AGENT_ORG_HOST` unset in this worktree, among others) and fail on the untouched base too.
+**Failing set.** `npx rstest run --config scripts/rstest/rstest.config.ts` over the whole suite, measured with the rstest JSON report: base `843df8a7` fails 15 of 10396 tests in 592 files; this branch fails 15 of 10400 in 593 files (the four new tests), and the two lists of failing test names are identical (`diff` empty). They fail on the untouched base too; the cause I read in the report is `AGENT_ORG_HOST` unset in this worktree (resolveHomeCheckout), and I did not trace the other 14 individually.
 
 **Open-check at this head.** `git grep -l -E "readFileSync\([^)]*work-gate(\.ts)?" -- src scripts` now names two files, the helper and its own test, which read the entry on purpose; no other test does.
 
