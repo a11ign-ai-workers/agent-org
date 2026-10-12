@@ -11,6 +11,7 @@ Not here, and named: the live reading after agent-org#904 merges is out of scope
 Flag: rows.autoUnpark
 Health-signals: claims-refused, wakes-held
 Revert: turn `rows.autoUnpark` off in `machinery-canary.json` (it ships OFF), or revert this PR
+Outside-Region: src/unpark-satisfied.ts — the un-park act itself lives there (#4050); the other-tracker pass extends that one pass, and moving it into the Region's causes file would split it across two modules
 
 Closes a11ign/a11ign#5177
 
