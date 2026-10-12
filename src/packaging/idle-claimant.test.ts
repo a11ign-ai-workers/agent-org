@@ -8,15 +8,17 @@
  */
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { mkdtempSync, rmSync } from "node:fs";
+import { mkdtempSync, readFileSync, rmSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { WORKER_STATE_DIR, writeDeclaration, type Declaration } from "../worker-state.ts";
 import {
   idleClaimantReading, idleNudgePrompt, WAIT_FIELDS, IDLE_CLAIMANT_MINUTES, IDLE_CLAIMANT_MS, IDLE_STATUSES, EVIDENCE_LABEL, HOLD_LABEL_PREFIX,
   redOwnPrs, redCheckNudgePrompt, unansweredNudgeNote, idleLimitMs, stoppedNudgePrompt, MAX_UNANSWERED_NUDGES, STOPPED_CLAIMANT_MS,
+  RED_CHECK_CONCLUSIONS, HOLD_OWN_CHECK_JOBS,
 } from "../idle-claimant.ts";
 import { HOLD_PREFIX } from "../pr-hold-state.ts";
+import { brokenChecks, RED_CONCLUSIONS, HOLD_OWN_JOBS } from "../red-pr.ts";
 import {
   claimReading, claimStalledOrders, nextStallState, nudgeKey, claimFactsFrom, stalledNudgeEvents,
 } from "../claim-stall.ts";
@@ -274,6 +276,27 @@ test("#743 (1) what a red check does NOT void: a pull request's own `awaiting-ev
   assert.deepEqual(redOwnPrs([redPr(RED_TS, { labels: held.labels })] as never), [{ number: 2968, repoKey: undefined, checks: ["ts"] }], "CONTROL: `ts` red under the same hold is a breakage");
   assert.deepEqual(redOwnPrs([redPr(GREEN)] as never), []);
   assert.deepEqual(redOwnPrs([{ number: 1 }, undefined as never]), [], "no rollup on the pull request is not red");
+});
+
+test("#743 (1) THE RED DECIDER IS A LEAF, AND AGREES WITH `red-pr.ts`: no import of `red-pr.ts` (a module cycle through `pr-hold-state.ts`), the two lists equal, and the same answer over the same pull requests", () => {
+  // the reviewer of #1151: `idle-claimant.ts` -> `red-pr.ts` -> `pr-hold-state.ts` -> `idle-claimant.ts` failed at the top of the file under `rstest`
+  const source = readFileSync(new URL("../idle-claimant.ts", import.meta.url), "utf8");
+  const imports = [...source.matchAll(/^import\s[^;]*?from\s+"([^"]+)"/gm)].map((m) => m[1]);
+  for (const reaching of ["./red-pr.ts", "./pr-hold-state.ts"]) assert.ok(!imports.includes(reaching), `idle-claimant.ts must not import ${reaching}`);
+  assert.deepEqual([...RED_CHECK_CONCLUSIONS].sort(), [...RED_CONCLUSIONS].sort());
+  assert.deepEqual([...HOLD_OWN_CHECK_JOBS].sort(), [...HOLD_OWN_JOBS].sort());
+  assert.equal(HOLD_LABEL_PREFIX, HOLD_PREFIX);
+  const running = [...RED_TS, { name: "docs", status: "IN_PROGRESS", ...CHECK, completedAt: "0001-01-01T00:00:00Z" }];
+  const rerun = [...RED_TS, { name: "ts", status: "COMPLETED", conclusion: "SUCCESS", startedAt: "2026-10-02T11:20:00Z", completedAt: "2026-10-02T11:30:00Z" }];
+  const timedOut = [{ name: "lint", status: "COMPLETED", conclusion: "TIMED_OUT", ...CHECK }, { name: "gate", status: "COMPLETED", conclusion: "CANCELLED", ...CHECK }];
+  const hold = [{ name: `${HOLD_PREFIX}worker-9` }];
+  const prs = [redPr(RED), redPr(RED_TS), redPr(GREEN), redPr(running), redPr(rerun), redPr(timedOut), redPr(RED_TS, { labels: hold }), redPr(RED, { labels: [`${HOLD_PREFIX}worker-9`] }), redPr(timedOut, { labels: hold })];
+  for (const pr of prs) {
+    const expected = [...new Set(brokenChecks(pr as never).map((c) => c.name))];
+    const got = redOwnPrs([pr] as never).flatMap((r) => r.checks);
+    assert.deepEqual(got, expected, `the same red checks as red-pr.ts's brokenChecks for ${JSON.stringify(pr.statusCheckRollup.map((c: any) => `${c.name}:${c.conclusion}`))} ${JSON.stringify(pr.labels)}`);
+  }
+  assert.ok(prs.some((pr) => redOwnPrs([pr] as never).length > 0) && prs.some((pr) => redOwnPrs([pr] as never).length === 0), "CONTROL: the fixtures are not all one answer");
 });
 
 test("#743 (1) with NO declaration read, a red check is not excused by a reviewer's pane, an approval or a check still running either -- and green is, as #2999 ruled", () => {

@@ -17,7 +17,7 @@
 // through `declaredWait`, never a second copy), the pull-request kinds are facts on the `pr list` payload and the herdr listing.
 import { listingIsComplete } from "./herdr-agents.ts";
 import { ANSWER_PREFIX, NEEDS_CHAIRMAN_LABEL } from "./project-vocabulary.ts";
-import { brokenChecks } from "./red-pr.ts";
+import { newestPerName } from "./newest-check-run.ts";
 import { reviewerSeat, subjectMention } from "./review-attribution.ts";
 import type { DeclarationReading } from "./worker-state.ts";
 
@@ -142,16 +142,29 @@ function prWaitKinds(pr: IdlePr, agents: Agent[]): string[] {
 export type RedPr = { number?: number, repoKey?: string, checks: string[] };
 
 /**
- * (agent-org#743) THE HOLDER'S OWN PULL REQUESTS THAT ARE RED, with the names of the failing checks. `red-pr.ts`'s `brokenChecks` is the one decider the gate's
- * `pr-checks-failing` order and the retrospective already ask: it reads the NEWEST run of each name (a re-run that passed clears the red, one still running is
- * not red) and leaves out the two jobs a `hold:` label turns red by design. It does not know which checks are REQUIRED (that is a `gh` read, and this is a leaf):
- * `gate` is the one required job and `needs` every other, so a red job is a red `gate`.
+ * `red-pr.ts`'s `RED_CONCLUSIONS` and `HOLD_OWN_JOBS`, restated for the reason `HOLD_LABEL_PREFIX` is: `red-pr.ts` imports `pr-hold-state.ts`, which imports `IDLE_STATUSES`
+ * from THIS file, so importing `red-pr.ts` here is a module cycle (`ReferenceError: Cannot access 'ANSWER_PREFIX' before initialization` at the top of this file, reviewer
+ * of #1151). `idle-claimant.test.ts` pins both equal to `red-pr.ts`'s, and pins `redOwnPrs` to `brokenChecks` over the same pull requests.
+ */
+export const RED_CHECK_CONCLUSIONS = Object.freeze(["FAILURE", "TIMED_OUT", "STARTUP_FAILURE", "ACTION_REQUIRED"]);
+export const HOLD_OWN_CHECK_JOBS = Object.freeze(["deliberateRefusals", "gate"]);
+
+/**
+ * (agent-org#743) THE HOLDER'S OWN PULL REQUESTS THAT ARE RED, with the names of the failing checks. It is `red-pr.ts`'s `brokenChecks` (the one decider the gate's
+ * `pr-checks-failing` order and the retrospective ask) over the same facts: the NEWEST run of each name decides (a re-run that passed clears the red, one still running is
+ * not red) and the two jobs a `hold:` label turns red by design are left out while one is on the pull request. It does not know which checks are REQUIRED (that is a `gh`
+ * read, and this is a leaf): `gate` is the one required job and `needs` every other, so a red job is a red `gate`.
  * @param {IdlePr[] | undefined} prs @returns {RedPr[]}
  */
 export function redOwnPrs(prs: IdlePr[] | undefined): RedPr[] {
   return (prs ?? []).flatMap((pr) => {
-    const checks = [...new Set(brokenChecks(pr).map((check) => check.name))];
-    return checks.length === 0 ? [] : [{ number: pr.number, repoKey: pr.repoKey, checks }];
+    const held = (pr?.labels ?? []).some((label) => String(typeof label === "string" ? label : label?.name ?? "").startsWith(HOLD_LABEL_PREFIX));
+    const checks = newestPerName((pr?.statusCheckRollup ?? []) as any[])
+      .filter((check: any) => RED_CHECK_CONCLUSIONS.includes(check.conclusion ?? ""))
+      .map((check: any) => String(check?.name ?? check?.context ?? ""))
+      .filter((name: string) => !(held && HOLD_OWN_CHECK_JOBS.includes(name)));
+    const named = [...new Set(checks)];
+    return named.length === 0 ? [] : [{ number: pr?.number, repoKey: pr?.repoKey, checks: named }];
   });
 }
 
