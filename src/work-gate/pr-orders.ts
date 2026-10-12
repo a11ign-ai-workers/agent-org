@@ -16,6 +16,7 @@
 //
 // `work-gate.ts` re-exports every name this file exports that it exported before, so a caller of the gate
 // is unchanged. Imports below are relative and leaf-shaped, the property the gate's own header states.
+import { join } from "node:path";
 import { newestPerName } from "../newest-check-run.ts";
 import { reviewerSeat, subjectMention, subjectRef } from "../review-attribution.ts";
 import { NO_VERDICT } from "../merge-guard/checks-rule.ts";
@@ -23,6 +24,7 @@ import { armabilityOf } from "../pr-hold-state.ts";
 import { isHeldRed, isWaitingRed } from "../red-pr.ts";
 import { sharedFileOrders } from "./shared-file-orders.ts";
 import { REPO } from "../project-identity.ts";
+import { HOME_CHECKOUT } from "../project-config.ts";
 import { VERIFY_STATE } from "../verify-stamp.ts";
 import { equivalentHeads } from "../review-verdict.ts";
 // #705: the definition moved to a leaf the hand-fix ledger can also import; re-exported so a reader of it from here is unchanged.
@@ -1245,7 +1247,18 @@ function awaitingVerdictPrompt(pr: any, { head8, key, all, wait }: ReviewHeads) 
       + "so write yours at the head you actually read and do not re-review work you have already answered."
     : "";
   return `${state} ${subjectMention(pr)} at \`${head8}\` ${checks}.${same} `
-    + "Review it per .agent-org/roles/reviewer.md and leave one comment carrying your verdict.";
+    + `Review it per ${reviewerRoleFile(pr)} and leave one comment carrying your verdict.`;
+}
+
+/**
+ * The reviewer's role file, as the order names it (#1142). A RELATIVE path is right only where the reviewer's checkout IS the project: a keyed
+ * repository's reviewer works in its own review checkout, which has no `.agent-org/`, so a relative path sent it searching the whole home
+ * directory for the file. A keyed pull request therefore names the file under the PROJECT root, where the declaration lives; the project's own
+ * keeps the relative path it always had. `HOME_CHECKOUT` is read here, at call time, never at load (this file's header says why).
+ */
+function reviewerRoleFile(pr: any): string {
+  const keyed = pr.repoKey !== undefined && pr.repoKey !== "";
+  return keyed ? join(HOME_CHECKOUT, ".agent-org/roles/reviewer.md") : ".agent-org/roles/reviewer.md";
 }
 
 /**
