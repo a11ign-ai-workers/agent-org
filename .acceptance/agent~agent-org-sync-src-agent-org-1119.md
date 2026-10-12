@@ -9,4 +9,4 @@ grep -c "COPIED FROM .scripts/cli-flags.ts. at a9ae7147d" src/lib/cli-flags.ts
 
 no-release: a comment line and a header in a copy, with the CI pin that matches it; nothing a pinned project runs changes
 
-Closes: none -- clears the copies-drifted org-health trip; no row was filed for a one-line comment sync.
+Closes: a11ign/agent-org#1119 -- clears the copies-drifted org-health trip for `src/lib/cli-flags.ts`.
