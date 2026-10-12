@@ -22,7 +22,7 @@
 // included, and the commands started, by name.
 import { execFileSync, spawnSync } from "node:child_process";
 import { pathToFileURL } from "node:url";
-import { appendFileSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, mkdirSync, readFileSync, realpathSync, renameSync, rmSync, statSync, writeFileSync } from "node:fs";
 import { loadavg } from "node:os";
 import { dirname, join } from "node:path";
 import { fileURLToPath } from "node:url";
@@ -71,6 +71,18 @@ const CRASH_PRELOAD = ["--import", new URL("./lib/crash-exit.ts", import.meta.ur
 
 /** work-gate's own contract, named here so the mapping below reads as a mapping and not as magic numbers. */
 export const GATE = { QUIET: 0, WORK: 1, CANNOT_ASK: 2, PARTIAL: 3 };
+
+/**
+ * THE GATE'S WALL BUDGET, in ms (a11ign/agent-org#1080). The gate was spawned with no deadline, so one slow read spent the unit's whole `TimeoutStartSec`
+ * and the tick yielded nothing: no `GATE` line, no orders, and no way to say which read it was in. Measured wall was 77-193 s over the ticks that read it;
+ * five minutes is well above that and well under the unit's 600 s.
+ */
+export const GATE_BUDGET_MS = 300_000;
+/**
+ * What the unit's `TimeoutStartSec` still leaves beside the gate's budget: the steps before the gate (seats, the chairman's path, the snapshot) and the
+ * wake after it, which has no bound of its own. The test that pins it reads `TimeoutStartSec` from `host/work-tick.service.in`.
+ */
+export const WAKE_ROOM_MS = 240_000;
 
 /**
  * What the tick should do next, given how the gate exited.
@@ -354,6 +366,48 @@ function reportIfSlow(line: ReturnType<typeof tickCostLine> | null, run: Run) {
   clearOwnMarker(run.markerPath, process.pid);
   if (line === null) return;
   deliverTickOrders(slowTickOrders(line, { thresholdSeconds: slowThresholdSeconds(), costPath: run.costPath }), run.wakeCommand);
+}
+
+/**
+ * The whole order lines of a gate that was killed at its budget (#1080). The gate prints one JSON line per order, so the segment after the last newline
+ * is the one the kill cut (empty when the output ended on a newline); it is dropped, and so is any line that is not JSON.
+ */
+export function wholeOrderLines(printed: string): string[] {
+  return printed.split("\n").slice(0, -1).filter((line) => {
+    try {
+      JSON.parse(line);
+      return true;
+    } catch {
+      return false;
+    }
+  });
+}
+
+/**
+ * The journal line for a gate that ran out of its budget (#1080): the read it was in and how many had finished, from this tick's census, and what the
+ * tick did with what the gate printed. The census's gate reads are the ones with no `phase`: the tick's own spawns in a phase are the snapshot's, the
+ * seats' and the gate's own spawn, which is written only when the kill returns. A synchronous read killed mid-call writes no census line at all, so
+ * when none is on record the line says so rather than naming a read it cannot see.
+ *
+ * @param censusPath this tick's census file @param handed how many whole orders were kept for `wake`
+ */
+export function gateBudgetLine(censusPath: string, handed: number): string {
+  let reads: string;
+  try {
+    if (!existsSync(censusPath)) reads = "no census file";
+    else {
+      const gateReads = readCensus(censusPath).filter((record) => (record as { phase?: string }).phase === undefined);
+      const inFlight = gateReads.filter((record) => record.ms === null);
+      const finished = gateReads.length - inFlight.length;
+      const named = inFlight.length === 0 ? "no unfinished read on record (a synchronous read killed mid-call writes none)"
+        : `in ${inFlight.map((record) => record.line).join("; ")}`;
+      reads = `${named}, ${finished} reads finished`;
+    }
+  } catch (error) {
+    reads = `census unreadable (${(error as Error).message})`;
+  }
+  const outcome = handed > 0 ? `${handed} whole order(s) handed on to wake` : "no whole order printed, so CANNOT ASK and nothing was woken";
+  return `GATE OUT OF BUDGET after ${GATE_BUDGET_MS / 1000} s: ${reads}. ${outcome}.`;
 }
 
 /**
@@ -710,14 +764,20 @@ function main() {
   // THEN THE SNAPSHOT (#4148): after the seats and the chairman's path (they read nothing it would change), before the first read the gate or any child of it makes.
   process.stderr.write(`${meter.phase("snapshot", refreshSnapshotOrSay)}\n`);
 
-  const gate = meter.phase("gate", () => spawnSync(process.execPath, [...CRASH_PRELOAD, here("./work-gate.ts")], { encoding: "utf8" }));
-  if (gate.error) {
+  const gate = meter.phase("gate", () => spawnSync(process.execPath, [...CRASH_PRELOAD, here("./work-gate.ts")],
+    { encoding: "utf8", timeout: GATE_BUDGET_MS, killSignal: "SIGTERM" }));
+  // A GATE KILLED AT ITS BUDGET IS ETIMEDOUT, NOT A GATE THAT COULD NOT RUN (#1080): the two read differently in the journal and in the next step.
+  const overBudget = (gate.error as NodeJS.ErrnoException | undefined)?.code === "ETIMEDOUT";
+  if (gate.error && !overBudget) {
     process.stderr.write(`CANNOT ASK: could not run work-gate (${gate.error.message}).\n`);
     finish(EXIT.CANNOT_ASK, run);
   }
   if (gate.stderr) process.stderr.write(gate.stderr);
   const statusWallMs = githubStatusWallMs(gate.stderr);
   if (statusWallMs !== undefined) meter.note("github-status", statusWallMs);
+  // WHAT A KILLED GATE PRINTED IS HANDED ON ONLY AS WHOLE ORDER LINES: the one the kill cut is not an order, and `wake` must not read half of one.
+  const handed = overBudget ? wholeOrderLines(gate.stdout ?? "") : undefined;
+  if (overBudget) process.stderr.write(`${gateBudgetLine(run.censusPath, handed?.length ?? 0)}\n`);
 
   // BEFORE THE QUIET EXIT, DELIBERATELY. A blocked session is most invisible precisely when the queue is
   // quiet -- there is no other output that tick, and nothing else looks at the roster.
@@ -725,11 +785,14 @@ function main() {
   if (roster !== null) tidyRoster(roster, ledgerPath, meter);
 
   const queued = meter.phase("queue", () => queuedOrderCount(handoffQueuePath(ledgerPath)));
-  const next = afterGate(gate.status ?? EXIT.CANNOT_ASK, { queued });
-  if (next.why) process.stderr.write(`${next.why}\n`);
+  // The budget line above already says what happened, so a budget stop does not repeat the gate's own reason (its PARTIAL reason names an unread lane).
+  const next = handed !== undefined && handed.length === 0 ? { deliver: false, exit: EXIT.CANNOT_ASK }
+    : afterGate(overBudget ? GATE.PARTIAL : gate.status ?? EXIT.CANNOT_ASK, { queued });
+  if (next.why && !overBudget) process.stderr.write(`${next.why}\n`);
   if (!next.deliver) finish(next.exit ?? EXIT.CANNOT_ASK, run);
 
-  const wake = meter.phase("wake", () => spawnSync(run.wakeCommand.node, run.wakeCommand.args, { encoding: "utf8", input: gate.stdout }));
+  const wake = meter.phase("wake", () => spawnSync(run.wakeCommand.node, run.wakeCommand.args,
+    { encoding: "utf8", input: handed === undefined ? gate.stdout : handed.map((line) => `${line}\n`).join("") }));
   if (wake.error) {
     process.stderr.write(`CANNOT ASK: could not run wake (${wake.error.message}). The gate found work and `
       + "it was NOT delivered.\n");

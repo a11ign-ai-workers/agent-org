@@ -1,0 +1,15 @@
+The work-tick spawns the gate with a wall budget, `GATE_BUDGET_MS` (five minutes, `timeout` plus `killSignal: "SIGTERM"` on the gate's `spawnSync`), so a gate that outlives it is killed and the tick keeps the room `TimeoutStartSec=600` leaves for wake. An overrun writes one stderr line naming the unfinished census read (`in <cmd>`) and the finished-read count; the whole order lines the gate printed before the kill go on to wake as a PARTIAL result, and if it printed none the tick ends CANNOT ASK, still recording its completion. A gate inside its budget reaches wake unchanged and writes no budget line.
+
+Acceptance: `bash -c 'cd /home/agent/repos/wt-agent-org-1080 && npx rstest run --config scripts/rstest/rstest.config.ts src/packaging/work-tick-gate-budget.test.ts'`
+
+Mutation: M1, `timeout: GATE_BUDGET_MS` removed from the gate's `spawnSync`: `VERDICT fail: 2 of 6 tests failed` (F01 test (b), F02 test (c)). M2, `wholeOrderLines` keeps the segment after the last newline (`.slice(0, -1)` removed): first run passed 6 of 6, so the test was extended by one assertion (a complete JSON object with no newline after it is still the line the kill cut); re-run `VERDICT fail: 1 of 6 tests failed` (F01 the `wholeOrderLines` test). M3, the PARTIAL mapping removed (`afterGate(overBudget ? GATE.PARTIAL : gate.status ...)` becomes `afterGate(gate.status ...)`): `VERDICT fail: 1 of 6 tests failed` (F01 test (c)). `src/work-tick.ts` restored from a copy each time and checked with `cmp` (byte-identical).
+
+Measured: `VERDICT pass: 6 tests in 1 file` for the acceptance file at head, after the mutation runs were restored. The 25 test files that import `src/work-tick.ts`, each run on its own (a multi-file invocation of rstest is refused here with "No test files found"): all 25 pass, each run on its own with exit 0 (`VERDICT pass` counts: 28, 5, 24, 13, 7, 20, 172, 23, 8, 5, 7, 19, 147, 423, 9, 10, 6, 10, 13, 11, 14, 50, 17, 35, 19; 1095 tests in total). Earlier, 15 failures in ten files that do not import `work-tick.ts` (`src/*` and `src/packaging/*` files whose failure text cites live host state: herdr seats, gh, systemctl, GH_CONFIG_DIR) were seen in a full-suite run; they are not caused by this change, and an A/B against the base `work-tick.ts` was attempted but both runs were refused, so that is unverified.
+
+Not here, and named: the budget is not measured against a real gate wall (the recent walls are 77–112 s with spikes to 160 s and 193 s; if the gate stays above 300 s every tick ends CANNOT ASK); the "no census file" wording is the only reading when the census is absent; the `incident:gate-crash` non-reading of a budget stop was reasoned from `finish()` and not separately verified; the rev-list/rev-parse cost (557/582 reads, about 12 s of the 00:09Z tick) is a separate defect, filed as its own row, not fixed here.
+
+Closes a11ign/agent-org#1080
+
+platform: the test runs on the local toolchain (rstest 0.12.3, Node v24.21.0, linux); no GitHub or host effect.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)
