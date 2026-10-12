@@ -178,7 +178,7 @@ export function readOnlyGh(args: string[]): boolean {
 }
 
 /** Is this process the gate (`work-gate.ts`)? The same test `tick.ts` makes (`runningAsGate`) and `work-gate.ts` makes of itself: importing this file is not running a tick. */
-function isGateProcess(): boolean {
+export function isGateProcess(): boolean {
   if (process.argv[1] === undefined) return false;
   try {
     return pathToFileURL(realpathSync(process.argv[1])).href === new URL("../work-gate.ts", import.meta.url).href;
@@ -198,7 +198,7 @@ export function holdReadMemo(on: boolean): void {
 /** @returns how many calls the memo answered and how many answers it holds: what the gate prints at the end of a tick, so the next reading of reads per tick can be taken */
 export const readMemoReading = () => ({ hits: readMemo.hits, held: readMemo.answers.size });
 
-const forgetReads = () => { readMemo.answers.clear(); readMemo.bytes = 0; };
+export const forgetReads = () => { readMemo.answers.clear(); readMemo.bytes = 0; };
 
 function rememberRead(key: string, answer: string): void {
   if (readMemo.bytes + answer.length > READ_MEMO_MAX_BYTES) return;
