@@ -23,6 +23,8 @@ Net lines: +41 non-test, -6 (about 35 net in `src/event-tunnel.ts`). Removing co
 - `pnpm run typecheck`: clean.
 - Mutations, each restored byte-identical (`diff` against a copy) and only its own test red: `AllowFunnel` ignored (1 red, the `pathIsServed` test); read-first off, so `up` always runs (1 red, the `changeFunnel` test); read-first always skips (1 red); read-after removed (1 red); wrong host key (2 red, both read it).
 
+History: full
+
 Acceptance: `env -u AGENT_ORG_HOST npx rstest run --config scripts/rstest/rstest.config.ts src/event-tunnel.test.ts`
 
 ## Anything a reviewer should be sceptical of
@@ -31,3 +33,5 @@ Acceptance: `env -u AGENT_ORG_HOST npx rstest run --config scripts/rstest/rstest
 - `down` still needs root while a file-path handler is in the config; it now says so rather than being silent.
 
 🤖 Generated with [Claude Code](https://claude.com/claude-code)
+
+Mutation: `pathIsServed` ignoring `AllowFunnel` (1 red, its own test); `up` never reading first (1 red); `up` always skipping (1 red); the read-after removed (1 red); the host:port key wrong (2 red, both read it). Each restored byte-identical (`diff` against a copy).
