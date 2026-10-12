@@ -11,7 +11,9 @@ Mutation: allowed-answer check never firing (1 red, its own negative control); c
 
 Evidence: `src/decision-run/classes/row-call-count-signal.test.ts` 10 of 10; `src/decision-run` with `src/serve-by-run.test.ts` green at this head; `tsc --noEmit` clean.
 
-Acceptance: `bash -c 'cd ~/repos/agent-org && npx rstest run --config scripts/rstest/rstest.config.ts src/decision-run/classes/row-call-count-signal.test.ts'`
+Acceptance: `npx rstest run --config scripts/rstest/rstest.config.ts src/decision-run/classes/row-call-count-signal.test.ts`
+
+(The row's own command is `cd ~/repos/agent-org && npx rstest ...`; that checkout is main and holds neither new file until this merges, so it runs 0 tests before the merge. This is the same command run in the PR's own checkout.)
 
 Closes a11ign/agent-org#908.
 
