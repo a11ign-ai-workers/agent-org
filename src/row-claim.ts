@@ -76,7 +76,7 @@ import { withBoardSnapshot, PROJECT_OWNER, PROJECT_NUMBER } from "./board-snapsh
 import { runnerReason, laneReason, drainReason, oneRowReason } from "./row-claim/runner-rule.ts";
 import { readStandIns, type LaneStandIn } from "./row-claim/lane-stand-in.ts";
 import { activeDrain, sparePathsFrom, ledgerPathFrom, isSpareRole, isPersistentRole, readSpareRegistry } from "./wake.ts";
-import { readWithFirstWaveTogether, runBatch, readChairmanPriority, CHAIRMAN_PRIORITY_LABEL } from "./work-gate.ts"; // #3566, slice 4: `wake.ts` above already loads it, and it never loads this file. #4793: and the gate's own reading of whose a chairman row is
+import { readWithFirstWaveTogether, runBatch, readChairmanPriority, CHAIRMAN_PRIORITY_LABEL, EMERGENCY_PRIORITY_LABEL, readEmergencyPriority, readEmergencyPriorityOption } from "./work-gate.ts"; // #3566, slice 4: `wake.ts` above already loads it, and it never loads this file. #4793: and the gate's own reading of whose a chairman row is. #989: and the gate's own verdict on which emergency row is honoured
 import { lookup } from "./merge-guard/lookups.ts";
 import { readJsonObject, writeJsonObject, cloneOfKey } from "./claim-stall.ts";
 import { inBuildReason, lookupHeldRows, lookupOtherHeldIssues } from "./row-claim/own-pr-health-rule.ts";
@@ -686,15 +686,16 @@ export function sessionEligibilityReason(issueNumber: number, mySession: string,
 export type WalkedPast = { kind: "row" | "pr"; number: number; repo?: string; };
 
 /**
- * #4793: {@link sessionEligibilityReason}'s verdict AND the holders a chairman row was let past, so the claim can say whose rebase it has ordered. `walked` is
- * empty for every row that is not a verified chairman row and for every claim that overlapped nothing.
- * @returns {{ reason: string | null, walked: WalkedPast[] }}
+ * #4793: {@link sessionEligibilityReason}'s verdict AND the holders a priority row was let past, so the claim can say whose rebase it has ordered. `walked` is
+ * empty for every row that is not a verified priority row and for every claim that overlapped nothing. `emergency` is the incident a `priority:emergency`
+ * yield was for (#989), and `null` for a chairman's yield and for a refusal.
+ * @returns {YieldVerdict}
  */
 export function sessionEligibility(issueNumber: number, mySession: string, { run = defaultRun, repo = REPO, repos, adoptedBranch }: {
     run?: typeof defaultRun; repo?: string; repos?: readonly { key: string; repo: string; }[]; adoptedBranch?: string;
-} = {}): { reason: string | null; walked: WalkedPast[]; } {
+} = {}): YieldVerdict {
   const ghRun = (args: string[]) => run("gh", args);
-  const refused = (reason: string) => ({ reason, walked: [] });
+  const refused = (reason: string): YieldVerdict => ({ reason, walked: [], emergency: null });
 
   // #989: B2 asks whether a ROW is in build, not whether a PR is open. `null` from the lookup is
   // INCONCLUSIVE and returns no refusal, exactly as the PR-shaped version did -- a failed lookup must
@@ -719,8 +720,11 @@ export function sessionEligibility(issueNumber: number, mySession: string, { run
   const ask: B4Ask = { myFiles: lookupMyRegionFiles(issueNumber, { run: ghRun, repo }),
     otherPrFiles: lookupOpenPrFiles({ run: ghRun, trackerRepo: repo, repos }), issueNumber, adoptedBranch, run: ghRun, repo, repos };
   const refusal = b4Refusal(ask);
-  return refusal === null ? { reason: null, walked: [] } : chairmanYield(ask, refusal);
+  return refusal === null ? { reason: null, walked: [], emergency: null } : chairmanYield(ask, refusal);
 }
+
+/** #4793, #989: a B4 verdict and the holders a priority row was let past. `emergency` is the incident its `priority:emergency` yield was for, else `null`. */
+export type YieldVerdict = { reason: string | null; walked: WalkedPast[]; emergency: string | null; };
 
 type ClaimedRows = { number: number; files: string[]; blockedBy: number[]; }[];
 
@@ -729,9 +733,10 @@ type B4Ask = {
   run: (args: string[]) => string; repo: string; repos?: readonly { key: string; repo: string; }[];
   /**
    * #4799: THE READS `check` HAS ALREADY MADE, and the one thing it must not do that the claim does. Absent for the claim, which reads its own and posts the sweep windows'
-   * row writes; present for `check`, which asks the same questions of what it read and writes nothing. `chairmanRows` is lazy because it is asked only after a refusal.
+   * row writes; present for `check`, which asks the same questions of what it read and writes nothing. `chairmanRows` and `emergencyRows` are lazy because they are asked only after a refusal.
    */
-  made?: { claimed: ClaimedRows | null; sweepFreeze: (myFiles: string[]) => string | null; chairmanRows: () => ReadonlySet<number> | null; };
+  made?: { claimed: ClaimedRows | null; sweepFreeze: (myFiles: string[]) => string | null; chairmanRows: () => ReadonlySet<number> | null;
+    emergencyRows: () => ReadonlyMap<number, string> | null; };
 };
 
 /** The rows a listed pull request declares it closes, which `closes` may carry bare (as the hand-run fixtures write it). */
@@ -770,10 +775,11 @@ function b4Refusal(ask: B4Ask, only?: ReadonlySet<number>): string | null {
  * asked again over the chairman holders alone, and a refusal from that is the answer. A sweep's freeze, a Region that could not be read and every check
  * before B4 are inside or ahead of the same two halves and are untouched.
  */
-function chairmanYield(ask: B4Ask, refusal: string): { reason: string | null; walked: WalkedPast[]; } {
+function chairmanYield(ask: B4Ask, refusal: string): YieldVerdict {
   const verdict = chairmanYieldVerdict(ask, refusal);
   if (verdict.reason === null) {
-    process.stderr.write(`row-claim: #${ask.issueNumber} is a chairman row, so B4 yields (#4793): claiming over ${walkedNames(verdict.walked)}. They rebase onto it when it lands.\n`);
+    const by = verdict.emergency === null ? "a chairman row, so B4 yields (#4793)" : `an emergency row for ${verdict.emergency}, so B4 yields (#989)`;
+    process.stderr.write(`row-claim: #${ask.issueNumber} is ${by}: claiming over ${walkedNames(verdict.walked)}. They rebase onto it when it lands.\n`);
   }
   return verdict;
 }
@@ -781,13 +787,18 @@ function chairmanYield(ask: B4Ask, refusal: string): { reason: string | null; wa
 /**
  * #4799: THE DECISION, WITHOUT THE WORDS: what the claim does with a B4 refusal, and what `check` predicts of it from the reads it made. Both call this, so a
  * `check` that says "yields" says it by the same code that lets the claim past, and the two cannot be taught different rules for whose a row is.
+ *
+ * #989: a PRIORITY row is one the chairman labelled `priority:chairman` (#4793) OR one whose `priority:emergency` the gate honours. The two are read as one set, so
+ * two priority rows still exclude each other whichever kind they are.
  */
-function chairmanYieldVerdict(ask: B4Ask, refusal: string): { reason: string | null; walked: WalkedPast[]; } {
+function chairmanYieldVerdict(ask: B4Ask, refusal: string): YieldVerdict {
   const chairmanRows = ask.made === undefined ? lookupChairmanRows({ run: ask.run, repo: ask.repo }) : ask.made.chairmanRows();
-  if (chairmanRows === null || !chairmanRows.has(ask.issueNumber)) return { reason: refusal, walked: [] };
-  const remaining = b4Refusal(ask, chairmanRows);
-  if (remaining !== null) return { reason: remaining, walked: [] };
-  return { reason: null, walked: holdersWalkedPast(ask) };
+  const emergencyRows = ask.made === undefined ? lookupEmergencyRows({ run: ask.run, repo: ask.repo }) : ask.made.emergencyRows();
+  const priority = new Set<number>([...(chairmanRows ?? []), ...(emergencyRows?.keys() ?? [])]);
+  if (!priority.has(ask.issueNumber)) return { reason: refusal, walked: [], emergency: null };
+  const remaining = b4Refusal(ask, priority);
+  if (remaining !== null) return { reason: remaining, walked: [], emergency: null };
+  return { reason: null, walked: holdersWalkedPast(ask), emergency: emergencyRows?.get(ask.issueNumber) ?? null };
 }
 
 /** Every holder that would have refused this row alone: the claimed rows and the pull requests, in the order B4's halves are read. */
@@ -809,8 +820,13 @@ const walkedNames = (walked: WalkedPast[]): string => walked
   .map((holder) => (holder.kind === "row" ? `row #${holder.number}` : `pull request #${holder.number}${holder.repo === undefined ? "" : ` in ${holder.repo}`}`)).join(", ");
 
 /** The comment a claim that went ahead over holders leaves on the row, so the rebase order has something to read. `null` when it walked past nobody. */
-export function walkedPastNote(issueNumber: number, walked: WalkedPast[]): string | null {
+export function walkedPastNote(issueNumber: number, walked: WalkedPast[], emergency: string | null = null): string | null {
   if (walked.length === 0) return null;
+  if (emergency !== null) {
+    return `**B4 yielded to an emergency row (agent-org#989).** #${issueNumber} carries \`${EMERGENCY_PRIORITY_LABEL}\`, which the gate honours for ${emergency}, and overlaps `
+      + `${walkedNames(walked)}, none of which is itself a priority row. The claim went ahead; each of those REBASES ONTO THIS ROW when it lands. `
+      + "Two priority rows still exclude each other, and every other check stood.";
+  }
   return `**B4 yielded to the chairman's row (#4793).** #${issueNumber} carries \`${CHAIRMAN_PRIORITY_LABEL}\`, added by the chairman's own login, and overlaps `
     + `${walkedNames(walked)}, none of which is itself a chairman row. The claim went ahead; each of those REBASES ONTO THIS ROW when it lands. `
     + "Two chairman rows still exclude each other, and every other check stood.";
@@ -831,6 +847,25 @@ function lookupChairmanRows({ run, repo }: { run: (args: string[]) => string; re
       .map((row) => ({ number: Number(row.number), labels: (row.labels?.nodes ?? []).map((label: { name: string; }) => ({ name: String(label.name) })) }));
     const inThisTracker = (args: string[]) => run(args.map((arg) => arg.replace("repos/{owner}/{repo}/", `repos/${repo}/`)));
     return readChairmanPriority(listed, inThisTracker).chairmanRows;
+  });
+}
+
+/**
+ * #989: THE ROWS WHOSE `priority:emergency` THE GATE HONOURS this tick, each with the incident it fixes, or `null` when the labelled rows could not be listed
+ * (which every caller reads as NOT honoured). It is the gate's `readEmergencyPriority` over the tracker's own list, so the claim and the offer cannot disagree.
+ * Nothing is read at all while `emergencyPriority.enabled` is off, which is the default (#5032).
+ *
+ * `readEmergencyPriority` names the incident by the gate's repository, and reads `repos/{owner}/{repo}/...` from the directory `gh` runs in; the same placeholder
+ * fill as {@link lookupChairmanRows} points both at this tracker.
+ */
+function lookupEmergencyRows({ run, repo }: { run: (args: string[]) => string; repo: string; }): ReadonlyMap<number, string> | null {
+  const option = readEmergencyPriorityOption();
+  if (!option.enabled) return new Map();
+  return lookup(() => {
+    const listed = readRowsByLabel({ label: EMERGENCY_PRIORITY_LABEL, state: "OPEN", select: "number body labels(first:50){nodes{name}}", run, repo })
+      .map((row) => ({ number: Number(row.number), body: String(row.body ?? ""), labels: (row.labels?.nodes ?? []).map((label: { name: string; }) => ({ name: String(label.name) })) }));
+    const inThisTracker = (args: string[]) => run(args.map((arg) => arg.replace("repos/{owner}/{repo}/", `repos/${repo}/`)));
+    return new Map(readEmergencyPriority(listed, option, inThisTracker).honoured.map((honoured) => [honoured.number, honoured.incident] as const));
   });
 }
 
@@ -1214,9 +1249,9 @@ function preWriteChecks({ issueNumber, mySession, before, drained, instance, ado
     // #2407: ONE INSTANCE, ONE ROW -- the same "new row only" placement, for a spare that holds or has held another.
     const oneRow = oneRowReason(mySession, issueNumber, instance);
     if (oneRow) return { refusal: { claimed: false, reason: oneRow }, blockedByNote: null, scope: null };
-    const { reason: ineligible, walked } = sessionEligibility(issueNumber, mySession, { run: preWrite, adoptedBranch, repo });
-    // #4793: a chairman row that B4 let past holders SAYS SO on the row, through the note a `--blocked-by` exception already leaves.
-    blockedByNote = walkedPastNote(issueNumber, walked);
+    const { reason: ineligible, walked, emergency } = sessionEligibility(issueNumber, mySession, { run: preWrite, adoptedBranch, repo });
+    // #4793: a priority row that B4 let past holders SAYS SO on the row, through the note a `--blocked-by` exception already leaves (#989: and the incident, for an emergency one).
+    blockedByNote = walkedPastNote(issueNumber, walked, emergency);
     if (ineligible) {
       const eligibility = eligibilityWithBlockedBy({ issueNumber, mySession, ineligible, blockedBy },
         { ghRun: ghRunForBody, repo });
@@ -2792,6 +2827,7 @@ export function reportB4(issueNumber: number, deps: {
     claimed?: (where?: { repo?: string; }) => { number: number; files: string[]; blockedBy: number[]; }[] | null;
     sweeps?: (where?: { repo?: string; }) => SweepRow[] | null;
     chairmanRows?: (where?: { repo?: string; }) => ReadonlySet<number> | null;
+    emergencyRows?: (where?: { repo?: string; }) => ReadonlyMap<number, string> | null;
 } = {}) {
   const write = deps.write ?? ((text: string) => process.stdout.write(text));
   const mine = deps.mine ?? lookupMyRegionFiles;
@@ -2806,7 +2842,7 @@ export function reportB4(issueNumber: number, deps: {
   // #3475: THE CLAIMED-ROW HALF, only when the first half could be asked -- a failed read there has already said INCONCLUSIVE.
   if (myFiles !== null && otherPrs !== null) {
     const reads = readClaimedHalf(deps);
-    const yielded = chairmanYieldLine({ myFiles, issueNumber, openPrs: otherPrs, reads, repo: deps.repo, chairmanRows: chairmanRowsOf(deps) });
+    const yielded = chairmanYieldLine({ myFiles, issueNumber, openPrs: otherPrs, reads, repo: deps.repo, chairmanRows: chairmanRowsOf(deps), emergencyRows: emergencyRowsOf(deps) });
     // #4799: A YIELD REPLACES THE VERDICT, NOT THE NOTES: `lines[0]` is `b4Lines`'s verdict, always, and what follows it is the empty-file-list note, which is true either way.
     if (yielded === null) lines.push(claimedB4Line(myFiles, issueNumber, otherPrs, reads));
     else lines.splice(0, 1, yielded);
@@ -2826,6 +2862,9 @@ function readClaimedHalf(deps: { repo?: string; claimed?: (where?: { repo?: stri
   return { claimed, sweeps };
 }
 
+/** #4799, #989: the live `gh` the priority reads ask with, one spawn site for all of them (`gh-call-ratchet` counts spawn sites, and this file is baselined). */
+const priorityGh = (args: string[]): string => defaultRun("gh", args);
+
 /**
  * #4799: whose rows are the chairman's, as `check` asks it -- lazily, and only after a refusal. A caller that injects any other read supplies them all, and one that
  * injects nothing here has declared no history to read: that is today's refusal, which is also what an unreadable history gives the claim.
@@ -2834,23 +2873,36 @@ function chairmanRowsOf(deps: { repo?: string; mine?: unknown; others?: unknown;
   const { repo, chairmanRows } = deps;
   if (chairmanRows !== undefined) return () => chairmanRows({ repo });
   const readsLive = deps.mine === undefined && deps.others === undefined && deps.claimed === undefined;
-  return readsLive ? () => lookupChairmanRows({ run: (args) => defaultRun("gh", args), repo: repo ?? REPO }) : () => null;
+  return readsLive ? () => lookupChairmanRows({ run: priorityGh, repo: repo ?? REPO }) : () => null;
 }
 
 /**
- * #4799: `check`'s sentence for a CHAIRMAN row that B4 would refuse and the claim now lets past (a11ign#4793), or `null` when the claim would refuse it too, or
- * there is nothing to refuse. It is the claim's own decision ({@link chairmanYieldVerdict}) over the reads `check` made, so what is printed is what the claim does:
- * a label somebody else added, an unreadable history and a second chairman row all come back as `null`, and the lines are then exactly what they were.
+ * #989: whose `priority:emergency` rows the gate honours, as `check` asks it -- lazily, and only after a refusal, as {@link chairmanRowsOf} does for chairman rows.
+ * A caller that injects any other read supplies this one too, or gets none: an injected test read has declared no label history, so nothing is honoured for it.
  */
-function chairmanYieldLine({ myFiles, issueNumber, openPrs, reads, repo, chairmanRows }: { myFiles: string[]; issueNumber: number; openPrs: NonNullable<B4Ask["otherPrFiles"]>; reads: { claimed: ClaimedRows | null; sweeps: SweepRow[] | null; }; repo?: string; chairmanRows: () => ReadonlySet<number> | null; }): string | null {
-  // An unread claimed list refuses the claim before a yield is asked (and the chairman history is not worth a round trip to learn nothing).
+function emergencyRowsOf(deps: { repo?: string; mine?: unknown; others?: unknown; claimed?: unknown; chairmanRows?: unknown; emergencyRows?: (where?: { repo?: string; }) => ReadonlyMap<number, string> | null; }): () => ReadonlyMap<number, string> | null {
+  const { repo, emergencyRows } = deps;
+  if (emergencyRows !== undefined) return () => emergencyRows({ repo });
+  const readsLive = deps.mine === undefined && deps.others === undefined && deps.claimed === undefined && deps.chairmanRows === undefined;
+  return readsLive ? () => lookupEmergencyRows({ run: priorityGh, repo: repo ?? REPO }) : () => null;
+}
+
+/**
+ * #4799: `check`'s sentence for a PRIORITY row that B4 would refuse and the claim now lets past (a11ign#4793, or #989 for an emergency row), or `null` when the claim
+ * would refuse it too, or there is nothing to refuse. It is the claim's own decision ({@link chairmanYieldVerdict}) over the reads `check` made, so what is printed is
+ * what the claim does: a label somebody else added, an unreadable history and a second priority row all come back as `null`, and the lines are then exactly what they were.
+ */
+function chairmanYieldLine({ myFiles, issueNumber, openPrs, reads, repo, chairmanRows, emergencyRows }: { myFiles: string[]; issueNumber: number; openPrs: NonNullable<B4Ask["otherPrFiles"]>; reads: { claimed: ClaimedRows | null; sweeps: SweepRow[] | null; }; repo?: string; chairmanRows: () => ReadonlySet<number> | null; emergencyRows: () => ReadonlyMap<number, string> | null; }): string | null {
+  // An unread claimed list refuses the claim before a yield is asked (and the priority history is not worth a round trip to learn nothing).
   if (reads.claimed === null) return null;
-  const made = { claimed: reads.claimed, chairmanRows, sweepFreeze: (files: string[]) => sweepFreezeOf({ myFiles: files, issueNumber, sweeps: reads.sweeps }) };
-  const ask: B4Ask = { myFiles, otherPrFiles: openPrs, issueNumber, run: (args) => defaultRun("gh", args), repo: repo ?? REPO, made };
+  const made = { claimed: reads.claimed, chairmanRows, emergencyRows, sweepFreeze: (files: string[]) => sweepFreezeOf({ myFiles: files, issueNumber, sweeps: reads.sweeps }) };
+  const ask: B4Ask = { myFiles, otherPrFiles: openPrs, issueNumber, run: priorityGh, repo: repo ?? REPO, made };
   const refusal = b4Refusal(ask);
   if (refusal === null) return null;
-  const { reason, walked } = chairmanYieldVerdict(ask, refusal);
-  return reason === null ? `B4: yields to the chairman's row (a11ign#4793); would walk past ${walkedNames(walked)}` : null;
+  const { reason, walked, emergency } = chairmanYieldVerdict(ask, refusal);
+  if (reason !== null) return null;
+  const by = emergency === null ? "the chairman's row (a11ign#4793)" : `the emergency row for ${emergency} (agent-org#989)`;
+  return `B4: yields to ${by}; would walk past ${walkedNames(walked)}`;
 }
 
 /**
