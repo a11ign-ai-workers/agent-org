@@ -1145,10 +1145,12 @@ test("every cause is classified as START or FINISH -- a new one cannot default i
   // its question was answered, once, which a drain exists to land -- and a drain is when the answerer's reply most needs to reach the asker.
   // #4970: `hold-holder-idle` is FINISH, and an ACTION cause. It starts no work -- it wakes the session that holds an approved pull request, then asks the seat that
   // decides about it -- and a drain is when a held pull request most needs releasing, since nothing else is landing.
+  // agent-org#1060: `row-closed-under-open-half` is FINISH, and a JUDGMENT cause. It starts no work -- it asks `product-manager` to reopen a row another half's merge
+  // closed while this half is still open -- and it has its own cause so `ready-row-unclaimable` keeps the one meaning, a refused claim.
   assert.deepEqual(finish, ["answer-given", "answer-label-unexplained", "answer-owed", "awaiting-evidence-stale", "backlog-aged-unpromoted", "blocker-cleared", "chairman-answered", "chairman-blocked",
     "claim-stalled", "claimed-row-amended", "closes-unresolved-repo-wide", "disk-headroom-low", "draft-awaiting-verdict", "draft-convinced-not-ready", "hold-holder-idle", "host-units-stale",
     "lab-job-finished", "org-health", "org-retrospective", "pr-approval-not-counted", "pr-checks-failing", "pr-codeowner-review-missing", "pr-green-unarmed", "pr-merge-conflict", "pr-review-blocked", "primary-stale", "ready-row-incomplete", "ready-row-unclaimable", "ready-rows-untiered", "repeating-log-line", "reviewer-auth-failed",
-    "row-branch-unshipped", "row-call-count-signal", "row-off-board", "tick-overran", "trunk-red", "verdict-comment-unreviewed", "verdict-not-convinced"]);
+    "row-branch-unshipped", "row-call-count-signal", "row-closed-under-open-half", "row-off-board", "tick-overran", "trunk-red", "verdict-comment-unreviewed", "verdict-not-convinced"]);
   for (const cause of START_CAUSES) {
     assert.ok(CAUSES.includes(cause), `${cause} is withheld by a drain but no longer exists`);
   }

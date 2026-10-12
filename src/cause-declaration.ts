@@ -662,6 +662,16 @@ export const TOOL_CAUSE_DECLARATIONS = Object.freeze([
     why: "the gate has already read and quoted the claim's refusal; the output is a decision about whose "
       + "tree it is, over a fact already in the prompt",
   }),
+  declareCause("row-closed-under-open-half", GROUPS.JUDGMENT, {
+    kind: "claude",
+    model: "sonnet",
+    // MEDIUM (agent-org#1060). Its own cause, not `ready-row-unclaimable`'s: that cause means a claim was refused, and this one means a row closed while one of its
+    // halves is still open. The gate has already named the row and the pull request that still `Closes` it; the work is deciding whether to reopen the row, a short
+    // judgment over a fact already in the prompt. JUDGMENT, NOT ACTION_START: it starts no work, and a drain is when a closed row with an open half most needs seeing.
+    effort: "medium",
+    why: "the gate has already named the closed row and the open pull request that still closes it; the output is a decision to reopen the row or say why not, "
+      + "over a fact already in the prompt",
+  }),
   declareCause("ready-rows-untiered", GROUPS.JUDGMENT, {
     kind: "claude",
     model: "sonnet",
