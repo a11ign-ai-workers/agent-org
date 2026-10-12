@@ -294,3 +294,64 @@ test("#3706 (4) an EMPTY listing, a refused read and a list that bounds nothing 
   }
   assert.equal(readBounded({ ...T3534, claimed, closings: closingsOf() }).drops.length, 1, "CONTROL: with the sorted listing the same row drops");
 });
+
+// --- agent-org#805: THE POPULATION. Every order the gate can type for a HELD row, with the holder's pull request OPEN, in either tracker -------------------------
+// The population is what the gate ACTUALLY types: `claimStallTick` every five minutes for four hours (claim-stalled, and a release of it) and `blockerClearedReading`
+// (blocker-cleared, which `tick.ts` gives the home tracker's rows alone). Three placements of the pull request: in the home repository, in another tracked repository
+// with the row in the home tracker, and a row of the other tracker with its pull request in its own repository. THE TWIN is the same placement with NO pull request.
+// The holder is IDLE at its prompt with the standing panes present (a listing without them reads `unknown`, which is no stall), and the nudge memory is carried between
+// ticks as the state file carries it (an idle run is counted from its first tick, so a memory that is dropped each tick never stalls).
+const POP_CLAIM = T("10:30:00");
+const POP_SESSION = "worker-805";
+const POP_ROW = 805;
+const POP_OTHER_ROW = 806;
+const POP_OTHER_TRACKER = { key: "agent-org", repo: "a11ign/agent-org" };
+const POP_AGENTS = [{ label: "ceo", status: "done" }, { label: "orchestrator", status: "done" }, { label: POP_SESSION, status: "idle" }];
+type Placement = "home" | "elsewhere" | "other-tracker";
+
+const popRow = (number: number) => ({ number, title: `row ${number}`, body: "", labels: [{ name: "in-progress" }, { name: `session:${POP_SESSION}` }],
+  blockedBy: { nodes: [{ number: 3384, state: "CLOSED" }] } });
+const popClaim = (number: number) => ({ number, comments: [{ body: claimRecordComment({ session: POP_SESSION, branch: `agent/x-${number}`, worktree: `../wt-${number}` }),
+  createdAt: new Date(POP_CLAIM).toISOString(), author: { login: WORKER } }] });
+/** A pull request of the holder's, on the claim's branch, opened 15 minutes after the claim (young, and inside the clock's own interval). */
+const popPr = (number: number, extra: Partial<Pr> = {}): Pr => ({ number: 900 + number, headRefName: `agent/x-${number}`, title: `row ${number}`,
+  createdAt: "2026-10-04T10:45:00Z", ...extra });
+
+/** Every order typed for the placement, as `{ cause, causeKey }`, over the claim's life. */
+function populationOf(placement: Placement, withPr: boolean): { cause: string; causeKey: string; }[] {
+  const otherRow = placement === "other-tracker";
+  const row = otherRow ? POP_OTHER_ROW : POP_ROW;
+  const homeOpen = withPr && placement === "home" ? [popPr(row)] : [];
+  const elsewhereOpen = withPr && placement !== "home" ? [popPr(row, { repoKey: "agent-org" })] : [];
+  const memory: Record<string, unknown> = {};
+  const typed: { cause: string; causeKey: string; }[] = [];
+  let claimFacts: Facts = undefined as never;
+  for (let minutes = 0; minutes <= 240; minutes += 5) {
+    const tick = claimStallTick({ rows: otherRow ? [] : [popRow(row)], claimedComments: otherRow ? [] : [popClaim(row)], openPrs: homeOpen, mergedPrs: [],
+      elsewhere: { open: elsewhereOpen, merged: [] } as never, trackers: otherRow ? [{ ...POP_OTHER_TRACKER, rows: [popRow(row)], claimedComments: [popClaim(row)] }] : [],
+      io, repo: "/home/agent/repos/a11y-witness", now: POP_CLAIM + minutes * 60_000, restartAt: null, agents: POP_AGENTS,
+      agentSessions: null, stateDir: "/state", ledger: () => "", log: () => {}, read: () => JSON.parse(JSON.stringify(memory)),
+      write: (_path: string, state: object) => { for (const k of Object.keys(memory)) delete memory[k]; Object.assign(memory, state); },
+      onFacts: (f: unknown) => { if (minutes === 0) claimFacts = f as Facts; } } as never) as unknown as { cause: string; causeKey: string; }[];
+    typed.push(...tick.map((o) => ({ cause: o.cause, causeKey: o.causeKey })));
+  }
+  if (!otherRow) {
+    const reading = blockerClearedReading([popRow(row)], TODAY, T("12:00:00"), { openPrs: homeOpen, closings: new Map([[3384, CLEARED]]), claimFacts });
+    typed.push(...reading.orders.map((o) => ({ cause: "blocker-cleared", causeKey: o.causeKey })));
+  }
+  return typed;
+}
+
+test("agent-org#805 THE POPULATION: no claim-stalled or blocker-cleared order is typed for a held row with an open closing pull request, in either tracker", () => {
+  for (const placement of ["home", "elsewhere", "other-tracker"] as const) {
+    assert.deepEqual(populationOf(placement, true), [], `${placement}: an open closing pull request types nothing`);
+  }
+});
+
+test("agent-org#805 POSITIVE CONTROL: the same rows with NO pull request ARE typed -- claim-stalled once idle, and blocker-cleared for the home row", () => {
+  for (const placement of ["home", "elsewhere", "other-tracker"] as const) {
+    const typed = populationOf(placement, false);
+    assert.ok(typed.some((o) => o.cause === "claim-stalled"), `${placement}: claim-stalled is typed without the pull request`);
+    if (placement !== "other-tracker") assert.ok(typed.some((o) => o.cause === "blocker-cleared"), `${placement}: blocker-cleared is typed without the pull request`);
+  }
+});

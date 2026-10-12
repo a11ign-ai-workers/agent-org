@@ -503,10 +503,10 @@ export function withRedChecks<T extends object>(prs: T[] | undefined): (T & { fa
  * a release. Only then the idle clock: a first stall is the nudge, and a holder idle but short of N is `idle-watch`, which is how the first
  * idle tick is remembered (`herdr` reports a status and never since when).
  *
- * WHY A `pr-owned` READING IS NOT THE LAST WORD (#4017). The 2026-10-04 ruling that an open pull request closing the row is not a stall read only
- * {@link clockReading}'s `pr-owned` branch, and this overlay sits ABOVE it and re-reads that very reading, so a holder the clock left alone was still nudged
- * here once it had been idle for N. Which facts reach a nudge is therefore decided in this function, not in the clock: an idle holder with a pull request
- * that is not yet {@link ownPrStillYoung}, and no declared wait.
+ * AN OPEN PULL REQUEST OF THE HOLDER'S IS NEVER A NUDGE (agent-org#805). The clock reads it `pr-owned`, and this overlay re-reads that reading, so the order of
+ * the two is what decides: a `pr-owned` holder is returned as it is, whatever its idle time, its declaration and the age of the pull request, and nothing
+ * here or in the clock types a claim-stalled order for a row with one open. The ruling is the row's, not the clock's: #4017 let a pull request be nudged
+ * once it was two hours old, and a row with an open closing pull request must type no claim-stalled order at all.
  *
  * @param {ClaimFacts} facts
  * @param {{ now: number, restartAt: number | null, nudge: { nudgedAt: number, deliveredAt: number | null, idle?: boolean, count?: number } | null,
@@ -519,6 +519,10 @@ function overlayReading(facts: ClaimFacts, ctx: {
     }): Reading {
   const base = clockReading(facts, ctx);
   if (base.kind !== "pr-owned" && base.kind !== "moving") return base;
+  // (agent-org#805) AN OPEN PULL REQUEST OF THE HOLDER'S IS NEVER A NUDGE, except a RED one: the red-check nudge (`redCheckNudgePrompt`) is the one exception the
+  // #1151 ruling names, because it exists for an open, red pull request. Everything below that is a counted nudge is reached by a red holder only.
+  const red = facts.nothing !== true && redOwnPrs(withRedChecks(facts.ownPrs)).length > 0;
+  if (facts.openPrs > 0 && !red) return base;
   // #458: THE STOPPED CLOCK is for a claim that names a branch; a `Claimed-nothing:` claim keeps N (it is idle at its prompt by design).
   // #460: `declared` is what the worker's last turn ended on, read by the gate for a claim that names a branch. Its presence turns the DECLARATION REGIME on, in
   // which an idle holder with no fresh and still-true declaration is stalled at M, a young pull request of its own no excuse (it should have declared `waiting-ci`).
@@ -526,10 +530,8 @@ function overlayReading(facts: ClaimFacts, ctx: {
   const idle = idleClaimantReading({ session: facts.session, prs: withRedChecks(facts.ownPrs), built: facts.nothing !== true,
     ...(regime ? { declared: facts.declared } : {}),
     waitKinds: [...(facts.waitKind ? [facts.waitKind] : []), ...(facts.blockedBy.length > 0 ? ["blocked-by"] : [])] }, ctx);
-  // (agent-org#743) A RED PULL REQUEST OF ITS OWN IS NO YOUNG ONE'S GRACE: that grace is the review the org owes, and nobody owes a review to a red check.
-  const red = facts.nothing !== true && redOwnPrs(withRedChecks(facts.ownPrs)).length > 0;
-  if (idle.kind === "waiting" || (!regime && !red && ownPrStillYoung(facts, ctx))) return base;
-  // (agent-org#743) A HOLDER WITH A PULL REQUEST OPEN IS COUNTED, one without it is the second reading's (below): the two paths do not meet.
+  if (idle.kind === "waiting") return base;
+  // (agent-org#743) A HOLDER WITH A PULL REQUEST OPEN IS COUNTED, one without it is the second reading's (below): the two paths do not meet. Only a red one reaches here (above).
   const counted = facts.openPrs > 0 && facts.nothing !== true;
   const held = ctx.nudge === null ? null : counted ? unansweredNudges(facts, idle, ctx) : rememberedNudge(facts, ctx);
   if (held !== null) return held.kind === "nudged" && !counted ? idleAgainReading(held, idle, facts, ctx) : held;
@@ -587,25 +589,6 @@ function unansweredNudges(facts: ClaimFacts, idle: IdleReading, ctx: Parameters<
     return { kind: "release", why: "stalled", lastMoveAt, idleMs: idle.idleMs, nudgedAt: nudge.nudgedAt, idle: true, count, idleSince: idle.since };
   }
   return { kind: "nudge", idle: true, lastMoveAt: ctx.now - idle.idleMs, idleMs: idle.idleMs, count: count + 1, unanswered: nudge.nudgedAt };
-}
-
-/**
- * (#4017) A PULL REQUEST THE HOLDER OPENED INSIDE THE CLOCK'S OWN INTERVAL IS WAITING ON THE REVIEW THE ORG OWES, AND THAT IS NOT THE HOLDER STALLING.
- * Five idle nudges in three days were typed while a pull request closing the row was open (#3560, #3591, #3719, #3787, #3993), each 52 to 74 minutes
- * after the pull request opened and each before the gate had asked anybody to review it: the overlay's N is 45 minutes, derived from the gap between a
- * claim and its FIRST pull request (#2999), and was being applied to the gap between that pull request and its first review, which took 69 to 162 minutes
- * in the same five. A holder with nothing left to do but wait cannot shorten that wait, and the nudge starts a turn that re-reads its whole window.
- *
- * THE BOUND IS {@link STALL_INTERVAL_MS}, the interval `moving` already grants a row, and NOT a figure derived from those five: it keeps #2999's
- * own case (#2968 and #2969 sat behind `pr-owned` for 171 and 233 minutes) a stall, and moves nothing but the first two hours of a pull request's life.
- * THE NEWEST OWN PULL REQUEST DECIDES: opening a second one is a move. A pull request whose age the list did not carry, or carried unparseably, is NOT young --
- * absence is not proof, and it is today's reading.
- * @param {ClaimFacts} facts @param {{ now: number, intervalMs?: number }} ctx @returns {boolean}
- */
-function ownPrStillYoung(facts: ClaimFacts, ctx: { now: number; intervalMs?: number; }): boolean {
-  const interval = ctx.intervalMs ?? STALL_INTERVAL_MS;
-  const opened = (facts.ownPrs ?? []).map((pr) => Date.parse(String((pr as { createdAt?: string }).createdAt ?? ""))).filter(Number.isFinite);
-  return opened.length > 0 && ctx.now - Math.max(...opened) < interval;
 }
 
 /**
