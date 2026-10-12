@@ -43,4 +43,4 @@ platform: checked GitHub (Dependabot cannot read a commit pin, as `ci.yml`'s own
 
 Revert: `"enabled": false` in `renovate.json` (the preset's own off switch), or revert this pull request. A bump pull request already open stays open and is closed by hand.
 
-Net lines (`git diff --cached --numstat`): +121 outside this file and the changeset (`renovate.json` 39, the test 73, `ci.yml` +4 -3), all additions. The 200-line interim workflow, its policy and its test leave in the follow-up, once the replacement has run live.
+Net lines (`git diff --cached --numstat`): +116 additions and -3 deletions outside this file and the changeset (`renovate.json` 39, the test 73, `ci.yml` +4 -3). The 200-line interim workflow, its policy and its test leave in the follow-up, once the replacement has run live.
