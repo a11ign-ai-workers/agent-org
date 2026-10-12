@@ -184,6 +184,8 @@ export function clearingAskWindow(cleared: number[], nowMs: number, closings: Ma
 
 /** How many rows `readRecentlyClosed` asks for. */
 const RECENTLY_CLOSED_LIMIT = 100;
+/** A commit sha the `Head:` line may carry: the same 7-40 lowercase hex the class's `HEAD_PATTERN` reads back. */
+const HEAD_SHA = /^[0-9a-f]{7,40}$/;
 
 /**
  * When each listed row closed. `closedNoLaterThan` is set only by `readRecentlyClosed` and only when its list is PROVEN ordered by `updatedAt`: every row ABSENT from the map then closed no later than it (#3706). A plain `Map` -- a test's, an old caller's -- carries none, and an absent blocker is then a read that was not made.
@@ -284,16 +286,21 @@ export function readRecentlyClosed(run: (args: string[]) => string = defaultRun)
  * closed; without it (`null`, or an old caller) every order is the unstaged first ask, which is the
  * behaviour before the backoff existed and is what a refused read must fall back to.
  *
+ * `head` IS THE `origin/main` COMMIT THE GATE READ THIS TICK, STAMPED INTO EACH PROMPT AS A `Head: <sha>` LINE (#1129). The
+ * `unclaimed-blocker-cleared` decision class guards `promote` on that line, so an order that states none holds the class for
+ * ever. Absent, or not a hex sha, the line is OMITTED -- never written as "unknown" -- which is what leaves `promote`
+ * unavailable, as before. It is NOT in `causeKey`: a moving `main` must not turn one clearing into a new question.
+ *
  * @param rows every open row
  */
-export function unclaimedBlockerClearedOrders(rows: any[], today: string = todayIso(), { closings = null, now = Date.now() }: { closings?: Map<number, number> | null; now?: number; } = {}): {
+export function unclaimedBlockerClearedOrders(rows: any[], today: string = todayIso(), { closings = null, now = Date.now(), head = null }: { closings?: Map<number, number> | null; now?: number; head?: string | null; } = {}): {
     session: string; cause: string; subject: string; discriminator: string;
     prompt: string; causeKey: string;
 }[] {
   const orders = [];
   for (const { row, cleared } of unclaimedClearings(rows, today, now)) {
     const window = clearingAskWindow(cleared, now, closings);
-    if (window) orders.push(promotionOrder(row, cleared, window.suffix));
+    if (window) orders.push(promotionOrder(row, cleared, window.suffix, head));
     if (orders.length >= MAX_ROW_ORDERS_PER_TICK) break;
   }
   return orders;
@@ -346,8 +353,9 @@ export function unclaimedClearings(rows: any[], today: string = todayIso(), nowM
  *
  *
  * @param [suffix] which re-ask this is -- `""` for the first, `@6h` for the one due six hours on
+ * @param [head] the `origin/main` commit the gate read; a `Head: <sha>` line when it is a hex sha, no line otherwise (#1129)
  */
-function promotionOrder(row: any, cleared: number[], suffix: string = "") {
+function promotionOrder(row: any, cleared: number[], suffix: string = "", head: string | null = null) {
   // RE-DERIVED RATHER THAN PASSED IN: the caller's list is its own, and a helper that reads the row it
   // is describing cannot be handed labels belonging to a different one.
   const hiding = labelsOf(row).filter((n) => NOT_PICKABLE.includes(n));
@@ -375,7 +383,9 @@ function promotionOrder(row: any, cleared: number[], suffix: string = "") {
           + "clears itself and one only a person re-reading the row can lift.\n"
         : "")
       + "THIS IS NOT A SURVEY OF THE BACKLOG. One row, one clearing, already named -- if the answer is "
-      + "\"it stays in backlog\", say so in a field and this stops asking.",
+      + "\"it stays in backlog\", say so in a field and this stops asking."
+      // ON ITS OWN LINE: the class reads it with a line-anchored pattern (`HEAD_PATTERN`).
+      + (head !== null && HEAD_SHA.test(head) ? `\nHead: ${head}` : ""),
     causeKey: `product-manager/unclaimed-blocker-cleared/row-${subjectRef(row.repoKey, row.number)}/${key}${suffix}`,
   };
 }
