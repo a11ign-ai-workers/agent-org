@@ -9,7 +9,7 @@ import { join } from "node:path";
 import { test } from "node:test";
 import { fileURLToPath } from "node:url";
 import {
-  compareReadings, dailyMeans, isWake, keyInstanceRows, matchLedger, measure, parseArgs, parseLedger, parseTranscript, readMergedPulls, renderReading, reviewerTarget, rowsClosedBy, workerRowFor,
+  compareReadings, dailyMeans, isWake, keyInstanceRows, matchLedger, measure, parseArgs, parseLedger, parseTranscript, readInstances, readMergedPulls, renderReading, reviewerTarget, rowsClosedBy, workerRowFor,
 } from "./wakes-per-row.ts";
 import * as everyTracker from "./wakes-per-row.ts"; // the readers #4080 adds, by namespace so a run without them fails each test and not the file's import
 
@@ -476,4 +476,35 @@ test("agent-org#804: keyInstanceRows keys only a declared key's worker, and neve
 test("agent-org#804: a reading with every row measured prints no PARTIAL", () => {
   const text = renderReading(run());
   assert.doesNotMatch(text, /PARTIAL/);
+});
+
+// ---- agent-org#1122: one NUL-padded spare-cycles line is skipped and counted, and the aggregate does not abort -------------------------------------------
+const NUL_PADDED = "\0".repeat(64);
+const cycleLine = (role: string, row: number, iso: string) => JSON.stringify({ role, row, rows: [row], at: at(iso), clean: true });
+const VALID_CYCLES = [cycleLine("worker-3390", 3390, "2026-10-04T10:00:00Z"), cycleLine("worker-agent-org-804", 804, "2026-10-04T11:00:00Z")];
+function spareDir(lines: string[]) {
+  const dir = mkdtempSync(join(tmpdir(), "spare-cycles-"));
+  writeFileSync(join(dir, "spare-cycles"), `${lines.join("\n")}\n`);
+  writeFileSync(join(dir, "spare-instances.json"), "{}");
+  return dir;
+}
+
+test("agent-org#1122: a NUL-padded spare-cycles line between two valid ones is skipped and counted, and both valid instances are read", () => {
+  const read = readInstances(spareDir([VALID_CYCLES[0], NUL_PADDED, VALID_CYCLES[1]]));
+  assert.deepEqual(read.instances.map((instance) => [instance.session, instance.rows, instance.endedAt]), [
+    ["worker-3390", [3390], at("2026-10-04T10:00:00Z")],
+    ["worker-agent-org-804", [804], at("2026-10-04T11:00:00Z")],
+  ]);
+  assert.equal(read.skipped, 1);
+});
+
+test("agent-org#1122: the same fixture without the NUL line skips nothing (positive control)", () => {
+  const read = readInstances(spareDir(VALID_CYCLES));
+  assert.equal(read.instances.length, 2);
+  assert.equal(read.skipped, 0);
+});
+
+test("agent-org#1122: the reading names the skipped spare-cycles lines, and a reading with none names nothing", () => {
+  assert.match(renderReading(run({ unreadInstances: 1 })), /UNREADABLE spare-cycles lines: 1 skipped, not read as instances/);
+  assert.doesNotMatch(renderReading(run()), /UNREADABLE spare-cycles/);
 });
