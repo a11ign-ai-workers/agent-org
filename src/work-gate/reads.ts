@@ -7,6 +7,7 @@ import { newestPerName } from "../newest-check-run.ts";
 import { LS_REMOTE_ARGS, rowBranchesInListing } from "../row-claim/row-branch-rule.ts";
 import { sandboxGitEnv } from "../lib/git-env.ts";
 import { stateEntryPath } from "../host-config.ts";
+import { budgetLine, meteredRun, restConditionalOn, tickBudget } from "../gh-conditional.ts";
 import { cachedReleaseBehind, readReleaseBehind, npmRegistryRead } from "../release-behind-main.ts";
 import { armedFromApi, openPullRequestsQueryArgs } from "../auto-arm-sweep.ts";
 import { REPO } from "../project-identity.ts";
@@ -111,8 +112,15 @@ export const ghWithin = (timeoutMs: number, { stdio, log = (line) => process.std
   }
 };
 
+/**
+ * THE FLAG `gate.restConditional` (a11ign#5128), read ONCE at import: each tick is a fresh process, so this is that tick's answer and a
+ * change lands on the next tick, never mid-tick. Off, `defaultRun` is the `gh` it has always been.
+ */
+const TICK_METERED = restConditionalOn() ? tickBudget : null;
+if (TICK_METERED !== null) process.on("exit", () => process.stderr.write(`${budgetLine(TICK_METERED.summary())}\n`));
+
 /** @param [repo] the repository to aim at; the ambient one when omitted */
-export const defaultRun = ghWithin(GH_READ_TIMEOUT_MS);
+export const defaultRun = meteredRun(ghWithin(GH_READ_TIMEOUT_MS), TICK_METERED);
 
 /**
  * #4128: THE RELEASE-BEHIND-MAIN FACTS, at most once an hour (see the comment in `GH_READS`). Through `defaultRun`, the identity the tick already reads as and never another config.
@@ -133,7 +141,7 @@ const ghOptions = (repo: string | undefined): import("node:child_process").ExecF
   ({ encoding: "utf8", maxBuffer: 32 * 1024 * 1024, ...(repo === undefined ? {} : { env: { ...process.env, GH_REPO: repo } }) });
 
 /** `defaultRun` with `gh`'s stderr CAPTURED on the error instead of inherited: for a read whose refusal is an answer the caller handles (#3724). */
-const capturedRun = ghWithin(GH_READ_TIMEOUT_MS, { stdio: "pipe" });
+const capturedRun = meteredRun(ghWithin(GH_READ_TIMEOUT_MS, { stdio: "pipe" }), TICK_METERED);
 
 /**
  * The reader a refusal-handling read asks through: the default one is swapped for the capturing one, and a test's `run` stands for `gh` as it is.

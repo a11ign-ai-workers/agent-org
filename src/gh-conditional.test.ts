@@ -11,7 +11,7 @@ import { test } from "node:test";
 import { existsSync, mkdirSync, mkdtempSync, rmSync, writeFileSync } from "node:fs";
 import { tmpdir } from "node:os";
 import { join } from "node:path";
-import { budgetLine, budgetOf, conditionalGate, partitionUnchanged, restConditionalOn, seenOf, TICK_POINTS_CAP } from "./gh-conditional.ts";
+import { budgetLine, budgetOf, conditionalGate, meteredRun, partitionUnchanged, restConditionalOn, seenOf, TICK_POINTS_CAP } from "./gh-conditional.ts";
 import { readValidators, saveValidators, type Validated } from "./trace/publish.ts";
 
 const ETAG = 'W/"abc123"';
@@ -122,4 +122,34 @@ test("the flag is a marker file: present turns the REST path on, absent leaves t
   } finally {
     rmSync(dir, { recursive: true, force: true });
   }
+});
+
+test("(c) metered: the GraphQL read that would pass the cap is refused before gh runs, and the refusal throws as a failed gh does", () => {
+  const sent: string[][] = [];
+  const run = (args: string[]) => { sent.push(args); return "[]"; };
+  const budget = budgetOf({ cap: 2 });
+  const metered = meteredRun(run, budget);
+  metered(["pr", "list", "--limit", "100"]);
+  metered(["issue", "list", "--limit", "500"]);
+  assert.throws(() => metered(["pr", "list"]), /gate-budget: refused `gh pr list` at 2\/2 points/);
+  assert.equal(sent.length, 2, "a refused read never reaches gh");
+  assert.equal(budget.summary().total, 2);
+});
+
+test("(c) positive control: REST, a mutation and a plain write are not charged, so the cap cannot refuse them", () => {
+  const sent: string[][] = [];
+  const run = (args: string[]) => { sent.push(args); return ""; };
+  const budget = budgetOf({ cap: 1 });
+  const metered = meteredRun(run, budget);
+  metered(["api", "repos/a11ign/a11ign/pulls/5/files?per_page=100"]);
+  metered(["api", "graphql", "-f", "query=mutation { enablePullRequestAutoMerge(input: {}) { clientMutationId } }"]);
+  metered(["pr", "merge", "5", "--squash"]);
+  metered(["api", "graphql", "-f", "query=query { viewer { login } }"]);
+  assert.equal(sent.length, 4, "the three non-reads ran, and the one GraphQL query was the one the cap allowed");
+  assert.deepEqual(budget.summary(), { total: 1, cap: 1, byCause: { "api graphql": 1 } });
+});
+
+test("(c) flag off: a null budget hands the run back unchanged, and nothing is charged", () => {
+  const run = (_args: string[]) => "ok";
+  assert.equal(meteredRun(run, null), run);
 });

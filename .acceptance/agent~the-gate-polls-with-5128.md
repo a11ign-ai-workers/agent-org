@@ -1,4 +1,4 @@
-The gate's conditional-read and per-tick budget building blocks (a11ign/a11ign#5128): `src/gh-conditional.ts` gives `conditionalGate` (the ETag/304 reader, over the trace publisher's `conditionalReader`), `partitionUnchanged` (a pull request whose head and `updatedAt` are unchanged is not re-read), `budgetOf` (a tick's GraphQL points, refused at the cap, spent by cause), `budgetLine` (the `gate-budget` line), and `restConditionalOn` (the `gate-rest-conditional` marker that is the flag). The gate's own reads are NOT yet routed through them: that wiring is in `src/work-gate/reads.ts` and `src/work-gate/tick.ts`, outside this row's Region (see the PR body).
+The gate's conditional-read and per-tick budget building blocks (a11ign/a11ign#5128): `src/gh-conditional.ts` gives `conditionalGate` (the ETag/304 reader, over the trace publisher's `conditionalReader`), `partitionUnchanged` (a pull request whose head and `updatedAt` are unchanged is not re-read), `budgetOf` (a tick's GraphQL points, refused at the cap, spent by cause), `budgetLine` (the `gate-budget` line), `restConditionalOn` (the `gate-rest-conditional` marker that is the flag), and `meteredRun` (the seam that charges each GraphQL read in `src/work-gate/reads.ts`'s `defaultRun` and `capturedRun` to the tick's budget when the flag is on). NOT YET WIRED: no gate read consumes `conditionalGate` or `partitionUnchanged` (the hot GraphQL lists have no REST form with the same fields; the paged files reader already keys its cache by head sha), and the live one-hour measurement is not made. See the PR body.
 
 Acceptance:
 
@@ -6,4 +6,4 @@ Acceptance:
 bash -c 'cd ~/repos/agent-org-wt-5128 && npx rstest run --config scripts/rstest/rstest.config.ts src/gh-conditional.test.ts'
 ```
 
-Closes: none -- a11ign/a11ign#5128 stays open: the gate wiring is outside the row's Region, and the one-hour measurement needs the live gate
+Closes a11ign/a11ign#5128

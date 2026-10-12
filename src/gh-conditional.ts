@@ -85,3 +85,39 @@ export function budgetLine({ total, cap, byCause }: BudgetSummary): string {
   const causes = Object.entries(byCause).map(([cause, points]) => `${cause} ${points}`).join(", ");
   return `gate-budget: ${total}/${cap} points (${causes})`;
 }
+
+export type Budget = ReturnType<typeof budgetOf>;
+
+/** Each tick is its own process, so one budget per process is one budget per tick. */
+export const tickBudget: Budget = budgetOf();
+
+/**
+ * The points one GraphQL read is charged. An ESTIMATE of one per call, not a measurement: `gh`'s own cost is per query, and the live
+ * one-hour measurement is what would say whether one is right.
+ */
+export const POINTS_PER_GRAPHQL_READ = 1;
+
+/**
+ * A read that spends GraphQL: `gh pr|issue list|view` and `gh api graphql` that is a QUERY. A mutation is not a read and is never refused
+ * by the cap, because a refused write is a lost write (`pr merge`, `issue edit`, the graphql arm call).
+ */
+export function graphqlReadOf(args: string[]): boolean {
+  const [head, verb] = args;
+  if ((head === "pr" || head === "issue") && (verb === "list" || verb === "view")) return true;
+  return head === "api" && verb === "graphql" && !args.some((arg) => /^query=\s*mutation\b/.test(arg));
+}
+
+/**
+ * `run`, metered: a GraphQL read is charged to the budget first, and REFUSED when the charge would pass its cap. A refusal THROWS, as a failed
+ * `gh` does, so every reader's own refusal path takes it: nothing new is thrown at a caller. A `null` budget is the flag being off, and
+ * `run` comes back as it was.
+ */
+export function meteredRun(run: (args: string[], repo?: string) => string, budget: Budget | null): (args: string[], repo?: string) => string {
+  if (budget === null) return run;
+  return (args, repo) => {
+    if (graphqlReadOf(args) && !budget.spend(args.slice(0, 2).join(" "), POINTS_PER_GRAPHQL_READ)) {
+      throw new Error(`gate-budget: refused \`gh ${args.slice(0, 2).join(" ")}\` at ${budget.summary().total}/${budget.summary().cap} points`);
+    }
+    return run(args, repo);
+  };
+}
