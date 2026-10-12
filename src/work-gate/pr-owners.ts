@@ -48,7 +48,7 @@ export function withClosingRowOwners(prs: any[], openRows: any[], rowsRepo?: str
     if (closing === "split") return pr;
     const owner = closing ?? branchRowOwner(pr, held);
     if (owner) return { ...pr, rowOwner: owner };
-    return pr.labelEnded ? { ...pr, ...rowsNobodyHolds(pr, openRows, rowsRepo) } : pr;
+    return { ...pr, ...rowsNobodyHolds(pr, openRows, rowsRepo) };
   });
 }
 
@@ -62,6 +62,10 @@ export function withClosingRowOwners(prs: any[], openRows: any[], rowsRepo?: str
  * named row is closed (`closingRowsClosed`, absent from `openRows`) or open and unheld (`closingRowsUnheld`; the wording differs, see `deadOwnerRowClause`).
  * #5115: A PR THAT NAMES NO ROW (`Closes: none -- <reason>`) is `closingRowsNone`, the third shape, and not "nobody could be named": its owner is known and gone
  * all the same, and a11ign#5115 (label `session:worker-5109`) was recorded as `owner-unresolved` for it, the eighth time.
+ * #5201: THE SAME LADDER FOR A PR WITH NO LABEL AT ALL. Its branch names a row (`agent/<slug>-<n>`), or it closes one, and that row is open with nobody
+ * holding it, so nobody will ever own it by a label: a11ign#5201 (no label, branch `agent/the-webhook-last-mile-5197`, row #5197 open and unheld) was
+ * recorded `owner-unresolved`, the tenth time. Such a PR is `closingRowsClosed` / `closingRowsUnheld` like a dead owner's, and `product-manager` owns it.
+ * `closingRowsNone` is NOT set for it: a PR with no label that names no row (`fix-typo`, `Closes: none`) is still "nobody could be named", and a test pins that.
  * TWO READINGS MUST NOT PASS FOR ANY OF THEM: no rows read at all (`openRows` empty because the read was refused, the case `withClosingRowOwners` leaves as
  * it was, and not "unclaimed"), which is `{}`.
  */
@@ -69,7 +73,7 @@ function rowsNobodyHolds(pr: any, openRows: any[], rowsRepo?: string): { closing
   if (openRows.length === 0) return {};
   const open = new Set(openRows.map((row) => Number(row.number)));
   const named = rowsNamedBy(pr, rowsRepo);
-  if (named.length === 0) return { closingRowsNone: true };
+  if (named.length === 0) return pr.labelEnded ? { closingRowsNone: true } : {};
   return named.every(({ row }) => !open.has(row)) ? { closingRowsClosed: true } : { closingRowsUnheld: true };
 }
 

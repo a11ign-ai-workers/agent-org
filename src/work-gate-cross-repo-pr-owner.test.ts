@@ -68,12 +68,15 @@ test("(1) the #436 fixture is ordered to worker-4371 by the BRANCH NUMBER alone"
   assert.match(orders[0].prompt, /REPOSITORY `agent-org`/, "the order still says which repository its number belongs to");
 });
 
-test("(1) NEGATIVE: a branch number naming a row held by NOBODY keeps the fallback order to ceo", () => {
-  for (const rows of [[], [row(4371, "in-progress")], [row(4371, "session:worker-4371")], [claimed(9999, "worker-9999")]]) {
+test("(1) NEGATIVE: a branch number naming a row nobody holds is owner-gone to product-manager (#5201); no rows read keeps the fallback order to ceo", () => {
+  for (const rows of [[row(4371, "in-progress")], [row(4371, "session:worker-4371")], [claimed(9999, "worker-9999")]]) {
     const { orders } = failingOrders([pr436({ body: "" })], rows);
-    assert.equal(orders[0].session, "ceo");
-    assert.match(orders[0].prompt, /NOBODY COULD BE NAMED/);
+    assert.equal(orders[0].session, "product-manager");
+    assert.doesNotMatch(orders[0].prompt, /NOBODY COULD BE NAMED/);
   }
+  const { orders } = failingOrders([pr436({ body: "" })], []);
+  assert.equal(orders[0].session, "ceo");
+  assert.match(orders[0].prompt, /NOBODY COULD BE NAMED/);
 });
 
 test("(2) the `Row:` line alone resolves it; the same line naming ANOTHER repository, or a bare #n, does not", () => {
@@ -94,7 +97,8 @@ test("(3) a `Closes a11ign/a11ign#4371` line alone resolves it, and so does GitH
 test("(4) the second fixture, agent-org#437: no row line at all, the branch number alone", () => {
   const pr437 = nameless({ number: 437, headRefName: "agent/triage-provider-4384", body: "Closes: none -- a triage fix" });
   assert.deepEqual(ownerOf([pr437], [claimed(4384, "worker-4384")]), ["worker-4384"]);
-  assert.deepEqual(ownerOf([pr437], LIVE_4371), ["ceo"], "control: the same PR with the claim held by another row");
+  // #5201: row 4384 is not open in LIVE_4371, so it is closed and owner-gone, not "nobody could be named"
+  assert.deepEqual(ownerOf([pr437], LIVE_4371), ["product-manager"], "control: the same PR with the claim held by another row");
 });
 
 test("(5) a PR with its own live session label is never touched, whatever its lines say", () => {

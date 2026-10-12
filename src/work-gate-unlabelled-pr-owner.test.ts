@@ -36,18 +36,29 @@ test("an unlabelled red PR whose closed row holds one live session is addressed 
   assert.match(order.prompt, /row it closes \(#2875\) is held by you/);
 });
 
-test("the same PR with rows naming nobody, a released claim, no read at all or an unlisted row still falls to ceo", () => {
+/**
+ * #5201: a PR with NO label whose closing row is not held is OWNER-GONE, to `product-manager`, not "nobody could be named": the row it
+ * closes is open and unheld, or closed and absent from the open list. Only a row list that was not read, or a PR naming no row, is still `ceo`.
+ */
+test("the same PR whose closed row nobody holds is owner-gone to product-manager, a released claim too; no read at all or no row named still falls to ceo", () => {
+  const ownerGone = (openRows: Fixture[], closes = [2875]) => {
+    const [order] = failingOrders([pr(closes)], openRows);
+    assert.equal(order.session, "product-manager");
+    assert.equal(order.causeKey, "product-manager/pr-checks-failing/pr-2880/24b0e94f");
+    assert.doesNotMatch(order.prompt, /NOBODY COULD BE NAMED/);
+  };
+  ownerGone([row(2875, "in-progress")]); // open, claimed by nobody (#5201)
+  ownerGone([row(2875, "session:worker-2875")]); // a released claim: the label outlived `in-progress` (#5201)
+  ownerGone([claimed(9999, "worker-9999")]); // a live row, but not the one this PR closes: the one it closes is not open, so closed (#5201)
+
   const fallsBack = (openRows: Fixture[], closes = [2875]) => {
     const [order] = failingOrders([pr(closes)], openRows);
     assert.equal(order.session, "ceo");
     assert.equal(order.causeKey, "ceo/pr-checks-failing/pr-2880/24b0e94f");
     assert.match(order.prompt, /NOBODY COULD BE NAMED/);
   };
-  fallsBack([row(2875, "in-progress")]); // claimed by nobody
-  fallsBack([row(2875, "session:worker-2875")]); // a released claim: the label outlived `in-progress`
   fallsBack([]); // the rows were not read
-  fallsBack([claimed(9999, "worker-9999")]); // a live row, but not the one this PR closes
-  fallsBack([claimed(2875, "worker-2875")], []); // GitHub resolved no closing reference
+  fallsBack([claimed(2875, "worker-2875")], []); // GitHub resolved no closing reference, and the branch names no row
 });
 
 test("two rows naming two different sessions are a question, so ceo keeps it; two naming the SAME one are an answer", () => {
@@ -95,15 +106,23 @@ test("a PR with no label and no closing row, on a branch whose suffix names a he
   assert.match(order.prompt, /branch `agent\/finish-the-move-to-2892` was claimed for row #2892, which is held by you/);
 });
 
-test("a branch naming no held row, a released claim, an unread row list or no numeric suffix still falls to ceo", () => {
+/** #5201: a suffix naming a row nobody holds (open, or closed and absent from the open list) is owner-gone, `product-manager`, as above. */
+test("a branch whose suffix names a row nobody holds is owner-gone to product-manager; an unread row list, no numeric suffix or no `agent/` branch still falls to ceo", () => {
+  const ownerGone = (headRefName: string, openRows: Fixture[]) => {
+    const [order] = failingOrders([onBranch(headRefName)], openRows);
+    assert.equal(order.session, "product-manager");
+    assert.equal(order.causeKey, "product-manager/pr-checks-failing/pr-2880/24b0e94f");
+    assert.doesNotMatch(order.prompt, /NOBODY COULD BE NAMED/);
+  };
+  ownerGone("agent/finish-the-move-to-2892", [claimed(9999, "worker-9999")]); // a held row, but not the suffix's: the suffix's is closed
+  ownerGone("agent/finish-the-move-to-2892", [row(2892, "session:worker-2892")]); // released: the label outlived `in-progress`
+  ownerGone("agent/finish-the-move-to-2892", [row(2892, "in-progress")]); // claimed by nobody
+
   const fallsBack = (headRefName: string, openRows: Fixture[]) => {
     const [order] = failingOrders([onBranch(headRefName)], openRows);
     assert.equal(order.session, "ceo");
     assert.match(order.prompt, /NOBODY COULD BE NAMED/);
   };
-  fallsBack("agent/finish-the-move-to-2892", [claimed(9999, "worker-9999")]); // a held row, but not the suffix's
-  fallsBack("agent/finish-the-move-to-2892", [row(2892, "session:worker-2892")]); // released: the label outlived `in-progress`
-  fallsBack("agent/finish-the-move-to-2892", [row(2892, "in-progress")]); // claimed by nobody
   fallsBack("agent/finish-the-move-to-2892", []); // the rows were not read
   fallsBack("agent/finish-the-move-to", [claimed(2892, "worker-2892")]); // no numeric suffix
   fallsBack("agent/2892-finish-the-move", [claimed(2892, "worker-2892")]); // a number that is not the SUFFIX
