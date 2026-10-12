@@ -1,0 +1,18 @@
+A daily unit posts yesterday's `trace manager-spend` reading on the project's record issue, once a day, and exits non-zero without posting when the trace store is stale or empty (agent-org#912, Move 2/3 of a11ign/a11ign#4505).
+
+**What it is.** `host/manager-spend-post.sh` reads `units.traceWeeklyIssue` and `tracker[0].repo` from the declaration (`$AGENT_ORG_PROJECT`), and FAILS on a missing or malformed field rather than guessing. It names yesterday in UTC, checks the trace store at `~/.cache/a11ign/trace/events.ndjson` (absent, or holding no events, or with a newest event before the day ends, is a named failure), runs `agent-org trace -- manager-spend --day <day> --store <store>`, and posts the reading with `gh issue comment`. A marker `~/.cache/a11ign/manager-spend-post/<day>` is written only after the post succeeds, so a refused post is retried and a second run the same day posts nothing. `host/manager-spend-post.timer.in` fires daily at 07:45 Europe/London with `Persistent=true`, and has no `Requires=`, so `host:install` does not start it. `host/manager-spend-post.service.in` is a oneshot with the workers' `GH_CONFIG_DIR`, and no `[Install]`.
+
+**Lists it joined.** The weekly report's lists, as the row asked: `src/host-units.ts` (the shipped list and the `OTHER_TOOL_FORMS` entry), and in `src/packaging/host-units.test.ts` the `spending` list, the non-requiring timer list, and a tool-form test. In `src/packaging/host-project-paths.test.ts`: the file-scan count (3 + 35), the `shippedUnits` list, the classification count (34, with `managerSpend` subtracted) and the acme services list. These files are outside the row's Region and are declared as `Outside-Region:` lines in the PR body.
+
+**Measured at this head.** `src/manager-spend-post.test.ts` 9 of 9. `src/packaging/host-units.test.ts`, `src/packaging/host-project-paths.test.ts` and the new test: 198 of 198. The changed-set run (`rstest run --changed=origin/main`): 803 of 803 across 16 files. `npx tsc --noEmit` (`pnpm run typecheck`): clean. `.github/scripts/leak-scan.ts`: 0 leaks in 1992 files. `.github/scripts/workflow-paths.ts`: all present. The real `agent-org trace -- manager-spend --day 2026-10-11 --store <host store>` exits 0 and prints `### Manager spend, 2026-10-11 (UTC)`. The script run end to end on the real host store, with a stub `gh` that logs and does not post, exits 0, posts the reading for `2026-10-11` to `acme/widgets#4242`, and writes the marker.
+
+**Mutation.** Each run and restored byte-identical (`cp` to a scratchpad copy, `diff`): (1) the stale guard removed (`-ge 0`): the stale NEGATIVE CONTROL fails and no other; (2) the once-a-day marker check disabled (`if false`): the second-run NEGATIVE CONTROL fails and no other. The restored script passes 9 of 9.
+
+**Not run.** Nothing was posted to GitHub: every post in this session went to a stub `gh`. The unit has not been installed on a host.
+
+**Acceptance correction.** The row's third Acceptance line is `bash -c 'cd ~/repos/agent-org && npx rstest run ...'`. `~/repos/agent-org` is the primary clone on `HEAD` (`b95142dc`), where this branch does not exist, and the command fails with `No test files`. The same command run from the worktree passes, so the Acceptance below runs from the worktree and the `cd` is dropped. The first two lines use `git grep`, which reads tracked files, so they pass once the test file is committed.
+
+Acceptance:
+git grep -q "POSITIVE CONTROL" -- src/manager-spend-post.test.ts
+git grep -q "NEGATIVE CONTROL" -- src/manager-spend-post.test.ts
+npx rstest run --config scripts/rstest/rstest.config.ts src/manager-spend-post.test.ts

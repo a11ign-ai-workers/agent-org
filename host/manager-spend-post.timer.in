@@ -1,0 +1,18 @@
+[Unit]
+# THE CLOCK BEHIND THE DAILY MANAGER-SPEND READING -- a11ign/a11ign#4505 (Move 2/3), agent-org#912. See @@prefix@@manager-spend-post.service
+# for what it runs, and why a timer rather than a session reading a clock.
+Description=Daily 07:45 London post of the manager-spend reading (#4505)
+
+[Timer]
+# LONDON, NOT UTC, in the expression, for the reason trace-weekly.timer.in gives: the reading is read against a London working morning.
+#
+# 07:45, AFTER the trace store's five-minute ingest has run for the night: the reading is of YESTERDAY, so a morning run finds the store fed through the
+# day's end. It is a write (`gh issue comment`) and reads GitHub nowhere, so it does not share the work tick's or the board's API minute.
+OnCalendar=*-*-* 07:45:00 Europe/London
+
+# A HOST THAT WAS ASLEEP OR REBOOTING AT 07:45 STILL POSTS, when it is next up. The reading names its own day, so a catch-up run posts the day that ended.
+# The marker keeps a second run of that day from posting twice.
+Persistent=true
+
+[Install]
+WantedBy=timers.target

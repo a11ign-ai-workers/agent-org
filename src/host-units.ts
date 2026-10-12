@@ -103,6 +103,8 @@ export const TOOL_ENTRIES = Object.freeze([
   "agent-org",
   // a11ign/a11ign#3627: the weekly token-efficiency report's pair and the script it runs, beside the board dispatcher's and shaped like them.
   "trace-weekly.service.in", "trace-weekly.timer.in", "trace-weekly-post.sh",
+  // a11ign/a11ign#4505 (Move 2/3), agent-org#912: the daily manager-spend reading's pair and the script it runs, beside the weekly report's and shaped like it.
+  "manager-spend-post.service.in", "manager-spend-post.timer.in", "manager-spend-post.sh",
   // a11ign/a11ign#3515: the trace pages' pair. The service runs `src/trace/publish.ts`, which decides whether a head has moved; the timer is only a clock.
   "trace-publish.service.in", "trace-publish.timer.in",
   // a11ign/agent-org#498: the trace store's own five-minute clock. The service runs `src/trace/freshness.ts` (ingest, then the freshness check and its once-per-episode incident); the timer is only a clock.
@@ -399,6 +401,11 @@ const OTHER_TOOL_FORMS: Readonly<Record<string, ReadonlyArray<readonly [RegExp, 
   "trace-weekly.service.in": [
     [/^ExecStart=\/usr\/bin\/bash packages\/agent-org\/host\/trace-weekly-post\.sh$/m,
       "Environment=AGENT_ORG_PROJECT=$CHECKOUT/.agent-org/project.json\nExecStart=/usr/bin/bash host/trace-weekly-post.sh"],
+  ],
+  // THE DAILY MANAGER-SPEND POST (a11ign/a11ign#4505, agent-org#912): the same two lines as the weekly report's, for the same reason (the script reads `$AGENT_ORG_PROJECT`).
+  "manager-spend-post.service.in": [
+    [/^ExecStart=\/usr\/bin\/bash packages\/agent-org\/host\/manager-spend-post\.sh$/m,
+      "Environment=AGENT_ORG_PROJECT=$CHECKOUT/.agent-org/project.json\nExecStart=/usr/bin/bash host/manager-spend-post.sh"],
   ],
   // THE /TMP FIXTURE JANITOR (a11ign/a11ign#3849): run from the tool's checkout, like the prune above it.
   "tmp-prune.service.in": [
