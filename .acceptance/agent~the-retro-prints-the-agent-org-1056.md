@@ -11,7 +11,7 @@ The retro prints the rows the spec lint refused in the last 24 hours, on the lin
 - Each ledger line is one refused finding. "Rows" counts distinct `#<row>` values in the window; "findings" counts lines. A second finding on one row is one row and two findings.
 - The reader lives in `org-retro.ts`, not `spec-lint.ts`, because `spec-lint.ts` is outside this Region. The only lint-side name it uses is `UNNAMED_FIELD`, imported read-only.
 - No trended NUMBERS entry, as the row asks.
-- No changeset: the change is under `src/`, and the changeset rule applies to `host/` only.
+- Changeset: `.changeset/the-retro-prints-the-spec-lint-refusals.md` (patch). The first CI run failed `changeset-required`: `src/` is releasable, so a changeset was needed after all. Patch, because the change adds one report line and changes no command, flag or file a pinned project reads.
 
 **Evidence, measured on this branch.**
 - Acceptance: `src/spec-lint-retro.test.ts` 6 of 6 pass.
