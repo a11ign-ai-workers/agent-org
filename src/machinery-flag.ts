@@ -18,6 +18,7 @@ import { writeJsonObject } from "./claim-stall.ts";
 import { CANARY_STATE_FILE, STANDARD_MACHINERY_SIGNALS, emptyCanaryState, machineryFlagOn, parseCanaryState, withMachineryFlag, type CanaryState, type FlagRecord } from "./org-health.ts";
 import { CHAIN_WAIT_FLAG } from "./work-gate/causes/org-health-chain-wait.ts";
 import { REENQUEUE_EJECTED_FLAG } from "./work-gate/causes/pr-ejected.ts";
+import { QUEUE_ENTRY_NO_RUN_FLAG } from "./work-gate/causes/queue-entry-no-run.ts";
 import { CLOSED_UNDER_HALF_FLAG } from "./work-gate/causes/rows-closed-under-half.ts";
 import { REVIEWER_STATE_DIR } from "./work-gate/vocabulary.ts";
 import { AUTO_UNPARK_FLAG } from "./unpark-satisfied.ts";
@@ -25,7 +26,7 @@ import { AUTO_UNPARK_FLAG } from "./unpark-satisfied.ts";
 const REFUSED = 2;
 
 /** The flags a module reads. A name that is not here is refused by `switchFlag`. */
-export const FLAG_REGISTRY: readonly string[] = Object.freeze([REENQUEUE_EJECTED_FLAG, CHAIN_WAIT_FLAG, CLOSED_UNDER_HALF_FLAG, AUTO_UNPARK_FLAG]);
+export const FLAG_REGISTRY: readonly string[] = Object.freeze([REENQUEUE_EJECTED_FLAG, CHAIN_WAIT_FLAG, CLOSED_UNDER_HALF_FLAG, AUTO_UNPARK_FLAG, QUEUE_ENTRY_NO_RUN_FLAG]);
 
 export const USAGE = [
   "usage: agent-org machinery:flag on|off <name> [--signals=a,b] --session=<you>",

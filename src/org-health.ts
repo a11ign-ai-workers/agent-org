@@ -41,6 +41,10 @@
 //                                            never an order of its own to wake on; the tick retries each tick, so it clears itself. The record's own p50/p95 are on the row.
 //   tick-wall-high               any         the tick wall's p95 over the last 24 h is past the limit (`tickHealthOf`, the record's own cost file): more than one tick in twenty overran, which is a trend
 //                                            for `ceo`'s daily read and not an order per overrun. Its detail carries p50/p95 and `tick-overran` wakes per day (slow reads 0; killed is the one that wakes).
+// THE MERGE QUEUE'S ENTRY WITH NO RUN, agent-org#1195 (a11ign#928: "the merge queue sat for 50 minutes on an entry whose CI never started"; asked only while `queue.queueEntryNoRun` is on):
+//   queue-entry-no-run           any         the day's re-queues of an entry GitHub never requested checks for (the count the chairman asked for), and an INCIDENT for a repeat: no run AGAIN after its
+//                                            one re-queue, which the gate does not re-queue a second time. To `product-manager`, who reads it first, and `ceo`.
+//   queue-head-age               > 10 min    the position-1 entry has stood in the queue longer than the detector's limit, so a stall of that shape shows at ten minutes and not at fifty.
 // WHY THE 180-MINUTE "NOT PROGRESSING" SIGNAL WAS REPLACED, not tuned: it fired at about 13x the median open-to-merge, exempted held and
 // drafted PRs by construction (so a hold whose reason had gone, agent-org #149, and an approved draft with no stamp, #3406, were
 // invisible), and counted any comment as activity, so a PR the bots kept commenting on never aged (#2950 sat 7.5 h; #3460 was re-queued).
@@ -247,10 +251,12 @@ export const SIGNALS = Object.freeze({
   FLAG_WITHOUT_SWITCH: "flag-without-a-switch",
   TICK_RECORD_UNWRITTEN: "tick-record-unwritten",
   TICK_WALL_HIGH: "tick-wall-high",
+  QUEUE_ENTRY_NO_RUN: "queue-entry-no-run",
+  QUEUE_HEAD_AGE: "queue-head-age",
 });
 
 /** Signals whose first reader is not `ceo`: the order goes to that session as well as to `ceo`, who takes every signal. */
-const FIRST_READERS = (Object.freeze({ [SIGNALS.STATE_LABEL]: FIRST_READER, [SIGNALS.BOARD_TRUTH]: FIRST_READER, [SIGNALS.SHELVED_CIRCLE]: FIRST_READER, [SIGNALS.FLAG_WITHOUT_SWITCH]: FIRST_READER }) as Readonly<Record<string, string>>);
+const FIRST_READERS = (Object.freeze({ [SIGNALS.STATE_LABEL]: FIRST_READER, [SIGNALS.BOARD_TRUTH]: FIRST_READER, [SIGNALS.SHELVED_CIRCLE]: FIRST_READER, [SIGNALS.FLAG_WITHOUT_SWITCH]: FIRST_READER, [SIGNALS.QUEUE_ENTRY_NO_RUN]: FIRST_READER, [SIGNALS.QUEUE_HEAD_AGE]: FIRST_READER }) as Readonly<Record<string, string>>);
 
 /**
  * `detail` is one line: for `unknown` it is WHY, for `tripped` the numbers. `firstTrippedAt` is epoch ms, or `null` when the signal's own source carries no time.
@@ -760,6 +766,36 @@ export function tickWallReading({ day, health }: { day: string; health: TickHeal
   const detail = tickHealthLine(health);
   if (!tickWallIsHigh(health)) return { signal, status: "clear", detail };
   return { signal, status: "tripped", firstTrippedAt: null, discriminator: `${signal}@${day}`, detail };
+}
+
+/** What the merge-queue detector counted: the day's re-queues, and each entry that stood with no run AGAIN after its one re-queue (`why` says what that re-queue came to). */
+export type QueueNoRunFact = { today: number; repeats: { pull: number; sha: string; minutes: number; why: string }[] };
+
+/**
+ * SIGNAL: A MERGE-QUEUE ENTRY WHOSE CHECKS NEVER STARTED (agent-org#1195). It COUNTS the day's re-queues, which is the chairman's "so we know how often GitHub drops the event", and it names an INCIDENT
+ * for a repeat: an entry with no run AGAIN after its one re-queue, which the gate does not re-queue a second time. Keyed on the day, the count and the repeats, so a new occurrence is a new order
+ * and a standing one is not. It is a DIGEST class: `product-manager` reads it first and at once, `ceo` in the digest, and a queue that stays stuck also trips `no-merge-while-work-exists`.
+ */
+export function queueEntryNoRunReading({ day, fact }: { day: string; fact: QueueNoRunFact; }): Reading {
+  const signal = SIGNALS.QUEUE_ENTRY_NO_RUN;
+  if (fact.today === 0 && fact.repeats.length === 0) return clear(signal);
+  const lines = fact.repeats.map((repeat) => `INCIDENT: #${repeat.pull} has stood AWAITING_CHECKS ${repeat.minutes} minutes with no run on ${repeat.sha.slice(0, 12)} AGAIN after its one re-queue (${repeat.why}); the gate does not re-queue it a second time`);
+  return { signal, status: "tripped", firstTrippedAt: null,
+    discriminator: `${signal}@${day}:${fact.today}:${fact.repeats.map((repeat) => repeat.pull).sort((a, b) => a - b).join(",")}`,
+    detail: [`${fact.today} merge-queue entr${fact.today === 1 ? "y was" : "ies were"} re-queued today because no run of its group ever started`, ...lines].join("\n") };
+}
+
+/**
+ * SIGNAL: THE POSITION-1 ENTRY HAS STOOD IN THE MERGE QUEUE TOO LONG (agent-org#1195). `head` is `null` for an empty queue, which is clear; `runs` is the count of `merge_group` runs on its head commit,
+ * `null` when that was not read, and is said in the detail so the reader sees at once whether the checks started. Keyed on the day and the pull request, so a stall is ONE order, not one per tick.
+ * @param limit the age past which it trips: the detector's own, so the two agree on what "too long" is
+ */
+export function queueHeadAgeReading({ day, head, limit }: { day: string; head: { pull: number | null; minutes: number; state: string; runs: number | null } | null; limit: number; }): Reading {
+  const signal = SIGNALS.QUEUE_HEAD_AGE;
+  if (head === null || head.minutes <= limit) return clear(signal);
+  const runs = head.runs === null ? "its runs were not read" : head.runs === 0 ? "no run exists on its group" : `${head.runs} run${head.runs === 1 ? "" : "s"} on its group`;
+  return { signal, status: "tripped", firstTrippedAt: null, discriminator: `${signal}@${day}:#${head.pull ?? "unknown"}`,
+    detail: `the merge queue's position-1 entry (${head.pull === null ? "no pull request named" : `#${head.pull}`}) has stood ${head.minutes} minutes, past ${limit}, in ${head.state}; ${runs}` };
 }
 
 /**
@@ -2089,6 +2125,14 @@ const REMEDY = (Object.freeze({
   [SIGNALS.TICK_WALL_HIGH]: "The tick's wall is past its limit at the 95th percentile over the last 24 h: more than one tick in twenty overran. The figures are above (p50, p95, the slow ticks "
     + "recorded on the standing row, and `tick-overran` wakes per day, where slow reads 0 and killed is the one case that still wakes). This is a trend to read, not a tick to act on: open the "
     + "standing row's table (the longest phase of each slow tick is named there) and file one row for the phase that dominates, or say it is the host and not the code. A single overrun is never an order.",
+  [SIGNALS.QUEUE_ENTRY_NO_RUN]: "A merge-queue entry's group never got its checks requested, so no run was ever created and the queue sat behind it (a11ign#5227, 50 minutes, 2026-10-12). The gate dequeues and "
+    + "re-queues such an entry ONCE with no model turn (flag `queue.queueEntryNoRun`) and counts each; the count above is how often GitHub drops the event. An INCIDENT line is the same pull request with no run AGAIN "
+    + "after that one re-queue, which the gate does not repeat: read why it came to (`why`), look at the pull request's merge-queue timeline and the repository's Actions status, re-queue it by hand "
+    + "(`gh pr merge <n> --auto --merge` after the dequeue) if the queue is still stuck, and FILE what you find `" + READY_LABEL + "` WITH AN OWNER in this turn. "
+    + "A count with no incident needs no act: it is the measurement, and `queue-entry-no-run.json` in the state directory keeps the day's number.",
+  [SIGNALS.QUEUE_HEAD_AGE]: "The merge queue's position-1 entry has stood longer than the detector's limit, so everything behind it waits. The detail says whether any run exists on its group: none is "
+    + "`queue-entry-no-run`'s shape (the gate re-queues it once, if its flag is on); a run that is queued or hung is the runner or the workflow, and a run that is red leaves the queue by itself. "
+    + "Read the entry's pull request and its newest `merge_group` run before choosing, and FILE what you find `" + READY_LABEL + "` WITH AN OWNER in this turn. It clears the tick the head entry is younger than the limit or gone.",
   [APPROVED_DIRTY_SIGNAL]: "An approved pull request has been DIRTY (it conflicts with main) for more than " + APPROVED_DIRTY_MINUTES + " minutes and nobody has pushed to its head inside that window, so it cannot land and nothing is rebasing it. "
     + "The named PRs are above. Rebase each one onto main, or if its author is away, say so on the PR and name who takes it; a push to the head clears the finding, and so does a merge. "
     + "Do not clear it by approving again, which changes nothing about the conflict.",

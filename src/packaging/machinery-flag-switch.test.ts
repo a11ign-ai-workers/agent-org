@@ -18,6 +18,7 @@ import { CANARY_STATE_FILE, emptyCanaryState, machineryFlagOn, withMachineryFlag
 import { readReenqueueState, REENQUEUE_EJECTED_FLAG } from "../work-gate/causes/pr-ejected.ts";
 import { CHAIN_WAIT_FLAG } from "../work-gate/causes/org-health-chain-wait.ts";
 import { CLOSED_UNDER_HALF_FLAG } from "../work-gate/causes/rows-closed-under-half.ts";
+import { QUEUE_ENTRY_NO_RUN_FLAG } from "../work-gate/causes/queue-entry-no-run.ts";
 import { AUTO_UNPARK_FLAG } from "../unpark-satisfied.ts";
 
 const SESSION = "worker-agent-org-1061";
@@ -48,14 +49,15 @@ test("(1) `on` makes the reader read the flag ON, `off` makes it read OFF, and t
   assert.equal(reenqueueOn(dir), false, "the reader sees the flag OFF after `off`");
 });
 
-test("(1) the other three registered flags are switched on and read through their own readers' flag name", () => {
+test("(1) the other four registered flags are switched on and read through their own readers' flag name", () => {
   const dir = tmpDir("machinery-flag-switch-");
-  for (const name of [CHAIN_WAIT_FLAG, CLOSED_UNDER_HALF_FLAG, AUTO_UNPARK_FLAG]) assert.equal(run(dir, ["on", name, `--session=${SESSION}`]).code, 0);
+  for (const name of [CHAIN_WAIT_FLAG, CLOSED_UNDER_HALF_FLAG, AUTO_UNPARK_FLAG, QUEUE_ENTRY_NO_RUN_FLAG]) assert.equal(run(dir, ["on", name, `--session=${SESSION}`]).code, 0);
   const state = JSON.parse(readFileSync(join(dir, CANARY_STATE_FILE), "utf8")) as CanaryState;
   assert.equal(machineryFlagOn(state, CHAIN_WAIT_FLAG), true);
   assert.equal(machineryFlagOn(state, CLOSED_UNDER_HALF_FLAG), true);
   assert.equal(machineryFlagOn(state, AUTO_UNPARK_FLAG), true, "rows.autoUnpark is switched by the command, which the gate's reader then sees");
-  assert.deepEqual(FLAG_REGISTRY, [REENQUEUE_EJECTED_FLAG, CHAIN_WAIT_FLAG, CLOSED_UNDER_HALF_FLAG, AUTO_UNPARK_FLAG], "the registry is the four flags a module reads");
+  assert.equal(machineryFlagOn(state, QUEUE_ENTRY_NO_RUN_FLAG), true, "queue.queueEntryNoRun is switched by the command, which the gate's reader then sees (agent-org#1195)");
+  assert.deepEqual(FLAG_REGISTRY, [REENQUEUE_EJECTED_FLAG, CHAIN_WAIT_FLAG, CLOSED_UNDER_HALF_FLAG, AUTO_UNPARK_FLAG, QUEUE_ENTRY_NO_RUN_FLAG], "the registry is the five flags a module reads");
 });
 
 test("(2) a name no module reads is refused, and nothing is written", () => {
