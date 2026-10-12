@@ -60,6 +60,21 @@ Environment=GH_CONFIG_DIR=@@workersDir@@/gh
 Nice=19
 IOSchedulingClass=idle
 
+# TWO CHECKOUTS, ONE UNIT (#1067). The tool's own checkout -- agent-org, which the host declares as `tool` -- takes the
+# worktrees a row's claim leaves behind just as the project's does, and it was never pruned: the line below ran from the
+# tool's directory with the PROJECT as its argument, so the tool's worktrees (the 100-worktree cap refusing claims) stood.
+# The first line is the tool's pass. It names no path: `pruneWorktrees` takes its cwd when given none, and the tool form
+# sets `WorkingDirectory=` to the declared `tool`, so the path comes from the host's declaration and not from this file.
+# The last line is the project's pass, untouched. The tool form rewrites it to pass the declared project checkout.
+#
+# THE FIRST PASS IS WRAPPED IN `timeout` AND THE LAST IS NOT, and the `-` prefix is the other half. A hung `git` in the
+# tool's checkout must not take the project's pass with it: `timeout` ends the tool's pass at its bound, the `-` lets the
+# next line run whatever it returned, and `TimeoutStartSec` below bounds the start phase for the project's line alone.
+# `timeout` signals the node process only, not a `git` child it has already started; that child is left to systemd, which
+# stops the unit's whole cgroup once the start phase ends. Each pass is bounded separately, so the per-run limit
+# (`MAX_REMOVALS_PER_RUN`) holds per pass: a firing removes at most twice that. The cap of 100 is NOT this unit's gate: a
+# pass removes whatever is removable whether the checkout is under the cap or not, and every refusal above still applies.
+#
 # `--apply` OR THIS UNIT IS A REPORT NOBODY READS. The bare script is deliberately a DRY RUN, and for a
 # measured reason: on 2026-09-09 a session ran the bare prune script to READ the breakdown before
 # writing a row about worktree accounting, and removed three other sessions' trees. So the flag that makes
@@ -71,12 +86,15 @@ IOSchedulingClass=idle
 # git activity in the last 10 minutes (#220, a tree deleted mid-`git stash`). It never passes `--force`, so
 # `git worktree remove`'s own refusal is a second guard behind its own. Nothing here needs a human's eye,
 # which is exactly why it must not need a model turn.
+ExecStart=-/usr/bin/timeout --kill-after=30 600 %h/.local/bin/node src/prune-worktrees.ts --apply
 ExecStart=%h/.local/bin/pnpm run worktrees:prune -- --apply
 
 # MEASURED 2026-09-22 ON THIS HOST: 88s for a full pass over 143 worktrees, most of it `git status` in each
 # one. The bound is generous against that because the cost falls as the backlog clears (fewer trees, less
-# I/O) and because what this timeout is really for is a hung `git`, not a slow one.
-TimeoutStartSec=900
+# I/O) and because what this timeout is really for is a hung `git`, not a slow one. The first pass has its
+# own 600s bound (above), so this one covers the start phase as a whole: the project's pass plus whatever
+# the tool's pass used, with room for both bounds to be hit in full.
+TimeoutStartSec=1500
 
 # NO `[Install]` SECTION, UNLIKE @@prefix@@work-tick.service AND a11ign-corpus-snapshot.service -- #1993's
 # shape, for a reason of this unit's own. `WantedBy=default.target` on a oneshot means "also run at boot",

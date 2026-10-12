@@ -1314,7 +1314,8 @@ test("#2000: the unit passes `--apply`, or the clock runs a REPORT and the backl
   // trees), so the flag has to be in the unit, and something has to say that it is.
   const service = shippedText("a11ign-worktree-prune.service");
   assert.match(service, /^ExecStart=%h\/\.local\/bin\/pnpm run worktrees:prune -- --apply$/m);
-  assert.deepEqual(entriesFromCommand(execCommands(service)[0]),
+  // THE LAST COMMAND, not the first: the tool's own pass (#1067) comes before it, wrapped in `timeout`, and the project's pass is the one this test has always meant.
+  assert.deepEqual(entriesFromCommand(execCommands(service).at(-1) ?? ""),
     [join(TOOL_ROOT, "src/prune-worktrees.ts")],
     "and the command resolves through package.json to the script itself -- a renamed npm script leaves "
     + "the unit syntactically perfect and starting nothing");
@@ -1326,6 +1327,43 @@ test("#2000: the unit passes `--apply`, or the clock runs a REPORT and the backl
     "and the service has NO [Install]: `WantedBy=default.target` would also prune at boot, while `herdr` "
     + "is restoring sessions into trees that have by definition been git-quiet for longer than "
     + "ACTIVITY_WINDOW_MS. Install and the calendar are the two entry points; boot is not one of them");
+});
+
+// #1067: the prune covered the project's checkout and never the tool's, so the tool's worktrees (the cap of 100 refusing claims) were never pruned.
+// The installed unit runs one pass per checkout, each named by the host's declaration: `tool` is the cwd of the first, `projects` the argument of the last.
+const execLines = (text: string) => text.split("\n").filter((line) => /^ExecStart=/.test(line));
+// The host declaration refuses a `tool` with a trailing slash, and TOOL_ROOT carries one.
+const TOOL_DIR = TOOL_ROOT.replace(/\/+$/, "");
+
+test("#1067: installed with a `tool`, the prune makes one pass over the tool's checkout AND one over the project's, both named by the host declaration", () => {
+  const installed = shippedUnitText("a11ign-worktree-prune.service", { host: hostWith({ tool: TOOL_DIR }) }) ?? "";
+  assert.ok(hasLine(installed, `WorkingDirectory=${TOOL_DIR}`), "POSITIVE CONTROL: the tool form is what this test renders");
+  // THE TOOL'S PASS names no path: its cwd is the declared `tool`, so a path written here would be a second copy of that declaration.
+  // THE PROJECT'S PASS takes the declared checkout as its argument. Deleting either line fails this assertion, which is the case it exists for.
+  assert.deepEqual(execLines(installed), [
+    "ExecStart=-/usr/bin/timeout --kill-after=30 600 %h/.local/bin/node src/prune-worktrees.ts --apply",
+    `ExecStart=%h/.local/bin/node src/prune-worktrees.ts --apply ${PROJECT_ROOT}`,
+  ], "two passes, the tool's first, and the project's last and unwrapped");
+});
+
+test("#1067: one pass failing does not stop the other: the tool's is bounded and `-`-prefixed, the project's is the last line, and the start phase outlives the bound", () => {
+  for (const text of [shippedText("a11ign-worktree-prune.service"), shippedUnitText("a11ign-worktree-prune.service", { host: hostWith({ tool: TOOL_DIR }) }) ?? ""]) {
+    const [first, last] = execLines(text);
+    assert.ok(first && last, `POSITIVE CONTROL: two passes are found: ${execLines(text).join(" | ")}`);
+    assert.match(first, /^ExecStart=-/, "the tool's pass is `-`-prefixed, so a failure there does not fail the start phase before the project's line runs");
+    assert.doesNotMatch(last, /^ExecStart=-/, "the project's pass is not `-`-prefixed: it is the last line, so its failure is the unit's failure, as it was before");
+    const bound = Number(/\/timeout --kill-after=\d+ (\d+) /.exec(first)?.[1]);
+    const startTimeout = Number(/^TimeoutStartSec=(\d+)$/m.exec(text)?.[1]);
+    assert.ok(bound > 0, "the tool's pass is bounded by timeout(1), so a hung `git` there ends the pass and not the unit");
+    assert.ok(startTimeout > bound, `TimeoutStartSec (${startTimeout}) must outlive the tool's bound (${bound}), or systemd kills the unit before the project's line runs`);
+  }
+});
+
+test("#1067: `--force` is in neither pass, in either form", () => {
+  for (const text of [shippedText("a11ign-worktree-prune.service"), shippedUnitText("a11ign-worktree-prune.service", { host: hostWith({ tool: TOOL_DIR }) }) ?? ""]) {
+    assert.ok(execLines(text).length > 0, "POSITIVE CONTROL: the ExecStart lines are found, so the check below is over something");
+    for (const line of execLines(text)) assert.doesNotMatch(line, /--force\b/, `the prune never passes --force: ${line}`);
+  }
 });
 
 test("#2782: the prune's API spend is ONE claim read per removable tree, declared under the workers' account, and READ rather than assumed", () => {
@@ -3010,6 +3048,9 @@ test("#3443 (6): the chairman listener and watcher render `node <tool>/src/...` 
 /** The wrapper a project's declared `beforeTick` is run in: its own checkout, since a unit cannot set a directory per line. The command after it is checked like any other. */
 const IN_PROJECT_CHECKOUT = (command: string) => command.replace(/^\/usr\/bin\/env -C \S+ /, "");
 
+/** The bound the prune's tool pass runs under (#1067): `timeout` runs the program after it and nothing of its own, so the walk checks that program. */
+const UNDER_TIMEOUT = (command: string) => command.replace(/^\/usr\/bin\/timeout --kill-after=\d+ \d+ /, "");
+
 test("#3443 + #3464: THE PROPERTY -- every shipped service in tool form runs agent-org code from the one tool checkout, and NOTHING is exempt", () => {
   const units = readUnitsDeclaration();
   const { beforeTick } = JSON.parse(readFileSync(join(PROJECT_ROOT, ".agent-org/project.json"), "utf8")) as { beforeTick: string };
@@ -3021,7 +3062,7 @@ test("#3443 + #3464: THE PROPERTY -- every shipped service in tool form runs age
     const installed = shippedUnitText(unit, { host: webhookToolHost3443() }) ?? "";
     assert.ok(hasLine(installed, `WorkingDirectory=${TOOL_3443}`), `${unit} runs from the tool checkout`);
     assert.ok(hasLine(installed, `Environment=AGENT_ORG_HOST=${PROJECT_ROOT}/.agent-org/host.json`), `${unit} resolves its project from the host's declaration`);
-    for (const command of execCommands(installed).map(IN_PROJECT_CHECKOUT)) {
+    for (const command of execCommands(installed).map((c) => IN_PROJECT_CHECKOUT(UNDER_TIMEOUT(c)))) {
       assert.doesNotMatch(command, /\bpnpm\b|\bnpm\b|packages\/agent-org/, `${unit} runs ${command}, which is not the tool checkout's code`);
       const [program, ...args] = command.split(/\s+/);
       const script = args.find((arg, at) => !arg.startsWith("-") && args[at - 1] !== "--import");
