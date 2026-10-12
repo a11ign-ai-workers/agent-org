@@ -133,6 +133,19 @@ const metered = (run: (args: string[], repo?: string) => string) => (args: strin
 export const defaultRun = metered(ghWithin(GH_READ_TIMEOUT_MS));
 
 /**
+ * a11ign#5169 (the reviewer's finding on agent-org#1108): WHICH `run` STANDS FOR `gh`. The conditional reads are for the gate's own `gh`, and a test's `run` must
+ * never be given a REST read it did not make; but the gate's reads reach `readPrs` and `readOpenRows` through WRAPPERS (the first wave's rehearsal and replay,
+ * a lane's aim), so `run === defaultRun` is false for every production read and the flag would have selected nothing. A wrapper made of a run that stands for `gh`
+ * stands for it too (`standingFor`); one made of anything else does not.
+ */
+const standsForGh = new WeakSet<object>([defaultRun]);
+export const isGhRun = (run: object): boolean => standsForGh.has(run);
+export function standingFor<W extends object>(run: object, wrapper: W): W {
+  if (standsForGh.has(run)) standsForGh.add(wrapper);
+  return wrapper;
+}
+
+/**
  * #4128: THE RELEASE-BEHIND-MAIN FACTS, at most once an hour (see the comment in `GH_READS`). Through `defaultRun`, the identity the tick already reads as and never another config.
  * @param [where] the directory the hour's facts are kept in; the tick's own unless a caller (a live run) must not write the tick's
  * @returns `null` is a declaration that will not parse, a stated gap
@@ -322,7 +335,7 @@ export function readWithFirstWaveTogether<T>(read: (run: (args: string[], repo?:
   if (batch === undefined) return read(run);
   const asked: Map<string, { args: string[]; repo: string | undefined; }> = new Map();
   try {
-    read((args, repo = activeRepo) => { asked.set(callKey(args, repo), { args, repo }); return "[]"; });
+    read(standingFor(run, (args: string[], repo = activeRepo) => { asked.set(callKey(args, repo), { args, repo }); return "[]"; }));
   } catch (err) {
     log(`NOTE: a reader threw on the rehearsal's empty answers, so its calls run one by one: ${err instanceof Error ? err.message : String(err)}\n`);
     return read(run);
@@ -346,7 +359,7 @@ export function readWithFirstWaveTogether<T>(read: (run: (args: string[], repo?:
     else notFolded.push(call);
   }
   askTogether({ calls: notFolded, batch, waiting, log });
-  return read((args, repo = activeRepo) => {
+  return read(standingFor(run, (args: string[], repo = activeRepo) => {
     const key = callKey(args, repo);
     const answer = waiting.get(key);
     if (answer === undefined) return run(args, repo);
@@ -354,7 +367,7 @@ export function readWithFirstWaveTogether<T>(read: (run: (args: string[], repo?:
     if (!("failed" in answer)) return answer.stdout;
     throw Object.assign(new Error(`Command failed: gh ${args.join(" ")}\n${answer.stderr}`),
       { status: answer.status, stdout: answer.stdout, stderr: answer.stderr, ...(answer.code === undefined ? {} : { code: answer.code }) });
-  });
+  }));
 }
 
 /**
@@ -422,7 +435,7 @@ function openPrsArgs(limit: number): string[] {
  * the org acts on it. Every caller below must keep the two apart. A refused SECOND read is `null` too: the first page alone is a list that may
  * be cut, which is the one answer a caller cannot tell from a whole one.
  */
-export function readPrs(run: (args: string[]) => string = defaultRun, conditional: ConditionalReads | null = run === defaultRun ? conditionalFor(undefined) : null): any[] | null {
+export function readPrs(run: (args: string[]) => string = defaultRun, conditional: ConditionalReads | null = isGhRun(run) ? conditionalFor(undefined) : null): any[] | null {
   const answered = conditional === null ? undefined : conditionalPrs({ run, conditional });
   return answered === undefined ? readPrsAsListed(run) : answered;
 }
@@ -481,10 +494,20 @@ export const ghAskWithin = (timeoutMs: number): Ask => {
 };
 
 /**
+ * What a test stands in for the marker, the state directory and `gh api`, so the gate's OWN selection of the conditional reader (`isGhRun`, through the
+ * first wave's wrappers) can be walked without a host or a `gh`; `null` is the real one.
+ */
+let conditionalSource: ((repo: string | undefined) => ConditionalReads | null) | null = null;
+export function useConditionalSource(source: ((repo: string | undefined) => ConditionalReads | null) | null): void {
+  conditionalSource = source;
+}
+
+/**
  * The conditional reads for `repo` (`undefined` is the ambient one), or `null` when `gate.restConditional` is off: the marker is read WHEN A READ IS MADE, so
  * a tick sees one answer and a change lands on the next.
  */
 export function conditionalFor(repo: string | undefined): ConditionalReads | null {
+  if (conditionalSource !== null) return conditionalSource(repo);
   return restConditionalOn() ? { ask: ghAskWithin(GH_READ_TIMEOUT_MS), dir: stateEntryPath(GATE_VALIDATORS_DIR), now: Date.now(), repo: repo ?? repoNow() } : null;
 }
 
@@ -564,6 +587,7 @@ const isDetailOf = (kept: KeptPr | undefined): kept is KeptPr =>
 /** One pull request's detail, with the fields the open list asks (so a view and a list can never disagree about shape). */
 function viewPr(number: number, run: (args: string[]) => string): any {
   const pr = JSON.parse(run(pullViewArgs(number, openPrsArgs(OPEN_PRS_FIRST_PAGE).at(-1) as string)));
+  if (Array.isArray(pr)) return null; // `gh pr view` answers an object: a list is a stand-in (the first wave's `[]`), and says so
   if (pr?.number !== number) throw new Error(`gh pr view ${number} answered something else`);
   return pr;
 }
@@ -593,6 +617,8 @@ function keptOrAsked({ run, conditional, listed }: { run: (args: string[]) => st
   if (mustRead.size >= listPoints(listed.length)) return readWholeAndKeep({ run, conditional, all });
   const fresh = new Map<number, any>();
   for (const number of mustRead) fresh.set(number, viewPr(number, run));
+  // Every view was asked, so a rehearsal has named them all for the batch; an answer that was a stand-in has no value to keep or to return.
+  if ([...fresh.values()].includes(null)) return [];
   const prs = listed.map(({ number }) => fresh.get(number) ?? held[number].pr);
   saveKept(dir, { ...all, [repo]: { ...all[repo], prs: Object.fromEntries(prs.map((pr) => [pr.number, { readAt: fresh.has(pr.number) ? now : held[pr.number].readAt, pr }])) } });
   return withPagedFiles(prs, { run });
@@ -1127,7 +1153,7 @@ export function claimedCommentsForClock(openRows: any[], claimedComments: any[] 
  *
  * @returns `null` when refused, never `[]`
  */
-export function readOpenRows(run: (args: string[]) => string = defaultRun, conditional: ConditionalReads | null = run === defaultRun ? conditionalFor(undefined) : null): any[] | null {
+export function readOpenRows(run: (args: string[]) => string = defaultRun, conditional: ConditionalReads | null = isGhRun(run) ? conditionalFor(undefined) : null): any[] | null {
   return conditional === null ? readOpenRowsAsListed(run) : conditionalOpenRows({ run, conditional });
 }
 

@@ -40,8 +40,8 @@ import { readEjections, readReenqueueState, requeueEjected } from "./causes/pr-e
 import { patchUnchangedSince, pipelineCodeownerReviewMissing, pipelineCodeownerReviewOrders, refusalCommitOf, reviewBlocked, withEvidenceLabelAges,
   withPatchIds } from "./causes/pr-reviews.ts";
 import { REVIEW_STATE, reviewStateOf } from "./pr-state.ts";
-import { EXIT, branchesToReplace, conditionalFor, defaultRun, holdTickBudget, inRepo, readArming, readClaimedRowComments, readElsewherePrs, readOpenRows,
-  readPromotableRows, readPrs, readReadyRows, readWithFirstWaveTogether, repoNow, restReadsOfTick, runBatch } from "./reads.ts";
+import { EXIT, branchesToReplace, conditionalFor, defaultRun, holdTickBudget, inRepo, isGhRun, readArming, readClaimedRowComments, readElsewherePrs, readOpenRows,
+  readPromotableRows, readPrs, readReadyRows, readWithFirstWaveTogether, repoNow, restReadsOfTick, runBatch, standingFor } from "./reads.ts";
 import { type Budget, budgetLine, restConditionalOn, tickBudget } from "../gh-conditional.ts";
 import { claimedRowAmendedOrders } from "./causes/rows-amended.ts";
 import { answerGivenOrders, answerGivenOrdersOrNone, answerOrders, bareAnswerLabelOrders, bareAnswerOrdersOrNone, blockedReferentOrders,
@@ -531,9 +531,9 @@ holdBudgetForThisTick();
 export function readLanes(scope: Scope, run: (args: string[], repo?: string) => string = defaultRun) {
   const codeRepo = aimOf(scope, scope.code);
   const trackerRepo = aimOf(scope, scope.tracker);
-  const aimed = (repo: string | undefined): (args: string[]) => string => (args) => run(args, repo);
+  const aimed = (repo: string | undefined): (args: string[]) => string => standingFor(run, (args: string[]) => run(args, repo));
   // #5169: a `run` that is not the gate's own stands for `gh` (a test's), and is never given a REST read it did not make.
-  const conditional = (repo: string | undefined) => (run === defaultRun ? conditionalFor(repo) : null);
+  const conditional = (repo: string | undefined) => (isGhRun(run) ? conditionalFor(repo) : null);
   const lane = (part: ScopeRepository | null, read: (run: (args: string[]) => string) => any[] | null) => (part === null ? [] : tagged(read(aimed(aimOf(scope, part))), scope.key, aimOf(scope, part)));
   return {
     prs: lane(scope.code, (aim) => readPrs(aim, conditional(codeRepo))),

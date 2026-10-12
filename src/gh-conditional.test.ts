@@ -13,8 +13,8 @@ import { tmpdir } from "node:os";
 import { join } from "node:path";
 import { budgetLine, budgetOf, conditionalGate, meteredBatch, meteredRun, partitionUnchanged, restConditionalOn, seenOf, TICK_POINTS_CAP } from "./gh-conditional.ts";
 import { readValidators, saveValidators, type Validated } from "./trace/publish.ts";
-import { KEPT_READ_MAX_AGE_MS, defaultRun, holdTickBudget, readOpenRows, readPrs, runBatch } from "./work-gate/reads.ts";
-import { CAUSE_SHARE, CUT_BACK_FROM, cutBackFirst, tickReadingLines } from "./work-gate/tick.ts";
+import { KEPT_READ_MAX_AGE_MS, defaultRun, holdTickBudget, readOpenRows, readPrs, readWithFirstWaveTogether, runBatch, standingFor, useConditionalSource } from "./work-gate/reads.ts";
+import { CAUSE_SHARE, CUT_BACK_FROM, cutBackFirst, readLanes, readTrackerLanes, tickReadingLines } from "./work-gate/tick.ts";
 
 const ETAG = 'W/"abc123"';
 const HEAD = { commit: { sha: "9f2c1d0" } };
@@ -324,6 +324,94 @@ test("(e) a rehearsal's [] over a store that holds details never erases them, th
 
   const kept = JSON.parse(readFileSync(join(dir, "kept-reads.json"), "utf8"));
   assert.equal(Object.keys(kept[REPO].prs).length, 25, "the details already held are still held");
+}));
+
+// ---- THE PRODUCTION PATH (the reviewer's finding on agent-org#1108): the gate's reads reach the readers through the first wave's WRAPPERS, never as `defaultRun`,
+// and the flag selected nothing through them. These walk the wrappers; `standingFor(defaultRun, run)` is how a test's `run` is the gate's own `gh`.
+
+/** The gate with the flag on and the REST read the fake's, for the length of `body`. */
+const withGateOn = <T>(world: ReturnType<typeof github>, dir: string, body: () => T): T => {
+  useConditionalSource((repo) => ({ ask: world.ask, dir, now: T0, repo: repo ?? REPO }));
+  try {
+    return body();
+  } finally {
+    useConditionalSource(null);
+  }
+};
+const aWave = (run: (args: string[]) => string) => ({ batch: (sent: { args: string[] }[]) => sent.map((call) => ({ stdout: run(call.args) })) });
+
+test("(d) THE PRODUCTION PATH: a run that stands for gh is read conditionally through the first wave's rehearsal and replay; one that does not is read as today", () => withStore((dir) => {
+  const world = github(worldOf(25));
+  const gh = standingFor(defaultRun, (args: string[]) => world.run(args));
+  const wave = aWave(world.run);
+
+  const first = withGateOn(world, dir, () => readWithFirstWaveTogether((read) => readPrs(read), gh, wave.batch as never));
+  assert.equal((first as any[]).length, 25);
+  assert.ok(world.asked.length > 0, "the REST list was asked through the wrappers");
+  assert.ok(existsSync(join(dir, "kept-reads.json")), "and what it read was kept");
+
+  world.calls.length = 0;
+  const again = withGateOn(world, dir, () => readWithFirstWaveTogether((read) => readPrs(read), gh, wave.batch as never));
+  assert.deepEqual(again, first);
+  assert.equal(world.calls.length, 0, "an unchanged tick makes no GraphQL call, rehearsal included");
+
+  const elsewhere = github(worldOf(25));
+  const plain = (args: string[]) => elsewhere.run(args);
+  withGateOn(elsewhere, dir, () => readWithFirstWaveTogether((read) => readPrs(read), plain, aWave(elsewhere.run).batch as never));
+  assert.equal(elsewhere.asked.length, 0, "a test's run is never given a REST read it did not make");
+}));
+
+test("(d) THE PRODUCTION PATH: a changed pull request is named in the rehearsal and viewed once, with no whole list asked and no note", () => withStore((dir) => {
+  const world = github(worldOf(25));
+  const gh = standingFor(defaultRun, (args: string[]) => world.run(args));
+  const wave = aWave(world.run);
+  withGateOn(world, dir, () => readWithFirstWaveTogether((read) => readPrs(read), gh, wave.batch as never));
+  world.calls.length = 0;
+  world.prs[3].updated = "2026-10-12T05:09:00Z";
+  world.prs[8].sha = "sha9-moved";
+
+  const noted: string[] = [];
+  const write = process.stderr.write.bind(process.stderr);
+  process.stderr.write = ((line: string) => { noted.push(line); return true; }) as typeof process.stderr.write;
+  let next: any[];
+  try {
+    next = withGateOn(world, dir, () => readWithFirstWaveTogether((read) => readPrs(read), gh, wave.batch as never)) as any[];
+  } finally {
+    process.stderr.write = write;
+  }
+  assert.deepEqual(viewed(world.calls).sort(), [4, 9], "exactly the two that moved");
+  assert.equal(world.calls.filter((call) => call[1] === "list").length, 0, "the rehearsal's stand-in answers did not turn into a whole list");
+  assert.equal(noted.join(""), "", "and nothing was said");
+  assert.equal(next[3].updatedAt, "2026-10-12T05:09:00Z");
+  assert.equal(next[8].headRefOid, "sha9-moved");
+}));
+
+test("(d) THE PRODUCTION PATH: readTrackerLanes reads the open rows conditionally when its run stands for gh", () => withStore((dir) => {
+  const world = github([], [[10, "2026-10-12T04:00:00Z"], [11, "2026-10-12T04:01:00Z"]]);
+  const everything = (args: string[]) => (args[0] === "issue" && args[1] === "list" ? world.run(args) : "[]");
+  const gh = standingFor(defaultRun, everything);
+  const wave = aWave(everything);
+  const read = () => withGateOn(world, dir, () => readTrackerLanes(gh, wave.batch as never)).openRowsRead;
+
+  assert.equal(read()?.length, 2);
+  assert.ok(world.asked.length > 0, "the REST listing was asked through the wrappers");
+  const issueLists = world.calls.filter((call) => call[0] === "issue" && call[1] === "list").length;
+  assert.equal(read()?.length, 2);
+  assert.equal(world.calls.filter((call) => call[0] === "issue" && call[1] === "list").length, issueLists, "the second tick asked GraphQL for no row list: the kept rows answered");
+}));
+
+test("(d) THE PRODUCTION PATH: a keyed scope's lanes are read conditionally through the aim, and a test's run is not given a REST read", () => withStore((dir) => {
+  const scope = { key: "other", code: { repo: REPO }, tracker: { repo: REPO } };
+  const world = github(worldOf(5), [[10, "2026-10-12T04:00:00Z"]]);
+  const gh = standingFor(defaultRun, (args: string[]) => (args[0] === "pr" || args[0] === "issue" && args[3] !== "--label" ? world.run(args) : "[]"));
+
+  const lanes = withGateOn(world, dir, () => readLanes(scope, gh as never));
+  assert.equal(lanes.prs?.length, 5);
+  assert.deepEqual(world.asked.map(({ path }) => path.split("?")[0]).sort(), [`repos/${REPO}/issues`, `repos/${REPO}/pulls`], "both lanes asked REST, once each, of the scope's own repository");
+
+  const other = github(worldOf(5), [[10, "2026-10-12T04:00:00Z"]]);
+  withGateOn(other, dir, () => readLanes(scope, (args: string[]) => (args[0] === "pr" || args[0] === "issue" && args[3] !== "--label" ? other.run(args) : "[]") as never));
+  assert.equal(other.asked.length, 0);
 }));
 
 test("(d) readOpenRows: an unchanged listing is answered from the kept rows with no issue list; a moved row asks again", () => withStore((dir) => {
