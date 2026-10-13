@@ -23,6 +23,6 @@ Full suite, `pnpm run test`: 6 of 11082 fail. Four are the same as on `18eb0f55`
 
 Not in this change: `src/auto-arm-sweep.ts:494` also announces a `cross-repo-red` refusal without disarming; it is the same hole, outside this row's Region, and is not changed here.
 
-Pending: the next refused lab pull request must read `autoMergeRequest: null` after its refusal. This needs a real refused lab PR; it is not checked here.
+Post-merge: the next refused lab pull request must read `autoMergeRequest: null` after its refusal; that reading is a11ign/agent-org#1292. It needs a real refused lab PR, after the merge; it is not checked here.
 
-Closes: none -- agent-org#1278 stays open for its Done-when 2 (the next refused lab PR reads `autoMergeRequest: null`), which is an outcome after the merge and does not block it, by the product-manager's ruling. Stated as Pending here; the row stays open for it.
+Closes a11ign/agent-org#1278
