@@ -40,14 +40,6 @@ export const REVIEWER_GH_CONFIG_DIR = "/home/agent/reviewer/gh";
 /** The verdict door's source, the file the host installs as `<reviewer bin>/pr-review-verdict`. */
 export const DOOR_SOURCE = fileURLToPath(new URL("./reviewer/pr-review-verdict.sh", import.meta.url));
 
-/**
- * Where the installed door runs from: `$A11Y_REVIEWER_BIN` else `<home>/reviewer/bin`, the same answer as `host-units.ts`'s
- * `reviewerDoorPath`. That function is not imported here because `host-units.ts` reads git history, and this module sits on the
- * gate's import closure, where a history reader taxes every test that reaches it. A test holds the two answers equal.
- */
-export function outsideDoorPath(): string {
-  return join(process.env.A11Y_REVIEWER_BIN ?? join(homeHostConfig().home, "reviewer", "bin"), "pr-review-verdict");
-}
 
 /**
  * The logins the host declares as its own, in the two shapes `gh pr list --json author` spells them: `exact` names an account and

@@ -16,9 +16,10 @@ import { readFileSync, existsSync } from "node:fs";
 import { perPullRequestOrders } from "./work-gate/pr-orders.ts";
 import { deliver, spawnInvocation, postOutsideVerdictsOf, reviewerEnvironment } from "./wake.ts";
 import { DEPENDENCY_BOT_LOGIN } from "./dependency-bot-login.ts";
+import { reviewerDoorPath } from "./reviewer-door-path.ts";
 import { startedPanes } from "./packaging/started-pane.ts";
 import {
-  AUTOMATION_WRITER_LOGIN, INSIDE, OUTSIDE, REVIEWER_GH_CONFIG_DIR, isDeclaredLogin, outsideDoorPath, outsidePrompt, outsideReviewArgs,
+  AUTOMATION_WRITER_LOGIN, INSIDE, OUTSIDE, REVIEWER_GH_CONFIG_DIR, isDeclaredLogin, outsidePrompt, outsideReviewArgs,
   outsideReviewerEnvironment,
   outsideVerdictBlock, postOutsideVerdict, postOutsideVerdicts, reviewTrustOf, type DeclaredIdentities, type DoorRun, type ReviewTrust,
 } from "./review-trust.ts";
@@ -170,15 +171,14 @@ test("#1311: an outside reviewer's pane carries no account: no GH_CONFIG_DIR, no
   assert.deepEqual(outsideReviewerEnvironment("reviewer-7000", "a11ign/agent-org"), { A11Y_REVIEWER_SESSION: "reviewer-7000", GH_REPO: "a11ign/agent-org" });
 });
 
-test("#1311: the door the gate posts through is the door the host installs -- host-units' reviewerDoorPath names the same file", () => {
-  // Read as text, not imported: host-units reads git history, and the gate's import closure must not reach it (the history ratchet in
-  // src/packaging/work-gate.test.ts). The same bin directory and file name, read from the one place each is written.
+test("#1311: the door the gate posts through is the door the host installs -- one reviewerDoorPath, re-exported by host-units", () => {
+  // host-units reads git history, so this test does not import it (the history ratchet in src/packaging/work-gate.test.ts). It reads
+  // the one definition the gate and the host both call, and checks host-units re-exports that definition rather than writing its own.
   const hostUnits = readFileSync(new URL("./host-units.ts", import.meta.url), "utf8");
-  const door = hostUnits.slice(hostUnits.indexOf("export function reviewerDoorPath"));
-  assert.match(door, /process\.env\.A11Y_REVIEWER_BIN/);
-  assert.match(door, /"reviewer", "bin"/);
-  assert.match(door, /join\(bin, "pr-review-verdict"\)/);
-  assert.ok(outsideDoorPath().endsWith("pr-review-verdict"), outsideDoorPath());
+  assert.match(hostUnits, /import \{ reviewerDoorPath \} from "\.\/reviewer-door-path\.ts";/);
+  assert.match(hostUnits, /export \{ reviewerDoorPath \};/);
+  assert.doesNotMatch(hostUnits, /export function reviewerDoorPath/);
+  assert.equal(reviewerDoorPath({ reviewerBin: "/x/bin" }), "/x/bin/pr-review-verdict");
 });
 
 // --- the order path: perPullRequestOrders decides the trust -----------------------------------------------------

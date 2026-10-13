@@ -54,7 +54,8 @@ import { JUDGMENT_CAUSES, ANSWER_PREFIX, LAUNCH_PLACEHOLDER, REVIEWER_REGISTRY_F
   readWithFirstWaveTogether, runBatch }
   from "./work-gate.ts";
 import { reviewerInstance, subjectMention } from "./review-attribution.ts";
-import { INSIDE, OUTSIDE, REVIEWER_GH_CONFIG_DIR, outsideDoorPath, outsideReviewArgs, outsideReviewerEnvironment, postOutsideVerdicts, type DoorRun, type ReviewTrust } from "./review-trust.ts";
+import { reviewerDoorPath } from "./reviewer-door-path.ts";
+import { INSIDE, OUTSIDE, REVIEWER_GH_CONFIG_DIR, outsideReviewArgs, outsideReviewerEnvironment, postOutsideVerdicts, type DoorRun, type ReviewTrust } from "./review-trust.ts";
 // A LEAF, and where the stall bound lives (#3448): the waker's deferral limit and the signal raised for a wait over it are one number.
 import { ORDER_STALL_MINUTES, SIGNALS, orderStallReading, panePromptReading, orgHealthOrders } from "./org-health.ts";
 // #2688: THE SAME INSTRUMENT #928's OFFLINE REPORT IS BUILT FROM, READ LIVE INSTEAD OF ONLY REPORTED --
@@ -7878,7 +7879,7 @@ export function postOutsideVerdictsOf(registry: Record<string, ReviewerEntry>, r
     return pr === null ? [] : [{ session, pr }];
   });
   if (outside.length === 0) return [];
-  return postOutsideVerdicts({ outside, read: outsidePaneReader(run), env: (session) => reviewerEnvironment(session), door: outsideDoorPath(), run: doorRun });
+  return postOutsideVerdicts({ outside, read: outsidePaneReader(run), env: (session) => reviewerEnvironment(session), door: reviewerDoorPath(), run: doorRun });
 }
 
 /**
