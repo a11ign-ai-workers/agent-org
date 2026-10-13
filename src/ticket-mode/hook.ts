@@ -38,7 +38,6 @@ const BASH_REFUSALS: readonly Refusal[] = [
 ];
 
 const SKILL_REFUSALS: readonly Refusal[] = [
-  { pattern: /tool-screenshot-app/, why: "it kills whatever holds a fixed port, which is another worker's server" },
   { pattern: /post-pr-to-slack/, why: "announcing a pull request is the person's" },
 ];
 

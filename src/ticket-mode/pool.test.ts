@@ -77,6 +77,13 @@ test("each run's brief carries the machine's notes, and its ticket dir a copy of
   assert.deepEqual(JSON.parse(readFileSync(join(dir, "deny.json"), "utf8")), deny);
 });
 
+test("the machine's plugins are enabled in each worker's settings file", async () => {
+  const { pool, settings } = setup(1, ["NBF-1"], { plugins: ["nbl-ui@applied-ai"] });
+  await pool.tick();
+  const written = JSON.parse(readFileSync(join(ticketFolder(settings, "NBF-1"), ".claude", "settings.local.json"), "utf8"));
+  assert.deepEqual(written.enabledPlugins, { "nbl-ui@applied-ai": true });
+});
+
 test("a notes file that cannot be read fails the run, naming the setting", async () => {
   const { pool, entry } = setup(1, ["NBF-1"], { brief: "/nowhere/notes.md" });
   await pool.tick();
