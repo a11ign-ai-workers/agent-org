@@ -2358,12 +2358,12 @@ export function reviewerDoorInstall(deps: Parameters<typeof reviewerDoorPath>[0]
 // --- agent-org#1268: THE SKILL THE REVIEWER REVIEWS WITH ---------------------------------------------------------------------------------
 //
 // The reviewer is a Codex session, and Codex loads a skill from `~/.codex/skills/<name>/` and runs one when the prompt NAMES it. The skill is shipped in
-// this repository (`skills/row-review/`) and `host:install` copies it there, so the order's sentence and the file it names cannot be two things: `host:check`
+// this repository (`src/skills/row-review/`) and `host:install` copies it there, so the order's sentence and the file it names cannot be two things: `host:check`
 // reports a copy that is missing or differs from the shipped one, the way it reports the reviewers' door. The ORDER names it only behind `review.rowReviewSkill`
 // (`pr-orders.ts`); installing it changes nothing a reviewer reads until that flag is on.
 
 /** The skill as the repository ships it: a directory, copied whole. `LICENSE` is upstream's MIT text, which the adaptation must carry. */
-export const ROW_REVIEW_SKILL_SOURCE = fileURLToPath(new URL("../skills/row-review/", import.meta.url));
+export const ROW_REVIEW_SKILL_SOURCE = fileURLToPath(new URL("./skills/row-review/", import.meta.url));
 /** The files of the skill, by name: a file there that is not listed is not the skill's and is neither compared nor written. */
 export const ROW_REVIEW_SKILL_FILES: readonly string[] = Object.freeze(["SKILL.md", "LICENSE"]);
 
@@ -2404,7 +2404,7 @@ export function rowReviewSkillDrift(deps: Parameters<typeof rowReviewSkillState>
   const { state, target, differing } = rowReviewSkillState(deps);
   if (state === "CURRENT") return [];
   const detail = {
-    "SOURCE UNREADABLE": `the repository's skills/row-review/ file(s) ${differing.join(", ")} could not be read, so the installed skill cannot be compared to it.`,
+    "SOURCE UNREADABLE": `the repository's src/skills/row-review/ file(s) ${differing.join(", ")} could not be read, so the installed skill cannot be compared to it.`,
     "NOT INSTALLED": `the repository ships the reviewer's row-review skill and this host has none at ${target}: an order that names it cannot run it. \`host:install\` copies it.`,
     STALE: `${differing.join(", ")} at ${target} is missing or is not the shipped copy: the reviewer reviews with a skill that was not the one reviewed and tested. \`host:install\` copies it.`,
   }[state];

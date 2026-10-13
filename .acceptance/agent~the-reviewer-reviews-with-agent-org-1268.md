@@ -1,4 +1,4 @@
-The reviewer reviews with a `row-review` skill (Spec item table, Tests and correctness, Standards). It is shipped as `skills/row-review/`, installed by `host:install`, named by `host:check`, and named in the reviewer's order only behind `review.rowReviewSkill` (agent-org#1268). It is proven by `scripts/review-eval.ts`, a re-runnable eval on the blind-labelled set.
+The reviewer reviews with a `row-review` skill (Spec item table, Tests and correctness, Standards). It is shipped as `src/skills/row-review/`, installed by `host:install`, named by `host:check`, and named in the reviewer's order only behind `review.rowReviewSkill` (agent-org#1268). It is proven by `scripts/review-eval.ts`, a re-runnable eval on the blind-labelled set.
 
 Acceptance:
 
@@ -52,7 +52,7 @@ Mutation: each restored from a copy and compared byte-identical; `hostUnitDrift`
 Outside-Region: src/work-gate/tick.ts — `decide` reads the flag where orders are decided and hands it to `perPullRequestOrders` (`rowReviewSkillFlagOn`), which the row's `pr-orders.ts` alone cannot do.
 Outside-Region: src/machinery-flag.ts — `review.rowReviewSkill` must be in `FLAG_REGISTRY` or `machinery:flag on` refuses it.
 Outside-Region: src/flag-switch-ledger.ts — its ledger test requires every registered flag to have a declared switch, and this one's is a11ign/a11ign#5325.
-Outside-Region: package.json — the `files` list ships `skills/`, which `host:install` copies from.
+Outside-Region: .changeset/identity-canary-widens-on-proof.md — agent-org#1247's changeset on main lacks its opening `---`, so `changeset version` refuses it and every pull request's release-dry-run fails; this adds the one line.
 Outside-Region: src/packaging/host-units.test.ts — the install and check tests for the skill, and `identityHost` pins the skill's directory as it pins the door's, so two #2184 tests do not read the real host's `~/.codex`.
 Outside-Region: src/packaging/row-review-skill-order.test.ts — the flag-off and flag-on orders and `decide`'s reading, kept out of the host-units file because its fixture project declares no `roles` for the order module to read.
 Outside-Region: src/packaging/machinery-flag-switch.test.ts — the recorded registry now has ten flags.

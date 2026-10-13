@@ -1,6 +1,6 @@
 // agent-org#1268: THE REVIEWER'S SKILL IS PROVEN ON A LABELLED SET BEFORE IT IS SWITCHED ON, AND THE PROOF CAN BE RUN AGAIN.
 //
-// `skills/row-review/SKILL.md` is what a reviewer reviews with behind `review.rowReviewSkill`. Whether it makes the reviewer stop approving pull requests that skip a Done-when item,
+// `src/skills/row-review/SKILL.md` is what a reviewer reviews with behind `review.rowReviewSkill`. Whether it makes the reviewer stop approving pull requests that skip a Done-when item,
 // copy a helper or "test" by regex is a MEASUREMENT, not an opinion, so this file holds the measurement: a set of merged pull requests whose verdict was read blind (a11ign#928,
 // comment 6133595219), each reviewed OFFLINE by the same reviewer model with the skill named, and the agreement printed.
 //
@@ -48,7 +48,7 @@ export const REVIEWER_MODEL = "gpt-5.6-luna";
 export const REVIEWER_EFFORT = "medium";
 
 /** The skill AS THE REPOSITORY SHIPS IT, which the eval puts in the reviewed tree's `.agents/skills/` (Codex reads a project's skills there, probed 2026-10-13), so the proof is of the file in this checkout and never of whichever copy `host:install` last wrote. */
-export const SKILL_SOURCE = fileURLToPath(new URL("../skills/row-review/", import.meta.url));
+export const SKILL_SOURCE = fileURLToPath(new URL("./skills/row-review/", import.meta.url));
 const SKILL_FILES = ["SKILL.md", "LICENSE"];
 
 /** Put the shipped skill under `<tree>/.agents/skills/row-review/`. Throws when a file of it cannot be copied, so an eval never runs without the skill it claims to prove. */
