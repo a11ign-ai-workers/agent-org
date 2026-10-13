@@ -76,13 +76,14 @@ export function linearSource({ key, fetch: request = fetch }: { key: string; fet
     },
 
     async read(identifier) {
-      try {
-        const data: { issue: IssueNode | null } = await query(`query($id: String!) { issue(id: $id) { ${ISSUE_FIELDS} } }`, { id: identifier });
-        return data.issue === null ? null : toTicket(data.issue);
-      } catch (err) {
-        if (String((err as Error).message).includes("Entity not found")) return null;
-        throw err;
-      }
+      // By team and number, so a key Linear has no ticket for is an empty list: nothing hangs on the wording of an error.
+      const parts = /^([A-Za-z][A-Za-z0-9]*)-(\d+)$/.exec(identifier);
+      if (parts === null) return null;
+      const data: { issues: { nodes: IssueNode[] } } = await query(
+        `query($team: String!, $number: Float!) { issues(first: 1, filter: { team: { key: { eq: $team } }, number: { eq: $number } }) { nodes { ${ISSUE_FIELDS} } } }`,
+        { team: parts[1].toUpperCase(), number: Number(parts[2]) });
+      const [found] = data.issues.nodes;
+      return found === undefined ? null : toTicket(found);
     },
 
     async download(ticket, dir) {

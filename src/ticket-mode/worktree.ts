@@ -4,17 +4,21 @@
 // THE DEFAULT BRANCH IS ASKED OF THE REMOTE, NOT READ OFF THE CLONE. A clone's `origin/HEAD` is set when it is cloned and never moves by itself:
 // measured 2026-10-13, a clone of `nbl-ui-agent-platform` still said `main` while GitHub's default was `develop`. `ls-remote --symref` asks GitHub.
 //
+// ASYNCHRONOUS, because a fetch of a large repository takes seconds and the pool runs inside the board's server, which must keep answering.
+//
 // A BRANCH THAT ALREADY EXISTS IS NOT REUSED. It is somebody's work (an earlier run, or a person's), and a worker started on it would build on
 // commits nobody briefed it about. The caller reports it and starts nothing.
-import { execFileSync } from "node:child_process";
+import { execFile } from "node:child_process";
 import { appendFileSync, existsSync, mkdirSync, readFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { sandboxGitEnv } from "../lib/git-env.ts";
 
 /** `git` run in `cwd`. Every call names its checkout: a `git` that names none asks whichever repository the process is in. */
-export type Git = (cwd: string, args: string[]) => string;
+export type Git = (cwd: string, args: string[]) => Promise<string>;
 
-const defaultGit: Git = (cwd, args) => execFileSync("git", args, { cwd, encoding: "utf8", env: sandboxGitEnv(), stdio: ["ignore", "pipe", "pipe"] });
+const defaultGit: Git = (cwd, args) => new Promise((resolve, reject) => {
+  execFile("git", args, { cwd, encoding: "utf8", env: sandboxGitEnv() }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
+});
 
 export type Prepared = Readonly<{ repo: string; path: string; base: string }>;
 
@@ -29,18 +33,13 @@ export function parseDefaultBranch(lsRemote: string): string {
  * A worktree of `clone` at `path` on a new `branch`, from the remote's default branch, freshly fetched. REFUSES, starting nothing, when the branch
  * already exists in the clone or the path is taken.
  */
-export function addWorktree({ repo, clone, path, branch }: { repo: string; clone: string; path: string; branch: string }, git: Git = defaultGit): Prepared {
+export async function addWorktree({ repo, clone, path, branch }: { repo: string; clone: string; path: string; branch: string }, git: Git = defaultGit): Promise<Prepared> {
   if (existsSync(path)) throw new Error(`${repo}: ${path} already exists; a run that was cut short left it, so remove it or retry under another name`);
-  const base = parseDefaultBranch(git(clone, ["ls-remote", "--symref", "origin", "HEAD"]));
-  git(clone, ["fetch", "--quiet", "origin", base]);
-  let exists = true;
-  try {
-    git(clone, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]);
-  } catch {
-    exists = false;
-  }
+  const base = parseDefaultBranch(await git(clone, ["ls-remote", "--symref", "origin", "HEAD"]));
+  await git(clone, ["fetch", "--quiet", "origin", base]);
+  const exists = await git(clone, ["rev-parse", "--verify", "--quiet", `refs/heads/${branch}`]).then(() => true, () => false);
   if (exists) throw new Error(`${repo}: branch ${branch} already exists in ${clone}; it is earlier work, so it is not reused`);
-  git(clone, ["worktree", "add", "--quiet", "-b", branch, path, `origin/${base}`]);
+  await git(clone, ["worktree", "add", "--quiet", "-b", branch, path, `origin/${base}`]);
   return { repo, path, base };
 }
 
@@ -48,10 +47,10 @@ export function addWorktree({ repo, clone, path, branch }: { repo: string; clone
  * The worktree an earlier run of the same ticket left, to continue in on a retry: it must be at `path` and on `branch`. Throws when it is not,
  * because then it is not that run's.
  */
-export function reuseWorktree({ repo, clone, path, branch }: { repo: string; clone: string; path: string; branch: string }, git: Git = defaultGit): Prepared {
-  const on = git(path, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+export async function reuseWorktree({ repo, clone, path, branch }: { repo: string; clone: string; path: string; branch: string }, git: Git = defaultGit): Promise<Prepared> {
+  const on = (await git(path, ["rev-parse", "--abbrev-ref", "HEAD"])).trim();
   if (on !== branch) throw new Error(`${repo}: ${path} is on ${on}, not ${branch}, so it is not this ticket's earlier run`);
-  return { repo, path, base: parseDefaultBranch(git(clone, ["ls-remote", "--symref", "origin", "HEAD"])) };
+  return { repo, path, base: parseDefaultBranch(await git(clone, ["ls-remote", "--symref", "origin", "HEAD"])) };
 }
 
 /** Where a ticket's worktree for one repository goes: `<root>/<ticket>/<repo>`, so one ticket's repositories sit side by side. */
@@ -68,13 +67,9 @@ function appendLine(path: string, line: string): void {
 }
 
 /** Keep a generated file out of the repository: add it to the clone's shared `info/exclude`, unless git already ignores it. */
-export function excludeFromGit(worktree: string, relative: string, { git = defaultGit, append = appendLine }: { git?: Git; append?: (path: string, line: string) => void } = {}): void {
-  try {
-    git(worktree, ["check-ignore", "--quiet", relative]);
-    return;
-  } catch {
-    // Not ignored, so it is excluded below.
-  }
-  const commonDir = git(worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"]).trim();
+export async function excludeFromGit(worktree: string, relative: string, { git = defaultGit, append = appendLine }: { git?: Git; append?: (path: string, line: string) => void } = {}): Promise<void> {
+  const ignored = await git(worktree, ["check-ignore", "--quiet", relative]).then(() => true, () => false);
+  if (ignored) return;
+  const commonDir = (await git(worktree, ["rev-parse", "--path-format=absolute", "--git-common-dir"])).trim();
   append(join(commonDir, "info", "exclude"), relative);
 }

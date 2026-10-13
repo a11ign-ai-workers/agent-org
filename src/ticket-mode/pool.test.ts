@@ -32,7 +32,7 @@ function herdr(status: Map<string, string>, screen: { text: string } = { text: "
 }
 
 /** A git whose remote's default is `develop`, where no branch exists yet and `worktree add` makes the directory. */
-const git: Git = (cwd, args) => {
+const git: Git = async (cwd, args) => {
   if (args[0] === "ls-remote") return "ref: refs/heads/develop\tHEAD\n";
   if (args.includes("--abbrev-ref")) return `${cwd.split("/").at(-2)?.toLowerCase()}\n`; // a worktree at <root>/<KEY>/<repo> is on the key's branch
   if (args[0] === "rev-parse" && args.includes("--verify")) throw new Error("no such branch");

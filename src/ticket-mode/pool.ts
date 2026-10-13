@@ -191,19 +191,20 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     mkdirSync(dir, { recursive: true });
     // An earlier run's outcome and stop count would end this run before it began.
     for (const file of [OUTCOME_FILE, STOP_COUNT_FILE]) rmSync(join(dir, file), { force: true });
-    const worktrees = entry.repos.map((repo) => {
+    const worktrees: WorktreeRef[] = [];
+    for (const repo of entry.repos) {
       const clone = settings.clones[repo];
       if (clone === undefined) throw new Error(`${repo} is not in the host file's clones`);
       const where = { repo, clone, path: worktreePath(settings.worktreeRoot, ticket.key, repo), branch: ticket.branch };
-      return entry.retried === true && existsSync(where.path) ? reuseWorktree(where, deps.git) : addWorktree(where, deps.git);
-    });
+      worktrees.push(await (entry.retried === true && existsSync(where.path) ? reuseWorktree(where, deps.git) : addWorktree(where, deps.git)));
+    }
     const attachments = await source.download(ticket, dir);
     writeFileSync(join(dir, BRIEF_FILE), briefText({ ticket, worktrees, ticketDir: dir, attachments }));
     const [first, ...others] = worktrees;
     mkdirSync(join(first.path, ".claude"), { recursive: true });
     writeFileSync(join(first.path, SETTINGS_FILE),
       `${JSON.stringify(workerSettings({ model: entry.model, ticketDir: dir, otherWorktrees: others.map((w) => w.path), hook }), null, 2)}\n`);
-    excludeFromGit(first.path, SETTINGS_FILE, deps.git === undefined ? {} : { git: deps.git });
+    await excludeFromGit(first.path, SETTINGS_FILE, deps.git === undefined ? {} : { git: deps.git });
     return { worktrees, dir };
   }
 

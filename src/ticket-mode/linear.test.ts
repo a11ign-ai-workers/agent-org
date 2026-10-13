@@ -39,9 +39,14 @@ test("assigned() reads every page of the viewer's unfinished tickets, sending th
   assert.match(second.query, /nin: \["completed", "canceled"\]/, "finished tickets are not offered");
 });
 
-test("read() returns the ticket, null for a key Linear has no ticket for, and throws when Linear cannot be asked", async () => {
-  assert.equal((await linearSource({ key: "k", fetch: linear([{ data: { issue: node("NBF-1270") } }]).fetch }).read("NBF-1270"))?.title, "Title NBF-1270");
-  assert.equal(await linearSource({ key: "k", fetch: linear([{ errors: [{ message: "Entity not found: Issue" }] }]).fetch }).read("NBF-0"), null);
+test("read() finds a ticket by its team and number, returns null for a key Linear has no ticket for, and throws when Linear cannot be asked", async () => {
+  const found = linear([{ data: { issues: { nodes: [node("NBF-1270")] } } }]);
+  assert.equal((await linearSource({ key: "k", fetch: found.fetch }).read("NBF-1270"))?.title, "Title NBF-1270");
+  assert.deepEqual(JSON.parse(String(found.requests[0].init.body)).variables, { team: "NBF", number: 1270 });
+  assert.equal(await linearSource({ key: "k", fetch: linear([{ data: { issues: { nodes: [] } } }]).fetch }).read("NBF-0"), null);
+  const unasked = linear([]);
+  assert.equal(await linearSource({ key: "k", fetch: unasked.fetch }).read("not a key"), null);
+  assert.equal(unasked.requests.length, 0, "a string that is not a key is not sent");
   await assert.rejects(linearSource({ key: "k", fetch: linear([{ errors: [{ message: "Authentication required" }] }]).fetch }).read("NBF-1"), /Authentication required/);
 });
 
