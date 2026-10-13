@@ -76,9 +76,9 @@ import { withBoardSnapshot, PROJECT_OWNER, PROJECT_NUMBER } from "./board-snapsh
 import { runnerReason, laneReason, drainReason, oneRowReason } from "./row-claim/runner-rule.ts";
 import { readStandIns, type LaneStandIn } from "./row-claim/lane-stand-in.ts";
 import { activeDrain, sparePathsFrom, ledgerPathFrom, isSpareRole, isPersistentRole, readSpareRegistry } from "./wake.ts";
-import { readWithFirstWaveTogether, runBatch, readChairmanPriority, CHAIRMAN_PRIORITY_LABEL, EMERGENCY_PRIORITY_LABEL, readEmergencyPriority, readEmergencyPriorityOption } from "./work-gate.ts"; // #3566, slice 4: `wake.ts` above already loads it, and it never loads this file. #4793: and the gate's own reading of whose a chairman row is. #989: and the gate's own verdict on which emergency row is honoured
+import { readWaitRef, readWithFirstWaveTogether, runBatch, readChairmanPriority, CHAIRMAN_PRIORITY_LABEL, EMERGENCY_PRIORITY_LABEL, readEmergencyPriority, readEmergencyPriorityOption } from "./work-gate.ts"; // #3566, slice 4: `wake.ts` above already loads it, and it never loads this file. #4793: and the gate's own reading of whose a chairman row is. #989: and the gate's own verdict on which emergency row is honoured
 import { lookup } from "./merge-guard/lookups.ts";
-import { readJsonObject, writeJsonObject, cloneOfKey } from "./claim-stall.ts";
+import { readJsonObject, writeJsonObject, cloneOfKey, unmetWaitingFor } from "./claim-stall.ts";
 import { inBuildReason, lookupHeldRows, lookupOtherHeldIssues } from "./row-claim/own-pr-health-rule.ts";
 import { resolveBlockedByOverride, blockedByExceptionNote } from "./row-claim/blocked-by-rule.ts";
 import { blockedByEdgeReason, lookupBlockedByEdge } from "./row-claim/blocked-by-edge-rule.ts";
@@ -1262,6 +1262,10 @@ function preWriteChecks({ issueNumber, mySession, before, drained, instance, ado
     // #2407: ONE INSTANCE, ONE ROW -- the same "new row only" placement, for a spare that holds or has held another.
     const oneRow = oneRowReason(mySession, issueNumber, instance);
     if (oneRow) return { refusal: { claimed: false, reason: oneRow }, blockedByNote: null, scope: null };
+    // #1281: A row whose `Waiting-for:` is still unmet is not finishable, and the gate releases a claim on one. Taking it again would hold the
+    // slot for the length of the wait, so the new claim is refused until the condition is true. A resume is not refused: the holder is there.
+    const unmet = unmetWaitingFor(body, repo, (ref) => readWaitRef(ref, ghRunForBody));
+    if (unmet !== null) return { refusal: { claimed: false, reason: `\`Waiting-for: ${unmet}\` is not yet true: the row cannot be finished until it is, and a claim on it is released again. Claim it once the condition holds.` }, blockedByNote: null, scope: null };
     const { reason: ineligible, walked, emergency } = sessionEligibility(issueNumber, mySession, { run: preWrite, adoptedBranch, repo });
     // #4793: a priority row that B4 let past holders SAYS SO on the row, through the note a `--blocked-by` exception already leaves (#989: and the incident, for an emergency one).
     blockedByNote = walkedPastNote(issueNumber, walked, emergency);
