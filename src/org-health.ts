@@ -1574,15 +1574,17 @@ export function readLatestMerge(run: (args: string[]) => string, repos: readonly
 /** How many of the newest `release.yml` runs on `main` the release read looks at: the `status` runs it skips on every commit crowd the list, so the window is wide. */
 const RELEASE_RUN_WINDOW = 30;
 const RELEASE_JOBS_WINDOW = 100;
+/** The job that publishes. A publishing run's jobs are named `release / <job>` (run 38332090768: `release / publish`, see {@link releaseJobPublished}). */
+const RELEASE_PUBLISH_JOB = "release / publish";
 /**
  * A run that says whether a release happened: any failure, and a success that PUBLISHED. A push to `main` publishes when it concludes success. A dispatch on `main` publishes only when its
- * `release` job did (a dispatch carrying `action-tag-version` is the promote-only run, whose `release` job is skipped by its `needs`). A `status` run's success is a promotion, never a release,
+ * `release / publish` job did (a dispatch carrying `action-tag-version` is the promote-only run, whose `release / publish` job is skipped by its `needs`). A `status` run's success is a promotion, never a release,
  * so it neither clears a streak nor joins one (a11ign/agent-org#1273: it cleared a streak of two on 2026-10-12). `cancelled`, `skipped`, `neutral` and a run still going say nothing (#4001).
  */
 const isVerdict = (r: ReleaseRun): boolean => r.conclusion === "failure" || (r.conclusion === "success" && (r.event === "push" || (r.event === "workflow_dispatch" && r.published === true)));
 
 /**
- * `published` is set only on a `workflow_dispatch` that concluded success: whether its `release` job did too (see {@link isVerdict}). Absent on every other run.
+ * `published` is set only on a `workflow_dispatch` that concluded success: whether its `release / publish` job did too (see {@link isVerdict}). Absent on every other run.
  */
 export type ReleaseRun = { id: number, event: string, status: string, conclusion: string | null, sha: string, createdAt: string, updatedAt: string, url: string, published?: boolean };
 export type FailedJob = { id?: number, name: string, steps: string[] };
@@ -1643,10 +1645,14 @@ export function readReleaseRuns(run: (args: string[]) => string, repo: string): 
     pending: Array.isArray(files) ? files.filter((name) => name.endsWith(".md") && name !== "README.md") : null };
 }
 
-/** @returns whether the run's `release` job concluded success: the one answer that tells a publishing dispatch from a promote-only one. A refused read is `false`, which neither clears nor trips. */
+/**
+ * @returns whether the run's publishing job concluded success: the one answer that tells a publishing dispatch from a promote-only one. A refused read is `false`, which neither clears nor trips.
+ * The job is `release / publish`, not `release`: a called workflow's jobs are named `<caller job> / <job>`, so no job of a publishing run is named exactly `release`
+ * (a11ign/agent-org#1298: that name matched nothing, so every dispatch read as promote-only and a release that shipped still read as failing).
+ */
 function releaseJobPublished(run: (args: string[]) => string, repo: string, id: number): boolean {
-  const jobs = releaseJobsOf(run, repo, id, "[.jobs[] | select(.name == \"release\" and .conclusion == \"success\") | .id]");
-  return Array.isArray(jobs) && jobs.length > 0;
+  const jobs = releaseJobsOf(run, repo, id, "[.jobs[] | {name, conclusion}]");
+  return Array.isArray(jobs) && jobs.some((job) => job.name === RELEASE_PUBLISH_JOB && job.conclusion === "success");
 }
 
 /** @returns the jobs of one run as `jq` shapes them: the one read of a run's jobs, so the `gh` call site is counted once (agent-org#1273, gh-call-baseline). `null` for a refusal or text that is not JSON. */

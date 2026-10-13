@@ -174,16 +174,45 @@ test("the reader makes ONE call while the newest verdict is a success, and three
   assert.equal(reading(fact).status, "tripped");
 });
 
-test("a dispatch's success clears only when its release job published: a promote-only one is read from its jobs and neither clears nor trips", () => {
-  const dispatch = run(2, "workflow_dispatch", "success", "2026-10-07T15:40:00Z");
-  const published = fakeGh({ [RUNS]: JSON.stringify([dispatch, ...THAT_DAY]), "runs/2/jobs": JSON.stringify([880001]) });
+// A called workflow's jobs are named `<caller job> / <job>`. release.yml calls its publishing workflow as job `release`, so the publishing job is `release / publish`.
+// These are the jobs of run 38332090768 (a11ign/a11ign, `workflow_dispatch` on main, 2026-10-13T01:25:50Z), as the API names and concludes them. The fake returns the projection
+// `readReleaseRuns` asks for, `{name, conclusion}`, so the name match runs for real: a fake that returned a pre-filtered list could not see a wrong name.
+const DISPATCH = 38332090768;
+const PUBLISHED_JOBS = [
+  { name: "release / ci gate result on this sha", conclusion: "success" },
+  { name: "release / version", conclusion: "success" },
+  { name: "release / publish", conclusion: "success" },
+  { name: "release / tag", conclusion: "success" },
+];
+// A promote-only dispatch (`action-tag-version`) skips the publishing job by its `needs`. Only `release / publish` being skipped is the row's fact; the rest is assumed.
+const PROMOTE_ONLY_JOBS = [
+  { name: "release / ci gate result on this sha", conclusion: "success" },
+  { name: "release / version", conclusion: "skipped" },
+  { name: "release / publish", conclusion: "skipped" },
+  { name: "release / tag", conclusion: "skipped" },
+];
+
+test("a dispatch's success clears when its `release / publish` job succeeded, on the REAL job names of run 38332090768", () => {
+  const dispatch = run(DISPATCH, "workflow_dispatch", "success", "2026-10-13T01:25:50Z");
+  const published = fakeGh({ [RUNS]: JSON.stringify([dispatch, ...THAT_DAY]), [`runs/${DISPATCH}/jobs`]: JSON.stringify(PUBLISHED_JOBS) });
   assert.equal(reading(readReleaseRuns(published.gh, REPO)).status, "clear");
   assert.equal(published.calls.length, 2, "one call for the runs and one for the dispatch's jobs");
+});
 
-  const promoteOnly = fakeGh({ [RUNS]: JSON.stringify([dispatch, ...THAT_DAY]), "runs/2/jobs": "[]", "runs/37643562214/jobs": JSON.stringify(GUARDS), "contents/.changeset": JSON.stringify(PENDING) });
+test("a promote-only dispatch (its `release / publish` job skipped) is no verdict: the failure before it still trips", () => {
+  const dispatch = run(DISPATCH, "workflow_dispatch", "success", "2026-10-13T01:25:50Z");
+  const promoteOnly = fakeGh({ [RUNS]: JSON.stringify([dispatch, ...THAT_DAY]), [`runs/${DISPATCH}/jobs`]: JSON.stringify(PROMOTE_ONLY_JOBS),
+    "runs/37643562214/jobs": JSON.stringify(GUARDS), "contents/.changeset": JSON.stringify(PENDING) });
   const fact = readReleaseRuns(promoteOnly.gh, REPO);
   assert.equal(reading(fact).status, "tripped", "the dispatch that did not publish does not clear the failure before it");
   assert.equal(reading(fact).discriminator, `${SIGNAL}@37643562214`);
+});
+
+test("a job named just `release` does not publish: no run's jobs carry that name, so it was the wrong name to look for", () => {
+  const dispatch = run(DISPATCH, "workflow_dispatch", "success", "2026-10-13T01:25:50Z");
+  const oldName = fakeGh({ [RUNS]: JSON.stringify([dispatch, ...THAT_DAY]), [`runs/${DISPATCH}/jobs`]: JSON.stringify([{ name: "release", conclusion: "success" }]),
+    "runs/37643562214/jobs": JSON.stringify(GUARDS), "contents/.changeset": JSON.stringify(PENDING) });
+  assert.equal(reading(readReleaseRuns(oldName.gh, REPO)).status, "tripped");
 });
 
 test("the reader's refusals are nulls, never an empty answer: the list, the jobs and the changesets", () => {
