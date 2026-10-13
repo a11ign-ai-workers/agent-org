@@ -64,7 +64,7 @@ import { stateEntryPath, hostConfigPath, readHostConfig, HOST_CONFIG_ENV } from 
 import { REPO } from "./project-identity.ts";
 import { roleBriefPath } from "./project-roles.ts";
 import { serveOrdersByRun, type ServedRecord } from "./serve-by-run.ts";
-import { accountLimitOn, pauseRefusal, tickAccountLimit, type AccountLimit } from "./account-limit.ts";
+import { accountLimitFlag, pauseRefusal, tickAccountLimit, type AccountLimit } from "./account-limit.ts";
 import { engineerBriefSentence, briefRoleSentence } from "./spawn-role-brief.ts"; // #828: the sentence that sends a spawned seat to a role brief
 // #832: a `lane:orchestrator` row as a one-shot seat's, behind `workers.orchestratorOneShot`; its cause is a sibling of `SPAWN_CAUSES`, never a member
 import { ONE_SHOT_SPAWN_CAUSES, createOrchestratorOneShot, isOneShotOrder, standInClaimer, withOrchestratorOneShot, type OrchestratorOneShot } from "./orchestrator-one-shot.ts";
@@ -321,11 +321,12 @@ export function unavailableReason(label: string, deps?: Parameters<typeof sessio
 
 /**
  * agent-org#1307: THE ACCOUNT'S PAUSE FOR THIS TICK, or `null`. ONE Claude seat that shows the allowance message is the account limited, because every
- * Claude seat draws on the one allowance. Flag off: `null`, and nothing is read beyond the flag. A change is said once (stdout) and logged (ndjson) by
- * {@link tickAccountLimit}; nothing is said on a tick that changes nothing.
+ * Claude seat draws on the one allowance. Flag read OFF: `null`, and nothing is read beyond the flag. Flag UNKNOWN (its state cannot be read) is not off:
+ * the record decides, and an unreadable record holds (see {@link tickAccountLimit}). A change is said once (stdout) and logged (ndjson); nothing is said
+ * on a tick that changes nothing.
  */
 export function accountPauseTick(labels: readonly string[], now: number = Date.now()): AccountLimit | null {
-  if (!accountLimitOn()) return null;
+  if (accountLimitFlag() === "off") return null;
   const seen = labels.map((label) => {
     const allowance = sessionAllowance(label, { now });
     return allowance.state === "limited" ? { limitedUntil: allowance.until, seenOn: label, text: allowance.text } : null;
