@@ -1,10 +1,18 @@
-// no-token: gh -- the page's own script runs against a fake DOM and a canned fetch; no browser, no socket
+// no-token: gh -- the page's own script runs against a fake DOM and a canned fetch, with the tested board-view module as its import; no browser, no socket
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { readFileSync } from "node:fs";
 import { runInNewContext } from "node:vm";
+import * as view from "./board-view.ts";
 
-const SCRIPT = /<script>([\s\S]*)<\/script>/.exec(readFileSync(new URL("./ui.html", import.meta.url), "utf8"))![1];
+/**
+ * The page's module script, run as the browser would run it but in a `vm` context: its one import (`/board-view.js`, which the server sends as
+ * `board-view.ts` with the types stripped) is supplied from the tested module itself, and its top-level `await` runs inside an async wrapper.
+ */
+const MODULE = /<script type="module">([\s\S]*)<\/script>/.exec(readFileSync(new URL("./ui.html", import.meta.url), "utf8"))![1];
+const IMPORT = /^import \{[^}]*\} from "\/board-view\.js";$/m;
+if (!IMPORT.test(MODULE)) throw new Error("the page's script no longer imports /board-view.js as this test expects");
+const SCRIPT = `(async () => {\n${MODULE.replace(IMPORT, "")}\n})();`;
 
 class Node_ {
   children: Node_[] = [];
@@ -29,10 +37,10 @@ class Node_ {
 }
 
 const TICKETS = [
-  { key: "T-1", title: "fix(netbox): one", status: "Backlog", statusOrder: 0, priority: 2, project: "Alpha", url: "", resolved: { repo: "netbox", package: null } },
-  { key: "T-2", title: "fix(netbox): two", status: "Backlog", statusOrder: 0, priority: 2, project: "Beta", url: "", resolved: { repo: "netbox", package: null } },
-  { key: "T-3", title: "no scope", status: "Backlog", statusOrder: 0, priority: 2, project: "Alpha", url: "", resolved: null },
-  { key: "T-4", title: "fix(netbox): four", status: "Todo", statusOrder: 1, priority: 2, project: null, url: "", resolved: { repo: "netbox", package: null } },
+  { key: "T-1", title: "one", status: "Backlog", statusOrder: 0, priority: 2, project: "Alpha", url: "" },
+  { key: "T-2", title: "two", status: "Backlog", statusOrder: 0, priority: 2, project: "Beta", url: "" },
+  { key: "T-3", title: "three", status: "Backlog", statusOrder: 0, priority: 2, project: "Alpha", url: "" },
+  { key: "T-4", title: "four", status: "Todo", statusOrder: 1, priority: 2, project: null, url: "" },
 ];
 
 /** Run the page's script against a fake document, with `storage` as its localStorage. Resolves once the first render has happened. */
@@ -48,12 +56,12 @@ async function page(storage: Map<string, string>, config: Record<string, unknown
   const fetch = async (path: string, init: { method: string; body?: string } = { method: "GET" }) => {
     const body = init.body === undefined ? undefined : JSON.parse(init.body);
     if (init.method === "POST") posts.push({ path, body });
-    const value = path === "/api/config" ? { models: ["opus"], efforts: ["high"], choice: { model: "opus", effort: "high" }, max: 3, unreadable: {}, ...config }
+    const value = path === "/api/config" ? { models: ["opus"], efforts: ["high"], choice: { model: "opus", effort: "high" }, max: 3, ...config }
       : path === "/api/tickets" ? TICKETS : { entries: [], max: 3, paused: true };
     return { ok: true, json: async () => value, statusText: "" };
   };
   const localStorage = { getItem: (k: string) => storage.get(k) ?? null, setItem: (k: string, v: string) => { storage.set(k, v); } };
-  runInNewContext(SCRIPT, { document, fetch, localStorage, setInterval: () => 0, Date, JSON, Object, Array, Set, Map, String, Number, Boolean, Math });
+  runInNewContext(SCRIPT, { ...view, document, fetch, window: { localStorage }, setInterval: () => 0, Date, JSON, Object, Array, Set, Map, String, Number, Boolean, Math });
   for (let i = 0; i < 10; i++) await new Promise((resolve) => setImmediate(resolve));
   const $ = (id: string) => document.getElementById(id);
   const groups = () => $("groups").children;
@@ -98,18 +106,13 @@ test("a status group folds from its header, stays folded after a reload, and unf
   assert.equal(storage.get("ticket-mode.folded"), "[]");
 });
 
-test("Select all takes the visible tickets that name a repository, and queues exactly those", async () => {
+test("Select all takes the visible tickets, and Queue sends exactly those with the model and effort and no repository", async () => {
   const p = await page(new Map([["ticket-mode.projects", JSON.stringify(["Alpha"])]]));
   p.$("all").checked = true;
   p.$("all").fire("change");
   p.$("queue").fire("click");
   await new Promise((resolve) => setImmediate(resolve));
-  assert.deepEqual(p.posts.find((x) => x.path === "/api/queue")?.body.keys, ["T-1"], "T-3 is visible but names no repository; T-2 and T-4 are filtered out");
-});
-
-test("a clone the server could not read is shown on the page", async () => {
-  const p = await page(new Map(), { unreadable: { netbox: "not a repository" } });
-  assert.equal(p.$("unreadable").hidden, false);
-  assert.match(p.$("unreadable").textContent, /netbox \(not a repository\)/);
-  assert.equal((await page(new Map())).$("unreadable").hidden, true, "control: hidden when every clone read");
+  const body = p.posts.find((x) => x.path === "/api/queue")?.body;
+  assert.deepEqual(body?.keys, ["T-1", "T-3"], "T-2 and T-4 are filtered out");
+  assert.equal("repos" in (body ?? {}), false, "the worker chooses the repository");
 });

@@ -12,6 +12,7 @@ import { randomBytes, timingSafeEqual } from "node:crypto";
 import { execFileSync } from "node:child_process";
 import { existsSync, readFileSync, realpathSync, writeFileSync, mkdirSync } from "node:fs";
 import { createServer, type IncomingMessage, type ServerResponse } from "node:http";
+import { stripTypeScriptTypes } from "node:module";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
 import { refuseUnknownFlags } from "../lib/cli-flags.ts";
@@ -20,10 +21,11 @@ import { createPool, type PoolDeps } from "./pool.ts";
 import { amend, enqueue, loadQueue, remove, retry, saveQueue, setMax, setPaused, type Queue, type RunChoice } from "./queue.ts";
 import { readTicketSettings, type TicketSettings } from "./settings.ts";
 import type { Ticket, TicketSource } from "./source.ts";
-import { discoverPackages, resolveScope, type Packages } from "./scope.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PAGE = join(HERE, "ui.html");
+/** The page's logic, written in TypeScript so its tests run it, and sent to the browser with the types stripped. */
+const VIEW = join(HERE, "board-view.ts");
 const BIN = join(HERE, "..", "bin.ts");
 const COOKIE = "ticket_token";
 const TICK_MS = 30_000;
@@ -38,14 +40,15 @@ export type BoardDeps = Readonly<{
   token: string;
   queuePath: string;
   choicePath: string;
-  /** Each clone's packages, which a ticket's title scope is resolved against (`scope.ts`). */
-  packages: Packages;
-  /** Clones whose packages could not be read, with the reason: a title scoped to one of their packages cannot resolve until they can. */
-  unreadable?: Readonly<Record<string, string>>;
   pool?: Pick<ReturnType<typeof createPool>, "tick" | "stop" | "reconcile" | "ensureSession">;
   poolDeps?: Omit<PoolDeps, "settings" | "source" | "hook">;
   now?: () => number;
 }>;
+
+/** `board-view.ts` as the browser can run it: Node's own type stripping, so what the tests ran is what the page runs. */
+export function boardViewScript(read: (path: string) => string = (path) => readFileSync(path, "utf8")): string {
+  return stripTypeScriptTypes(read(VIEW));
+}
 
 /** The request carries this server's token, in its cookie or its `x-ticket-token` header. Compared in constant time. */
 export function carriesToken(request: Pick<IncomingMessage, "headers">, token: string): boolean {
@@ -63,23 +66,16 @@ export function refusal(request: Pick<IncomingMessage, "headers" | "method">, po
   return null;
 }
 
-type ModelChoice = Readonly<{ model: string; effort: string }>;
-
 /** The last model and effort chosen, so the page offers them again. */
-function readChoice(path: string): ModelChoice {
-  const fallback: ModelChoice = { model: "opus", effort: "high" };
+function readChoice(path: string): RunChoice {
+  const fallback: RunChoice = { model: "opus", effort: "high" };
   if (!existsSync(path)) return fallback;
   try {
-    const saved = JSON.parse(readFileSync(path, "utf8")) as Partial<ModelChoice>;
+    const saved = JSON.parse(readFileSync(path, "utf8")) as Partial<RunChoice>;
     return { model: saved.model ?? fallback.model, effort: saved.effort ?? fallback.effort };
   } catch {
     return fallback;
   }
-}
-
-function checkRepos(repos: string[], settings: TicketSettings): void {
-  const unknown = repos.filter((repo) => !(repo in settings.clones));
-  if (unknown.length > 0) throw new Error(`not in the host file's clones: ${unknown.join(", ")}`);
 }
 
 function checkModel(model: string): void {
@@ -90,7 +86,7 @@ function checkEffort(effort: string): void {
   if (!EFFORTS.includes(effort)) throw new Error(`effort must be one of ${EFFORTS.join(", ")}`);
 }
 
-function validModelChoice(body: Json): ModelChoice {
+function validRunChoice(body: Json): RunChoice {
   const model = String(body.model ?? "");
   const effort = String(body.effort ?? "");
   checkModel(model);
@@ -99,23 +95,18 @@ function validModelChoice(body: Json): ModelChoice {
 }
 
 /** An amend names only what it changes, and each part is held to the rules queueing uses. */
-function validAmend(body: Json, settings: TicketSettings): Partial<RunChoice> {
-  if (body.repos !== undefined && !Array.isArray(body.repos)) throw new Error("repos must be a list");
-  const repos = Array.isArray(body.repos) ? body.repos.map(String) : undefined;
+function validAmend(body: Json): Partial<RunChoice> {
   const model = body.model === undefined ? undefined : String(body.model);
   const effort = body.effort === undefined ? undefined : String(body.effort);
-  if (repos !== undefined) checkRepos(repos, settings);
   if (model !== undefined) checkModel(model);
   if (effort !== undefined) checkEffort(effort);
   // `RunChoice` is read-only, so the change is built whole rather than assigned field by field.
-  return { ...(repos === undefined ? {} : { repos }), ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
+  return { ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
 }
 
 /** The request handler, with every dependency named, so a test drives it without a socket. */
 export function createBoard(deps: BoardDeps) {
-  const { settings, source, token, packages } = deps;
-  const unreadable = deps.unreadable ?? {};
-  const repoOf = (ticket: Ticket) => resolveScope(ticket.title, packages);
+  const { settings, source, token } = deps;
   const now = deps.now ?? Date.now;
   let queue: Queue = loadQueue(deps.queuePath, settings.max);
   const store = { get: () => queue, set: (next: Queue) => { queue = next; saveQueue(deps.queuePath, next); } };
@@ -126,33 +117,24 @@ export function createBoard(deps: BoardDeps) {
 
   async function api(method: string, path: string, body: Json): Promise<[number, unknown]> {
     if (method === "GET" && path === "/api/config") {
-      return [200, { models: MODELS, efforts: EFFORTS, choice: readChoice(deps.choicePath), max: queue.max, unreadable }];
+      return [200, { models: MODELS, efforts: EFFORTS, choice: readChoice(deps.choicePath), max: queue.max }];
     }
     if (method === "GET" && path === "/api/tickets") {
       const tickets = await source.assigned();
       known = new Map(tickets.map((ticket) => [ticket.key, ticket]));
-      return [200, tickets.map((ticket) => ({ ...ticket, resolved: repoOf(ticket) }))];
+      return [200, tickets];
     }
     if (method === "GET" && path === "/api/queue") return [200, queue];
     if (method === "POST" && path === "/api/queue") {
-      const choice = validModelChoice(body);
+      const choice = validRunChoice(body);
       const keys = Array.isArray(body.keys) ? body.keys.map(String) : [];
-      const runs: { ticket: Ticket; repo: string }[] = [];
-      const unscoped: string[] = [];
+      const tickets: Ticket[] = [];
       for (const key of keys) {
         const ticket = known.get(key) ?? await source.read(key);
         if (ticket === null) throw new Error(`no ticket ${key}`);
-        const resolved = repoOf(ticket);
-        if (resolved === null) unscoped.push(key);
-        else runs.push({ ticket, repo: resolved.repo });
+        tickets.push(ticket);
       }
-      // Nothing is queued unless every ticket says where its work lands: a partial queue would hide the ones that were left out.
-      if (unscoped.length > 0) {
-        const blind = Object.entries(unreadable).map(([repo, why]) => `${repo} (${why})`);
-        const unread = blind.length === 0 ? "" : `. Packages could not be read for ${blind.join(", ")}, so a package scope may be among these`;
-        throw new Error(`no repository in the title of ${unscoped.join(", ")}: retitle as <type>(<repo or package>): <what>, e.g. fix(ui-visual-explorer): ...${unread}`);
-      }
-      store.set(runs.reduce((next, { ticket, repo }) => enqueue(next, [ticket], { repos: [repo], ...choice }, now()), queue));
+      store.set(enqueue(queue, tickets, choice, now()));
       mkdirSync(dirname(deps.choicePath), { recursive: true });
       writeFileSync(deps.choicePath, `${JSON.stringify(choice)}\n`);
       wake();
@@ -172,7 +154,7 @@ export function createBoard(deps: BoardDeps) {
     const action = /^\/api\/queue\/([A-Za-z0-9_-]+)\/(amend|remove|retry|stop)$/.exec(path);
     if (method === "POST" && action) {
       const [, key, verb] = action;
-      if (verb === "amend") store.set(amend(queue, key, validAmend(body, settings)));
+      if (verb === "amend") store.set(amend(queue, key, validAmend(body)));
       if (verb === "remove") store.set(remove(queue, key));
       if (verb === "retry") store.set(retry(queue, key, now()));
       if (verb === "stop") pool.stop(key);
@@ -195,8 +177,12 @@ export function createBoard(deps: BoardDeps) {
       return void response.end();
     }
     if (!carriesToken(request, token)) return send(401, { error: "open the URL ticket:serve printed, which carries the token" });
+    if (request.method === "GET" && url.pathname === "/board-view.js") {
+      response.writeHead(200, { "Content-Type": "text/javascript; charset=utf-8", "Cache-Control": "no-store" });
+      return void response.end(boardViewScript());
+    }
     if (request.method === "GET" && url.pathname === "/") {
-      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'unsafe-inline'; img-src 'self' data:" });
+      response.writeHead(200, { "Content-Type": "text/html; charset=utf-8", "Cache-Control": "no-store", "Content-Security-Policy": "default-src 'self'; style-src 'unsafe-inline'; script-src 'self' 'unsafe-inline'; img-src 'self' data:" });
       return void response.end(readFileSync(PAGE, "utf8"));
     }
     let body: Json = {};
@@ -222,9 +208,7 @@ async function serve(): Promise<void> {
   const source = linearSource({ key: readLinearKey(settings.linearKey) });
   const token = randomBytes(24).toString("hex");
   const dir = join(settings.stateDir, "tickets");
-  const { packages, unreadable } = await discoverPackages(settings.clones);
-  for (const [repo, why] of Object.entries(unreadable)) process.stderr.write(`ticket:serve: could not read the packages of ${repo}: ${why}\n`);
-  const board = createBoard({ settings, source, token, packages, unreadable, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json") });
+  const board = createBoard({ settings, source, token, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json") });
   await board.pool.ensureSession();
   board.pool.reconcile();
   const server = createServer((request, response) => { void board.handle(request, response); });

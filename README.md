@@ -76,19 +76,20 @@ takes them one each. `agent-org ticket:serve` starts a board on `127.0.0.1` and 
 
 - **Pick.** Your assigned Linear tickets that are not done or canceled, grouped by status the way Linear shows them, with Select All per
   group and for the page. Filter by Linear project (several at once) or by search, and fold any status group; both are remembered in the
-  browser. Each ticket is worked in the repository its title names: the scope of `<type>(<scope>): <what>`, which is a repository in
-  `clones` or a package under one's `packages/` (`fix(ui-visual-explorer): ...` is worked in the repository holding that package). A
-  ticket whose title names neither cannot be queued until it is retitled. Choose the model and the effort, then Queue.
+  browser. Choose the model and the effort, then Queue. You do not choose a repository: the worker does.
 - **Board.** Queued, Running, Draft PR, Needs human and Failed. A card can be removed while queued, stopped while running, and retried
   once it has failed. The number of workers at once can be changed live.
 - **Paused until you start it.** A new queue is paused, so queueing a ticket never also starts it: queue what you want, then press
   Start workers on the Board when what the workers need is ready. Pause stops new starts and leaves running workers alone, and the
   choice survives a restart of the board.
 
-Each run gets a worktree at `<worktreeRoot>/<ticket>/<repo>`, on the ticket's own branch (`branchName` in Linear, so Linear
-links the pull request), from the remote's default branch as `ls-remote` reports it. One herdr workspace per ticket opens in ticket mode's
-own session, never the org's, and Claude starts there with its brief. The worker reads each repository's `CLAUDE.md`/`AGENTS.md` for its
-commands, opens a DRAFT pull request per repository it changed, and writes an outcome file: `draft-pr`, `wrong-repo` or `needs-human`.
+Each run starts in the ticket's own folder, `<worktreeRoot>/<ticket>`, among the repositories `clones` lists, in one herdr workspace of
+ticket mode's own session (never the org's). The worker reads its ticket and decides where the work lands, which a model can do from what a
+ticket says and a rule cannot, then makes its worktree there with `ticket:worktree <repo>`. That command keeps the branch rules in code: the
+ticket's own branch (`branchName` in Linear, so Linear links the pull request), from the remote's default branch as `ls-remote` reports it,
+never an existing branch, and the same worktree again on a retry. The board shows the repositories once the worker has made them. The worker
+reads each repository's `CLAUDE.md`/`AGENTS.md` for its commands, opens a DRAFT pull request per repository it changed, and writes an outcome
+file: `draft-pr`, `wrong-repo` (the fix belongs in none of them) or `needs-human`.
 Nothing is written to Linear.
 
 **What a worker may not do** is enforced by `ticket:hook`, which the worktree's `.claude/settings.local.json` names, so a session herdr

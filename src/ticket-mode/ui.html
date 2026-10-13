@@ -31,9 +31,7 @@
   .row { display: grid; grid-template-columns: 24px 96px 1fr auto auto; gap: 10px; align-items: center; padding: 6px 12px; border-top: 1px solid var(--line); }
   .row .pill { justify-self: end; }
   .row:first-of-type { border-top: 0; }
-  .row.taken, .row.unscoped { opacity: .55; }
-  .pill.repo { color: var(--text); }
-  .pill.noscope { border-style: dashed; }
+  .row.taken { opacity: .55; }
   .key { font-variant-numeric: tabular-nums; color: var(--muted); }
   .pill { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
   footer { position: fixed; bottom: 0; left: 0; right: 0; background: var(--panel); border-top: 1px solid var(--line); padding: 10px 20px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
@@ -69,7 +67,6 @@
 </header>
 <main>
   <div id="error" class="error" role="alert"></div>
-  <div id="unreadable" class="notice" hidden></div>
   <section id="pick">
     <div class="bar">
       <input id="filter" type="search" placeholder="Filter by key, title or project">
@@ -94,46 +91,23 @@
   <label>Effort <select id="effort"></select></label>
   <button class="primary" id="queue">Queue 0 tickets</button>
 </footer>
-<script>
-"use strict";
+<script type="module">
+// The decisions (what shows, how it groups, what can be selected, which column a run is in) are board-view.ts's, tested there.
+// This page only draws what they return and wires the clicks.
+import { COLUMNS, groupByStatus, projectCounts, projectOf, queueLabel, recall, remember, selectable, toggled, visibleTickets } from "/board-view.js";
+
 const el = (tag, props = {}, ...children) => {
   const node = Object.assign(document.createElement(tag), props);
   for (const child of children) if (child !== null && child !== undefined) node.append(child);
   return node;
 };
 const $ = (id) => document.getElementById(id);
-const state = { tickets: [], queue: { entries: [], max: 3 }, config: null, selected: new Set() };
-
-/** Per-viewer conveniences: which status groups are folded and which projects are filtered on. Lost storage just means the defaults. */
-const remembered = (name) => { try { return new Set(JSON.parse(localStorage.getItem(name) || "[]")); } catch { return new Set(); } };
-const remember = (name, set) => { try { localStorage.setItem(name, JSON.stringify([...set])); } catch { /* storage refused: the view still works */ } };
-const folded = remembered("ticket-mode.folded");
-const projectFilter = remembered("ticket-mode.projects");
-const NO_PROJECT = "(no project)";
-const projectOf = (t) => t.project || NO_PROJECT;
-
-/** The tickets the Pick tab shows: in a chosen project (any, when none is chosen) and matching the search. */
-function visibleTickets() {
-  const words = $("filter").value.trim().toLowerCase();
-  return state.tickets.filter((t) => (projectFilter.size === 0 || projectFilter.has(projectOf(t)))
-    && (!words || `${t.key} ${t.title} ${t.project || ""}`.toLowerCase().includes(words)));
-}
-
-function renderProjects() {
-  const counts = new Map();
-  for (const t of state.tickets) counts.set(projectOf(t), (counts.get(projectOf(t)) || 0) + 1);
-  for (const name of [...projectFilter]) if (!counts.has(name)) projectFilter.delete(name);
-  const chips = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([name, n]) => {
-    const chip = el("button", { className: "chip", type: "button" }, name, el("span", { className: "n" }, String(n)));
-    chip.setAttribute("aria-pressed", String(projectFilter.has(name)));
-    chip.addEventListener("click", () => { projectFilter.has(name) ? projectFilter.delete(name) : projectFilter.add(name); remember("ticket-mode.projects", projectFilter); render(); });
-    return chip;
-  });
-  const all = el("button", { className: "chip", type: "button", textContent: "All projects" });
-  all.setAttribute("aria-pressed", String(projectFilter.size === 0));
-  all.addEventListener("click", () => { projectFilter.clear(); remember("ticket-mode.projects", projectFilter); render(); });
-  $("projects").replaceChildren(el("span", { className: "label" }, "Projects"), all, ...chips);
-}
+const storage = (() => { try { return window.localStorage; } catch { return null; } })();
+const state = {
+  tickets: [], queue: { entries: [], max: 3, paused: true }, selected: new Set(),
+  folded: recall(storage, "ticket-mode.folded"), projects: recall(storage, "ticket-mode.projects"),
+};
+const PRIORITY = ["", "Urgent", "High", "Medium", "Low"];
 
 async function call(method, path, body) {
   const response = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -142,59 +116,57 @@ async function call(method, path, body) {
   return value;
 }
 function report(err) { $("error").textContent = err ? String(err.message || err) : ""; }
-
-const COLUMNS = [
-  ["Queued", (e) => e.phase === "queued"],
-  ["Running", (e) => e.phase === "starting" || e.phase === "running"],
-  ["Draft PR", (e) => e.outcome && e.outcome.kind === "draft-pr"],
-  ["Needs human", (e) => e.outcome && ["needs-human", "wrong-repo", "no-outcome"].includes(e.outcome.kind)],
-  ["Failed", (e) => e.outcome && ["crashed", "stopped"].includes(e.outcome.kind)],
-];
-const PRIORITY = ["", "Urgent", "High", "Medium", "Low"];
 const entryFor = (key) => state.queue.entries.find((e) => e.ticket.key === key);
+const shown = () => visibleTickets(state.tickets, state.projects, $("filter").value);
+
+function renderProjects() {
+  const counts = projectCounts(state.tickets);
+  const chip = (label, pressed, onClick, n) => {
+    const b = el("button", { className: "chip", type: "button" }, label, n === undefined ? null : el("span", { className: "n" }, String(n)));
+    b.setAttribute("aria-pressed", String(pressed));
+    b.addEventListener("click", onClick);
+    return b;
+  };
+  const choose = (next) => { state.projects = next; remember(storage, "ticket-mode.projects", next); render(); };
+  $("projects").replaceChildren(el("span", { className: "label" }, "Projects"),
+    chip("All projects", state.projects.size === 0, () => choose(new Set())),
+    ...counts.map(([name, n]) => chip(name, state.projects.has(name), () => choose(toggled(state.projects, name)), n)));
+}
 
 function renderPick() {
   renderProjects();
-  const shown = visibleTickets();
-  const groups = new Map();
-  for (const t of [...shown].sort((a, b) => a.statusOrder - b.statusOrder || a.priority - b.priority)) {
-    if (!groups.has(t.status)) groups.set(t.status, []);
-    groups.get(t.status).push(t);
-  }
-  const free = (t) => !entryFor(t.key) && t.resolved;
+  const tickets = shown();
+  const free = (t) => selectable(t, state.queue.entries);
   const list = $("groups");
   list.replaceChildren();
-  for (const [status, tickets] of groups) {
-    const selectable = tickets.filter(free);
-    const groupBox = el("input", { type: "checkbox", checked: selectable.length > 0 && selectable.every((t) => state.selected.has(t.key)), disabled: selectable.length === 0 });
-    groupBox.addEventListener("change", () => { for (const t of selectable) groupBox.checked ? state.selected.add(t.key) : state.selected.delete(t.key); render(); });
-    const isFolded = folded.has(status);
-    const toggle = () => { folded.has(status) ? folded.delete(status) : folded.add(status); remember("ticket-mode.folded", folded); renderPick(); };
-    const fold = el("button", { className: "fold", type: "button", textContent: isFolded ? "▸" : "▾", title: isFolded ? "Expand" : "Collapse" });
-    fold.setAttribute("aria-expanded", String(!isFolded));
-    fold.addEventListener("click", toggle);
+  for (const [status, group] of groupByStatus(tickets)) {
+    const open = group.filter(free);
+    const all = el("input", { type: "checkbox", checked: open.length > 0 && open.every((t) => state.selected.has(t.key)), disabled: open.length === 0 });
+    all.addEventListener("change", () => { for (const t of open) all.checked ? state.selected.add(t.key) : state.selected.delete(t.key); render(); });
+    const folded = state.folded.has(status);
+    const fold = () => { state.folded = toggled(state.folded, status); remember(storage, "ticket-mode.folded", state.folded); renderPick(); };
+    const arrow = el("button", { className: "fold", type: "button", textContent: folded ? "▸" : "▾", title: folded ? "Expand" : "Collapse" });
+    arrow.setAttribute("aria-expanded", String(!folded));
+    arrow.addEventListener("click", fold);
     const name = el("span", { className: "name", textContent: status });
-    name.addEventListener("click", toggle);
-    const picked = tickets.filter((t) => state.selected.has(t.key)).length;
-    const group = el("div", { className: `group${isFolded ? " collapsed" : ""}` },
-      el("h2", {}, fold, groupBox, name, el("span", { className: "count" }, ` ${tickets.length}${picked ? ` · ${picked} selected` : ""}`)));
-    for (const t of tickets) {
+    name.addEventListener("click", fold);
+    const picked = group.filter((t) => state.selected.has(t.key)).length;
+    const box = el("div", { className: `group${folded ? " collapsed" : ""}` },
+      el("h2", {}, arrow, all, name, el("span", { className: "count" }, ` ${group.length}${picked ? ` · ${picked} selected` : ""}`)));
+    for (const t of group) {
       const taken = entryFor(t.key);
-      const box = el("input", { type: "checkbox", checked: state.selected.has(t.key), disabled: Boolean(taken) || !t.resolved });
-      box.addEventListener("change", () => { box.checked ? state.selected.add(t.key) : state.selected.delete(t.key); render(); });
-      const where = t.resolved
-        ? el("span", { className: "pill repo", title: "Read from the ticket's title scope" }, t.resolved.package ? `${t.resolved.repo} · ${t.resolved.package}` : t.resolved.repo)
-        : el("span", { className: "pill noscope", title: "The title names no repository or package. Retitle it in Linear as <type>(<repo or package>): <what>, e.g. fix(ui-visual-explorer): ..." }, "no repo in title");
-      group.append(el("label", { className: `row${taken ? " taken" : ""}${t.resolved ? "" : " unscoped"}` }, box, el("span", { className: "key" }, t.key),
+      const tick = el("input", { type: "checkbox", checked: state.selected.has(t.key), disabled: Boolean(taken) });
+      tick.addEventListener("change", () => { tick.checked ? state.selected.add(t.key) : state.selected.delete(t.key); render(); });
+      box.append(el("label", { className: `row${taken ? " taken" : ""}` }, tick, el("span", { className: "key" }, t.key),
         el("span", {}, el("a", { href: t.url, target: "_blank", rel: "noreferrer" }, t.title)),
-        where,
+        el("span", { className: "pill" }, projectOf(t)),
         el("span", { className: "pill" }, taken ? `on the queue: ${taken.phase}` : PRIORITY[t.priority] || "No priority")));
     }
-    list.append(group);
+    list.append(box);
   }
-  const shownFree = shown.filter(free);
-  $("all").checked = shownFree.length > 0 && shownFree.every((t) => state.selected.has(t.key));
-  $("loaded").textContent = `${shown.length} of ${state.tickets.length} assigned to you shown, ${state.selected.size} selected`;
+  const open = tickets.filter(free);
+  $("all").checked = open.length > 0 && open.every((t) => state.selected.has(t.key));
+  $("loaded").textContent = `${tickets.length} of ${state.tickets.length} assigned to you shown, ${state.selected.size} selected`;
 }
 
 function since(ms) {
@@ -214,20 +186,19 @@ function card(e) {
     : el("div", { className: "meta" }, o.kind === "wrong-repo" ? `Belongs in: ${o.where}` : o.kind === "needs-human" ? o.reason : o.kind === "crashed" ? o.reason : o.kind);
   const when = e.phase === "finished" ? (e.startedAt ? `ran ${since(e.startedAt)} ago` : "") : e.startedAt ? `running ${since(e.startedAt)}` : `queued ${since(e.queuedAt)} ago`;
   const tokens = e.tokens ? ` · ${Math.round(e.tokens.input / 1000)}k in / ${Math.round(e.tokens.output / 1000)}k out` : "";
+  const repos = e.repos && e.repos.length > 0 ? e.repos.join(", ") : e.phase === "queued" ? "repo: the worker chooses" : "repo: choosing";
   return el("div", { className: "card" },
     el("div", {}, el("a", { href: e.ticket.url, target: "_blank", rel: "noreferrer" }, e.ticket.key), ` ${e.ticket.title}`),
-    el("div", { className: "meta" }, `${e.repos.join(", ")} · ${e.model}/${e.effort} · ${when}${tokens}`),
+    el("div", { className: "meta" }, `${repos} · ${e.model}/${e.effort} · ${when}${tokens}`),
     e.waiting ? el("div", { className: "waiting" }, "Waiting on a person: open its herdr pane") : null,
     detail, actions);
 }
 
 function renderBoard() {
-  const columns = $("columns");
-  columns.replaceChildren();
-  for (const [title, test] of COLUMNS) {
-    const entries = state.queue.entries.filter(test);
-    columns.append(el("div", { className: "column" }, el("h2", {}, `${title} (${entries.length})`), ...entries.map(card)));
-  }
+  $("columns").replaceChildren(...COLUMNS.map(({ title, holds }) => {
+    const entries = state.queue.entries.filter(holds);
+    return el("div", { className: "column" }, el("h2", {}, `${title} (${entries.length})`), ...entries.map(card));
+  }));
   if (document.activeElement !== $("max")) $("max").value = state.queue.max;
   const paused = state.queue.paused !== false;
   $("pool-state").textContent = paused ? "Workers paused: nothing queued will start" : "Workers started: queued tickets start as slots free up";
@@ -237,18 +208,13 @@ function renderBoard() {
 }
 
 function renderFooter() {
-  const count = state.selected.size;
-  $("queue").textContent = count === 0 ? "Select tickets to queue" : `Queue ${count} ticket${count === 1 ? "" : "s"}`;
-  $("queue").disabled = count === 0;
+  $("queue").textContent = queueLabel(state.selected.size);
+  $("queue").disabled = state.selected.size === 0;
 }
 
 function render() { renderPick(); renderBoard(); renderFooter(); }
 
 function setup(config) {
-  state.config = config;
-  const blind = Object.entries(config.unreadable || {});
-  $("unreadable").hidden = blind.length === 0;
-  $("unreadable").textContent = blind.length === 0 ? "" : `Packages could not be read for ${blind.map(([repo, why]) => `${repo} (${why})`).join(", ")}: tickets scoped to one of their packages show "no repo in title" until they can.`;
   $("model").replaceChildren(...config.models.map((m) => el("option", { value: m, textContent: m, selected: m === config.choice.model })));
   $("effort").replaceChildren(...config.efforts.map((x) => el("option", { value: x, textContent: x, selected: x === config.choice.effort })));
 }
@@ -263,10 +229,7 @@ for (const tab of document.querySelectorAll(".tab")) {
 }
 $("filter").addEventListener("input", render);
 $("all").addEventListener("change", () => {
-  for (const t of visibleTickets()) {
-    if (entryFor(t.key) || !t.resolved) continue;
-    $("all").checked ? state.selected.add(t.key) : state.selected.delete(t.key);
-  }
+  for (const t of shown().filter((t) => selectable(t, state.queue.entries))) $("all").checked ? state.selected.add(t.key) : state.selected.delete(t.key);
   render();
 });
 $("queue").addEventListener("click", async () => {
@@ -280,14 +243,12 @@ $("queue").addEventListener("click", async () => {
 $("toggle-pause").addEventListener("click", () => call("POST", "/api/paused", { paused: state.queue.paused === false }).then((q) => { state.queue = q; render(); }, report));
 $("save-max").addEventListener("click", () => call("POST", "/api/max", { max: Number($("max").value) }).then((q) => { state.queue = q; render(); }, report));
 
-(async () => {
-  try {
-    setup(await call("GET", "/api/config"));
-    [state.tickets, state.queue] = await Promise.all([call("GET", "/api/tickets"), call("GET", "/api/queue")]);
-    render();
-  } catch (err) { report(err); }
-  setInterval(() => call("GET", "/api/queue").then((q) => { state.queue = q; renderBoard(); renderPick(); }, report), 5000);
-})();
+try {
+  setup(await call("GET", "/api/config"));
+  [state.tickets, state.queue] = await Promise.all([call("GET", "/api/tickets"), call("GET", "/api/queue")]);
+  render();
+} catch (err) { report(err); }
+setInterval(() => call("GET", "/api/queue").then((q) => { state.queue = q; renderBoard(); renderPick(); }, report), 5000);
 </script>
 </body>
 </html>

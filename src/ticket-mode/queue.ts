@@ -2,7 +2,8 @@
 // module: ticket mode's queue -- what you queued, what is running, and how each run ended; pure transitions plus one file
 //
 // THE PERSON CHOOSES EVERY ENTRY. Nothing is added by a filter or a label: an entry exists because someone selected the ticket on the board (or
-// named it to `ticket:serve`'s API) with the repositories, model and effort it runs with. The queue runs in the order entries were added.
+// named it to `ticket:serve`'s API) with the model and effort it runs with. The queue runs in the order entries were added. Which repositories a
+// ticket is worked in is the worker's call, made from the ticket itself, and is recorded here as the worker makes its worktrees.
 //
 // EVERY TRANSITION IS A PURE FUNCTION of the queue and returns a new one, so the board, the pool and the tests share one set of rules. The server is
 // the only writer of the file, which it replaces whole by rename, so a reader never sees half of one.
@@ -23,6 +24,7 @@ export type Phase = "queued" | "starting" | "running" | "finished";
 
 export type Entry = Readonly<{
   ticket: Ticket;
+  /** The repositories the worker has made worktrees in, as the pool last saw; empty until it chooses. */
   repos: readonly string[];
   model: string;
   effort: string;
@@ -30,8 +32,6 @@ export type Entry = Readonly<{
   queuedAt: number;
   startedAt?: number;
   finishedAt?: number;
-  /** This is a retry: the earlier run's worktrees are continued in, not made again. */
-  retried?: boolean;
   /** The herdr workspace the run's agent is in, while it has one. */
   workspace?: string;
   /** Seen `working` at least once, so a later `idle` means a finished turn and not a prompt not yet taken. */
@@ -48,7 +48,7 @@ export type Entry = Readonly<{
  */
 export type Queue = Readonly<{ entries: readonly Entry[]; max: number; paused: boolean }>;
 
-export type RunChoice = Readonly<{ repos: readonly string[]; model: string; effort: string }>;
+export type RunChoice = Readonly<{ model: string; effort: string }>;
 
 const LIVE: ReadonlySet<Phase> = new Set(["starting", "running"]);
 
@@ -60,16 +60,14 @@ function replace(queue: Queue, key: string, change: (entry: Entry) => Entry): Qu
 
 const find = (queue: Queue, key: string): Entry | undefined => queue.entries.find((entry) => entry.ticket.key === key);
 
-/** Add each ticket not already on the queue, after the last entry. A ticket already there is left as it is. A choice with no repository is refused. */
+/** Add each ticket not already on the queue, after the last entry. A ticket already there is left as it is. */
 export function enqueue(queue: Queue, tickets: readonly Ticket[], choice: RunChoice, now: number): Queue {
-  if (choice.repos.length === 0) throw new Error("choose at least one repository to queue a ticket to");
   const fresh = tickets.filter((ticket) => find(queue, ticket.key) === undefined);
-  return { ...queue, entries: [...queue.entries, ...fresh.map((ticket): Entry => ({ ticket, ...choice, phase: "queued", queuedAt: now }))] };
+  return { ...queue, entries: [...queue.entries, ...fresh.map((ticket): Entry => ({ ticket, repos: [], ...choice, phase: "queued", queuedAt: now }))] };
 }
 
-/** Change a queued entry's repositories, model or effort. An entry that has started keeps what it started with. */
+/** Change a queued entry's model or effort. An entry that has started keeps what it started with. */
 export function amend(queue: Queue, key: string, choice: Partial<RunChoice>): Queue {
-  if (choice.repos !== undefined && choice.repos.length === 0) throw new Error("an entry needs at least one repository");
   return replace(queue, key, (entry) => (entry.phase === "queued" ? { ...entry, ...choice } : entry));
 }
 
@@ -83,7 +81,7 @@ export function retry(queue: Queue, key: string, now: number): Queue {
   const entry = find(queue, key);
   if (entry === undefined || entry.phase !== "finished" || entry.outcome?.kind === "draft-pr") return queue;
   const { ticket, repos, model, effort } = entry;
-  return { ...queue, entries: [...queue.entries.filter((e) => e.ticket.key !== key), { ticket, repos, model, effort, phase: "queued", queuedAt: now, retried: true }] };
+  return { ...queue, entries: [...queue.entries.filter((e) => e.ticket.key !== key), { ticket, repos, model, effort, phase: "queued", queuedAt: now }] };
 }
 
 export function setPaused(queue: Queue, paused: boolean): Queue {
@@ -97,6 +95,11 @@ export function setMax(queue: Queue, max: number): Queue {
 
 export function markStarting(queue: Queue, key: string, now: number): Queue {
   return replace(queue, key, (entry) => ({ ...entry, phase: "starting", startedAt: now }));
+}
+
+/** The repositories the worker has made worktrees in so far. */
+export function recordRepos(queue: Queue, key: string, repos: readonly string[]): Queue {
+  return replace(queue, key, (entry) => ({ ...entry, repos }));
 }
 
 export function markRunning(queue: Queue, key: string, workspace: string): Queue {

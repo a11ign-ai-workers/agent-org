@@ -16,13 +16,13 @@ import { availableParallelism, homedir, loadavg } from "node:os";
 import { join } from "node:path";
 import { agentStartArgs, closedNote, herdrReason, openPane, readAgents } from "../herdr-agents.ts";
 import {
-  finish, isLive, markRunning, markStarting, nextStarts, observe,
+  finish, isLive, markRunning, markStarting, nextStarts, observe, recordRepos,
   type Entry, type Outcome, type Queue,
 } from "./queue.ts";
-import type { TicketSettings } from "./settings.ts";
 import type { TicketSource } from "./source.ts";
-import { addWorktree, excludeFromGit, reuseWorktree, worktreePath, type Git } from "./worktree.ts";
-import { BRIEF_FILE, OUTCOME_FILE, STOP_COUNT_FILE, briefText, firstPrompt, workerFlags, workerSettings, type HookCommand, type WorktreeRef } from "./worker-files.ts";
+import { TICKET_ENV } from "./worktree-command.ts";
+import { HOST_FILE_ENV, type TicketSettings } from "./settings.ts";
+import { BRIEF_FILE, OUTCOME_FILE, STOP_COUNT_FILE, briefText, firstPrompt, workerFlags, workerSettings, type HookCommand } from "./worker-files.ts";
 
 /** herdr waits on Claude's start; a slow one has been measured past 30 s (`wake.ts`'s start budget), so a start gets 90. */
 const START_TIMEOUT_MS = 90_000;
@@ -55,7 +55,8 @@ export type PoolDeps = Readonly<{
   herdr?: Herdr;
   /** `agent start`; when absent it is `herdr` itself if that was given, so a test that injects one injects both. */
   herdrAsync?: HerdrAsync;
-  git?: Git;
+  /** The host file the worker's `ticket:worktree` reads; `$AGENT_ORG_HOST` when absent. */
+  hostFile?: string;
   now?: () => number;
   /** The 1-minute load average and the cores it is compared with. */
   load?: () => Readonly<{ load: number; cores: number }>;
@@ -71,6 +72,18 @@ export type PoolDeps = Readonly<{
 export type QueueStore = Readonly<{ get: () => Queue; set: (queue: Queue) => void }>;
 
 export const ticketDir = (settings: TicketSettings, key: string): string => join(settings.stateDir, "tickets", key);
+
+/** The folder a ticket's worker starts in, and makes its worktrees in: `<worktreeRoot>/<key>`. */
+export const ticketFolder = (settings: TicketSettings, key: string): string => join(settings.worktreeRoot, key);
+
+/** The repositories a worker has made worktrees in: the folder's directories that hold a git worktree. */
+export function worktreesIn(folder: string): string[] {
+  if (!existsSync(folder)) return [];
+  return readdirSync(folder, { withFileTypes: true })
+    .filter((entry) => entry.isDirectory() && existsSync(join(folder, entry.name, ".git")))
+    .map((entry) => entry.name)
+    .sort();
+}
 
 /**
  * A ticket's name in herdr, for its workspace and its agent: herdr refuses an agent name that is not a lowercase letter followed by up to 31
@@ -157,6 +170,7 @@ export function countTokens(file: string | null): { input: number; output: numbe
 
 export function createPool(store: QueueStore, deps: PoolDeps) {
   const { settings, source, hook } = deps;
+  const hostFile = deps.hostFile ?? process.env[HOST_FILE_ENV];
   const herdr = deps.herdr ?? defaultHerdr;
   const injected = deps.herdr;
   const herdrAsync: HerdrAsync = deps.herdrAsync ?? (injected ? async (args, timeoutMs) => injected(args, timeoutMs) : defaultHerdrAsync);
@@ -184,38 +198,37 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
   }
   const update = (change: (queue: Queue) => Queue) => store.set(change(store.get()));
 
-  /** The worktrees, the brief and the settings file for one run. Throws, with the reason, when any of it cannot be made. */
-  async function prepare(entry: Entry): Promise<{ worktrees: WorktreeRef[]; dir: string }> {
+  /**
+   * The ticket's folder, its brief and its settings file. The folder sits among the person's repositories (under `worktreeRoot`), so the worker
+   * starts with the workspace's own `CLAUDE.md` around it, and it is no repository itself: the worker makes its worktrees inside it with
+   * `ticket:worktree` once it has decided where the work lands. Throws, with the reason, when any of it cannot be made.
+   */
+  async function prepare(entry: Entry): Promise<{ folder: string; dir: string }> {
     const { ticket } = entry;
     const dir = ticketDir(settings, ticket.key);
+    const folder = ticketFolder(settings, ticket.key);
     mkdirSync(dir, { recursive: true });
     // An earlier run's outcome and stop count would end this run before it began.
     for (const file of [OUTCOME_FILE, STOP_COUNT_FILE]) rmSync(join(dir, file), { force: true });
-    const worktrees: WorktreeRef[] = [];
-    for (const repo of entry.repos) {
-      const clone = settings.clones[repo];
-      if (clone === undefined) throw new Error(`${repo} is not in the host file's clones`);
-      const where = { repo, clone, path: worktreePath(settings.worktreeRoot, ticket.key, repo), branch: ticket.branch };
-      worktrees.push(await (entry.retried === true && existsSync(where.path) ? reuseWorktree(where, deps.git) : addWorktree(where, deps.git)));
-    }
     const attachments = await source.download(ticket, dir);
-    writeFileSync(join(dir, BRIEF_FILE), briefText({ ticket, worktrees, ticketDir: dir, attachments }));
-    const [first, ...others] = worktrees;
-    mkdirSync(join(first.path, ".claude"), { recursive: true });
-    writeFileSync(join(first.path, SETTINGS_FILE),
-      `${JSON.stringify(workerSettings({ model: entry.model, ticketDir: dir, otherWorktrees: others.map((w) => w.path), hook }), null, 2)}\n`);
-    await excludeFromGit(first.path, SETTINGS_FILE, deps.git === undefined ? {} : { git: deps.git });
-    return { worktrees, dir };
+    const worktreeCommand = `${hook.node} ${hook.bin} ticket:worktree`;
+    writeFileSync(join(dir, BRIEF_FILE), briefText({ ticket, folder, ticketDir: dir, attachments, clones: settings.clones, worktreeCommand }));
+    mkdirSync(join(folder, ".claude"), { recursive: true });
+    writeFileSync(join(folder, SETTINGS_FILE),
+      `${JSON.stringify(workerSettings({ model: entry.model, ticketDir: dir, readDirs: Object.values(settings.clones), hook }), null, 2)}\n`);
+    return { folder, dir };
   }
 
   /** Open the workspace and start Claude in it. Returns the workspace, or throws with herdr's reason after closing anything it opened. */
-  async function start(entry: Entry, worktrees: WorktreeRef[], dir: string): Promise<string> {
+  async function start(entry: Entry, folder: string, dir: string): Promise<string> {
     const key = entry.ticket.key;
     const name = herdrName(key);
     const run = (args: string[]) => herdr(args);
-    const opened = openPane(run, name, {}, worktrees[0].path, session);
+    // The worker's shell carries its ticket, its branch and the host file, which `ticket:worktree` reads.
+    const env = { [TICKET_ENV.key]: key, [TICKET_ENV.branch]: entry.ticket.branch, ...(hostFile ? { [TICKET_ENV.host]: hostFile } : {}) };
+    const opened = openPane(run, name, env, folder, session);
     if ("refusal" in opened) throw new Error(opened.refusal);
-    const tail = [firstPrompt(dir), ...workerFlags({ name: key, model: entry.model, effort: entry.effort, addDirs: [dir, ...worktrees.slice(1).map((w) => w.path)] })];
+    const tail = [firstPrompt(dir), ...workerFlags({ name: key, model: entry.model, effort: entry.effort, addDirs: [dir] })];
     try {
       await herdrAsync(agentStartArgs(name, "claude", opened.pane, tail, session), START_TIMEOUT_MS);
     } catch (err) {
@@ -239,7 +252,7 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     } catch {
       return false;
     }
-    if (!isStartDialog(screen, worktreePath(settings.worktreeRoot, entry.ticket.key, entry.repos[0]))) return false;
+    if (!isStartDialog(screen, ticketFolder(settings, entry.ticket.key))) return false;
     herdr(["--session", settings.herdrSession, "agent", "send-keys", name, "down", "enter"]);
     answered.set(name, count + 1);
     return true;
@@ -261,6 +274,8 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
         continue;
       }
       misses.delete(key);
+      const repos = worktreesIn(ticketFolder(settings, key));
+      if (repos.join("\n") !== entry.repos.join("\n")) update((queue) => recordRepos(queue, key, repos));
       if (!["working", "idle", "done"].includes(seen) && answerStartDialog(entry)) continue;
       update((queue) => observe(queue, key, seen));
       const current = store.get().entries.find((e) => e.ticket.key === key) ?? entry;
@@ -294,8 +309,8 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     for (const entry of nextStarts(store.get(), load, cores)) {
       update((queue) => markStarting(queue, entry.ticket.key, now()));
       try {
-        const { worktrees, dir } = await prepare(entry);
-        const workspace = await start(entry, worktrees, dir);
+        const { folder, dir } = await prepare(entry);
+        const workspace = await start(entry, folder, dir);
         // Stopped while it was starting: the stop is the person's last word, so the workspace it raced is closed and the run stays stopped.
         if (store.get().entries.find((e) => e.ticket.key === entry.ticket.key)?.phase !== "starting") {
           closedNote((args) => herdr(args), workspace, session);

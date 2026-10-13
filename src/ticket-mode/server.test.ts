@@ -2,26 +2,24 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import { parseTicketSettings } from "./settings.ts";
-import { carriesToken, createBoard, refusal } from "./server.ts";
+import { boardViewScript, carriesToken, createBoard, refusal } from "./server.ts";
 import type { Ticket, TicketSource } from "./source.ts";
 
-/** A ticket whose title is `title`: its scope is what decides its repository. */
-const ticket = (key: string, title = `fix(nbl-ui-netbox): ${key}`) => ({ key, title, description: "", url: "", branch: key.toLowerCase(), status: "Backlog", statusOrder: 0, team: "NBF", project: null, priority: 0 }) as Ticket;
-const PACKAGES = { "nbl-ui-netbox": ["ui-netbox", "ui-visual-explorer"], "platform-monorepo": [] };
+const ticket = (key: string, title = key) => ({ key, title, description: "", url: "", branch: key.toLowerCase(), status: "Backlog", statusOrder: 0, team: "NBF", project: null, priority: 0 }) as Ticket;
 const TOKEN = "a".repeat(48);
 
-function board(port = 4747, unreadable: Record<string, string> = {}) {
+function board(port = 4747) {
   const dir = tmpDir("ticket-server-");
   const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/r/netbox", "platform-monorepo": "/r/pm" }, stateDir: dir, tickets: { port } });
-  const assigned = [ticket("NBF-1"), ticket("NBF-2"), ticket("NBF-3", "Visual Explorer UI - Fit to View does nothing"), ticket("NBF-4", "fix(ci): lint-staged")];
-  const source: TicketSource = { assigned: async () => assigned, read: async (key) => (key === "VE-9" ? ticket("VE-9", "feat(ui-visual-explorer): zoom") : null), download: async () => [] };
+  const source: TicketSource = { assigned: async () => [ticket("NBF-1"), ticket("NBF-2")], read: async (key) => (key === "VE-9" ? ticket("VE-9") : null), download: async () => [] };
   const ticks: string[] = [];
   const pool = { tick: async () => { ticks.push("tick"); }, stop: (key: string) => { ticks.push(`stop ${key}`); }, reconcile: () => {}, ensureSession: async () => {} };
-  const made = createBoard({ settings, source, token: TOKEN, packages: PACKAGES, unreadable, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json"), pool, now: () => 7 });
+  const made = createBoard({ settings, source, token: TOKEN, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json"), pool, now: () => 7 });
   return { ...made, ticks, dir };
 }
 
@@ -40,49 +38,19 @@ test("the token is taken from the cookie or the header, and a wrong or missing o
   assert.equal(carriesToken({ headers: {} }, TOKEN), false);
 });
 
-test("each ticket is listed with the repository its title names, a package resolving to the repository that holds it", async () => {
-  const b = board();
-  const [, tickets] = await b.api("GET", "/api/tickets", {}) as [number, any[]];
-  assert.deepEqual(tickets.map((t) => [t.key, t.resolved]), [
-    ["NBF-1", { repo: "nbl-ui-netbox", package: null }],
-    ["NBF-2", { repo: "nbl-ui-netbox", package: null }],
-    ["NBF-3", null],
-    ["NBF-4", null],
-  ], "no scope, and a scope that is neither a repository nor a package (`ci`), resolve to nothing");
-});
-
-test("queueing works each ticket in the repository its title names, with the model and effort chosen, remembers them, and wakes the pool", async () => {
+test("queueing takes the tickets you selected with the model and effort chosen, no repository until the worker chooses one, remembers the choice, and wakes the pool", async () => {
   const b = board();
   await b.api("GET", "/api/tickets", {});
   const [status, queue] = await b.api("POST", "/api/queue", { keys: ["NBF-2", "VE-9"], model: "opus", effort: "max" }) as [number, any];
   assert.equal(status, 200);
   assert.deepEqual(queue.entries.map((e: any) => [e.ticket.key, e.repos, e.model, e.effort]), [
-    ["NBF-2", ["nbl-ui-netbox"], "opus", "max"],
-    ["VE-9", ["nbl-ui-netbox"], "opus", "max"],
-  ], "VE-9 was not in the assigned list, so it was read by key, and its package `ui-visual-explorer` is in nbl-ui-netbox");
+    ["NBF-2", [], "opus", "max"],
+    ["VE-9", [], "opus", "max"],
+  ], "VE-9 was not in the assigned list, so it was read by key");
   assert.ok(existsSync(join(b.dir, "queue.json")));
   assert.deepEqual(b.ticks, ["tick"]);
   const [, config] = await b.api("GET", "/api/config", {}) as [number, any];
   assert.deepEqual(config.choice, { model: "opus", effort: "max" });
-});
-
-test("a ticket whose title names no repository is refused with how to retitle it, and then nothing in the request is queued", async () => {
-  const b = board();
-  await b.api("GET", "/api/tickets", {});
-  await assert.rejects(b.api("POST", "/api/queue", { keys: ["NBF-1", "NBF-3", "NBF-4"], model: "opus", effort: "high" }),
-    /no repository in the title of NBF-3, NBF-4: retitle as <type>\(<repo or package>\): <what>/);
-  assert.deepEqual(b.store.get().entries, [], "NBF-1 resolved, but a partial queue would hide the two that did not");
-});
-
-test("a clone whose packages could not be read is named to the page and in the refusal, so an unscoped ticket is not blamed on its title alone", async () => {
-  const b = board(4747, { "platform-monorepo": "ssh: connect to host refused" });
-  const [, config] = await b.api("GET", "/api/config", {}) as [number, any];
-  assert.deepEqual(config.unreadable, { "platform-monorepo": "ssh: connect to host refused" });
-  await b.api("GET", "/api/tickets", {});
-  await assert.rejects(b.api("POST", "/api/queue", { keys: ["NBF-4"], model: "opus", effort: "high" }),
-    /Packages could not be read for platform-monorepo \(ssh: connect to host refused\), so a package scope may be among these/);
-  const [, clean] = await board().api("GET", "/api/config", {}) as [number, any];
-  assert.deepEqual(clean.unreadable, {}, "control: nothing is reported when every clone read");
 });
 
 test("an unknown model or an unknown ticket is refused, and nothing is queued", async () => {
@@ -92,17 +60,26 @@ test("an unknown model or an unknown ticket is refused, and nothing is queued", 
   assert.deepEqual(b.store.get().entries, []);
 });
 
-test("an amend is held to the rules queueing uses: an unknown repository, model or effort is refused and the entry is unchanged", async () => {
+test("an amend is held to the rules queueing uses: an unknown model or effort is refused and the entry is unchanged", async () => {
   const b = board();
   await b.api("GET", "/api/tickets", {});
   await b.api("POST", "/api/queue", { keys: ["NBF-1"], model: "opus", effort: "high" });
   const before = JSON.stringify(b.store.get());
-  await assert.rejects(b.api("POST", "/api/queue/NBF-1/amend", { repos: ["nbl-ui-elsewhere"] }), /not in the host file's clones/);
   await assert.rejects(b.api("POST", "/api/queue/NBF-1/amend", { model: "gpt" }), /model must be one of/);
   await assert.rejects(b.api("POST", "/api/queue/NBF-1/amend", { effort: "extreme" }), /effort must be one of/);
   assert.equal(JSON.stringify(b.store.get()), before);
-  await b.api("POST", "/api/queue/NBF-1/amend", { model: "sonnet", repos: ["platform-monorepo"] });
-  assert.deepEqual(b.store.get().entries.map((e) => [e.repos, e.model, e.effort]), [[["platform-monorepo"], "sonnet", "high"]]);
+  await b.api("POST", "/api/queue/NBF-1/amend", { model: "sonnet" });
+  assert.deepEqual(b.store.get().entries.map((e) => [e.model, e.effort]), [["sonnet", "high"]]);
+});
+
+test("the page's logic is served as JavaScript the browser can import, and it is the tested module, types stripped", async () => {
+  const script = boardViewScript();
+  assert.doesNotMatch(script, /:\s*readonly ViewTicket\[\]|export type /, "no type annotation reaches the browser");
+  const file = join(tmpDir("ticket-board-view-"), "board-view.mjs");
+  writeFileSync(file, script);
+  const view = await import(pathToFileURL(file).href);
+  const tickets = [{ key: "A-1", title: "x", status: "Backlog", statusOrder: 0, priority: 2, project: "P" }];
+  assert.deepEqual(view.visibleTickets(tickets, new Set(["P"]), "").map((t: any) => t.key), ["A-1"], "the browser's copy filters as the tested one does");
 });
 
 test("the board's queue starts paused, and Start and Pause go through the API", async () => {
