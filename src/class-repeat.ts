@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { CLAIM_GUARD_HELD_KIND, FAILURE_LEDGER_FILE, UNCLASSIFIED_KIND, UNIDENTIFIED_CALLER_KIND, parseFailureLedger, repeatsIn } from "./failure-ledger.ts";
+import { CLAIM_GUARD_HELD_KIND, FAILURE_LEDGER_FILE, SWEEP_WINDOW_RELEASED_KIND, UNCLASSIFIED_KIND, UNIDENTIFIED_CALLER_KIND, parseFailureLedger, repeatsIn } from "./failure-ledger.ts";
 import { decisionLogPathFrom, decisionSwitchesPath, readSwitches, type DecisionDeps } from "./decision-provider.ts";
 import { matchFailureClass, recordLabelOutcome, type ClassMatch, type Incident } from "./class-match.ts";
 import { homeHostConfig, stateEntryPath, type HostConfig } from "./host-config.ts";
@@ -190,8 +190,8 @@ export function readClassRepeat(run: (args: string[]) => string, repo: string, i
  */
 export type ClassGroup = { id: string, entry: FailureClass | null, rows: ClassRow[], events: string[], eventsNewestAt: number | null };
 
-/** The ledger keys that COUNT and name no failure class: orders (`prompt-session.ts`, #4452) and the claim guard working (#1262); one list, imported from the ledger, not a second spelling. */
-const LEDGER_COUNTER_KINDS: ReadonlySet<string> = new Set([UNCLASSIFIED_KIND, UNIDENTIFIED_CALLER_KIND, CLAIM_GUARD_HELD_KIND]);
+/** The ledger keys that COUNT and name no failure class: orders (`prompt-session.ts`, #4452), the claim guard working (#1262) and a sweep overrun the guard released (#1314); one list, imported from the ledger, not a second spelling. */
+const LEDGER_COUNTER_KINDS: ReadonlySet<string> = new Set([UNCLASSIFIED_KIND, UNIDENTIFIED_CALLER_KIND, CLAIM_GUARD_HELD_KIND, SWEEP_WINDOW_RELEASED_KIND]);
 
 /**
  * EVERY CLASS ID THE ROWS OR THE LEDGER NAME, with its rows newest first. One row under two classes is an instance of each. Membership is the label and, for a ledger kind, the kind's name
