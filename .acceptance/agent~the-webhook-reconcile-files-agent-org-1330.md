@@ -6,9 +6,9 @@ A webhook reconcile that finds the same repository set drifted again files ONE i
 - *A failed read is retried, never duplicated.* If the rows cannot be read, `fileDrift` logs the reason and returns `false`, so the probes stay CHANGED and the next tick retries; `recordIncident` is not called.
 - `readRows` is exported from `ci-failure-class.ts` for `fileDrift`; nothing else there changes.
 
-**Acceptance.** `node --test src/event-drift.test.ts`
+Acceptance: `node --test src/event-drift.test.ts`
 
-**Mutation.** Two directions, each restored byte-identical (copy in the scratchpad, `diff` after the restore):
+Mutation: two directions, each restored byte-identical (copy in the scratchpad, `diff` after the restore):
 - *Key back to `repo@window`*: 3 red: the join test (the OPEN row is joined, `creates` stays 1), the fold test, and the default-filer test (its key is asserted). Restored: 17 of 17.
 - *Closed-row fold branch disabled* (`if (false && ...)`): 1 red, the fold test (inside the quiet window it must not file; after it, it must). Restored: 17 of 17.
 
