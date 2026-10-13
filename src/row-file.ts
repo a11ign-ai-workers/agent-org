@@ -1754,7 +1754,7 @@ export function unverifiedFilingFields(after: {
  * @returns {string | null} the Status option name, or `null` if the issue is not on this tracker's Project at all
  */
 export function fetchIssueBoardStatus(issueNumber: number, { run = defaultRun, tracker = homeTracker() }: { run?: typeof defaultRun; tracker?: Tracker; } = {}): string | null {
-  return boardItemOf(issueNumber, run, tracker)?.fieldValueByName?.name ?? null;
+  return boardItemOf(issueNumber, (args) => run("gh", args), tracker)?.fieldValueByName?.name ?? null;
 }
 
 /**

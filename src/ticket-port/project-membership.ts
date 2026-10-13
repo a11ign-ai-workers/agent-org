@@ -1,9 +1,11 @@
 // #5405: the Project-membership read a machine-filed row's retry needs. Kept out of `row-file.ts` on purpose: `row-file` imports `work-gate.ts`,
 // which reaches `ci-failure-class.ts` again, so `ci-failure-class` importing `row-file` closes a cycle that crashes `claim-stall-tick.ts` at load.
-import { execFileSync } from "node:child_process";
+// It spawns nothing: the caller hands in the `gh` reader, as the ticket port's adapter does (#484).
 import { homeProjectDeclaration, type Tracker } from "../project-config.ts";
 
-const defaultRun: (cmd: string, args: string[]) => string = (cmd, args): string => execFileSync(cmd, args, { encoding: "utf8" });
+/** Runs the tracker's CLI with these arguments and returns its stdout. The caller supplies the spawn. */
+export type ReadGh = (args: string[]) => string;
+
 const homeTracker = (): Tracker => homeProjectDeclaration().tracker[0];
 
 /** #3330: project items asked for per request; `fetchIssueBoardStatus` pages past it rather than trusting it. */
@@ -11,10 +13,10 @@ export const PROJECT_ITEMS_PAGE = 100;
 
 /**
  * One page of the issue's `projectItems`. Throws, never guesses, on a failed call or an unexpected shape.
- * @param {number} issueNumber @param {string | null} cursor @param {typeof defaultRun} run @param {string} repo the tracker the issue lives in
+ * @param {number} issueNumber @param {string | null} cursor @param {ReadGh} read @param {string} repo the tracker the issue lives in
  * @returns {{ nodes: any[], hasNextPage: boolean, endCursor: string | null }}
  */
-function projectItemsPage(issueNumber: number, cursor: string | null, run: typeof defaultRun, repo: string): { nodes: any[]; hasNextPage: boolean; endCursor: string | null; } {
+function projectItemsPage(issueNumber: number, cursor: string | null, read: ReadGh, repo: string): { nodes: any[]; hasNextPage: boolean; endCursor: string | null; } {
   const [owner, name] = repo.split("/");
   const after = cursor === null ? "" : `, after: "${cursor}"`;
   const query = `query { repository(owner: "${owner}", name: "${name}") { issue(number: ${issueNumber}) `
@@ -23,7 +25,7 @@ function projectItemsPage(issueNumber: number, cursor: string | null, run: typeo
     + `{ ... on ProjectV2ItemFieldSingleSelectValue { name } } } } } } }`;
   let raw: string;
   try {
-    raw = run("gh", ["api", "graphql", "-f", `query=${query}`]);
+    raw = read(["api", "graphql", "-f", `query=${query}`]);
   } catch (cause) {
     throw new Error(`row-file: could not read #${issueNumber}'s Project membership -- refusing to guess `
       + `whether it boarded. ${(cause as Error).message}`, { cause });
@@ -52,18 +54,18 @@ function projectItemsPage(issueNumber: number, cursor: string | null, run: typeo
 /**
  * #5405: is issue `issueNumber` on the tracker's Project AT ALL, whatever its Status? `fetchIssueBoardStatus` cannot answer that: its `null` is
  * "not on the board" AND "on it with no Status", and a retry that cannot tell them apart adds an item that is already there. Throws when unreadable.
- * @param {number} issueNumber @param {{ run?: typeof defaultRun, tracker?: Tracker }} [deps]
+ * @param {number} issueNumber @param {{ read: ReadGh, tracker?: Tracker }} deps
  * @returns {boolean}
  */
-export function isIssueOnBoard(issueNumber: number, { run = defaultRun, tracker = homeTracker() }: { run?: typeof defaultRun; tracker?: Tracker; } = {}): boolean {
-  return boardItemOf(issueNumber, run, tracker) !== undefined;
+export function isIssueOnBoard(issueNumber: number, { read, tracker = homeTracker() }: { read: ReadGh; tracker?: Tracker; }): boolean {
+  return boardItemOf(issueNumber, read, tracker) !== undefined;
 }
 
 /** The issue's item on the tracker's Project, read page by page until it is found or the pages run out; `undefined` when it is not on the board. */
-export function boardItemOf(issueNumber: number, run: typeof defaultRun, tracker: Tracker): any | undefined {
+export function boardItemOf(issueNumber: number, read: ReadGh, tracker: Tracker): any | undefined {
   let cursor: string | null = null;
   do {
-    const page = projectItemsPage(issueNumber, cursor, run, tracker.repo);
+    const page = projectItemsPage(issueNumber, cursor, read, tracker.repo);
     const onThisProject = page.nodes.find((n) => isBoardOf(tracker, n?.project));
     if (onThisProject) return onThisProject;
     cursor = page.hasNextPage ? page.endCursor : null;

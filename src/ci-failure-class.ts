@@ -601,7 +601,7 @@ const bodyOf = (group: SharedGroup, prs: readonly string[]): string => [
 const BOARD_STATUS = "Backlog";
 function boardIncident(number: number, run: Run): void {
   const url = `https://github.com/${REPO}/issues/${number}`;
-  if (!isIssueOnBoard(number, { run: (_cmd, args) => run(args) })) {
+  if (!isIssueOnBoard(number, { read: run })) {
     run(["project", "item-add", String(PROJECT_NUMBER), "--owner", PROJECT_OWNER, "--url", url]);
   }
   run(["project", "item-edit", String(PROJECT_NUMBER), "--owner", PROJECT_OWNER, "--url", url, "--field", "Status", "--value", BOARD_STATUS]);
