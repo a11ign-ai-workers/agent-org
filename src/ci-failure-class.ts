@@ -13,7 +13,7 @@ import { CLAIM_LABEL } from "./claim-labels.ts";
 import { REPO } from "./project-identity.ts"; // #2616: the project's repository comes from its declaration, never a literal
 import { PROJECT_NUMBER, PROJECT_OWNER } from "./board-snapshot-scope.ts"; // #5405: the incident row is boarded on the home board when it is filed
 import { BACKLOG_LABEL, OUT_OF_RELEASE_LABEL } from "./project-vocabulary.ts";
-import { isIssueOnBoard } from "./row-file.ts"; // #5405: the retry asks whether the card is already on the board before it adds it
+import { isIssueOnBoard } from "./ticket-port/project-membership.ts"; // #5405: the retry asks whether the card is already on the board before it adds it
 import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5039
 import { decide, MAX_STATE_BYTES, type DecisionDeps, type Question } from "./decision-provider.ts";
 
