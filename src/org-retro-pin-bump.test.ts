@@ -4,9 +4,12 @@
 // The reads are fixtures and the `gh` reader is a seam, so no `gh` runs here.
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { buildReport, pinBumpRead, renderReport } from "./org-retro.ts";
-import { PIN_BUMP_FLAG, pinBumpFlagOn, pinBumpLine, pinBumpMeasure } from "./pin-bump-measure.ts";
-import { emptyCanaryState, machineryFlagOn, parseCanaryState, withMachineryFlag } from "./org-health.ts";
+import { writeFileSync } from "node:fs";
+import { join } from "node:path";
+import { buildReport, pinBumpRead, renderReport, retroClasses } from "./org-retro.ts";
+import { PIN_BUMP_FLAG, pinBumpLine, pinBumpMeasure } from "./pin-bump-measure.ts";
+import { CANARY_STATE_FILE, emptyCanaryState, withMachineryFlag } from "./org-health.ts";
+import { tmpDir } from "./lib/tmp-fixture.ts";
 
 const NOW = Date.parse("2026-10-12T12:00:00Z");
 const HOUR = 60 * 60_000;
@@ -66,11 +69,44 @@ test("pinBumpRead: a list that is refused reads `unknown`, and a filed row that 
   assert.deepEqual(measure.repos, [{ repo: "a11ign/x", unknown: true }]);
 });
 
-test("the flag reads from the canary text exactly as `machineryFlagOn` reads it, and OFF when the file is absent", () => {
-  const on = JSON.stringify(withMachineryFlag(emptyCanaryState(), { name: PIN_BUMP_FLAG, on: true }));
-  const off = JSON.stringify(withMachineryFlag(emptyCanaryState(), { name: PIN_BUMP_FLAG, on: false }));
-  assert.equal(pinBumpFlagOn(null), false, "no file is OFF");
-  assert.equal(pinBumpFlagOn(on), true);
-  assert.equal(pinBumpFlagOn(off), false);
-  for (const text of [on, off]) assert.equal(pinBumpFlagOn(text), machineryFlagOn(parseCanaryState(text), PIN_BUMP_FLAG), "the two readers agree");
+// The wiring, through `retroClasses` and a real canary file in a temp state directory: the class exists only when the flag is ON, and its read is
+// the one that makes the pin read. Constructing `retroClasses` reads nothing; only the pin class's own `read` is called here.
+const FIXTURE = pinBumpMeasure({ now: NOW, rows: [], repos: [] });
+const canaryText = (on: boolean) => JSON.stringify(withMachineryFlag(emptyCanaryState(), { name: PIN_BUMP_FLAG, on }));
+function stateDirWith(text: string | null): string {
+  const dir = tmpDir("pin-bump-state-");
+  if (text !== null) writeFileSync(join(dir, CANARY_STATE_FILE), text);
+  return dir;
+}
+function pinClass(stateDir: string, calls: number[]) {
+  return retroClasses({ now: NOW, stateDir, readPinBump: (at) => { calls.push(at); return FIXTURE; } }).find((cls) => cls.name === "pin and bump");
+}
+
+test("flag ON in the canary state: the class is wired, and its read is the pin read at `now`", () => {
+  const calls: number[] = [];
+  const cls = pinClass(stateDirWith(canaryText(true)), calls);
+  assert.ok(cls, "the class is in the report's classes when the flag is ON");
+  assert.deepEqual(cls.read(), { pinBump: FIXTURE });
+  assert.deepEqual(calls, [NOW]);
+});
+
+test("flag OFF, or no canary state at all: no class and no pin read", () => {
+  for (const dir of [stateDirWith(canaryText(false)), stateDirWith(null)]) {
+    const calls: number[] = [];
+    assert.equal(pinClass(dir, calls), undefined, "no class when OFF");
+    assert.deepEqual(calls, []);
+  }
+});
+
+test("a canary state that will not parse makes the flag UNKNOWN, never OFF: the class says so and reads nothing", () => {
+  for (const text of ["not json", `{"flags":{}}`]) {
+    const calls: number[] = [];
+    const cls = pinClass(stateDirWith(text), calls);
+    assert.ok(cls, "an unreadable state keeps the class, so the report can say it is unknown");
+    assert.deepEqual(cls.read(), { pinBump: { flagUnreadable: true } });
+    assert.deepEqual(calls, [], "no pin read on an unknown flag");
+  }
+  const report = renderReport(buildReport({ ...BASE, pinBump: { flagUnreadable: true } }, NOW));
+  assert.match(report, /Hand-filed pin or bump rows and stuck Renovate PRs: unknown, because machinery-canary\.json cannot be read/);
+  assert.notEqual(report, renderReport(buildReport(BASE, NOW)), "UNKNOWN is not the OFF report");
 });

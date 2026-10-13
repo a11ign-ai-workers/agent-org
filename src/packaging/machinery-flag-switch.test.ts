@@ -14,7 +14,7 @@ import { existsSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import { main, FLAG_REGISTRY } from "../machinery-flag.ts";
-import { CANARY_STATE_FILE, emptyCanaryState, machineryFlagOn, withMachineryFlag, type CanaryState } from "../org-health.ts";
+import { CANARY_STATE_FILE, emptyCanaryState, machineryFlagOn, parseCanaryState, withMachineryFlag, type CanaryState } from "../org-health.ts";
 import { readReenqueueState, REENQUEUE_EJECTED_FLAG } from "../work-gate/causes/pr-ejected.ts";
 import { CHAIN_WAIT_FLAG } from "../work-gate/causes/org-health-chain-wait.ts";
 import { CLOSED_UNDER_HALF_FLAG } from "../work-gate/causes/rows-closed-under-half.ts";
@@ -26,7 +26,7 @@ import { AUTO_UNPARK_FLAG } from "../unpark-satisfied.ts";
 import { OPEN_PR_HOLD_FLAG } from "../prune-worktrees.ts";
 import { REFUSE_ASKING_ANNOUNCEMENTS_FLAG } from "../messaging/core.ts";
 import { ACCOUNT_LIMIT_FLAG } from "../account-limit.ts";
-import { PIN_BUMP_FLAG, pinBumpFlagOn } from "../pin-bump-measure.ts";
+import { PIN_BUMP_FLAG } from "../pin-bump-measure.ts";
 
 const SESSION = "worker-agent-org-1061";
 const T0 = Date.parse("2026-10-12T09:00:00Z");
@@ -78,9 +78,9 @@ test("(1) the pin/bump count's flag (agent-org#1245) is registered, default OFF,
   assert.equal(run(dir, ["on", PIN_BUMP_FLAG, `--session=${SESSION}`]).code, 0);
   const text = readFileSync(join(dir, CANARY_STATE_FILE), "utf8");
   assert.equal(machineryFlagOn(JSON.parse(text) as CanaryState, PIN_BUMP_FLAG), true);
-  assert.equal(pinBumpFlagOn(text), true, "the daily reading's reader sees the switch");
+  assert.equal(machineryFlagOn(parseCanaryState(text), PIN_BUMP_FLAG), true, "the daily reading's reader sees the switch");
   assert.equal(run(dir, ["off", PIN_BUMP_FLAG, `--session=${SESSION}`]).code, 0);
-  assert.equal(pinBumpFlagOn(readFileSync(join(dir, CANARY_STATE_FILE), "utf8")), false, "off reads OFF again");
+  assert.equal(machineryFlagOn(parseCanaryState(readFileSync(join(dir, CANARY_STATE_FILE), "utf8")), PIN_BUMP_FLAG), false, "off reads OFF again");
 });
 
 test("(2) a name no module reads is refused, and nothing is written", () => {

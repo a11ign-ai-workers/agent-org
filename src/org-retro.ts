@@ -21,7 +21,7 @@
 // EVERY READ CAN BE REFUSED, AND A REFUSED READ IS `unknown`, NEVER 0 (#1286). A retrospective that printed "0 red PRs" because
 // the PR list could not be read would be the org's own health reported as good by an absence, which is the defect it exists to find.
 import { execFileSync } from "node:child_process";
-import { appendFileSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
+import { appendFileSync, existsSync, readFileSync, readdirSync, realpathSync, renameSync, statSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
 import { stateEntryPath } from "./host-config.ts";
@@ -58,7 +58,8 @@ import { untieredReadyRows, untieredLines, ghReadyReader, untieredOffer, untiere
 import { HAIKU_TIER_LABEL } from "./worker-profile.ts";
 // THE "UNDERSPECIFIED" FEEDBACK LOOP (a11ign#5117): a leaf, so the retro stays importable before any install.
 // THE PIN/BUMP COUNT (agent-org#1245): the leaf that counts it, and the one flag that puts it on #928 (`machinery:flag`, default OFF).
-import { PIN_BUMP_FLAG, PIN_BUMP_WINDOW_DAYS, pinBumpFlagOn, pinBumpLine, pinBumpMeasure, type FiledRow, type PinBumpMeasure, type RepoPrs } from "./pin-bump-measure.ts";
+import { PIN_BUMP_FLAG, PIN_BUMP_WINDOW_DAYS, pinBumpLine, pinBumpMeasure, type FiledRow, type PinBumpMeasure, type RepoPrs } from "./pin-bump-measure.ts";
+import { machineryFlagOn, parseCanaryState } from "./org-health.ts";
 import { UNNAMED_FIELD, underspecifiedLines, underspecifiedReading, underspecifiedStops, type UnderspecifiedReading } from "./spec-lint.ts";
 import { commentsSince } from "./ticket-port/comments-since.ts";
 import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: the claimed rows and the merged list are connections, never a search
@@ -495,7 +496,7 @@ export function buildReport(reads: {
         merged: any[] | null; mergedRepositories?: ReturnType<typeof readMerged> | null; openPrs: any[] | null; journal: string | null; ledger: string | null;
         turns: any[] | null; handFixes: ReturnType<typeof readHandFixLedger> | null; readings?: Readings; dora?: ReturnType<typeof readDora> | null;
         unwaited?: ReturnType<typeof unwaitedStockRows> | null; untiered?: ReturnType<typeof untieredReadyRows> | null; failureLedger?: string | null; blockingRecord?: string | null; idleClaims?: IdleClaimIncident[] | null; idleClaimedHours?: IdleClaimedHours | null; mergedRowOpen?: MergedRowOpenIncident[] | null; inertOptions?: InertOptionReading | null; safetyDenials?: SafetyCheckDenialReading | null;
-        underspecified?: UnderspecifiedReading | null; closedSharedRows?: any[] | null; pinBump?: PinBumpMeasure | null;
+        underspecified?: UnderspecifiedReading | null; closedSharedRows?: any[] | null; pinBump?: PinBumpReading | null;
     }, now: number) {
   const window = { since: now - WINDOW_MS, until: now };
   const lines = reads.journal === null ? null : journalLines(reads.journal, window);
@@ -897,8 +898,10 @@ function sharedFailureLines(shared: SharedFailures): string[] {
  * @param {ReturnType<typeof buildReport>} report @returns {string}
  */
 /** The pin/bump line (agent-org#1245): one line when the flag is ON, and none when it is OFF, so a report with the flag off is the report it was. */
-function pinBumpLines(measure: PinBumpMeasure | null): string[] {
-  return measure === null ? [] : [pinBumpLine(measure)];
+function pinBumpLines(reading: PinBumpReading | null): string[] {
+  if (reading === null) return [];
+  if ("flagUnreadable" in reading) return [`Hand-filed pin or bump rows and stuck Renovate PRs: unknown, because machinery-canary.json cannot be read, so retro.pinBump is not known to be off.`];
+  return [pinBumpLine(reading)];
 }
 
 export function renderReport(report: ReturnType<typeof buildReport>): string {
@@ -1274,8 +1277,18 @@ function readOpenRows({ repo, read }: { repo: string; read: (args: string[]) => 
 /** The canary state file's name: `CANARY_STATE_FILE` in org-health.ts, written out here because org-health is a hub this leaf does not reach. */
 const CANARY_STATE = "machinery-canary.json";
 
-/** Whether `PIN_BUMP_FLAG` is ON. Absent or unreadable is OFF: `pinBumpFlagOn` throws on a file that is not a canary state, and `attemptDora` answers that as `null`. */
-const readPinBumpFlag = (stateDir: string): boolean => attemptDora(() => pinBumpFlagOn(readText(join(stateDir, CANARY_STATE)))) === true;
+/**
+ * `PIN_BUMP_FLAG` from the canary state, read the way `machineryFlagOn` reads it. An absent file is the empty state, so OFF, as `machinery:flag` treats it.
+ * A file that is there and will not parse is `null`, UNKNOWN and not OFF: a flag that cannot be read is not known to be off, so the reading says so.
+ */
+const readPinBumpFlag = (stateDir: string): boolean | null => {
+  const path = join(stateDir, CANARY_STATE);
+  if (!existsSync(path)) return false;
+  return attemptDora(() => machineryFlagOn(parseCanaryState(readFileSync(path, "utf8")), PIN_BUMP_FLAG));
+};
+
+/** The pin/bump reading the report takes: the measure, or `flagUnreadable` when the flag's state could not be read, which the report says and which reads nothing. */
+type PinBumpReading = PinBumpMeasure | { flagUnreadable: true };
 
 /**
  * THE PIN/BUMP READ (agent-org#1245), made only when `PIN_BUMP_FLAG` is ON: the home repository's issues, all states, read as a plain list (never a
@@ -1539,7 +1552,7 @@ export function readUnderspecified({ now, declaration = homeProjectDeclaration()
  *   readDoraReport?: (now: number) => ReturnType<typeof readDora> | null, readUnwaited?: (now: number) => ReturnType<typeof unwaitedStockRows>, readUntiered?: () => ReturnType<typeof untieredReadyRows>, readMergedRepositories?: (now: number) => ReturnType<typeof readMerged> }} where
  * MERGED PRS ARE READ FROM EVERY DECLARED REPOSITORY (`readMerged`, #3593), each named with `-R`; `merged` stays the PRIMARY's list, the definition the count had before.
  */
-function retroClasses({ now, stateDir, unit = "a11ign-work-tick.service", memory = freshRetroReads(),
+export function retroClasses({ now, stateDir, unit = "a11ign-work-tick.service", memory = freshRetroReads(),
   readMergedRepositories = (at) => readMerged({ declaration: homeProjectDeclaration(), since: at - WINDOW_MS }),
   readHandFixes = (at) => readHandFixLedger({ read: gatherChanges(), now: new Date(at) }),
   readUnwaited = (at) => unwaitedStockRows({ reader: ghTrackerReader(homeProjectDeclaration().repo), now: at }),
@@ -1554,9 +1567,10 @@ function retroClasses({ now, stateDir, unit = "a11ign-work-tick.service", memory
         readAgentListing?: () => Agent[] | null; readIdleHours?: (now: number) => IdleClaimedHours | null; readOpenRowIncidents?: (now: number) => MergedRowOpenIncident[] | null;
         readInertOptionReading?: (now: number, recorded: string[]) => InertOptionReading | null; readDenials?: (now: number) => SafetyCheckDenialReading | null;
         readUnderspecifiedStops?: (now: number) => UnderspecifiedReading | null; readSharedRows?: () => any[] | null;
-        pinBumpOn?: () => boolean; readPinBump?: (now: number) => PinBumpMeasure;
+        pinBumpOn?: () => boolean | null; readPinBump?: (now: number) => PinBumpMeasure;
     }) {
   const since = now - WINDOW_MS;
+  const pinBumpState = pinBumpOn();
   return [
     { name: "merged lists", read: () => {
       const mergedRepositories = attemptDora(() => readMergedRepositories(now));
@@ -1587,8 +1601,9 @@ function retroClasses({ now, stateDir, unit = "a11ign-work-tick.service", memory
     // a declaration that will not parse is a refused read, like the DORA one
     { name: "unwaited", read: () => ({ unwaited: attemptDora(() => readUnwaited(now)) }) },
     { name: "untiered", read: () => ({ untiered: attemptDora(() => readUntiered()) }) },
-    // THE PIN/BUMP COUNT (agent-org#1245): a class of its own, so a flag that is OFF makes none of its reads
-    ...(pinBumpOn() ? [{ name: "pin and bump", read: () => ({ pinBump: readPinBump(now) }) }] : []),
+    // THE PIN/BUMP COUNT (agent-org#1245): a class of its own, so a flag that is OFF makes none of its reads. A flag whose state cannot be read is
+    // UNKNOWN: the class is kept so the report says so, and reads nothing.
+    ...(pinBumpState === false ? [] : [{ name: "pin and bump", read: () => ({ pinBump: pinBumpState === null ? { flagUnreadable: true } : readPinBump(now) }) }]),
     { name: "dora", read: () => ({ dora: attemptDora(() => readDoraReport(now)) }) },
   ];
 }
