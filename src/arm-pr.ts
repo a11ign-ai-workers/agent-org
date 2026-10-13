@@ -37,6 +37,8 @@ import { GRAPHQL_POOL_PROBE, poolFromHeaders } from "./api-pool.ts";
 import { newestVerdictRun, TRUNK_WORKFLOW } from "./trunk-red.ts";
 // agent-org#992: A LAB PULL REQUEST'S RED CROSS-REPO LEG, asked once for both arming doors (the sweep imports it from here as it does `blockerVerdict`).
 import { crossRepoRedMarker, crossRepoRedVerdict } from "./cross-repo-red.ts";
+import { dequeuePullRequestOf } from "./ticket-port/queue-entry-reads.ts";
+import { disableAutoMergeOf, readDisarmSeat } from "./ticket-port/auto-merge-disarm.ts";
 
 /**
  * EXIT CODES ARE THE CONTRACT. `auto-arm.yml`'s `arm` step goes red on any non-zero, so each code's job is to tell the
@@ -286,25 +288,68 @@ const blockedMarker = (blockers: number[]) => `<!-- arm-refused: open-blocker ${
  * agent-org#992: ONE SHAPE FOR TWO REFUSALS. An open blocker is a wait that ends by itself, so its comment says nothing needs doing; a
  * red cross-repo leg (`files`) ends only when the author adds the declaration, so its comment says the line to add is in the reason, and
  * its marker holds the files so a changed set is said afresh.
+ * `lead` (agent-org#1278) is the line above the refusal, the one that says whether a red leg's PR was disarmed.
  * @param {{ number: string | number, repo: string, verdict: { why: string, blockers: number[] } | { why: string, files: string[] },
- *   run: (ghArgs: string[]) => string, error: (line: string) => void }} refusal
+ *   run: (ghArgs: string[]) => string, error: (line: string) => void, lead?: string }} refusal
  * @returns {{ posted: boolean }}
  */
-export function announceBlocked({ number, repo, verdict, run, error }: {
+export function announceBlocked({ number, repo, verdict, run, error, lead }: {
         number: string | number; repo: string; verdict: { why: string; blockers: number[]; } | { why: string; files: string[]; };
-        run: (ghArgs: string[]) => string; error: (line: string) => void;
+        run: (ghArgs: string[]) => string; error: (line: string) => void; lead?: string;
     }): { posted: boolean; } {
   const marker = "files" in verdict ? crossRepoRedMarker(verdict.files) : blockedMarker(verdict.blockers);
   const tail = "files" in verdict ? "This comment is posted once for this set of files, and again if the set changes." : "This comment is posted once; nothing needs doing here.";
   try {
     const existing = JSON.parse(run(["pr", "view", String(number), "--repo", repo, "--json", "comments"])).comments;
     if (!Array.isArray(existing)) throw new Error("the API returned no comment list");
-    if (existing.some((comment) => String(comment?.body ?? "").includes(marker))) return { posted: false };
-    run(["pr", "comment", String(number), "--repo", repo, "--body", `${marker}\n**Not armed: ${verdict.why}.** ${tail}`]);
+    // agent-org#1278: a marker comment that does not carry this run's lead is a refusal made before the disarm said so, and does not stand for this one.
+    if (existing.some((comment) => {
+      const body = String(comment?.body ?? "");
+      return body.includes(marker) && (!lead || body.includes(lead));
+    })) return { posted: false };
+    run(["pr", "comment", String(number), "--repo", repo, "--body", `${marker}\n${lead ? `${lead}\n` : ""}**Not armed: ${verdict.why}.** ${tail}`]);
     return { posted: true };
   } catch (cause) {
     error(`arm-pr: could not tell #${number} why it is not armed: ${(cause as Error).message}`);
     return { posted: false };
+  }
+}
+
+/** agent-org#1278: the dequeue, by hand, for the comment: the same mutation `dequeuePullRequestOf` sends, with the pull request's node id. */
+const dequeueByHand = (id: string) => `gh api graphql -f query='mutation($id:ID!){dequeuePullRequest(input:{id:$id}){mergeQueueEntry{state}}}' -f id=${id}`;
+
+/**
+ * agent-org#1278: a `cross-repo-red` refusal DISARMS the pull request it refuses. The outcome is read from the PR's state after each
+ * write (`readDisarmSeat`), never from the exit code. `stuck` is true when the PR is still armed or queued after the disarm, so the caller exits CANNOT_ASK.
+ * @param {{ number: string, repo: string, run: typeof defaultRun }} args
+ * @returns {{ disarmed: boolean, outcome: string, stuck: boolean }}
+ */
+export function disarmRedLeg({ number, repo, run }: { number: string; repo: string; run: typeof defaultRun; }): {
+    disarmed: boolean; outcome: string; stuck: boolean;
+} {
+  const port = { number, repo, run: (args: string[]) => gh(args, run) };
+  try {
+    const before = readDisarmSeat(port);
+    if (before.merged) return { disarmed: false, outcome: "already merged", stuck: false };
+    // The exit code of `--disable-auto` is not read: the read-back below is the evidence (`disarmAutoMerge` in pr-hold.ts does the same).
+    try { disableAutoMergeOf(port); } catch { /* read back below */ }
+    let after = readDisarmSeat(port);
+    if (after.merged) return { disarmed: false, outcome: "already merged", stuck: false };
+    if (after.queued) {
+      // A queued PR is taken out of the queue by the same dequeue `pr:hold`'s queue path uses (`dequeuePullRequestOf`).
+      try {
+        dequeuePullRequestOf({ pullId: after.id, run: port.run });
+      } catch (cause) {
+        return { disarmed: false, outcome: `queued, and the dequeue failed (${(cause as Error).message}); to take it out of the queue run: ${dequeueByHand(after.id)}`, stuck: true };
+      }
+      after = readDisarmSeat(port);
+      if (after.merged) return { disarmed: false, outcome: "already merged", stuck: false };
+      if (after.queued) return { disarmed: false, outcome: `queued, and still queued after the dequeue; to take it out of the queue run: ${dequeueByHand(after.id)}`, stuck: true };
+    }
+    if (after.armed) return { disarmed: false, outcome: "auto-merge is still enabled after `gh pr merge --disable-auto`", stuck: true };
+    return { disarmed: true, outcome: before.queued ? "already in the queue" : "disarmed", stuck: false };
+  } catch (cause) {
+    return { disarmed: false, outcome: `the pull request could not be read back (${(cause as Error).message})`, stuck: true };
   }
 }
 
@@ -1137,7 +1182,14 @@ export function runArmPr({ argv, env, run = defaultRun, sleep = defaultSleep, lo
   if (crossRed.kind !== "clear") {
     const cannotAsk = crossRed.kind === "cannot-ask";
     (cannotAsk ? error : log)(`arm-pr: NOT arming #${number} -- ${crossRed.why}`);
-    if (crossRed.kind === "cross-repo-red") announceBlocked({ number, repo, verdict: crossRed, run: (args) => gh(args, run), error });
+    if (crossRed.kind === "cross-repo-red") {
+      // agent-org#1278: THE REFUSAL DISARMS, then says so. The disarm runs BEFORE the comment, because the comment's first line is its outcome.
+      const disarm = disarmRedLeg({ number, repo, run });
+      (disarm.disarmed ? log : error)(`arm-pr: ${disarm.disarmed ? "disarmed" : "NOT disarmed"} #${number} -- ${disarm.outcome}`);
+      announceBlocked({ number, repo, verdict: crossRed, run: (args) => gh(args, run), error,
+        lead: `**Disarmed: ${disarm.disarmed ? "yes" : "no"} (${disarm.outcome}).**` });
+      if (disarm.stuck) return EXIT.CANNOT_ASK;
+    }
     return cannotAsk ? EXIT.CANNOT_ASK : EXIT.DONE;
   }
   const { outcome, jumpFailure } = armOrJump({ number, repo, prBody }, { run, sleep, log, error });

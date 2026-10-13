@@ -122,6 +122,7 @@ function world(w: World = {}) {
     }
     if (args[0] === "pr" && args[1] === "view" && line.includes("comments")) return JSON.stringify({ comments });
     if (args[0] === "pr" && args[1] === "view") return JSON.stringify({ labels: [], body, state: "OPEN", author: { login: "worker-1" } });
+    if (line.includes("pullRequest(number:$n){id merged")) return JSON.stringify({ id: "PR_x", merged: false, autoMergeRequest: null, mergeQueueEntry: null });
     if (line.includes("timelineItems")) return JSON.stringify({ mergeQueueEntry: null, timelineItems: { nodes: [] } });
     return "";
   };
@@ -306,7 +307,7 @@ function driveArm(w: World = {}) {
   const code = runArmPr({ argv: ["--pr=81", `--repo=${LAB}`], env: {}, run: run as never, sleep: () => "ok" as const,
     log: (line: string) => said.push(line), error: (line: string) => said.push(line), lanes: { lanes: [] } });
   const commented = fake.calls.filter((args) => args[0] === "pr" && args[1] === "comment");
-  return { code, said: said.join("\n"), merged: fake.calls.some((args) => args[0] === "pr" && args[1] === "merge"), commented, calls: fake.calls };
+  return { code, said: said.join("\n"), merged: fake.calls.some((args) => args[0] === "pr" && args[1] === "merge" && !args.includes("--disable-auto")), commented, calls: fake.calls };
 }
 
 test("#992 (5) arm-pr: lab#81's reading is NOT armed -- no merge call, exit DONE, the line names both files and the declaration to add", () => {
@@ -347,7 +348,8 @@ test("#992 (5) arm-pr: the refusal is COMMENTED once -- its marker holds the fil
   assert.doesNotMatch(text, /nothing needs doing here/, "something DOES need doing: the line to add");
 
   const marker = first.commented[0][first.commented[0].indexOf("--body") + 1].split("\n")[0];
-  const again = driveArm({ comments: [{ body: "unrelated" }, { body: `${marker}\nNot armed` }] });
+  // The seeded comment is what this code writes on a repeat tick: its marker, its disarm outcome, its refusal.
+  const again = driveArm({ comments: [{ body: "unrelated" }, { body: `${marker}\n**Disarmed: yes (disarmed).**\nNot armed` }] });
   assert.equal(again.commented.length, 0, "ONE comment for one file set");
   assert.equal(again.merged, false);
 
