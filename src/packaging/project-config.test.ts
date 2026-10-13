@@ -280,6 +280,7 @@ const DECLARED_CARRIERS: Declaration[] = [
   { name: "host-units.ts", reason: "the units' own templates name the repository; row 3f of #69 moves them" },
   { name: "org-watch.ts", reason: "a later row of #69 moves it" },
   { name: "reviewer/pr-review-verdict.sh", reason: "the verdict script; row 3e of #69 moves it" },
+  { name: "review-eval.ts", reason: "agent-org#1268: the eval's labelled set IS recorded pull requests of two named repositories, so the set names them; it is data the eval replays, not a declaration the tool reads" },
   { name: "decision-run/classes/ready-queue-empty.ts", reason: "a row mention (`#7`, `agent-org#7`) names one of the project's two trackers, and the queue is served on the record issue (#910)" },
 ];
 
