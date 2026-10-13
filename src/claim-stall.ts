@@ -49,6 +49,7 @@ import type { LabelEvent } from "./claim-provenance.ts";
 // #3453: where a keyed repository's clone lives (`host.json`'s `clones`), for the read of the worktrees a merged pull request's work was in. A leaf too.
 import { hostConfigPath, readHostConfig } from "./host-config.ts";
 import { parseWaits, conditionHolds, isItemWait, type RefFact } from "./wait-condition.ts";
+import { pausedNow } from "./account-limit.ts";
 
 const MINUTE_MS = 60_000;
 
@@ -1279,7 +1280,7 @@ function releaseOrder(facts: Pick<ClaimFacts, "row" | "session" | "branch" | "wo
  * @param {{ facts: ClaimFacts, reading: Reading }[] | undefined} readings @param {number} now
  * @returns {StallOrder[]}
  */
-export function claimStalledOrders(readings: { facts: ClaimFacts; reading: Reading; }[] | undefined, now: number): StallOrder[] {
+export function claimStalledOrders(readings: { facts: ClaimFacts; reading: Reading; }[] | undefined, now: number, accountPaused: boolean = pausedNow(now) !== null): StallOrder[] {
   const orders: StallOrder[] = [];
   for (const { facts, reading } of readings ?? []) {
     if (reading.kind === "nudge" && reading.idle) orders.push(idleNudgeOrder(facts, now, reading.idleMs, reading.count));
@@ -1289,7 +1290,7 @@ export function claimStalledOrders(readings: { facts: ClaimFacts; reading: Readi
     else if (reading.kind === "nudged" && reading.deliveredAt === null) {
       const floor = idleLimitMs({ built: facts.nothing !== true, prs: withRedChecks(facts.ownPrs), ...(facts.declared !== undefined ? { declared: facts.declared } : {}) });
       orders.push(reading.idle ? idleNudgeOrder(facts, reading.nudgedAt, floor, reading.count) : nudgeOrder(facts, reading.nudgedAt, reading.lastMoveAt));
-    } else if (reading.kind === "release") orders.push(releaseOrder(facts, reading));
+    } else if (reading.kind === "release" && !accountPaused) orders.push(releaseOrder(facts, reading)); // agent-org#1307: a claim is kept while the account is limited
   }
   return orders;
 }

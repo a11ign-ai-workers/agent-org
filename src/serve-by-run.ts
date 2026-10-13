@@ -27,6 +27,7 @@ import { BriefTooLargeError, BriefUnreadableItemError, buildBrief, type BriefQue
 import { DecisionClassError, loadClasses, type DecisionAction, type DecisionClass, type DecisionOrder } from "./decision-run/registry.ts";
 import { runDecision, type DecisionRunDeps, type ExecOptions, type ExecResult } from "./decision-run/run.ts";
 import { seatModeOf, seatsPath } from "./seat-mode.ts";
+import type { AccountLimit } from "./account-limit.ts";
 import { githubTicketAdapter } from "./ticket-port/github-adapter.ts";
 import type { ItemRef, StateChange, TicketPort } from "./ticket-port/port.ts";
 
@@ -294,6 +295,8 @@ export type ServeOrdersOptions = Readonly<{
   scopeOf: (trackerKey: string) => string | null;
   /** A role brief's text, or `null` when it cannot be read. */
   roleBrief: (session: string) => string | null;
+  /** agent-org#1307: the account's pause for this tick. While it holds, no `claude -p` decision run is started, so nothing is served. */
+  accountPause?: AccountLimit | null;
   /** Everything below is for a test: the production default is what the tick uses. */
   classesDir?: string;
   port?: (ref: ItemRef) => TicketPort;
@@ -313,7 +316,8 @@ export type ServeOrdersOptions = Readonly<{
  */
 export async function serveOrdersByRun(orders: readonly ServeOrder[], options: ServeOrdersOptions): Promise<ReadonlyMap<string, ServedRecord>> {
   const served = new Map<string, ServedRecord>();
-  if (orders.length === 0) return served;
+  // agent-org#1307: A DECISION RUN IS `claude -p`, a Claude start, so none is made while the account's pause holds.
+  if (orders.length === 0 || options.accountPause) return served;
   const say = options.diagnostic ?? ((line: string) => { process.stderr.write(`${line}\n`); });
   let classes: ReadonlyMap<string, DecisionClass>;
   try {

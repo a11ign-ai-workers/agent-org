@@ -45,6 +45,7 @@ export const FLAGS_WITH_ANOTHER_HOME: Readonly<Record<string, string>> = Object.
   "messaging.refuseAskingAnnouncements": "switched by `machinery:flag` (agent-org#1222), which writes the canary state and not a declaration file",
   "gate.graphqlPacing": "switched by `machinery:flag` (agent-org#1240), which writes the canary state and not a declaration file",
   "review.rowReviewSkill": "switched by `machinery:flag` (agent-org#1268), which writes the canary state and not a declaration file",
+  "gate.accountLimitPause": "switched by `machinery:flag` (agent-org#1307), which writes the canary state and not a declaration file",
 });
 
 /** `export const AUTO_UNPARK_FLAG = "rows.autoUnpark"`: the shape the row's open-check greps, with a digit allowed after the first letter so `queue.reenqueue2` is not skipped. */
