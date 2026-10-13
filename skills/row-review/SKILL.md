@@ -21,7 +21,8 @@ Review the three axes separately and report them separately. One axis passing ne
 1. **Item table.** Make one line per Done-when item and one per Change item: `quoted item | where in the diff | met / partial / missing / deferred`. Every item gets a line.
    - An item that is partial, missing, turned into a notice or message instead of the behaviour, or deferred "to a follow-up row" is a **defect in this diff**. Deferring is allowed only when the row itself says so.
    - An item that names a counter, a signal, a flag or a command is met only where the diff WRITES and READS it, not where it merely mentions it.
-2. **Region check.** List every changed path that is not in the row's Region. Ignore `.changeset/` and `.acceptance/`.
+   - An item that prescribes HOW a test is built (an injected clock, an injected spawn) is met when the test crosses the same boundary through the seam the code really has and the PR says which seam. It is partial only when the behaviour at that boundary has no test that fails; then say what is untested, not that the recipe differs.
+2. **Region check.** List every changed path that is not in the row's Region. `.changeset/` and `.acceptance/` are exempt by repo rule: leave them out of the list and never raise them as a finding.
    - Each one needs a reason in the PR body (`Outside-Region: <path> — <reason>`). A path with no reason is a defect.
    - So is any out-of-Region change that is security-relevant: permissions, token or STS policy, a workflow `permissions:` block, or secrets handling.
 3. **Scope creep.** Behaviour the row did not ask for is a nit, unless it adds risk; then it is a defect. A row that says "decision rows stay where they are" is broken by a change that moves them, whatever else it does well.
@@ -37,6 +38,7 @@ Review the three axes separately and report them separately. One axis passing ne
    - a re-implementation of the production check inside the test;
    - a flag test that injects the flag's reading, when the production default (where the flag is really read) is never exercised.
 3. **Mutate the subject, not the test.** Take the key changed line, flip it, and check that a test goes red. Do it for real when it is cheap.
+   - Read where the changed line LIVES. If it is inside a function the tests call, with the clock, the spawn or the store passed in, it is tested; the entrypoint that only hands that function the real collaborators and exits with its result is a nit at most. An untested entrypoint is a defect only when the changed line or the changed logic is in the entrypoint itself, or when the only evidence for it is a source-text assertion.
 4. **Correctness.** Each of these is a defect if it is reachable:
    - **Fails open:** an unreadable or unknown input treated as safe or empty (`?? []`, an empty `catch`, `void error`, a parse failure that returns `{}`).
    - **Silent skip:** a read that is skipped without saying so, which downstream code then reads as "nothing there".
