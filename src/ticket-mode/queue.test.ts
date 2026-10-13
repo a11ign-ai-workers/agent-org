@@ -4,8 +4,8 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import {
-  amend, emptyQueue, enqueue, finish, loadQueue, markRunning, markStarting, nextStarts, observe, recordRepos, recordTrackerStates, remove, retry, saveQueue, setMax, setPaused,
-  unsettledKeys, type Queue,
+  amend, emptyQueue, enqueue, finish, isLive, isParked, loadQueue, markResumed, markRunning, markStarting, nextStarts, observe, park, recordRepos,
+  recordTrackerStates, remove, retry, saveQueue, setMax, setPaused, unpark, unsettledKeys, type Queue,
 } from "./queue.ts";
 import type { Ticket } from "./source.ts";
 
@@ -49,7 +49,7 @@ test("nextStarts fills free slots in queue order, counts starting and running al
   assert.deepEqual(nextStarts(queue, 1, 14).map((e) => e.ticket.key), ["A", "B"]);
   queue = markStarting(queue, "A", 2);
   assert.deepEqual(nextStarts(queue, 1, 14).map((e) => e.ticket.key), ["B"]);
-  queue = markRunning(markStarting(queue, "B", 3), "B", "w2");
+  queue = markRunning(markStarting(queue, "B", 3), "B", "w2", "w2:p1");
   assert.deepEqual(nextStarts(queue, 1, 14), [], "both slots are taken");
   queue = setMax(queue, 3);
   assert.deepEqual(nextStarts(queue, 14, 14).map((e) => e.ticket.key), ["C"], "exactly equal to the cores does not refuse");
@@ -58,7 +58,7 @@ test("nextStarts fills free slots in queue order, counts starting and running al
 });
 
 test("observe marks working, and a status that is none of the four ordinary ones as waiting on a person", () => {
-  let queue = markRunning(markStarting(enqueue(emptyQueue(1), [ticket("A")], choice, 1), "A", 2), "A", "w1");
+  let queue = markRunning(markStarting(enqueue(emptyQueue(1), [ticket("A")], choice, 1), "A", 2), "A", "w1", "w1:p1");
   queue = observe(queue, "A", "idle");
   assert.equal(queue.entries[0].seenWorking, false, "idle before the first prompt is taken is not a finished turn");
   queue = observe(observe(queue, "A", "working"), "A", "idle");
@@ -96,4 +96,28 @@ test("finished runs are read from the tracker until it settles their ticket, and
   assert.equal(queue.entries.find((e) => e.ticket.key === "NBF-1")!.trackerState, "completed");
   assert.equal(queue.entries.find((e) => e.ticket.key === "NBF-3")!.trackerState, undefined, "a queued run takes no tracker state");
   assert.deepEqual(unsettledKeys(queue), ["NBF-2"], "a completed ticket is not asked about again");
+});
+
+test("a parked run keeps its workspace and pane, holds no slot, and is not retried until its workspace is closed", () => {
+  let queue = setPaused(enqueue(emptyQueue(1), [ticket("A"), ticket("B")], choice, 1), false);
+  queue = markRunning(markStarting(queue, "A", 2), "A", "w1", "w1:p1");
+  queue = park(queue, "A", { kind: "needs-human", reason: "which colour?" }, 5);
+  const a = () => queue.entries.find((e) => e.ticket.key === "A")!;
+  assert.deepEqual([a().phase, a().workspace, a().pane, isParked(a()), isLive(a())], ["finished", "w1", "w1:p1", true, false]);
+  assert.deepEqual(nextStarts(queue, 0, 14).map((e) => e.ticket.key), ["B"], "a parked run holds no slot");
+  assert.equal(retry(queue, "A", 9), queue, "a second workspace would take the same herdr name");
+  queue = unpark(queue, "A");
+  assert.deepEqual([a().workspace, a().pane, a().outcome?.kind, isParked(a())], [undefined, undefined, "needs-human", false], "closing keeps the outcome");
+  assert.deepEqual(keys(retry(queue, "A", 9)), ["B", "A"]);
+});
+
+test("finish drops the workspace and pane, and markResumed makes a parked run live again without its old outcome or tracker state", () => {
+  const running = markRunning(markStarting(enqueue(emptyQueue(1), [ticket("A")], choice, 1), "A", 2), "A", "w1", "w1:p1");
+  const finished = finish(running, "A", { kind: "stopped" }, 5);
+  assert.deepEqual([finished.entries[0].workspace, finished.entries[0].pane], [undefined, undefined]);
+  assert.equal(markResumed(finished, "A").entries[0].phase, "finished", "a run with no workspace has nothing to resume in");
+  const parked = recordTrackerStates(park(running, "A", { kind: "no-outcome" }, 5), new Map([["A", "started"]]));
+  const [a] = markResumed(parked, "A").entries;
+  assert.deepEqual([a.phase, a.outcome, a.finishedAt, a.trackerState, a.workspace, a.pane, a.seenWorking], ["running", undefined, undefined, undefined, "w1", "w1:p1", true]);
+  assert.equal(unpark(running, "A").entries[0].workspace, "w1", "unpark leaves a live run's workspace alone");
 });

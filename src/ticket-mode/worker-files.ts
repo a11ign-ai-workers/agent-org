@@ -12,6 +12,8 @@ import type { Ticket } from "./source.ts";
 
 /** The file a worker writes last, and the one thing the pool and the stop hook read to know a run has ended. */
 export const OUTCOME_FILE = "outcome.json";
+/** Where a parked run's outcome is moved when a person answers its agent, so the stop hook asks for a new one. */
+export const PREVIOUS_OUTCOME_FILE = "outcome.prev.json";
 export const BRIEF_FILE = "brief.md";
 /** The stop hook's count of refused stops in a row, beside the outcome file. */
 export const STOP_COUNT_FILE = "stop-refusals";
@@ -70,6 +72,8 @@ Write \`${ticketDir}/${OUTCOME_FILE}\` as the last thing you do, with exactly on
 { "kind": "wrong-repo", "where": "<the repository or service the fix belongs in, and why>" }
 { "kind": "needs-human", "reason": "<what a person must decide or provide>" }
 \`\`\`
+
+A person may answer you here after a \`needs-human\` or \`wrong-repo\` outcome. If one does, carry on with what they said, and write the outcome file again as the last thing you do.
 `;
 }
 

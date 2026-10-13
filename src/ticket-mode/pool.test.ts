@@ -12,12 +12,14 @@ import type { Ticket, TicketSource } from "./source.ts";
 const ticket = (key: string) => ({ key, title: key, description: "", url: `https://linear.app/x/${key}`, branch: key.toLowerCase(), status: "Backlog", statusOrder: 0, team: "NBF", project: null, priority: 0 }) as Ticket;
 const source: TicketSource = { assigned: async () => [], read: async () => null, download: async () => [] };
 
-/** A herdr that opens workspaces and starts agents, and reports each label's status from `status`. */
+/** A herdr that opens workspaces and starts agents, and reports each label's status from `status`. A verb in `refused` fails as herdr does. */
 function herdr(status: Map<string, string>, screen: { text: string } = { text: "" }) {
   const calls: string[][] = [];
+  const refused = new Set<string>();
   let next = 0;
   const run = (args: string[]) => {
     calls.push(args);
+    if (args.some((arg) => refused.has(arg))) throw Object.assign(new Error("herdr exited 1"), { stdout: JSON.stringify({ error: { message: "workspace_not_found" } }) });
     if (args.includes("read")) return screen.text;
     if (args.includes("create")) {
       next += 1;
@@ -27,7 +29,7 @@ function herdr(status: Map<string, string>, screen: { text: string } = { text: "
     if (args.includes("list")) return JSON.stringify({ result: { workspaces: [...status].map(([label, s]) => ({ label, agent_status: s })) } });
     return JSON.stringify({ type: "ok" });
   };
-  return { run, calls };
+  return { run, calls, refused };
 }
 
 function setup(max = 2, keys = ["NBF-1", "NBF-2", "NBF-3"], tickets: Record<string, unknown> = {}) {
@@ -105,7 +107,7 @@ test("a run ends on its outcome file once the agent is idle; idle before it ever
   await pool.tick();
   assert.deepEqual(entry("NBF-1").tokens, { input: 3, output: 4 });
   assert.deepEqual(entry("NBF-1").outcome, { kind: "draft-pr", prs: [{ repo: "nbl-ui-netbox", url: "https://github.com/x/pull/1" }] });
-  assert.equal(entry("NBF-1").workspace, undefined, "its workspace was closed");
+  assert.deepEqual([entry("NBF-1").workspace, entry("NBF-1").pane], [undefined, undefined], "its workspace was closed");
 });
 
 test("working then idle with no outcome is `no-outcome`; a workspace gone from two listings is `crashed`", async () => {
@@ -242,6 +244,7 @@ test("a retry's earlier outcome does not end it before it starts", async () => {
   status.set(herdrName("NBF-1"), "idle");
   await pool.tick();
   assert.deepEqual(entry("NBF-1").outcome, { kind: "no-outcome" });
+  pool.close("NBF-1");
   writeFileSync(join(ticketDir(settings, "NBF-1"), "outcome.json"), JSON.stringify({ kind: "needs-human", reason: "stale" }));
   store.set(retry(store.get(), "NBF-1", 200));
   status.set(herdrName("NBF-1"), "idle");
@@ -310,4 +313,80 @@ test("a source that cannot read states never marks a run completed", async () =>
   const pool = createPool(store, { settings, source, hook: { node: "/node", bin: "/b" }, herdr: () => "{}", now: () => 9, load: () => ({ load: 0, cores: 1 }), transcriptsRoot: root, wait: async () => {} });
   await pool.refreshTracker();
   assert.equal(queue.entries[0].trackerState, undefined);
+});
+
+/** Run NBF-1 until it ends on `outcome` (null for none), and return the setup. */
+async function endedOn(outcome: Record<string, unknown> | null, max = 1, keys = ["NBF-1"]) {
+  const made = setup(max, keys);
+  await made.pool.tick();
+  made.status.set(herdrName("NBF-1"), "working");
+  await made.pool.tick();
+  if (outcome !== null) writeFileSync(join(ticketDir(made.settings, "NBF-1"), "outcome.json"), JSON.stringify(outcome));
+  made.status.set(herdrName("NBF-1"), "idle");
+  await made.pool.tick();
+  return made;
+}
+const closes = (h: { calls: string[][] }, workspace: string) => h.calls.filter((args) => args.includes("close") && args.includes(workspace)).length;
+
+test("a run that hands its ticket back is parked: its workspace and pane stay, and it holds no slot", async () => {
+  for (const outcome of [{ kind: "needs-human", reason: "which colour?" }, { kind: "wrong-repo", where: "netbox" }, null]) {
+    const { entry, h } = await endedOn(outcome, 1, ["NBF-1", "NBF-2"]);
+    assert.deepEqual([entry("NBF-1").phase, entry("NBF-1").workspace, entry("NBF-1").pane], ["finished", "w1", "w1:p1"], JSON.stringify(outcome));
+    assert.equal(closes(h, "w1"), 0, "the person can still answer it");
+    assert.equal(entry("NBF-2").phase, "running", "NBF-2 took the one slot as NBF-1 parked");
+  }
+});
+
+test("a parked run whose agent works again is resumed: its outcome is moved aside, its stop count cleared, and it ends again on a new one", async () => {
+  const { pool, status, entry, settings, h } = await endedOn({ kind: "needs-human", reason: "which colour?" });
+  const dir = ticketDir(settings, "NBF-1");
+  writeFileSync(join(dir, "stop-refusals"), "2");
+  await pool.tick();
+  assert.equal(entry("NBF-1").phase, "finished", "an idle parked agent stays parked");
+  status.set(herdrName("NBF-1"), "working");
+  await pool.tick();
+  assert.deepEqual([entry("NBF-1").phase, entry("NBF-1").outcome], ["running", undefined]);
+  assert.ok(!existsSync(join(dir, "outcome.json")), "the stop hook now asks for a new outcome");
+  assert.match(readFileSync(join(dir, "outcome.prev.json"), "utf8"), /which colour/);
+  assert.ok(!existsSync(join(dir, "stop-refusals")), "a fresh count, so the hook refuses a stop without an outcome again");
+  writeFileSync(join(dir, "outcome.json"), JSON.stringify({ kind: "draft-pr", prs: [{ repo: "nbl-ui-netbox", url: "https://github.com/x/pull/2" }] }));
+  status.set(herdrName("NBF-1"), "idle");
+  await pool.tick();
+  assert.equal(entry("NBF-1").outcome?.kind, "draft-pr");
+  assert.equal(closes(h, "w1"), 1, "a draft pull request closes the workspace");
+});
+
+test("Close closes a parked run's workspace and keeps its outcome; a refused close leaves it parked and says why", async () => {
+  const { pool, entry, h } = await endedOn({ kind: "needs-human", reason: "which colour?" });
+  h.refused.add("close");
+  assert.throws(() => pool.close("NBF-1"), /herdr could not close NBF-1's workspace \(workspace_not_found\)/);
+  assert.equal(entry("NBF-1").workspace, "w1");
+  h.refused.clear();
+  pool.close("NBF-1");
+  assert.deepEqual(h.calls.at(-1), ["--session", "tickets", "workspace", "close", "w1"]);
+  assert.deepEqual([entry("NBF-1").workspace, entry("NBF-1").pane, entry("NBF-1").outcome?.kind], [undefined, undefined, "needs-human"]);
+});
+
+test("Close does nothing to a run that is not parked", async () => {
+  const { pool, entry, h } = setup(1, ["NBF-1"]);
+  await pool.tick();
+  pool.close("NBF-1");
+  assert.equal(closes(h, "w1"), 0);
+  assert.equal(entry("NBF-1").phase, "running");
+});
+
+test("a parked run whose workspace is gone from two listings in a row is unparked and keeps its outcome", async () => {
+  const { pool, status, entry } = await endedOn({ kind: "needs-human", reason: "r" });
+  status.delete(herdrName("NBF-1"));
+  await pool.tick();
+  assert.equal(entry("NBF-1").workspace, "w1", "one missing listing is not enough");
+  await pool.tick();
+  assert.deepEqual([entry("NBF-1").workspace, entry("NBF-1").outcome?.kind], [undefined, "needs-human"]);
+});
+
+test("after a restart, a parked run herdr no longer lists is unparked", async () => {
+  const { pool, status, entry } = await endedOn({ kind: "needs-human", reason: "r" });
+  status.delete(herdrName("NBF-1"));
+  pool.reconcile();
+  assert.deepEqual([entry("NBF-1").workspace, entry("NBF-1").outcome?.kind], [undefined, "needs-human"]);
 });

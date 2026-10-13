@@ -191,3 +191,26 @@ test("a row offers only the actions its state allows, and a completed run is not
   assert.deepEqual(buttons("M-1"), []);
   assert.ok(runRows(p).find((r) => r.text().includes("D-1"))!.text().includes("nbl-ui-netbox #12"), "the draft's pull request is linked by repo and number");
 });
+
+test("a live or parked run links its terminal when the machine serves one, and a parked run offers Close, which goes to the board", async () => {
+  const runs = [
+    entry("R-1", { phase: "running", startedAt: 5, workspace: "w1", pane: "w1:p1" }),
+    entry("P-1", { phase: "finished", startedAt: 2, finishedAt: 4, workspace: "w2", pane: "w2:p1", outcome: { kind: "needs-human", reason: "which colour?" } }),
+    entry("F-1", { phase: "finished", startedAt: 2, finishedAt: 3, outcome: { kind: "crashed", reason: "herdr refused" } }),
+  ];
+  const p = await page(new Map(), { terminal: "http://127.0.0.1:7318/?ws={workspace}&pane={pane}&view=terminal" }, runs);
+  const row = (key: string) => runRows(p).find((r) => r.text().includes(key))!;
+  const link = (key: string) => row(key).all().find((n) => n.className === "terminal") as (Node_ & { href?: string; target?: string }) | undefined;
+  assert.equal(link("R-1")?.href, "http://127.0.0.1:7318/?ws=w1&pane=w1%3Ap1&view=terminal");
+  assert.equal(link("R-1")?.target, "_blank", "it opens in its own tab: the terminal page refuses to be framed");
+  assert.equal(link("P-1")?.href, "http://127.0.0.1:7318/?ws=w2&pane=w2%3Ap1&view=terminal");
+  assert.equal(link("F-1"), undefined, "a run with no workspace has no terminal");
+  assert.ok(row("P-1").text().includes("Still open"), "a parked run says it can still be answered");
+  const close = row("P-1").all().find((n) => n.tag === "button")!;
+  assert.equal(close.textContent, "Close");
+  close.fire("click");
+  await new Promise((resolve) => setImmediate(resolve));
+  assert.ok(p.posts.some((x) => x.path === "/api/queue/P-1/close"));
+  const none = await page(new Map(), {}, runs);
+  assert.equal(runRows(none).flatMap((r) => r.all()).find((n) => n.className === "terminal"), undefined, "a machine that serves no terminal shows no link");
+});

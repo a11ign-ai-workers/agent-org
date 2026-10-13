@@ -5,6 +5,7 @@
 // workers it can carry and where the tracker's key lives are facts no repository can know, which is the host file's rule (`host-config.ts`'s
 // header). Nothing here is a fact about one repository: a worker chooses the repository and reads its own `CLAUDE.md`. The optional `brief`,
 // `deny` and `plugins` say how workers behave on this machine, for example how they share its dev servers with each other and with the person.
+// The optional `terminal` says where this machine serves a worker's terminal in a browser, if it does.
 //
 // READ RAW, AS `haiku-brief.ts` READS ITS KEY. `readHostConfig` ignores unknown keys, so `tickets` is inert to every existing reader, and this
 // module does not teach the strict reader a block only ticket mode uses. It imports neither `host-config.ts` nor `project-config.ts`: both
@@ -39,6 +40,8 @@ export type TicketSettings = Readonly<{
   deny: readonly DenyRule[];
   /** Claude Code plugins every worker runs with, as `name@marketplace`, installed on this machine already. */
   plugins: readonly string[];
+  /** The web address of a run's live terminal, with `{workspace}`, `{pane}` and `{key}` filled in per run, or null when this machine serves none. */
+  terminal: string | null;
 }>;
 
 export class TicketSettingsRefusal extends Error {
@@ -77,6 +80,14 @@ function pluginList(value: unknown): readonly string[] {
     throw new TicketSettingsRefusal("tickets.plugins", "must be a list of installed plugins as \"name@marketplace\", such as [\"nbl-ui@applied-ai\"]");
   }
   return Object.freeze([...value]);
+}
+
+function terminalTemplate(value: unknown): string | null {
+  if (value === undefined) return null;
+  if (typeof value !== "string" || !/^https?:\/\/[^\s]+$/.test(value) || !/\{(workspace|pane)\}/.test(value)) {
+    throw new TicketSettingsRefusal("tickets.terminal", "must be a web address that names the run's {workspace} or {pane}, such as \"http://127.0.0.1:7318/?ws={workspace}&pane={pane}&view=terminal\"");
+  }
+  return value;
 }
 
 function denyRules(value: unknown): readonly DenyRule[] {
@@ -123,6 +134,7 @@ export function parseTicketSettings(host: unknown, home: string = homedir()): Ti
     brief: tickets.brief === undefined ? null : absolutePath(tickets.brief, "tickets.brief"),
     deny: denyRules(tickets.deny),
     plugins: pluginList(tickets.plugins),
+    terminal: terminalTemplate(tickets.terminal),
   });
 }
 

@@ -1,7 +1,11 @@
 // no-token: gh -- pure functions, and a fake storage
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { NO_PROJECT, RUN_STATUSES, groupByStatus, projectCounts, queueLabel, recall, remember, runStatus, runsShown, selectable, statusCounts, toggled, visibleTickets, type ViewEntry, type ViewTicket } from "./board-view.ts";
+import {
+  NO_PROJECT, RUN_STATUSES, groupByStatus, isParkedRun, projectCounts, queueLabel, recall, remember, runActions, runStatus, runsShown, selectable, statusCounts, terminalLink, toggled,
+  visibleTickets, type ViewEntry, type ViewTicket,
+} from "./board-view.ts";
+import { HANDED_BACK } from "./queue.ts";
 
 const t = (key: string, status: string, statusOrder: number, priority: number, project: string | null, title = key): ViewTicket =>
   ({ key, title, status, statusOrder, priority, project });
@@ -107,4 +111,34 @@ test("the Queue button says what it will do", () => {
   assert.equal(queueLabel(0), "Select tickets to queue");
   assert.equal(queueLabel(1), "Queue 1 ticket");
   assert.equal(queueLabel(3), "Queue 3 tickets");
+});
+
+test("a run offers what its state allows: Remove queued, Stop live, Close parked, Retry once closed, and nothing for a result", () => {
+  const run = (phase: string, fields: Partial<ViewEntry> = {}): ViewEntry => ({ ticket: { key: "NBF-1" }, phase, ...fields });
+  const handedBack = { outcome: { kind: "needs-human" } };
+  assert.deepEqual(runActions(run("queued")), ["remove"]);
+  assert.deepEqual(runActions(run("starting")), ["stop"]);
+  assert.deepEqual(runActions(run("running", { workspace: "w1", pane: "w1:p1" })), ["stop"]);
+  assert.deepEqual(runActions(run("finished", { ...handedBack, workspace: "w1", pane: "w1:p1" })), ["close"], "its workspace is still open, so no retry yet");
+  assert.deepEqual(runActions(run("finished", handedBack)), ["retry"]);
+  assert.deepEqual(runActions(run("finished", { outcome: { kind: "draft-pr" } })), [], "a draft pull request is the result");
+  assert.deepEqual(runActions(run("finished", { outcome: { kind: "crashed" }, trackerState: "completed" })), [], "a completed ticket is done");
+});
+
+test("a parked run is a finished one that kept its workspace, and every outcome that parks a run reads as Needs you", () => {
+  assert.equal(isParkedRun({ ticket: { key: "NBF-1" }, phase: "finished", workspace: "w1" }), true);
+  assert.equal(isParkedRun({ ticket: { key: "NBF-1" }, phase: "running", workspace: "w1" }), false, "a live run is not parked");
+  assert.equal(isParkedRun({ ticket: { key: "NBF-1" }, phase: "finished" }), false, "a closed run is not parked");
+  for (const kind of HANDED_BACK) {
+    assert.equal(runStatus({ ticket: { key: "NBF-1" }, phase: "finished", outcome: { kind } }), "needs-you", `${kind} parks the run, so the board must ask for a person`);
+  }
+});
+
+test("a run's terminal link fills the machine's template with its workspace, pane and key, encoded, and there is none without both", () => {
+  const live: ViewEntry = { ticket: { key: "NBF-1" }, phase: "running", workspace: "w3", pane: "w3:p1" };
+  assert.equal(terminalLink("http://127.0.0.1:7318/?ws={workspace}&pane={pane}&view=terminal", live), "http://127.0.0.1:7318/?ws=w3&pane=w3%3Ap1&view=terminal");
+  assert.equal(terminalLink("http://h/{key}/{pane}/{pane}", live), "http://h/NBF-1/w3%3Ap1/w3%3Ap1", "every placeholder, each time it appears");
+  assert.equal(terminalLink(null, live), null, "the machine serves no terminal");
+  assert.equal(terminalLink("http://h/{pane}", { ...live, pane: undefined }), null, "a run still starting has no pane yet");
+  assert.equal(terminalLink("http://h/{pane}", { ticket: { key: "NBF-1" }, phase: "finished" }), null, "a closed run has no terminal");
 });

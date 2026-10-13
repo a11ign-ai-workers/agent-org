@@ -11,7 +11,7 @@ export type ViewTicket = Readonly<{ key: string; title: string; status: string; 
 /** The fields of a queue entry the board reads. */
 export type ViewEntry = Readonly<{
   ticket: Readonly<{ key: string }>; phase: string; outcome?: Readonly<{ kind: string }>; waiting?: boolean; trackerState?: string;
-  queuedAt?: number; startedAt?: number; finishedAt?: number;
+  queuedAt?: number; startedAt?: number; finishedAt?: number; workspace?: string; pane?: string;
 }>;
 
 /** Where a browser keeps the view's settings between visits; `localStorage` in the page. */
@@ -119,6 +119,33 @@ export function statusCounts(entries: readonly ViewEntry[]): Map<RunStatus, numb
 export function runsShown<T extends ViewEntry>(entries: readonly T[], filter: RunStatus | null): T[] {
   const latest = (entry: ViewEntry) => entry.finishedAt ?? entry.startedAt ?? entry.queuedAt ?? 0;
   return entries.filter((entry) => filter === null || runStatus(entry) === filter).sort((a, b) => latest(b) - latest(a));
+}
+
+/** A finished run that kept its herdr workspace, so a person can still answer its agent there: `isParked` in `queue.ts`, restated for the page. */
+export const isParkedRun = (entry: ViewEntry): boolean => entry.phase === "finished" && entry.workspace !== undefined;
+
+/** What a person can do to a run from the board. */
+export type RunAction = "remove" | "stop" | "retry" | "close";
+
+/**
+ * The actions a run offers. A queued run can be removed and a live one stopped. A finished run that kept its workspace (parked) can be closed,
+ * and only once it is closed can it be retried. A draft pull request and a completed ticket are results, so they are not retried.
+ */
+export function runActions(entry: ViewEntry): RunAction[] {
+  if (entry.phase === "queued") return ["remove"];
+  if (entry.phase !== "finished") return ["stop"];
+  if (isParkedRun(entry)) return ["close"];
+  return entry.outcome === undefined || entry.outcome.kind === "draft-pr" || runStatus(entry) === "completed" ? [] : ["retry"];
+}
+
+/**
+ * The web address of a run's live terminal: `template` (the host file's `tickets.terminal`) with the run's `{workspace}`, `{pane}` and `{key}`
+ * filled in, each encoded for a URL. Null when the machine serves no terminal or the run holds no pane.
+ */
+export function terminalLink(template: string | null, entry: ViewEntry): string | null {
+  if (template === null || entry.workspace === undefined || entry.pane === undefined) return null;
+  const values: Readonly<Record<string, string>> = { workspace: entry.workspace, pane: entry.pane, key: entry.ticket.key };
+  return template.replace(/\{(workspace|pane|key)\}/g, (_, name: string) => encodeURIComponent(values[name]));
 }
 
 /** The Queue button's words for `count` selected tickets. */

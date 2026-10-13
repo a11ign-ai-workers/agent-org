@@ -18,7 +18,7 @@ test("only `clones` is required, every repository in it is offered, and every ot
 
 test("the `tickets` block and `stateDir` override the defaults", () => {
   const settings = parseTicketSettings({ clones, stateDir: "/state", tickets: { max: 5, port: 5000, herdrSession: "nbl", worktreeRoot: "/wt", linearKey: { path: "/keys/linear" } } });
-  assert.deepEqual({ ...settings, clones: undefined }, { clones: undefined, max: 5, port: 5000, herdrSession: "nbl", worktreeRoot: "/wt", stateDir: "/state", linearKey: { path: "/keys/linear" }, brief: null, deny: [], plugins: [] });
+  assert.deepEqual({ ...settings, clones: undefined }, { clones: undefined, max: 5, port: 5000, herdrSession: "nbl", worktreeRoot: "/wt", stateDir: "/state", linearKey: { path: "/keys/linear" }, brief: null, deny: [], plugins: [], terminal: null });
 });
 
 test("a machine can add notes to every brief and refuse commands of its own", () => {
@@ -31,6 +31,12 @@ test("a machine can add notes to every brief and refuse commands of its own", ()
 test("a machine names the plugins its workers run with, each as name@marketplace", () => {
   assert.deepEqual(parseTicketSettings({ clones, tickets: { plugins: ["nbl-ui@applied-ai"] } }, "/home/me").plugins, ["nbl-ui@applied-ai"]);
   assert.deepEqual(parseTicketSettings({ clones }, "/home/me").plugins, [], "none by default");
+});
+
+test("a machine names where it serves a run's terminal, as a web address naming the run's workspace or pane", () => {
+  const terminal = "http://127.0.0.1:7318/?ws={workspace}&pane={pane}&view=terminal";
+  assert.equal(parseTicketSettings({ clones, tickets: { terminal } }, "/home/me").terminal, terminal);
+  assert.equal(parseTicketSettings({ clones }, "/home/me").terminal, null, "none by default, so the board shows no link");
 });
 
 test("a bad field is refused by its name", () => {
@@ -57,6 +63,9 @@ test("a bad field is refused by its name", () => {
   assert.equal(field({ clones, tickets: { deny: [{ pattern: "x" }] } }), "tickets.deny[0]", "a rule with no reason");
   assert.equal(field({ clones, tickets: { deny: [{ pattern: "x", reason: "y" }, { pattern: "(", reason: "y" }] } }), "tickets.deny[1].pattern", "not a regular expression");
   assert.equal(field({ clones, tickets: { linearKey: { path: "rel" } } }), "tickets.linearKey.path");
+  assert.equal(field({ clones, tickets: { terminal: "127.0.0.1:7318/?pane={pane}" } }), "tickets.terminal", "not a web address");
+  assert.equal(field({ clones, tickets: { terminal: "http://127.0.0.1:7318/" } }), "tickets.terminal", "names no run, so every link is the same");
+  assert.equal(field({ clones, tickets: { terminal: ["http://x/{pane}"] } }), "tickets.terminal", "not a string");
   assert.equal(field({ clones, tickets: [] }), "tickets");
   assert.equal(field({ clones }), "accepted", "POSITIVE CONTROL: a valid file is not refused");
 });

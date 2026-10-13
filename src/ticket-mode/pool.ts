@@ -10,25 +10,31 @@
 //   - no outcome file, and done, or idle after it was seen working: finished, `no-outcome`;
 //   - its workspace missing from two complete listings in a row, or `unknown` twice: `crashed`;
 //   - any other status (a dialog, a prompt waiting on a person) is shown on the board as waiting, and the run continues.
+//
+// A RUN THAT HANDS ITS TICKET BACK IS PARKED, NOT CLOSED. On `needs-human`, `wrong-repo` or `no-outcome` its workspace stays open and holds no
+// slot, so the person can answer the agent in its terminal. An agent seen working again has been answered: its outcome file is moved aside, so
+// the stop hook asks for a new one, and the run is live again. Close ends a parked run's workspace; a workspace closed by hand is noticed.
 import { execFile, execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
+import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, loadavg } from "node:os";
 import { join } from "node:path";
 import { agentStartArgs, closedNote, herdrReason, openPane, readAgents } from "../herdr-agents.ts";
 import {
-  finish, isLive, markRunning, markStarting, nextStarts, observe, recordRepos, recordTrackerStates, unsettledKeys,
-  type Entry, type Outcome, type Queue,
+  HANDED_BACK, finish, isLive, isParked, markResumed, markRunning, markStarting, nextStarts, observe, park, recordRepos, recordTrackerStates, unpark,
+  unsettledKeys, type Entry, type Outcome, type Queue,
 } from "./queue.ts";
 import type { TicketSource } from "./source.ts";
 import { TICKET_ENV } from "./worktree-command.ts";
 import { HOST_FILE_ENV, type TicketSettings } from "./settings.ts";
-import { BRIEF_FILE, DENY_FILE, OUTCOME_FILE, STOP_COUNT_FILE, briefText, firstPrompt, workerFlags, workerSettings, type HookCommand } from "./worker-files.ts";
+import {
+  BRIEF_FILE, DENY_FILE, OUTCOME_FILE, PREVIOUS_OUTCOME_FILE, STOP_COUNT_FILE, briefText, firstPrompt, workerFlags, workerSettings, type HookCommand,
+} from "./worker-files.ts";
 
 /** herdr waits on Claude's start; a slow one has been measured past 30 s (`wake.ts`'s start budget), so a start gets 90. */
 const START_TIMEOUT_MS = 90_000;
 const SETTINGS_FILE = ".claude/settings.local.json";
-/** Listings in a row a live run may be missing from (or `unknown` in) before it is recorded as crashed. */
-const MISSES_TO_CRASH = 2;
+/** Listings in a row a run may be missing from before its workspace counts as gone: a running run is then crashed, and a parked one unparked. */
+const MISSES_TO_GONE = 2;
 
 export type Herdr = (args: string[], timeoutMs?: number) => string;
 
@@ -198,6 +204,13 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
   }
   const update = (change: (queue: Queue) => Queue) => store.set(change(store.get()));
 
+  /** Count one more listing in a row that `key` was missing from. True once that reaches {@link MISSES_TO_GONE}. */
+  function missedAgain(key: string): boolean {
+    const count = (misses.get(key) ?? 0) + 1;
+    misses.set(key, count);
+    return count >= MISSES_TO_GONE;
+  }
+
   /** The host file's `tickets.brief`, read for each run so an edit reaches the next worker. Throws naming the setting when it cannot be read. */
   function machineNotes(): string | undefined {
     if (settings.brief === null) return undefined;
@@ -230,8 +243,8 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     return { folder, dir };
   }
 
-  /** Open the workspace and start Claude in it. Returns the workspace, or throws with herdr's reason after closing anything it opened. */
-  async function start(entry: Entry, folder: string, dir: string): Promise<string> {
+  /** Open the workspace and start Claude in it. Returns the workspace and its pane, or throws with herdr's reason after closing anything it opened. */
+  async function start(entry: Entry, folder: string, dir: string): Promise<{ workspace: string; pane: string }> {
     const key = entry.ticket.key;
     const name = herdrName(key);
     const run = (args: string[]) => herdr(args);
@@ -249,7 +262,7 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
         throw new Error(`herdr could not start Claude for ${key} (${herdrRefusal(err)})${closedNote(run, opened.workspace, session)}`);
       }
     }
-    return opened.workspace;
+    return { workspace: opened.workspace, pane: opened.pane };
   }
 
   /** Answer a start dialog on this run's pane, if one is showing and the run has answers left. True when it answered. */
@@ -269,19 +282,23 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     return true;
   }
 
-  /** Read each live run's status once and record any that has ended. */
+  /** Read each live and parked run's status once: record any live run that has ended, and resume any parked one a person has answered. */
   function watch(): void {
     const agents = readAgents((args) => herdr(args), session);
     if (agents === null) return;
     const status = new Map(agents.map((agent) => [agent.label, agent.status]));
     for (const [workspace, id] of readSessionIds()) claudeSessions.set(workspace, id);
+    watchRunning(status);
+    watchParked(status);
+  }
+
+  /** Each running run's status, from one listing (label -> status): record its repositories, answer a start dialog, or end it. */
+  function watchRunning(status: ReadonlyMap<string, string>): void {
     for (const entry of store.get().entries.filter((e) => e.phase === "running")) {
       const key = entry.ticket.key;
       const seen = status.get(herdrName(key));
       if (seen === undefined || seen === "unknown") {
-        const count = (misses.get(key) ?? 0) + 1;
-        misses.set(key, count);
-        if (count >= MISSES_TO_CRASH) end(entry, { kind: "crashed", reason: seen === undefined ? "its herdr workspace is gone" : "herdr finds no agent in its workspace" });
+        if (missedAgain(key)) end(entry, { kind: "crashed", reason: seen === undefined ? "its herdr workspace is gone" : "herdr finds no agent in its workspace" });
         continue;
       }
       misses.delete(key);
@@ -296,10 +313,38 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     }
   }
 
+  /** Each parked run's status, from the same listing: one whose agent works again resumes, and one whose workspace is gone is unparked. */
+  function watchParked(status: ReadonlyMap<string, string>): void {
+    for (const entry of store.get().entries.filter(isParked)) {
+      const key = entry.ticket.key;
+      const seen = status.get(herdrName(key));
+      if (seen === undefined) {
+        if (missedAgain(key)) {
+          misses.delete(key);
+          update((queue) => unpark(queue, key));
+        }
+        continue;
+      }
+      misses.delete(key);
+      if (seen === "working") resume(key);
+    }
+  }
+
+  /** A person answered a parked run: move its outcome aside and clear the stop count, so the stop hook asks for a new outcome, and mark it live. */
+  function resume(key: string): void {
+    const dir = ticketDir(settings, key);
+    if (existsSync(join(dir, OUTCOME_FILE))) renameSync(join(dir, OUTCOME_FILE), join(dir, PREVIOUS_OUTCOME_FILE));
+    rmSync(join(dir, STOP_COUNT_FILE), { force: true });
+    update((queue) => markResumed(queue, key));
+  }
+
+  /** Record how a run ended. One that hands its ticket back keeps its workspace (parked); any other has its workspace closed. */
   function end(entry: Entry, outcome: Outcome): void {
-    if (entry.workspace) closedNote((args) => herdr(args), entry.workspace, session);
+    const parks = entry.workspace !== undefined && HANDED_BACK.has(outcome.kind);
+    if (entry.workspace && !parks) closedNote((args) => herdr(args), entry.workspace, session);
     const id = entry.workspace === undefined ? undefined : claudeSessions.get(entry.workspace);
-    update((queue) => finish(queue, entry.ticket.key, outcome, now(), countTokens(id === undefined ? null : findTranscript(transcripts, id))));
+    const tokens = countTokens(id === undefined ? null : findTranscript(transcripts, id));
+    update((queue) => (parks ? park : finish)(queue, entry.ticket.key, outcome, now(), tokens));
     misses.delete(entry.ticket.key);
     answered.delete(herdrName(entry.ticket.key));
   }
@@ -321,13 +366,13 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
       update((queue) => markStarting(queue, entry.ticket.key, now()));
       try {
         const { folder, dir } = await prepare(entry);
-        const workspace = await start(entry, folder, dir);
+        const { workspace, pane } = await start(entry, folder, dir);
         // Stopped while it was starting: the stop is the person's last word, so the workspace it raced is closed and the run stays stopped.
         if (store.get().entries.find((e) => e.ticket.key === entry.ticket.key)?.phase !== "starting") {
           closedNote((args) => herdr(args), workspace, session);
           continue;
         }
-        update((queue) => markRunning(queue, entry.ticket.key, workspace));
+        update((queue) => markRunning(queue, entry.ticket.key, workspace, pane));
         await settleStart(entry);
       } catch (err) {
         update((queue) => finish(queue, entry.ticket.key, { kind: "crashed", reason: String((err as Error)?.message ?? err).split("\n")[0] }, now()));
@@ -341,9 +386,23 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     if (entry !== undefined) end(entry, { kind: "stopped" });
   }
 
+  /** Close a parked run's workspace. Its outcome and its worktrees stay. Throws with herdr's reason when herdr refuses, so the run stays parked. */
+  function close(key: string): void {
+    const entry = store.get().entries.find((e) => e.ticket.key === key && isParked(e));
+    if (entry?.workspace === undefined) return;
+    try {
+      herdr(["--session", settings.herdrSession, "workspace", "close", entry.workspace]);
+    } catch (err) {
+      throw new Error(`herdr could not close ${key}'s workspace (${herdrRefusal(err)})`);
+    }
+    misses.delete(key);
+    update((queue) => unpark(queue, key));
+  }
+
   /**
    * After a restart: a run the file says is live but herdr does not list is recorded as crashed; one still listed carries on. A run caught
-   * between `starting` and `running` has no workspace on record, so it is crashed too: its worktree is kept and it can be retried.
+   * between `starting` and `running` has no workspace on record, so it is crashed too: its worktree is kept and it can be retried. A parked run
+   * herdr no longer lists is unparked, keeping its outcome.
    */
   function reconcile(): void {
     const agents = readAgents((args) => herdr(args), session);
@@ -353,6 +412,9 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
       if (entry.phase === "starting" || !listed.has(herdrName(entry.ticket.key))) {
         update((queue) => finish(queue, entry.ticket.key, { kind: "crashed", reason: "the pool restarted while it was running" }, now()));
       }
+    }
+    for (const entry of store.get().entries.filter(isParked)) {
+      if (!listed.has(herdrName(entry.ticket.key))) update((queue) => unpark(queue, entry.ticket.key));
     }
   }
 
@@ -403,7 +465,7 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     }
   }
 
-  return { tick, stop, reconcile, ensureSession, refreshTracker };
+  return { tick, stop, close, reconcile, ensureSession, refreshTracker };
 }
 
 export type Pool = ReturnType<typeof createPool>;

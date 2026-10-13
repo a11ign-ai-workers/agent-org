@@ -59,6 +59,7 @@
   .run .meta { color: var(--muted); font-size: 12px; margin-top: 2px; }
   .run .side { display: flex; flex-direction: column; align-items: flex-end; gap: 6px; }
   .run .actions { display: flex; gap: 6px; }
+  .run .terminal { font-size: 12px; font-weight: 600; }
   .empty { padding: 32px 16px; color: var(--muted); text-align: center; }
   .icon { width: 16px; height: 16px; margin-top: 2px; display: block; }
   .icon svg { width: 16px; height: 16px; display: block; }
@@ -115,9 +116,12 @@
   <button class="primary" id="queue">Queue 0 tickets</button>
 </footer>
 <script type="module">
-// The decisions (what shows, how it groups, what can be selected, which column a run is in) are board-view.ts's, tested there.
+// The decisions (what shows, how it groups, what can be selected, what status a run has and what it offers) are board-view.ts's, tested there.
 // This page only draws what they return and wires the clicks.
-import { RUN_STATUSES, groupByStatus, projectCounts, projectOf, queueLabel, recall, remember, runStatus, runsShown, selectable, statusCounts, toggled, visibleTickets } from "/board-view.js";
+import {
+  RUN_STATUSES, groupByStatus, isParkedRun, projectCounts, projectOf, queueLabel, recall, remember, runActions, runStatus, runsShown, selectable, statusCounts, terminalLink,
+  toggled, visibleTickets,
+} from "/board-view.js";
 
 const el = (tag, props = {}, ...children) => {
   const node = Object.assign(document.createElement(tag), props);
@@ -127,7 +131,7 @@ const el = (tag, props = {}, ...children) => {
 const $ = (id) => document.getElementById(id);
 const storage = (() => { try { return window.localStorage; } catch { return null; } })();
 const state = {
-  tickets: [], queue: { entries: [], max: 3, paused: true }, selected: new Set(),
+  tickets: [], queue: { entries: [], max: 3, paused: true }, selected: new Set(), terminal: null,
   // Sections start collapsed, so a first visit sees every status and its count before any list.
   open: recall(storage, "ticket-mode.open"), projects: recall(storage, "ticket-mode.projects"),
   runFilter: [...recall(storage, "ticket-mode.run-filter")][0] ?? null,
@@ -214,6 +218,7 @@ const ICONS = {
   "cancelled": '<svg viewBox="0 0 16 16" aria-hidden="true"><circle cx="8" cy="8" r="6" fill="none" stroke="currentColor" stroke-width="2"/><path d="M4 12L12 4" stroke="currentColor" stroke-width="2" stroke-linecap="round"/></svg>',
 };
 const LABEL = Object.fromEntries(RUN_STATUSES.map(({ status, label }) => [status, label]));
+const ACTION_LABEL = { remove: "Remove", stop: "Stop", retry: "Retry", close: "Close" };
 
 function statusIcon(status) {
   const icon = el("span", { className: `icon st-${status}`, title: LABEL[status] });
@@ -232,10 +237,13 @@ function row(e) {
   const status = runStatus(e);
   const o = e.outcome;
   const actions = el("div", { className: "actions" });
-  const act = (label, verb) => { const b = el("button", { className: "small", textContent: label }); b.addEventListener("click", () => call("POST", `/api/queue/${e.ticket.key}/${verb}`).then((q) => { state.queue = q; render(); }, report)); actions.append(b); };
-  if (e.phase === "queued") act("Remove", "remove");
-  if (e.phase === "starting" || e.phase === "running") act("Stop", "stop");
-  if (e.phase === "finished" && o && o.kind !== "draft-pr" && status !== "completed") act("Retry", "retry");
+  for (const verb of runActions(e)) {
+    const b = el("button", { className: "small", textContent: ACTION_LABEL[verb] });
+    b.addEventListener("click", () => call("POST", `/api/queue/${e.ticket.key}/${verb}`).then((q) => { state.queue = q; render(); }, report));
+    actions.append(b);
+  }
+  const link = terminalLink(state.terminal, e);
+  const terminal = link ? el("a", { className: "terminal", href: link, target: "_blank", rel: "noreferrer" }, "Open terminal") : null;
   const prs = o && o.kind === "draft-pr" ? el("div", { className: "meta" }, ...o.prs.flatMap((pr, i) => [i ? " · " : "", el("a", { href: pr.url, target: "_blank", rel: "noreferrer" }, `${pr.repo} #${pr.url.split("/").pop()}`)])) : null;
   const reason = !o ? null : o.kind === "wrong-repo" ? `Belongs in: ${o.where}` : o.kind === "needs-human" || o.kind === "crashed" ? o.reason : o.kind === "no-outcome" ? "Stopped without writing an outcome" : null;
   const repos = e.repos && e.repos.length > 0 ? e.repos.join(", ") : e.phase === "queued" ? "the worker chooses the repo" : "choosing a repo";
@@ -247,8 +255,9 @@ function row(e) {
       el("div", { className: "title" }, el("a", { href: e.ticket.url, target: "_blank", rel: "noreferrer" }, e.ticket.key), ` ${e.ticket.title}`),
       el("div", { className: "meta" }, `${LABEL[status]} · ${repos} · ${e.model}/${e.effort} · ${when}${tokens}`),
       e.waiting ? el("div", { className: "waiting" }, "Waiting on a person") : null,
-      reason ? el("div", { className: "meta" }, reason) : null),
-    el("div", { className: "side" }, prs, actions));
+      reason ? el("div", { className: "meta" }, reason) : null,
+      isParkedRun(e) ? el("div", { className: "waiting" }, "Still open: answer the agent in its terminal and the run carries on") : null),
+    el("div", { className: "side" }, terminal, prs, actions));
 }
 
 function renderBoard() {
@@ -281,6 +290,7 @@ function renderFooter() {
 function render() { renderPick(); renderBoard(); renderFooter(); }
 
 function setup(config) {
+  state.terminal = config.terminal ?? null;
   $("model").replaceChildren(...config.models.map((m) => el("option", { value: m, textContent: m, selected: m === config.choice.model })));
   $("effort").replaceChildren(...config.efforts.map((x) => el("option", { value: x, textContent: x, selected: x === config.choice.effort })));
 }
