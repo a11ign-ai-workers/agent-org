@@ -74,7 +74,7 @@ export function linearSource({ key, fetch: request = fetch }: { key: string; fet
       let after: string | null = null;
       do {
         const data: { viewer: { assignedIssues: { nodes: IssueNode[]; pageInfo: { hasNextPage: boolean; endCursor: string | null } } } } = await query(
-          `query($after: String) { viewer { assignedIssues(first: ${PAGE}, after: $after, filter: { state: { type: { nin: ["completed", "canceled"] } } }) {
+          `query($after: String) { viewer { assignedIssues(first: ${PAGE}, after: $after, filter: { state: { type: { nin: ["completed", "canceled", "duplicate"] } } }) {
             nodes { ${ISSUE_FIELDS} } pageInfo { hasNextPage endCursor } } } }`, { after });
         const page = data.viewer.assignedIssues;
         tickets.push(...page.nodes.map(toTicket));
