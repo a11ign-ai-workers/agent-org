@@ -25,4 +25,4 @@ Not in this change: `src/auto-arm-sweep.ts:494` also announces a `cross-repo-red
 
 Pending: the next refused lab pull request must read `autoMergeRequest: null` after its refusal. This needs a real refused lab PR; it is not checked here.
 
-Closes agent-org#1278
+Closes: none -- agent-org#1278 stays open for its Done-when 2 (the next refused lab PR reads `autoMergeRequest: null`), which is an outcome after the merge and does not block it, by the product-manager's ruling. Stated as Pending here; the row stays open for it.
