@@ -18,7 +18,14 @@ test("only `clones` is required, every repository in it is offered, and every ot
 
 test("the `tickets` block and `stateDir` override the defaults", () => {
   const settings = parseTicketSettings({ clones, stateDir: "/state", tickets: { max: 5, port: 5000, herdrSession: "nbl", worktreeRoot: "/wt", linearKey: { path: "/keys/linear" } } });
-  assert.deepEqual({ ...settings, clones: undefined }, { clones: undefined, max: 5, port: 5000, herdrSession: "nbl", worktreeRoot: "/wt", stateDir: "/state", linearKey: { path: "/keys/linear" } });
+  assert.deepEqual({ ...settings, clones: undefined }, { clones: undefined, max: 5, port: 5000, herdrSession: "nbl", worktreeRoot: "/wt", stateDir: "/state", linearKey: { path: "/keys/linear" }, brief: null, deny: [] });
+});
+
+test("a machine can add notes to every brief and refuse commands of its own", () => {
+  const deny = [{ pattern: "\\bnpm\\s+run\\s+dev\\b(?!:atomic)", reason: "a fixed port collides with other workers" }];
+  const settings = parseTicketSettings({ clones, tickets: { brief: "/work/.agent-org/worker-notes.md", deny } }, "/home/me");
+  assert.equal(settings.brief, "/work/.agent-org/worker-notes.md");
+  assert.deepEqual(settings.deny, deny);
 });
 
 test("a bad field is refused by its name", () => {
@@ -38,6 +45,10 @@ test("a bad field is refused by its name", () => {
   assert.equal(field({ clones, tickets: { max: 2.5 } }), "tickets.max");
   assert.equal(field({ clones, tickets: { herdrSession: "has space" } }), "tickets.herdrSession");
   assert.equal(field({ clones, tickets: { linearKey: { keychain: "x", path: "/y" } } }), "tickets.linearKey");
+  assert.equal(field({ clones, tickets: { brief: "notes.md" } }), "tickets.brief", "a relative path");
+  assert.equal(field({ clones, tickets: { deny: { pattern: "x", reason: "y" } } }), "tickets.deny", "one rule, not a list");
+  assert.equal(field({ clones, tickets: { deny: [{ pattern: "x" }] } }), "tickets.deny[0]", "a rule with no reason");
+  assert.equal(field({ clones, tickets: { deny: [{ pattern: "x", reason: "y" }, { pattern: "(", reason: "y" }] } }), "tickets.deny[1].pattern", "not a regular expression");
   assert.equal(field({ clones, tickets: { linearKey: { path: "rel" } } }), "tickets.linearKey.path");
   assert.equal(field({ clones, tickets: [] }), "tickets");
   assert.equal(field({ clones }), "accepted", "POSITIVE CONTROL: a valid file is not refused");

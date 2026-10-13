@@ -18,6 +18,13 @@ test("the brief carries the ticket, every repository to choose from, the worktre
   }
 });
 
+test("the machine's notes join the brief under their own heading, and a machine with none adds no heading", () => {
+  const brief = (notes?: string) => briefText({ ticket, folder: "/f", ticketDir: "/d", attachments: [], clones, worktreeCommand: "w", notes });
+  assert.ok(brief("Start apps with `npm run dev:atomic`.\n").includes("## On this machine\n\nStart apps with `npm run dev:atomic`.\n\n## The outcome file"));
+  assert.equal(brief().includes("## On this machine"), false);
+  assert.equal(brief("  \n").includes("## On this machine"), false, "an empty notes file adds nothing");
+});
+
 test("the settings file holds the permission mode, the model, the repositories to read and both hooks, by absolute path", () => {
   const settings = workerSettings({ model: "sonnet", ticketDir: "/state/tickets/NBF-1270", readDirs: Object.values(clones), hook: { node: "/usr/bin/node", bin: "/tool/src/bin.ts" } }) as any;
   assert.equal(settings.autoMemoryEnabled, false);

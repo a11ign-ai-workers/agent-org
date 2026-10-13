@@ -31,6 +31,29 @@ test("every connector is refused, and so are the two skills that reach outside t
   assert.equal(toolVerdict("Edit", { file_path: "/x" }).code, 0);
 });
 
+/** A pre-tool-use call for `command` in a ticket dir holding `deny` as its copy of the machine's refusals. */
+function withDeny(deny: string, command: string) {
+  const dir = tmpDir("ticket-hook-deny-");
+  writeFileSync(join(dir, "deny.json"), deny);
+  return main(JSON.stringify({ tool_name: "Bash", tool_input: { command } }), ["pre-tool-use", dir]);
+}
+
+test("this machine's own refusals apply after the built-in ones, each with its own reason", () => {
+  const deny = JSON.stringify([{ pattern: "\\bnpm\\s+run\\s+(dev|preview)\\b(?!:atomic)", reason: "a fixed port collides with other workers" }]);
+  const refused = withDeny(deny, "npm run dev -w packages/ui-netbox");
+  assert.equal(refused.code, 2);
+  assert.match(refused.say[0], /a fixed port collides with other workers/);
+  assert.equal(withDeny(deny, "npm run dev:atomic:standalone").code, 0, "POSITIVE CONTROL: what the rule leaves out is allowed");
+  assert.equal(withDeny(deny, "gh pr ready 5").code, 2, "the built-in refusals still apply");
+});
+
+test("a copy of the machine's refusals that cannot be read is reported and skipped, and the built-in refusals still apply", () => {
+  const ready = withDeny("{not json", "gh pr ready 5");
+  assert.equal(ready.code, 2);
+  assert.match(ready.say[0], /could not read .*deny\.json, so only the built-in refusals apply/);
+  assert.equal(withDeny("{not json", "npm run dev").code, 0);
+});
+
 test("a stop with no outcome is refused twice in a row, then allowed; an outcome allows it and resets the count", () => {
   const dir = tmpDir("ticket-hook-stop-");
   const verdicts = Array.from({ length: MAX_STOP_REFUSALS + 1 }, () => stopVerdict(dir).code);

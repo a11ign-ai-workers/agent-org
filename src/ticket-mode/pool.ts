@@ -22,7 +22,7 @@ import {
 import type { TicketSource } from "./source.ts";
 import { TICKET_ENV } from "./worktree-command.ts";
 import { HOST_FILE_ENV, type TicketSettings } from "./settings.ts";
-import { BRIEF_FILE, OUTCOME_FILE, STOP_COUNT_FILE, briefText, firstPrompt, workerFlags, workerSettings, type HookCommand } from "./worker-files.ts";
+import { BRIEF_FILE, DENY_FILE, OUTCOME_FILE, STOP_COUNT_FILE, briefText, firstPrompt, workerFlags, workerSettings, type HookCommand } from "./worker-files.ts";
 
 /** herdr waits on Claude's start; a slow one has been measured past 30 s (`wake.ts`'s start budget), so a start gets 90. */
 const START_TIMEOUT_MS = 90_000;
@@ -198,10 +198,20 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
   }
   const update = (change: (queue: Queue) => Queue) => store.set(change(store.get()));
 
+  /** The host file's `tickets.brief`, read for each run so an edit reaches the next worker. Throws naming the setting when it cannot be read. */
+  function machineNotes(): string | undefined {
+    if (settings.brief === null) return undefined;
+    try {
+      return readFileSync(settings.brief, "utf8");
+    } catch {
+      throw new Error(`tickets.brief names ${settings.brief}, which cannot be read`);
+    }
+  }
+
   /**
-   * The ticket's folder, its brief and its settings file. The folder sits among the person's repositories (under `worktreeRoot`), so the worker
-   * starts with the workspace's own `CLAUDE.md` around it, and it is no repository itself: the worker makes its worktrees inside it with
-   * `ticket:worktree` once it has decided where the work lands. Throws, with the reason, when any of it cannot be made.
+   * The ticket's folder, its brief, its copy of this machine's refusals and its settings file. The folder sits among the person's repositories
+   * (under `worktreeRoot`), so the worker starts with the workspace's own `CLAUDE.md` around it, and it is no repository itself: the worker makes
+   * its worktrees inside it with `ticket:worktree` once it has decided where the work lands. Throws, with the reason, when any of it cannot be made.
    */
   async function prepare(entry: Entry): Promise<{ folder: string; dir: string }> {
     const { ticket } = entry;
@@ -212,7 +222,8 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     for (const file of [OUTCOME_FILE, STOP_COUNT_FILE]) rmSync(join(dir, file), { force: true });
     const attachments = await source.download(ticket, dir);
     const worktreeCommand = `${hook.node} ${hook.bin} ticket:worktree`;
-    writeFileSync(join(dir, BRIEF_FILE), briefText({ ticket, folder, ticketDir: dir, attachments, clones: settings.clones, worktreeCommand }));
+    writeFileSync(join(dir, BRIEF_FILE), briefText({ ticket, folder, ticketDir: dir, attachments, clones: settings.clones, worktreeCommand, notes: machineNotes() }));
+    writeFileSync(join(dir, DENY_FILE), `${JSON.stringify(settings.deny)}\n`);
     mkdirSync(join(folder, ".claude"), { recursive: true });
     writeFileSync(join(folder, SETTINGS_FILE),
       `${JSON.stringify(workerSettings({ model: entry.model, ticketDir: dir, readDirs: Object.values(settings.clones), hook }), null, 2)}\n`);

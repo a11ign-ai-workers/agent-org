@@ -15,10 +15,15 @@ export const OUTCOME_FILE = "outcome.json";
 export const BRIEF_FILE = "brief.md";
 /** The stop hook's count of refused stops in a row, beside the outcome file. */
 export const STOP_COUNT_FILE = "stop-refusals";
+/** The host file's `tickets.deny`, copied beside the outcome file, where the PreToolUse hook reads it. */
+export const DENY_FILE = "deny.json";
 
-/** The brief, as markdown. `worktreeCommand` is the full command line that makes a worktree, short of the repository's name. */
-export function briefText({ ticket, folder, ticketDir, attachments, clones, worktreeCommand }: {
-  ticket: Ticket; folder: string; ticketDir: string; attachments: readonly string[]; clones: Readonly<Record<string, string>>; worktreeCommand: string;
+/**
+ * The brief, as markdown. `worktreeCommand` is the full command line that makes a worktree, short of the repository's name. `notes` is the host
+ * file's `tickets.brief`, how workers behave on this machine.
+ */
+export function briefText({ ticket, folder, ticketDir, attachments, clones, worktreeCommand, notes }: {
+  ticket: Ticket; folder: string; ticketDir: string; attachments: readonly string[]; clones: Readonly<Record<string, string>>; worktreeCommand: string; notes?: string;
 }): string {
   const repos = Object.entries(clones).map(([name, path]) => `- \`${name}\` at \`${path}\``).join("\n");
   const files = attachments.length === 0 ? "None." : attachments.map((path) => `- \`${path}\``).join("\n");
@@ -55,7 +60,7 @@ ${repos}
 5. If a design gate asks for a design check, decline it with "unattended worker, no browser" and say so in the pull request body.
 
 Never mark a pull request ready, request a review, merge, force-push, run a workflow, or post to Slack. Those are the person's.
-
+${notes?.trim() ? `\n## On this machine\n\n${notes.trim()}\n` : ""}
 ## The outcome file
 
 Write \`${ticketDir}/${OUTCOME_FILE}\` as the last thing you do, with exactly one of:

@@ -3,7 +3,8 @@
 //
 // MACHINE FACTS ONLY, IN THE HOST FILE AGENT-ORG ALREADY READS. Which repositories this machine has checked out, where worktrees go, how many
 // workers it can carry and where the tracker's key lives are facts no repository can know, which is the host file's rule (`host-config.ts`'s
-// header). Nothing here is a fact about a project: the person queueing a ticket chooses its repositories on the board.
+// header). Nothing here is a fact about one repository: a worker chooses the repository and reads its own `CLAUDE.md`. The optional `brief` and
+// `deny` say how workers behave on this machine, for example how they share its dev servers with each other and with the person.
 //
 // READ RAW, AS `haiku-brief.ts` READS ITS KEY. `readHostConfig` ignores unknown keys, so `tickets` is inert to every existing reader, and this
 // module does not teach the strict reader a block only ticket mode uses. It imports neither `host-config.ts` nor `project-config.ts`: both
@@ -21,6 +22,9 @@ export const HOST_FILE_ENV = "AGENT_ORG_HOST";
 /** Where the tracker's key is read from: the macOS Keychain by service name, or a mode-600 file. */
 export type KeySource = Readonly<{ keychain: string } | { path: string }>;
 
+/** A command this machine's workers may not run: a regular expression matched against the whole Bash command, and the reason the worker is told. */
+export type DenyRule = Readonly<{ pattern: string; reason: string }>;
+
 export type TicketSettings = Readonly<{
   /** Repository name -> its local checkout, as many as the machine has. */
   clones: Readonly<Record<string, string>>;
@@ -30,6 +34,9 @@ export type TicketSettings = Readonly<{
   worktreeRoot: string;
   stateDir: string;
   linearKey: KeySource;
+  /** A markdown file added to every worker's brief, or null. */
+  brief: string | null;
+  deny: readonly DenyRule[];
 }>;
 
 export class TicketSettingsRefusal extends Error {
@@ -60,6 +67,25 @@ function keySource(value: unknown): KeySource {
   throw new TicketSettingsRefusal("tickets.linearKey", "must be { \"keychain\": \"<service>\" } or { \"path\": \"/abs/file\" }");
 }
 
+const DENY_RULE_SHAPE = "{ \"pattern\": \"<regular expression>\", \"reason\": \"<why>\" }";
+
+function denyRules(value: unknown): readonly DenyRule[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value)) throw new TicketSettingsRefusal("tickets.deny", `must be a list of ${DENY_RULE_SHAPE}`);
+  return Object.freeze(value.map((rule: unknown, i) => {
+    const field = `tickets.deny[${i}]`;
+    if (!isObject(rule) || typeof rule.pattern !== "string" || rule.pattern === "" || typeof rule.reason !== "string" || rule.reason === "") {
+      throw new TicketSettingsRefusal(field, `must be ${DENY_RULE_SHAPE}`);
+    }
+    try {
+      new RegExp(rule.pattern);
+    } catch {
+      throw new TicketSettingsRefusal(`${field}.pattern`, `is not a regular expression: ${JSON.stringify(rule.pattern)}`);
+    }
+    return Object.freeze({ pattern: rule.pattern, reason: rule.reason });
+  }));
+}
+
 /**
  * The settings, from the host file's parsed JSON. PURE: the caller reads the file.
  * @param home the user's home directory, for the default state directory
@@ -84,6 +110,8 @@ export function parseTicketSettings(host: unknown, home: string = homedir()): Ti
     worktreeRoot: tickets.worktreeRoot === undefined ? join(stateDir, "tickets", "worktrees") : absolutePath(tickets.worktreeRoot, "tickets.worktreeRoot"),
     stateDir,
     linearKey: keySource(tickets.linearKey),
+    brief: tickets.brief === undefined ? null : absolutePath(tickets.brief, "tickets.brief"),
+    deny: denyRules(tickets.deny),
   });
 }
 

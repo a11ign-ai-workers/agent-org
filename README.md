@@ -92,12 +92,13 @@ reads each repository's `CLAUDE.md`/`AGENTS.md` for its commands, opens a DRAFT 
 file: `draft-pr`, `wrong-repo` (the fix belongs in none of them) or `needs-human`.
 Nothing is written to Linear.
 
-**What a worker may not do** is enforced by `ticket:hook`, which the worktree's `.claude/settings.local.json` names, so a session herdr
+**What a worker may not do** is enforced by `ticket:hook`, which the ticket folder's `.claude/settings.local.json` names, so a session herdr
 resumes after a restart keeps it. A stop with no outcome file is refused twice in a row. These are refused outright: a pull request that
-is not a draft, `gh pr ready`, `merge` and `review`, requesting a reviewer, `gh workflow run`, a force push, and every MCP connector.
+is not a draft, `gh pr ready`, `merge` and `review`, requesting a reviewer, `gh workflow run`, a force push, and every MCP connector. A
+machine adds its own refusals with `tickets.deny`.
 
 **Configuration** is machine facts only, in the host file `$AGENT_ORG_HOST` names. Only `clones` is required, and it lists every repository
-the board offers:
+a worker can choose from:
 
 ```json
 { "clones": { "nbl-ui-netbox": "/path/to/nbl-ui-netbox", "platform-monorepo": "/path/to/platform-monorepo" },
@@ -111,6 +112,8 @@ the board offers:
 | `tickets.herdrSession` | `tickets` |
 | `tickets.worktreeRoot` | `<stateDir>/tickets/worktrees` |
 | `tickets.linearKey` | `{ "keychain": "agent-org-linear" }` (macOS Keychain service), or `{ "path": "/abs/file" }` |
+| `tickets.brief` | none. A markdown file added to every worker's brief under "On this machine", read again for each run: how workers share the machine, such as the command that starts a dev server without taking a fixed port |
+| `tickets.deny` | none. `[{ "pattern": "<regular expression>", "reason": "<why>" }]`: Bash commands the hook refuses as well as its own, each matched against the whole command, with the reason the worker is told |
 | `stateDir` | `~/.local/state/agent-org`: the queue, each ticket's brief, attachments and outcome |
 
 The Linear key is a personal API key, so ticket mode reads as you and needs no workspace admin. On macOS, store it once with

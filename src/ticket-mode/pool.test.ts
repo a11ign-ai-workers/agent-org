@@ -30,9 +30,9 @@ function herdr(status: Map<string, string>, screen: { text: string } = { text: "
   return { run, calls };
 }
 
-function setup(max = 2, keys = ["NBF-1", "NBF-2", "NBF-3"]) {
+function setup(max = 2, keys = ["NBF-1", "NBF-2", "NBF-3"], tickets: Record<string, unknown> = {}) {
   const root = tmpDir("ticket-pool-");
-  const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/repos/nbl-ui-netbox", "nbl-ui-platform-libs": "/repos/libs" }, stateDir: join(root, "state") });
+  const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/repos/nbl-ui-netbox", "nbl-ui-platform-libs": "/repos/libs" }, stateDir: join(root, "state"), tickets });
   let queue: Queue = setPaused(enqueue(emptyQueue(max), keys.map(ticket), { model: "sonnet", effort: "high" }, 0), false);
   const store = { get: () => queue, set: (next: Queue) => { queue = next; } };
   const status = new Map<string, string>();
@@ -64,6 +64,25 @@ test("a tick starts as many as `max` allows, each in ticket mode's own herdr ses
   for (const pair of ["AGENT_ORG_TICKET=NBF-1", "AGENT_ORG_TICKET_BRANCH=nbf-1", "AGENT_ORG_TICKET_HOST=/work/.agent-org/host.json"]) {
     assert.ok(create.includes(pair), `its shell carries ${pair}, which ticket:worktree reads`);
   }
+});
+
+test("each run's brief carries the machine's notes, and its ticket dir a copy of the machine's refusals", async () => {
+  const notes = join(tmpDir("ticket-notes-"), "notes.md");
+  writeFileSync(notes, "Start apps with `npm run dev:atomic`.\n");
+  const deny = [{ pattern: "\\bnpm\\s+run\\s+dev\\b(?!:atomic)", reason: "a fixed port collides with other workers" }];
+  const { pool, settings } = setup(1, ["NBF-1"], { brief: notes, deny });
+  await pool.tick();
+  const dir = ticketDir(settings, "NBF-1");
+  assert.match(readFileSync(join(dir, "brief.md"), "utf8"), /## On this machine\n\nStart apps with `npm run dev:atomic`\./);
+  assert.deepEqual(JSON.parse(readFileSync(join(dir, "deny.json"), "utf8")), deny);
+});
+
+test("a notes file that cannot be read fails the run, naming the setting", async () => {
+  const { pool, entry } = setup(1, ["NBF-1"], { brief: "/nowhere/notes.md" });
+  await pool.tick();
+  const outcome = entry("NBF-1").outcome;
+  assert.equal(outcome?.kind, "crashed");
+  assert.match(outcome?.kind === "crashed" ? outcome.reason : "", /tickets\.brief names \/nowhere\/notes\.md/);
 });
 
 test("a run ends on its outcome file once the agent is idle; idle before it ever worked is not an end", async () => {
