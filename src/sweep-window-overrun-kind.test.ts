@@ -39,9 +39,11 @@ execFileSync("git", ["add", "-A"], { cwd: PROJECT, env: sandboxGitEnv() });
 process.chdir(PROJECT);
 
 const { OVERRUN_MARKER, SWEEP_OVERRUN_KIND, readSweepWindows, recordOverrunRefusal, reportSweepWindows } = await import("./sweep-window.ts");
-const { sessionEligibilityReason } = await import("./row-claim.ts");
-const { SWEEP_WINDOW_RELEASED_KIND, parseFailureLedger, repeatsIn } = await import("./failure-ledger.ts");
+const { claimRow, sessionEligibilityReason } = await import("./row-claim.ts");
+const { FAILURE_LEDGER_FILE, SWEEP_WINDOW_RELEASED_KIND, parseFailureLedger, repeatsIn } = await import("./failure-ledger.ts");
 const { groupByClass } = await import("./class-repeat.ts");
+const { stateEntryPath } = await import("./host-config.ts");
+const { CHAIRMAN_LOGINS } = await import("./work-gate.ts");
 
 const MIN = 60_000;
 const TRACKER = "a11ign/a11ign";
@@ -163,4 +165,65 @@ test("(2) a read that throws records nothing and never throws into the claim tha
   recordOverrunRefusal("overlaps the Region of #4389, a declared SWEEP", { issueNumber: ASKER, reads: { run: broken, repo: TRACKER, repos: [AGENT_ORG] }, io: { logPath: () => path, report: (line) => void lines.push(line) } });
   assert.equal(readBack(path), "");
   assert.equal(lines.length, 0, "an unread holder is inconclusive: nothing is recorded, and nothing is reported as an error");
+});
+
+// --- the claim itself: `claimRow` refuses, and the call at row-claim.ts:1298 writes the line to the DEFAULT ledger (agent-org#1314's verdict) ------------------
+
+// `claimRow` reads the real clock, so the sweep's claim and its notice are placed against `Date.now()`, not the fixed NOW above.
+const live = (minutesAgo: number) => new Date(Date.now() - minutesAgo * MIN).toISOString();
+// The asker's body carries the sections `claimRow` requires (the issue template's Acceptance and Open-check), as the chairman-yield test's `bodyOf` does.
+const TEMPLATE = "\n## Acceptance\n\n```bash\ntrue\n```\n\n## Open-check\n\n```\n$ true\n```\n";
+const liveClaim = (minutesAgo: number) => ({ ...claimRecord(0), createdAt: live(minutesAgo) });
+const notice = (minutesAgo: number) => ({ body: `${OVERRUN_MARKER}\nnotice`, createdAt: live(minutesAgo) });
+// THE DEFAULT LEDGER, which the host file places in SCRATCH: the test reads the path the claim writes, and asserts it is never the real one.
+const LEDGER = stateEntryPath(FAILURE_LEDGER_FILE);
+const freshLedger = () => { assert.ok(LEDGER.startsWith(SCRATCH), `the default ledger is the scratch one: ${LEDGER}`); rmSync(LEDGER, { force: true }); };
+
+/** The `gh` a claim reads: the asker's Region and labels, the sweep row and its comments. Writes are no-ops. A chairman asker's label is read as the tracker has it. */
+function claimGh(comments: unknown[], { chairman = false } = {}) {
+  return (_cmd: string, args: string[]): string => {
+    if (args[0] === "issue" && args[1] === "comment") return "";
+    if (args[0] === "issue" && args[1] === "view") {
+      if (args.includes("comments")) return JSON.stringify({ comments });
+      return JSON.stringify({ number: ASKER, title: "A row", body: plainBody("agent-org:src/b.ts") + TEMPLATE, state: "OPEN", labels: [{ name: "ready" }], blockedBy: { nodes: [] } });
+    }
+    const byLabel = readsRowsByLabel(args);
+    if (byLabel?.label === "priority:chairman") return connectionOf(chairman ? [{ number: ASKER, labels: [{ name: "priority:chairman" }] }] : []);
+    if (byLabel?.label === "in-progress") return connectionOf([{ number: SWEEP, labels: [{ name: "in-progress" }, { name: "session:worker-4389" }], body: rowBody("agent-org:src/"), blockedBy: { nodes: [] } }]);
+    if (args[0] === "api" && args[1] === `repos/${TRACKER}/issues/${ASKER}`) return JSON.stringify({ number: ASKER, title: "A row", labels: [{ name: "ready" }], state: "open" });
+    if (args[0] === "api" && args[1] === `repos/${TRACKER}/issues/${ASKER}/events`) return chairman ? `${CHAIRMAN_LOGINS[0]}\n` : "[]";
+    return "[]";
+  };
+}
+const claimLive = (comments: unknown[], chairman = false) => claimRow(ASKER, `worker-${ASKER}`, {
+  run: claimGh(comments, { chairman }), moveStatus: () => ({ moved: true }), drained: [], instance: { spare: false, rows: [] }, persistent: false,
+  tracker: { key: "", repo: TRACKER },
+} as never) as { claimed: boolean; reason?: string };
+
+test("(3) THROUGH claimRow: a claim REFUSED on the swept Region after the overrun notice writes ONE sweep-overrun line to the default ledger, ref = the refused row", () => {
+  freshLedger();
+  const result = claimLive([liveClaim(200), notice(1)]);
+  assert.equal(result.claimed, false, "the released area still refuses the claim");
+  assert.match(result.reason ?? "", new RegExp(`overlaps the Region of #${SWEEP}`));
+  const text = readBack(LEDGER);
+  assert.equal(linesOf(text, SWEEP_OVERRUN_KIND).length, 1, `one failure from the claim:\n${text}`);
+  assert.match(text, new RegExp(`^${SWEEP_OVERRUN_KIND}\\t\\d+\\t${TRACKER}#${ASKER}\\n$`), "ref is the REFUSED row");
+});
+
+test("(3) CONTROL: the same refused claim with NO overrun notice on the sweep writes no ledger line", () => {
+  freshLedger();
+  const result = claimLive([liveClaim(200)]);
+  assert.equal(result.claimed, false, "the refusal is the same");
+  assert.match(result.reason ?? "", new RegExp(`overlaps the Region of #${SWEEP}`));
+  // The claim reports the overrun it finds (one release, the holder told once); the refusal that follows has no notice to name, so it is no failure.
+  const text = readBack(LEDGER);
+  assert.equal(linesOf(text, SWEEP_OVERRUN_KIND).length, 0, `no notice, no failure:\n${text}`);
+  assert.equal(linesOf(text, SWEEP_WINDOW_RELEASED_KIND).length, 1, `the claim's own release, once:\n${text}`);
+});
+
+test("(3) CONTROL: a chairman row that B4 yields past the same notified holder is claimed and writes no sweep-overrun line", () => {
+  freshLedger();
+  const result = claimLive([liveClaim(200), notice(1)], true);
+  assert.equal(result.claimed, true, "the chairman's yield lets the claim past");
+  assert.equal(readBack(LEDGER), "", "a yielded claim is no refusal, so the final verdict writes nothing");
 });
