@@ -2424,10 +2424,21 @@ test("#2332: END TO END -- `host:install` then `host:check --json` on a temp HOM
     assert.ok(identityFindings(before).length >= 3, "before the install: gh, the leads list and the README are all absent");
     const shadowNote = (out: string) => JSON.parse(out).notes.some((n: { problem: string }) => /SEAT WRAPPER/.test(n.problem));
     assert.ok(shadowNote(before), "the control: with no wrapper installed, a pane's shell is told it resolves `claude` elsewhere");
+    // agent-org#1268: THE ROW-REVIEW SKILL IS PLACED BY THE ENTRY POINT, not by a source search for the call. Neither `--json` nor a plain
+    // `host:check` may place it (a check that installs hides the drift it exists to report), and `--install` must, byte for byte.
+    const skillDir = join(home, ".codex", "skills", "row-review");
+    const skillFindings = (out: string) => JSON.parse(out).findings.filter((f: { problem: string }) => /^row-review skill/.test(f.problem)).map((f: { problem: string }) => f.problem);
+    assert.deepEqual(skillFindings(before), ["row-review skill NOT INSTALLED"], "before the install: `host:check --json` reports the skill missing");
+    run();
+    assert.equal(existsSync(skillDir), false, "and neither `--json` nor a plain `host:check` placed it");
     const install = run("--install");
     assert.match(install.stdout, /installed .*\/\.local\/bin\/gh/);
+    for (const name of ROW_REVIEW_SKILL_FILES) {
+      assert.equal(readFileSync(join(skillDir, name), "utf8"), readFileSync(join(ROW_REVIEW_SKILL_SOURCE, name), "utf8"), `\`host:install\` placed ${name} of the skill, byte for byte`);
+    }
     const after = JSON.parse(run("--json").stdout);
     assert.deepEqual(identityFindings(JSON.stringify(after)), [], "after the install every identity file matches");
+    assert.deepEqual(skillFindings(JSON.stringify(after)), [], "and `host:check --json` reads the skill as current");
     assert.equal(shadowNote(JSON.stringify(after)), false, "after the install the pane's shell resolves `claude` to the wrapper, so there is no note");
     // "COULD NOT BE ASKED" IS ITS OWN READING (and never a clean one): a shell that cannot answer leaves the note up, saying so, even with the wrapper installed.
     const detailOf = (out: string) => JSON.parse(out).notes.find((n: { problem: string }) => /SEAT WRAPPER/.test(n.problem))?.detail ?? "";
@@ -3501,10 +3512,4 @@ test("`host:check` is WIRED to it: hostUnitDrift carries the finding and drops i
     rowReviewSkillInstall({ ...asked, ...skillQuiet });
     assert.deepEqual(mine(), []);
   });
-});
-
-test("`host:install` runs it: the call sits inside the --install branch of main()", () => {
-  const main = readFileSync(join(TOOL_ROOT, "src", "host-units.ts"), "utf8").split("\n");
-  const at = main.findIndex((l) => l.trim() === "rowReviewSkillInstall();");
-  assert.ok(at > 0 && main.slice(at - 6, at).some((l) => l.includes("--install")), "rowReviewSkillInstall() is called inside the --install branch of main()");
 });
