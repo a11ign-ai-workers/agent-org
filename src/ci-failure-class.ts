@@ -563,7 +563,7 @@ type IncidentRow = {
  * #5039: THE INCIDENT ROWS, READ WITHOUT SEARCH (see rows-by-label.ts), and a FAILED READ THROWS: it used to answer `[]`, which read as "no
  * incident row", so a tick that could not list them filed a second row for the same failure. The two callers that file or join catch it.
  */
-const readRows = (run: Run, state: "open" | "closed"): IncidentRow[] =>
+export const readRows = (run: Run, state: "open" | "closed"): IncidentRow[] =>
   readRowsByLabel({ label: SHARED_FAILURE_LABEL, state: state === "open" ? "OPEN" : "CLOSED", newest: MAX_INCIDENT_ROWS, run,
     select: "number body createdAt closedAt labels(first:20){nodes{name}} closedByPullRequestsReferences(first:10){nodes{number repository{nameWithOwner}}}" })
     .map((row) => ({ number: Number(row.number), body: String(row.body ?? ""), createdAt: row.createdAt, closedAt: row.closedAt,

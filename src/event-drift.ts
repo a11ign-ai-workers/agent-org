@@ -23,7 +23,7 @@
 // REVERT: `"source": "poll"` in host.json. Without `events` (poll) or with an unhealthy receiver nothing here runs.
 import { readFileSync, renameSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
-import { recordIncident, type Run, type SharedGroup } from "./ci-failure-class.ts";
+import { readRows, recordIncident, type Run, type SharedGroup, standingOf } from "./ci-failure-class.ts";
 
 const MS = 1000;
 const KEEP_DAYS = 14;
@@ -62,14 +62,17 @@ export function driftOf({ repo, probes, named, windowStartS, nowS }: { repo: str
 
 const iso = (seconds: number): string => new Date(seconds * MS).toISOString().replace(/\.\d+Z$/, "Z");
 
-/** The group `recordIncident` files for one pass. Its key is every drifted repository and its window start, so a retry of the same pass joins its row and the next window is a row of its own. */
+/**
+ * The group `recordIncident` files for one pass. Its key is the SET of drifted repositories, with no window (agent-org#1330): a repository set that drifts again joins its
+ * OPEN row, and {@link fileDrift} folds it into a row that CLOSED recently. The window the row first named stays in its `Step:`, because a join never rewrites the body of a group with no PRs.
+ */
 export function groupOf(drifts: readonly Drift[]): SharedGroup {
   const windowStartS = Math.min(...drifts.map((d) => d.windowStartS));
   const nowS = Math.max(...drifts.map((d) => d.nowS));
   const window = `${iso(windowStartS)} to ${iso(nowS)}`;
   const moved = drifts.map((d) => `${d.repo}: ${d.probe}`).join("; ");
   return {
-    key: `event-drift:${drifts.map((d) => `${d.repo}@${d.windowStartS}`).sort().join(",")}`,
+    key: `event-drift:${drifts.map((d) => d.repo).sort().join(",")}`,
     signature: {
       check: `missed delivery: ${moved} moved`,
       step: `reconcile window ${window}`,
@@ -90,9 +93,24 @@ export type FileDrift = (drifts: readonly Drift[]) => boolean;
 /**
  * File one incident for the pass's `drifts` through `recordIncident` (its label, dedupe and refusal handling are reused, not copied). `run` is handed in: this file spawns nothing (`gh-call-ratchet.test.ts`), the caller's one `gh` spawn serves. Returns `true` when a row exists, `false` when `gh` refused:
  * the caller then leaves the windows open, so each probe says CHANGED again next tick and the filing is retried instead of lost.
+ * agent-org#1330: a repository set whose row CLOSED within `QUIET_AFTER_CLOSE_MS` files nothing. `standingOf` reads that, the pass logs that it was folded in, and the row exists, so `true`.
+ * The rows are read here, not left to `recordIncident`, because that one joins an open row and would file a second row once the first has closed.
  */
 export function fileDrift(drifts: readonly Drift[], { run, log = (line: string) => process.stderr.write(line), record = recordIncident }: { run: Run; log?: (line: string) => void; record?: typeof recordIncident }): boolean {
-  return record(groupOf(drifts), { run, log }) !== null;
+  const group = groupOf(drifts);
+  const nowMs = Math.max(...drifts.map((d) => d.nowS)) * MS;
+  let said;
+  try {
+    said = standingOf(group, { open: readRows(run, "open"), closed: readRows(run, "closed"), nowMs });
+  } catch (error) {
+    log(`event-drift: could not read the incident rows (${String((error as Error).message).split("\n")[0]}); the next tick retries\n`);
+    return false;
+  }
+  if (!said.hold && said.why === "closed") {
+    log(`event-drift: ${drifts.map((d) => d.repo).join(", ")} moved again within the quiet window after incident #${said.row} closed; folded into it, no row filed\n`);
+    return true;
+  }
+  return record(group, { run, log }) !== null;
 }
 
 /** Where the per-day count of reconciles whose tag moved over the same content is kept, under the read cache (`read-cache/`). */
