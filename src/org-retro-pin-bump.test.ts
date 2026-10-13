@@ -1,3 +1,4 @@
+// no-token: gh -- `org-retro.ts` reaches `gh` only through the `read` seam of `pinBumpRead`, which every test here replaces with a fixture; `buildReport` reads nothing, so nothing imported reaches the real `ghJson`
 // The pin/bump line on #928 (agent-org#1245), behind `PIN_BUMP_FLAG`. The flag OFF control is the one the row asks for: a report built with
 // the flag off is the report it was, byte for byte, and the flag ON report is that report with the one line added and nothing else.
 // The reads are fixtures and the `gh` reader is a seam, so no `gh` runs here.
