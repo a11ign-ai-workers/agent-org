@@ -64,6 +64,7 @@ import { stateEntryPath, hostConfigPath, readHostConfig, HOST_CONFIG_ENV } from 
 import { REPO } from "./project-identity.ts";
 import { roleBriefPath } from "./project-roles.ts";
 import { serveOrdersByRun, type ServedRecord } from "./serve-by-run.ts";
+import { accountLimitFlag, pauseRefusal, tickAccountLimit, type AccountLimit } from "./account-limit.ts";
 import { engineerBriefSentence, briefRoleSentence } from "./spawn-role-brief.ts"; // #828: the sentence that sends a spawned seat to a role brief
 // #832: a `lane:orchestrator` row as a one-shot seat's, behind `workers.orchestratorOneShot`; its cause is a sibling of `SPAWN_CAUSES`, never a member
 import { ONE_SHOT_SPAWN_CAUSES, createOrchestratorOneShot, isOneShotOrder, standInClaimer, withOrchestratorOneShot, type OrchestratorOneShot } from "./orchestrator-one-shot.ts";
@@ -316,6 +317,21 @@ export function unavailableReason(label: string, deps?: Parameters<typeof sessio
     ? `"${label}" is out of usage allowance until ${new Date(allowance.until).toISOString()} ("${allowance.text}") `
       + "-- nothing sent and nothing counted as a delivery"
     : null;
+}
+
+/**
+ * agent-org#1307: THE ACCOUNT'S PAUSE FOR THIS TICK, or `null`. ONE Claude seat that shows the allowance message is the account limited, because every
+ * Claude seat draws on the one allowance. Flag read OFF: `null`, and nothing is read beyond the flag. Flag UNKNOWN (its state cannot be read) is not off:
+ * the record decides, and an unreadable record holds (see {@link tickAccountLimit}). A change is said once (stdout) and logged (ndjson); nothing is said
+ * on a tick that changes nothing.
+ */
+export function accountPauseTick(labels: readonly string[], now: number = Date.now()): AccountLimit | null {
+  if (accountLimitFlag() === "off") return null;
+  const seen = labels.map((label) => {
+    const allowance = sessionAllowance(label, { now });
+    return allowance.state === "limited" ? { limitedUntil: allowance.until, seenOn: label, text: allowance.text } : null;
+  }).find((limit) => limit !== null) ?? null;
+  return tickAccountLimit(seen, now, (line) => process.stdout.write(`${line}\n`));
 }
 
 const defaultRun = (args: string[]) => execFileSync("herdr", args, { encoding: "utf8", timeout: 30_000 });
@@ -5159,12 +5175,15 @@ function targetFor(order: {
         env?: Record<string, string>; registerSpawn?: (role: string) => void; drained?: readonly string[];
         claimable?: (order: { causeKey: string; startFresh?: boolean; }) => string | null; claimer?: SpawnClaimer; hostLoad?: () => HostLoad;
         claimRefused?: ClaimRefused; oneShot?: OrchestratorOneShot; ceoOneShot?: CeoOneShot; toolchain?: ToolchainGate;
+        accountPause?: AccountLimit | null;
     } & ReviewerDeps): {
     label: string; profile?: { kind: string; model: string; effort: string; }; claimed?: ClaimedRow;
     workspace?: string; reviewer?: true; order?: { prompt: string; };
 } | { refusal: string; } {
   // A REVIEWER ORDER IS ASKED FIRST AND SEPARATELY (#2401): the engineer pilot's checks below are unchanged.
   if (isReviewerOrder(order)) return reviewerTarget(order, live, deps);
+  // agent-org#1307: WHILE THE ACCOUNT'S CLAUDE ALLOWANCE IS SPENT, NO CLAUDE SEAT IS STARTED, CLAIMED FOR OR PROMPTED. A reviewer is a Codex seat and went above.
+  if (deps.accountPause) return { refusal: pauseRefusal(deps.accountPause) };
   // agent-org#459: A READY ROW IS OFFERED TO ITS OWN SPARE OR TO A FRESH WORKER, never to another row's idle instance (`ownRowOnly`).
   const routed = routeWithFallback(order, live, withSpareInstances(roster, live), ownRowOnly(order, deps.ineligibleReason));
   if (!("refusal" in routed)) {
@@ -5576,8 +5595,10 @@ function noteClaimOrders(claimOrders: ClaimOrders | undefined, { gateOrder, targ
 export function deliver(orders: readonly { session: string; causeKey: string; prompt: string; cause?: string; title?: string; replaces?: { branch: string; }[]; resume?: boolean; outageNow?: boolean; startFresh?: boolean; briefRole?: string; }[], agents: { label: string; status: string; }[], roster: string[],
   { run = defaultRun, record, counts, ineligibleReason, env, registerSpawn, drained, claimable, claimer, memory, hostLoad, claimRefused, oneShot, ceoOneShot,
     launch, reviewerEnv, registerReviewer, checkout, registry, unavailable, sleep, contextRoot, codexConfig, clock, relane, goneSeats, claimOrders, toolchain,
-    now = Date.now, serve }: {
+    now = Date.now, serve, accountPause }: {
           run?: (args: string[]) => string; record?: (key: string, recipient?: string, noClear?: boolean, at?: number) => void;
+          /** agent-org#1307: the account's pause for this tick; while it holds, no Claude seat is started, claimed for or prompted, and no `claude -p` run is served. */
+          accountPause?: AccountLimit | null;
           serve?: (order: { causeKey: string; }) => ServedRecord | null;
           counts?: Map<string, number>; ineligibleReason?: (label: string) => string | null;
           env?: Record<string, string>; registerSpawn?: (role: string) => void; drained?: readonly string[];
@@ -5615,14 +5636,15 @@ export function deliver(orders: readonly { session: string; causeKey: string; pr
     // agent-org#904: AN ORDER A RUN SERVED THIS TICK IS NOT PROMPTED TO ITS SEAT. `serve` is the answer `serveOrdersByRun` already holds (a run is asynchronous and this loop is not),
     // and it is absent, or `null` for an order, unless the project set that order's class to `run` and the run APPLIED its decision. The delivery is recorded like any other, so the
     // gate does not derive the cause again for the wake window and the cap above counts it; every other order, and every fallback, goes on to the seat below unchanged.
-    const servedByRun = serve?.(order) ?? null;
+    // agent-org#1307: WHILE THE ACCOUNT'S PAUSE HOLDS, A RUN IS NOT SERVED EITHER: a `claude -p` decision is a Claude start, and the order is refused below.
+    const servedByRun = accountPause ? null : (serve?.(order) ?? null);
     if (servedByRun !== null) {
       record?.(order.causeKey, undefined, undefined, now());
       sent.push(`${order.session} <- ${order.causeKey} (SERVED BY RUN ${servedByRun.runId} at ${servedByRun.tier})`);
       continue;
     }
     const target = targetFor(order, live, roster, { run: spawnRun, spawned, ineligibleReason, env, registerSpawn, drained, startHold: starts.hold,
-      claimable, claimer, memory, hostLoad, claimRefused, oneShot, ceoOneShot, reviewerEnv, registerReviewer, checkout, registry, codexConfig, relane, goneSeats: gone, toolchain });
+      claimable, claimer, memory, hostLoad, claimRefused, oneShot, ceoOneShot, reviewerEnv, registerReviewer, checkout, registry, codexConfig, relane, goneSeats: gone, toolchain, accountPause });
     if ("refusal" in target) {
       const left = endedSeatLine(order, gone);
       if (left === null) refused.push(`${order.causeKey}: ${target.refusal}`); else settled.push(left);
@@ -8170,7 +8192,7 @@ function restartOnSonnet(escalation: Escalation, deps: EscalationDeps): { line: 
  *
  * @returns one line per escalation, and the labels it restarted: they are working NOW, so no order of this tick is routed to them
  */
-export function performEscalations(live: readonly string[], deps: EscalationDeps & { counts?: (label: string) => { turns: number | null; compactions: number | null; } | null; haikuDefault?: HaikuDefaultEvidence; }): { lines: string[]; busied: string[]; } {
+export function performEscalations(live: readonly string[], deps: EscalationDeps & { counts?: (label: string) => { turns: number | null; compactions: number | null; } | null; haikuDefault?: HaikuDefaultEvidence; accountPause?: AccountLimit | null; }): { lines: string[]; busied: string[]; } {
   const lines: string[] = [];
   const busied: string[] = [];
   let recordText: string;
@@ -8179,6 +8201,8 @@ export function performEscalations(live: readonly string[], deps: EscalationDeps
   } catch (err) {
     return { lines: [`escalation: the claim-orders record could not be read (${firstLine(err)}) -- nothing is escalated this tick`], busied };
   }
+  // agent-org#1307: A RESTART ON SONNET IS A CLAUDE START, so none is made while the account's pause holds; the escalation stays due and is made after it.
+  if (deps.accountPause) return { lines, busied };
   for (const escalation of escalationsNow(recordText, live, deps.counts ?? ((label) => instanceCounts(label)), deps.haikuDefault)) {
     try {
       const { line, restarted } = restartOnSonnet(escalation, deps);
@@ -8440,8 +8464,10 @@ async function main() {
   if (agents === null) exitCannotAsk(gateOrders.length, handoffs);
   const { orders, failed: releasesNotDone, goneSeats: released } = performReleases(gateOrders, agents, { ledgerPath, hostLayout });
   // #4630: A HAIKU START THAT HAS NOT COPED IS RESTARTED ON SONNET before anything is delivered, and what it restarted is working NOW (`free` below).
+  // agent-org#1307: THE ACCOUNT'S PAUSE, read before anything that could start a Claude seat. Flag off, it is `null` and the tick is as it was.
+  const accountPause = accountPauseTick(agents.map((a) => a.label));
   const escalated = performEscalations(agents.map((a) => a.label), { run: defaultRun, gh: defaultGh, post: guardedGh, ledgerPath, worktreesDir: hostLayout.worktreesDir, launch: hostLayout,
-    haikuDefault: { on: haikuDefaultOn({ switchesPath: decisionSwitchesPath(PRIMARY_CHECKOUT) }), refused: (label) => instanceRefused(label) } });
+    haikuDefault: { on: haikuDefaultOn({ switchesPath: decisionSwitchesPath(PRIMARY_CHECKOUT) }), refused: (label) => instanceRefused(label) }, accountPause });
   for (const line of escalated.lines) process.stdout.write(`${line}\n`);
 
   const queued = settleEndedOrders(handoffs, agents, { queuePath, ledgerPath });
@@ -8457,7 +8483,8 @@ async function main() {
 
   // AUTHORED ORDERS FIRST. One has already been refused once and has been waiting since; a derived cause
   // has not, and will be re-derived unchanged by the next tick if it loses the session to this one.
-  const unavailable = memoised(unavailableReason);
+  // agent-org#1307: WHILE THE PAUSE HOLDS, A HANDOFF TO A CLAUDE SEAT IS REFUSED AS AN OUT-OF-ALLOWANCE SEAT IS; a Codex reviewer is not a Claude seat.
+  const unavailable = memoised((label) => accountPause !== null && reviewerInstance(label) === null ? pauseRefusal(accountPause) : unavailableReason(label));
   const clock = orderClockIn(join(dirname(ledgerPath), "last-order"));
   const handed = deliverHandoffs(waiting, agents, roster, { queuePath, unavailable, clock, goneSeats: released });
   // STALE MEANS STILL WAITING, so it is asked AFTER the delivery and against what the delivery carried.
@@ -8511,11 +8538,11 @@ async function main() {
         return null;
       }
     },
-    decisionDeps: { host, switchesPath: decisionSwitchesPath(PRIMARY_CHECKOUT), logPath: decisionLogPathFrom(ledgerPath) },
+    decisionDeps: { host, switchesPath: decisionSwitchesPath(PRIMARY_CHECKOUT), logPath: decisionLogPathFrom(ledgerPath) }, accountPause,
   });
   // A SEAT THE FIRST DELIVERY FOUND ENDED IS ENDED FOR THE SECOND (#3568): one `agent_not_found` per label per tick, not one per order.
   const { sent, refused: gateRefused, stuck, outaged, settled } = deliver(ready, free, roster, { record, unavailable, clock, relane: relaneFacts(ledgerPath),
-    serve: (order) => served.get(order.causeKey) ?? null,
+    serve: (order) => served.get(order.causeKey) ?? null, accountPause,
     goneSeats: handed.goneSeats,
     claimOrders: claimOrdersIn(claimOrdersPath(ledgerPath)),
     counts: deliveryCounts(ledgerPath), ineligibleReason: poolEngineerReason(poolEligibility(spares, drained), unavailable),
