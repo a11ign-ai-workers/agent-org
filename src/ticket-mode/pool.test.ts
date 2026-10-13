@@ -4,11 +4,10 @@ import assert from "node:assert/strict";
 import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
-import { countTokens, createPool, findTranscript, herdrName, isStartDialog, parseOutcome, ticketDir } from "./pool.ts";
+import { countTokens, createPool, findTranscript, herdrName, isStartDialog, parseOutcome, ticketDir, ticketFolder, worktreesIn } from "./pool.ts";
 import { emptyQueue, enqueue, retry, setPaused, type Queue } from "./queue.ts";
 import { parseTicketSettings } from "./settings.ts";
 import type { Ticket, TicketSource } from "./source.ts";
-import type { Git } from "./worktree.ts";
 
 const ticket = (key: string) => ({ key, title: key, description: "", url: `https://linear.app/x/${key}`, branch: key.toLowerCase(), status: "Backlog", statusOrder: 0, team: "NBF", project: null, priority: 0 }) as Ticket;
 const source: TicketSource = { assigned: async () => [], read: async () => null, download: async () => [] };
@@ -31,25 +30,15 @@ function herdr(status: Map<string, string>, screen: { text: string } = { text: "
   return { run, calls };
 }
 
-/** A git whose remote's default is `develop`, where no branch exists yet and `worktree add` makes the directory. */
-const git: Git = async (cwd, args) => {
-  if (args[0] === "ls-remote") return "ref: refs/heads/develop\tHEAD\n";
-  if (args.includes("--abbrev-ref")) return `${cwd.split("/").at(-2)?.toLowerCase()}\n`; // a worktree at <root>/<KEY>/<repo> is on the key's branch
-  if (args[0] === "rev-parse" && args.includes("--verify")) throw new Error("no such branch");
-  if (args[0] === "worktree") mkdirSync(args[args.length - 2], { recursive: true });
-  if (args[0] === "check-ignore") return "";
-  return "";
-};
-
 function setup(max = 2, keys = ["NBF-1", "NBF-2", "NBF-3"]) {
   const root = tmpDir("ticket-pool-");
   const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/repos/nbl-ui-netbox", "nbl-ui-platform-libs": "/repos/libs" }, stateDir: join(root, "state") });
-  let queue: Queue = setPaused(enqueue(emptyQueue(max), keys.map(ticket), { repos: ["nbl-ui-netbox"], model: "sonnet", effort: "high" }, 0), false);
+  let queue: Queue = setPaused(enqueue(emptyQueue(max), keys.map(ticket), { model: "sonnet", effort: "high" }, 0), false);
   const store = { get: () => queue, set: (next: Queue) => { queue = next; } };
   const status = new Map<string, string>();
   const screen = { text: "" };
   const h = herdr(status, screen);
-  const pool = createPool(store, { settings, source, hook: { node: "/node", bin: "/tool/src/bin.ts" }, herdr: h.run, git, now: () => 100, load: () => ({ load: 1, cores: 14 }), transcriptsRoot: join(root, "transcripts"), wait: async () => {} });
+  const pool = createPool(store, { settings, source, hook: { node: "/node", bin: "/tool/src/bin.ts" }, herdr: h.run, hostFile: "/work/.agent-org/host.json", now: () => 100, load: () => ({ load: 1, cores: 14 }), transcriptsRoot: join(root, "transcripts"), wait: async () => {} });
   const entry = (key: string) => queue.entries.find((e) => e.ticket.key === key)!;
   return { settings, pool, status, h, entry, store, root, screen };
 }
@@ -65,10 +54,16 @@ test("a tick starts as many as `max` allows, each in ticket mode's own herdr ses
   assert.equal(tail[0], `Read ${ticketDir(settings, "NBF-1")}/brief.md and follow it.`);
   assert.deepEqual(tail.slice(-2), ["--disallowedTools", "AskUserQuestion"]);
   assert.ok(tail.includes("--dangerously-skip-permissions") && tail.includes("sonnet"));
-  const worktree = join(settings.worktreeRoot, "NBF-1", "nbl-ui-netbox");
-  const written = JSON.parse(readFileSync(join(worktree, ".claude", "settings.local.json"), "utf8"));
-  assert.equal(written.permissions.defaultMode, "bypassPermissions");
+  const folder = ticketFolder(settings, "NBF-1");
+  const written = JSON.parse(readFileSync(join(folder, ".claude", "settings.local.json"), "utf8"));
+  assert.equal(written.permissions.defaultMode, "bypassPermissions", "the settings sit in the ticket's folder, where the worker starts");
+  assert.deepEqual(worktreesIn(folder), [], "no worktree is made for it: the worker chooses the repository");
   assert.ok(existsSync(join(ticketDir(settings, "NBF-1"), "brief.md")));
+  const create = h.calls.find((args) => args.includes("create"))!;
+  assert.ok(create.includes("--cwd") && create.includes(folder), "the worker starts in the ticket's folder");
+  for (const pair of ["AGENT_ORG_TICKET=NBF-1", "AGENT_ORG_TICKET_BRANCH=nbf-1", "AGENT_ORG_TICKET_HOST=/work/.agent-org/host.json"]) {
+    assert.ok(create.includes(pair), `its shell carries ${pair}, which ticket:worktree reads`);
+  }
 });
 
 test("a run ends on its outcome file once the agent is idle; idle before it ever worked is not an end", async () => {
@@ -102,6 +97,18 @@ test("working then idle with no outcome is `no-outcome`; a workspace gone from t
   assert.equal(entry("NBF-2").outcome?.kind, "crashed");
 });
 
+test("the repositories a worker has made worktrees in are recorded on its entry as it makes them", async () => {
+  const { pool, status, entry, settings } = setup(1, ["NBF-1"]);
+  await pool.tick();
+  status.set(herdrName("NBF-1"), "working");
+  const folder = ticketFolder(settings, "NBF-1");
+  mkdirSync(join(folder, "nbl-ui-netbox"), { recursive: true });
+  writeFileSync(join(folder, "nbl-ui-netbox", ".git"), "gitdir: /repos/nbl-ui-netbox/.git/worktrees/x\n");
+  mkdirSync(join(folder, "notes"), { recursive: true });
+  await pool.tick();
+  assert.deepEqual(entry("NBF-1").repos, ["nbl-ui-netbox"], "a directory that holds no worktree is not a repository");
+});
+
 test("an agent waiting on a person is shown as waiting and keeps running", async () => {
   const { pool, status, entry } = setup(1, ["NBF-1"]);
   await pool.tick();
@@ -110,17 +117,12 @@ test("an agent waiting on a person is shown as waiting and keeps running", async
   assert.deepEqual([entry("NBF-1").phase, entry("NBF-1").waiting], ["running", true]);
 });
 
-test("stop closes a live run's workspace and records it; a preparation that fails is `crashed` with the reason", async () => {
+test("stop closes a live run's workspace and records it", async () => {
   const { pool, entry, h } = setup(1, ["NBF-1"]);
   await pool.tick();
   pool.stop("NBF-1");
   assert.deepEqual(entry("NBF-1").outcome, { kind: "stopped" });
   assert.ok(h.calls.some((args) => args.includes("close")));
-
-  const other = setup(1, ["NBF-9"]);
-  other.store.set({ ...other.store.get(), entries: other.store.get().entries.map((e) => ({ ...e, repos: ["not-a-clone"] })) });
-  await other.pool.tick();
-  assert.deepEqual(other.entry("NBF-9").outcome, { kind: "crashed", reason: "not-a-clone is not in the host file's clones" });
 });
 
 test("after a restart, a run herdr no longer lists is `crashed`, and one it lists carries on", async () => {
@@ -164,7 +166,7 @@ test("a session whose herdr server does not answer is started once, and waited f
   };
   let queue = emptyQueue(1);
   const pool = createPool({ get: () => queue, set: (q) => { queue = q; } }, {
-    settings, source, hook: { node: "n", bin: "b" }, herdr: run, git, wait: async () => { up = true; }, startServer: (s) => started.push(s),
+    settings, source, hook: { node: "n", bin: "b" }, herdr: run, wait: async () => { up = true; }, startServer: (s) => started.push(s),
   });
   await pool.ensureSession();
   await pool.ensureSession();
@@ -185,7 +187,7 @@ const TRUST = (path: string) => [
 ].join("\n");
 
 test("the two start dialogs are recognised for the pool's own worktree, a wrapped path included, and nothing else is", () => {
-  const worktree = "/Users/me/Documents/repos/work/.tickets/NBF-1/nbl-ui-netbox";
+  const worktree = "/Users/me/Documents/repos/work/.tickets/NBF-1";
   assert.equal(isStartDialog(TRUST(worktree), worktree), true);
   assert.equal(isStartDialog(TRUST("/somewhere/else/entirely/that/is/not/ours/at/all"), worktree), false, "a trust dialog for another folder is the person's");
   assert.equal(isStartDialog("  Allow external CLAUDE.md file imports?\n  /Users/me/Documents/repos/work/AGENTS.md", worktree), true);
@@ -196,7 +198,7 @@ test("a run showing a start dialog for its worktree is answered with down-enter 
   const { pool, status, entry, settings, h, screen } = setup(1, ["NBF-1"]);
   await pool.tick();
   status.set(herdrName("NBF-1"), "blocked");
-  screen.text = TRUST(join(settings.worktreeRoot, "NBF-1", "nbl-ui-netbox"));
+  screen.text = TRUST(ticketFolder(settings, "NBF-1"));
   await pool.tick();
   const answers = () => h.calls.filter((args) => args.includes("send-keys"));
   assert.deepEqual(answers()[0], ["--session", "tickets", "agent", "send-keys", "t-nbf-1", "down", "enter"]);
@@ -206,7 +208,7 @@ test("a run showing a start dialog for its worktree is answered with down-enter 
   assert.equal(entry("NBF-1").waiting, true);
 });
 
-test("a retry continues in the run's own worktree, and the earlier outcome does not end it before it starts", async () => {
+test("a retry's earlier outcome does not end it before it starts", async () => {
   const { pool, status, entry, settings, store } = setup(1, ["NBF-1"]);
   await pool.tick();
   status.set(herdrName("NBF-1"), "working");
@@ -225,13 +227,13 @@ test("a retry continues in the run's own worktree, and the earlier outcome does 
 test("a run stopped while it was starting stays stopped, and the workspace its start raced is closed", async () => {
   const root = tmpDir("ticket-race-");
   const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/repos/nbl-ui-netbox" }, stateDir: root });
-  let queue: Queue = setPaused(enqueue(emptyQueue(1), [ticket("NBF-1")], { repos: ["nbl-ui-netbox"], model: "sonnet", effort: "high" }, 0), false);
+  let queue: Queue = setPaused(enqueue(emptyQueue(1), [ticket("NBF-1")], { model: "sonnet", effort: "high" }, 0), false);
   const store = { get: () => queue, set: (next: Queue) => { queue = next; } };
   const h = herdr(new Map());
   let pool: ReturnType<typeof createPool>;
   // The person presses Stop while Claude is starting.
   const herdrAsync = async (args: string[]) => { pool.stop("NBF-1"); return h.run(args); };
-  pool = createPool(store, { settings, source, hook: { node: "n", bin: "b" }, herdr: h.run, herdrAsync, git, wait: async () => {}, load: () => ({ load: 0, cores: 1 }) });
+  pool = createPool(store, { settings, source, hook: { node: "n", bin: "b" }, herdr: h.run, herdrAsync, wait: async () => {}, load: () => ({ load: 0, cores: 1 }) });
   await pool.tick();
   assert.deepEqual(queue.entries[0].outcome, { kind: "stopped" });
   assert.ok(h.calls.some((args) => args.includes("close") && args.includes("w1")), "the raced workspace is closed");
@@ -240,7 +242,7 @@ test("a run stopped while it was starting stays stopped, and the workspace its s
 test("a tick asked for during a tick runs once more after it, so a ticket queued meanwhile does not wait for the next interval", async () => {
   const { pool, entry, store } = setup(2, ["NBF-1"]);
   const first = pool.tick();
-  store.set(enqueue(store.get(), [ticket("NBF-2")], { repos: ["nbl-ui-netbox"], model: "sonnet", effort: "high" }, 1));
+  store.set(enqueue(store.get(), [ticket("NBF-2")], { model: "sonnet", effort: "high" }, 1));
   await pool.tick();
   await first;
   assert.equal(entry("NBF-2").phase, "running");

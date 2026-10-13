@@ -16,7 +16,7 @@ import { sandboxGitEnv } from "../lib/git-env.ts";
 /** `git` run in `cwd`. Every call names its checkout: a `git` that names none asks whichever repository the process is in. */
 export type Git = (cwd: string, args: string[]) => Promise<string>;
 
-const defaultGit: Git = (cwd, args) => new Promise((resolve, reject) => {
+export const defaultGit: Git = (cwd, args) => new Promise((resolve, reject) => {
   execFile("git", args, { cwd, encoding: "utf8", env: sandboxGitEnv() }, (err, stdout) => (err ? reject(err) : resolve(stdout)));
 });
 

@@ -52,6 +52,7 @@ export const COMMANDS = {
   "survey": "survey.ts",
   "ticket:hook": "ticket-mode/hook.ts",
   "ticket:serve": "ticket-mode/server.ts",
+  "ticket:worktree": "ticket-mode/worktree-command.ts",
   "trace": "trace/trace.ts",
   "tracker:comment": "tracker-comment.ts",
   "wakes:per-row": "wakes-per-row.ts",

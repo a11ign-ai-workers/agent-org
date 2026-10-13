@@ -4,29 +4,33 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import {
-  amend, emptyQueue, enqueue, finish, loadQueue, markRunning, markStarting, nextStarts, observe, remove, retry, saveQueue, setMax, setPaused, type Queue,
+  amend, emptyQueue, enqueue, finish, loadQueue, markRunning, markStarting, nextStarts, observe, recordRepos, remove, retry, saveQueue, setMax, setPaused, type Queue,
 } from "./queue.ts";
 import type { Ticket } from "./source.ts";
 
 const ticket = (key: string) => ({ key, title: key, description: "", url: "", branch: key.toLowerCase(), status: "Backlog", statusOrder: 0, team: "NBF", project: null, priority: 0 }) as Ticket;
-const choice = { repos: ["nbl-ui-netbox"], model: "opus", effort: "high" };
+const choice = { model: "opus", effort: "high" };
 const keys = (queue: Queue) => queue.entries.map((e) => e.ticket.key);
 
-test("enqueue adds what you selected, in order, once each, and refuses a choice with no repository", () => {
+test("enqueue adds what you selected, in order, once each, with no repository until the worker chooses", () => {
   let queue = enqueue(emptyQueue(3), [ticket("A"), ticket("B")], choice, 1);
-  queue = enqueue(queue, [ticket("B"), ticket("C")], { ...choice, repos: ["nbl-ui-netbox", "nbl-ui-platform-libs"] }, 2);
+  queue = enqueue(queue, [ticket("B"), ticket("C")], { ...choice, model: "sonnet" }, 2);
   assert.deepEqual(keys(queue), ["A", "B", "C"]);
-  assert.deepEqual(queue.entries[1].repos, ["nbl-ui-netbox"], "B kept the choice it was first queued with");
-  assert.deepEqual(queue.entries[2].repos, ["nbl-ui-netbox", "nbl-ui-platform-libs"], "a ticket can be queued to several repositories");
-  assert.throws(() => enqueue(queue, [ticket("D")], { ...choice, repos: [] }, 3), /at least one repository/);
+  assert.equal(queue.entries[1].model, "opus", "B kept the choice it was first queued with");
+  assert.deepEqual(queue.entries.map((e) => e.repos), [[], [], []]);
+});
+
+test("the repositories a worker made worktrees in are recorded on its entry", () => {
+  const queue = recordRepos(enqueue(emptyQueue(1), [ticket("A")], choice, 1), "A", ["nbl-ui-netbox", "nbl-ui-platform-libs"]);
+  assert.deepEqual(queue.entries[0].repos, ["nbl-ui-netbox", "nbl-ui-platform-libs"], "a ticket can land in several");
 });
 
 test("amend and remove touch a queued entry only", () => {
   let queue = enqueue(emptyQueue(3), [ticket("A"), ticket("B")], choice, 1);
   queue = markStarting(queue, "A", 2);
-  queue = amend(amend(queue, "A", { model: "sonnet" }), "B", { model: "sonnet", repos: ["platform-monorepo"] });
+  queue = amend(amend(queue, "A", { model: "sonnet" }), "B", { model: "sonnet", effort: "max" });
   assert.equal(queue.entries[0].model, "opus", "A started with opus and keeps it");
-  assert.deepEqual([queue.entries[1].model, queue.entries[1].repos], ["sonnet", ["platform-monorepo"]]);
+  assert.deepEqual([queue.entries[1].model, queue.entries[1].effort], ["sonnet", "max"]);
   assert.deepEqual(keys(remove(remove(queue, "A"), "B")), ["A"], "a started entry is not removed");
 });
 

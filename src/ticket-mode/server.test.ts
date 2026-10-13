@@ -2,14 +2,15 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { createServer, type Server } from "node:http";
-import { existsSync } from "node:fs";
+import { existsSync, writeFileSync } from "node:fs";
+import { pathToFileURL } from "node:url";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import { parseTicketSettings } from "./settings.ts";
-import { carriesToken, createBoard, refusal } from "./server.ts";
+import { boardViewScript, carriesToken, createBoard, refusal } from "./server.ts";
 import type { Ticket, TicketSource } from "./source.ts";
 
-const ticket = (key: string) => ({ key, title: key, description: "", url: "", branch: key.toLowerCase(), status: "Backlog", statusOrder: 0, team: "NBF", project: null, priority: 0 }) as Ticket;
+const ticket = (key: string, title = key) => ({ key, title, description: "", url: "", branch: key.toLowerCase(), status: "Backlog", statusOrder: 0, team: "NBF", project: null, priority: 0 }) as Ticket;
 const TOKEN = "a".repeat(48);
 
 function board(port = 4747) {
@@ -37,41 +38,48 @@ test("the token is taken from the cookie or the header, and a wrong or missing o
   assert.equal(carriesToken({ headers: {} }, TOKEN), false);
 });
 
-test("queueing takes the tickets you selected to the repositories, model and effort you chose, remembers the choice, and wakes the pool", async () => {
+test("queueing takes the tickets you selected with the model and effort chosen, no repository until the worker chooses one, remembers the choice, and wakes the pool", async () => {
   const b = board();
   await b.api("GET", "/api/tickets", {});
-  const [status, queue] = await b.api("POST", "/api/queue", { keys: ["NBF-2", "VE-9"], repos: ["nbl-ui-netbox", "platform-monorepo"], model: "opus", effort: "max" }) as [number, any];
+  const [status, queue] = await b.api("POST", "/api/queue", { keys: ["NBF-2", "VE-9"], model: "opus", effort: "max" }) as [number, any];
   assert.equal(status, 200);
   assert.deepEqual(queue.entries.map((e: any) => [e.ticket.key, e.repos, e.model, e.effort]), [
-    ["NBF-2", ["nbl-ui-netbox", "platform-monorepo"], "opus", "max"],
-    ["VE-9", ["nbl-ui-netbox", "platform-monorepo"], "opus", "max"],
+    ["NBF-2", [], "opus", "max"],
+    ["VE-9", [], "opus", "max"],
   ], "VE-9 was not in the assigned list, so it was read by key");
   assert.ok(existsSync(join(b.dir, "queue.json")));
   assert.deepEqual(b.ticks, ["tick"]);
   const [, config] = await b.api("GET", "/api/config", {}) as [number, any];
-  assert.deepEqual(config.choice, { repos: ["nbl-ui-netbox", "platform-monorepo"], model: "opus", effort: "max" });
-  assert.deepEqual(config.repos, ["nbl-ui-netbox", "platform-monorepo"]);
+  assert.deepEqual(config.choice, { model: "opus", effort: "max" });
 });
 
-test("a repository not in the host file, an unknown model or an unknown ticket is refused, and nothing is queued", async () => {
+test("an unknown model or an unknown ticket is refused, and nothing is queued", async () => {
   const b = board();
-  await assert.rejects(b.api("POST", "/api/queue", { keys: ["NBF-1"], repos: ["nbl-ui-elsewhere"], model: "opus", effort: "high" }), /not in the host file's clones/);
-  await assert.rejects(b.api("POST", "/api/queue", { keys: ["NBF-1"], repos: ["nbl-ui-netbox"], model: "gpt", effort: "high" }), /model must be one of/);
-  await assert.rejects(b.api("POST", "/api/queue", { keys: ["NOPE-1"], repos: ["nbl-ui-netbox"], model: "opus", effort: "high" }), /no ticket NOPE-1/);
+  await assert.rejects(b.api("POST", "/api/queue", { keys: ["NBF-1"], model: "gpt", effort: "high" }), /model must be one of/);
+  await assert.rejects(b.api("POST", "/api/queue", { keys: ["NOPE-1"], model: "opus", effort: "high" }), /no ticket NOPE-1/);
   assert.deepEqual(b.store.get().entries, []);
 });
 
-test("an amend is held to the rules queueing uses: an unknown repository, model or effort is refused and the entry is unchanged", async () => {
+test("an amend is held to the rules queueing uses: an unknown model or effort is refused and the entry is unchanged", async () => {
   const b = board();
   await b.api("GET", "/api/tickets", {});
-  await b.api("POST", "/api/queue", { keys: ["NBF-1"], repos: ["nbl-ui-netbox"], model: "opus", effort: "high" });
+  await b.api("POST", "/api/queue", { keys: ["NBF-1"], model: "opus", effort: "high" });
   const before = JSON.stringify(b.store.get());
-  await assert.rejects(b.api("POST", "/api/queue/NBF-1/amend", { repos: ["nbl-ui-elsewhere"] }), /not in the host file's clones/);
   await assert.rejects(b.api("POST", "/api/queue/NBF-1/amend", { model: "gpt" }), /model must be one of/);
   await assert.rejects(b.api("POST", "/api/queue/NBF-1/amend", { effort: "extreme" }), /effort must be one of/);
   assert.equal(JSON.stringify(b.store.get()), before);
-  await b.api("POST", "/api/queue/NBF-1/amend", { model: "sonnet", repos: ["platform-monorepo"] });
-  assert.deepEqual(b.store.get().entries.map((e) => [e.repos, e.model, e.effort]), [[["platform-monorepo"], "sonnet", "high"]]);
+  await b.api("POST", "/api/queue/NBF-1/amend", { model: "sonnet" });
+  assert.deepEqual(b.store.get().entries.map((e) => [e.model, e.effort]), [["sonnet", "high"]]);
+});
+
+test("the page's logic is served as JavaScript the browser can import, and it is the tested module, types stripped", async () => {
+  const script = boardViewScript();
+  assert.doesNotMatch(script, /:\s*readonly ViewTicket\[\]|export type /, "no type annotation reaches the browser");
+  const file = join(tmpDir("ticket-board-view-"), "board-view.mjs");
+  writeFileSync(file, script);
+  const view = await import(pathToFileURL(file).href);
+  const tickets = [{ key: "A-1", title: "x", status: "Backlog", statusOrder: 0, priority: 2, project: "P" }];
+  assert.deepEqual(view.visibleTickets(tickets, new Set(["P"]), "").map((t: any) => t.key), ["A-1"], "the browser's copy filters as the tested one does");
 });
 
 test("the board's queue starts paused, and Start and Pause go through the API", async () => {
@@ -89,7 +97,7 @@ test("the board's queue starts paused, and Start and Pause go through the API", 
 test("remove, stop and max go through the board", async () => {
   const b = board();
   await b.api("GET", "/api/tickets", {});
-  await b.api("POST", "/api/queue", { keys: ["NBF-1", "NBF-2"], repos: ["nbl-ui-netbox"], model: "sonnet", effort: "high" });
+  await b.api("POST", "/api/queue", { keys: ["NBF-1", "NBF-2"], model: "sonnet", effort: "high" });
   await b.api("POST", "/api/queue/NBF-1/remove", {});
   await b.api("POST", "/api/queue/NBF-2/stop", {});
   await b.api("POST", "/api/max", { max: 5 });
