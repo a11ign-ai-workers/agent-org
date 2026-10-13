@@ -3,8 +3,9 @@ import { test } from "node:test";
 import assert from "node:assert/strict";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
+import { isParked } from "./board-view.ts";
 import {
-  amend, emptyQueue, enqueue, finish, isLive, isParked, loadQueue, markResumed, markRunning, markStarting, nextStarts, observe, park, recordRepos,
+  amend, emptyQueue, enqueue, finish, isLive, loadQueue, markResumed, markRunning, markStarting, nextStarts, observe, park, recordRepos,
   recordTrackerStates, remove, retry, saveQueue, setMax, setPaused, unpark, unsettledKeys, type Queue,
 } from "./queue.ts";
 import type { Ticket } from "./source.ts";

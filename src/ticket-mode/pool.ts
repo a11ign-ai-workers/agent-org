@@ -19,9 +19,10 @@ import { existsSync, mkdirSync, readdirSync, readFileSync, renameSync, rmSync, w
 import { availableParallelism, homedir, loadavg } from "node:os";
 import { join } from "node:path";
 import { agentStartArgs, closedNote, herdrReason, openPane, readAgents } from "../herdr-agents.ts";
+import { HANDED_BACK, isParked } from "./board-view.ts";
 import {
-  HANDED_BACK, finish, isLive, isParked, markResumed, markRunning, markStarting, nextStarts, observe, park, recordRepos, recordTrackerStates, unpark,
-  unsettledKeys, type Entry, type Outcome, type Queue,
+  finish, isLive, markResumed, markRunning, markStarting, nextStarts, observe, park, recordRepos, recordTrackerStates, unpark, unsettledKeys,
+  type Entry, type Outcome, type Queue,
 } from "./queue.ts";
 import type { TicketSource } from "./source.ts";
 import { TICKET_ENV } from "./worktree-command.ts";

@@ -2,10 +2,9 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import {
-  NO_PROJECT, RUN_STATUSES, groupByStatus, isParkedRun, projectCounts, queueLabel, recall, remember, runActions, runStatus, runsShown, selectable, statusCounts, terminalLink, toggled,
+  HANDED_BACK, NO_PROJECT, RUN_STATUSES, groupByStatus, isParked, projectCounts, queueLabel, recall, remember, runActions, runStatus, runsShown, selectable, statusCounts, terminalLink, toggled,
   visibleTickets, type ViewEntry, type ViewTicket,
 } from "./board-view.ts";
-import { HANDED_BACK } from "./queue.ts";
 
 const t = (key: string, status: string, statusOrder: number, priority: number, project: string | null, title = key): ViewTicket =>
   ({ key, title, status, statusOrder, priority, project });
@@ -126,9 +125,9 @@ test("a run offers what its state allows: Remove queued, Stop live, Close parked
 });
 
 test("a parked run is a finished one that kept its workspace, and every outcome that parks a run reads as Needs you", () => {
-  assert.equal(isParkedRun({ ticket: { key: "NBF-1" }, phase: "finished", workspace: "w1" }), true);
-  assert.equal(isParkedRun({ ticket: { key: "NBF-1" }, phase: "running", workspace: "w1" }), false, "a live run is not parked");
-  assert.equal(isParkedRun({ ticket: { key: "NBF-1" }, phase: "finished" }), false, "a closed run is not parked");
+  assert.equal(isParked({ ticket: { key: "NBF-1" }, phase: "finished", workspace: "w1" }), true);
+  assert.equal(isParked({ ticket: { key: "NBF-1" }, phase: "running", workspace: "w1" }), false, "a live run is not parked");
+  assert.equal(isParked({ ticket: { key: "NBF-1" }, phase: "finished" }), false, "a closed run is not parked");
   for (const kind of HANDED_BACK) {
     assert.equal(runStatus({ ticket: { key: "NBF-1" }, phase: "finished", outcome: { kind } }), "needs-you", `${kind} parks the run, so the board must ask for a person`);
   }

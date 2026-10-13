@@ -9,6 +9,7 @@
 // the only writer of the file, which it replaces whole by rename, so a reader never sees half of one.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { isParked } from "./board-view.ts";
 import type { Ticket } from "./source.ts";
 
 /** How a finished run ended. A worker writes the first three; the pool decides the rest. */
@@ -57,12 +58,6 @@ export type RunChoice = Readonly<{ model: string; effort: string }>;
 const LIVE: ReadonlySet<Phase> = new Set(["starting", "running"]);
 
 export const isLive = (entry: Entry): boolean => LIVE.has(entry.phase);
-
-/** A finished run that kept its workspace, so a person can answer its agent there. It holds no slot. */
-export const isParked = (entry: Entry): boolean => entry.phase === "finished" && entry.workspace !== undefined;
-
-/** The outcomes that hand a ticket back to a person. Their runs are parked rather than closed, so the person can answer the agent. */
-export const HANDED_BACK: ReadonlySet<Outcome["kind"]> = new Set(["needs-human", "wrong-repo", "no-outcome"]);
 
 function replace(queue: Queue, key: string, change: (entry: Entry) => Entry): Queue {
   return { ...queue, entries: queue.entries.map((entry) => (entry.ticket.key === key ? change(entry) : entry)) };
