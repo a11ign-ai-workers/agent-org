@@ -2,6 +2,8 @@ A claim that meets an existing local branch of its own row adopts it, with its c
 
 Acceptance: `bash -c 'cd /home/agent/repos/wt-agent-org-1285 && node --test src/row-claim-existing-branch.test.ts'`
 
+The run needs `AGENT_ORG_HOST` set to the checkout's `.agent-org/host.json` (`host:install` writes it). Unset, the tool refuses before any test runs; nothing is defaulted to another project's value.
+
 Mutation: `isOwnRowBranch` made to return `true` at its start (adopt every local branch) failed the two refusal controls (another row's branch, and a local-only branch no record names); made to return `false` at its start (adopt nothing) failed the three adoption cases, including the lost-claim case that keeps the branch; the origin check removed from the trailing-number path (`&& true`) failed the local-only refusal. Each mutant was a copy in a scratch directory, and the real `row-claim.ts` was not changed.
 
 Measured: against the original `row-claim.ts` from HEAD, 4 of 6 fail (the adoption and lost-claim cases) and both refusal controls pass. `node --test` on `row-claim-existing-branch`, `row-claim-worktree-cap`, `row-claim-writes`, `row-claim-installs-worktree` and `row-claim`: 64 of 64 pass. `pnpm run typecheck` exits 0. Full `pnpm test`: 5 of 11,178 fail in four packaging files (`host-install-agent-org-launcher`, `live-tree-independence`, `multi-board-gate`, `release-tag-on-merge`), the same 5 of 30 on untouched HEAD.
