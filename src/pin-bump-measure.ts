@@ -11,6 +11,8 @@ import { isBrokenRed } from "./red-pr.ts";
 
 export const PIN_BUMP_WINDOW_DAYS = 7;
 export const STUCK_RENOVATE_PR_MINUTES = 60;
+/** THE FLAG THAT PUTS THE COUNT ON #928 (agent-org#1245): default OFF, switched by `machinery:flag`, read by `org-retro.ts`. */
+export const PIN_BUMP_FLAG = "retro.pinBump";
 
 const MS_PER_MINUTE = 60_000;
 const MS_PER_DAY = 24 * 60 * MS_PER_MINUTE;
