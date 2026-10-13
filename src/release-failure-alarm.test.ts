@@ -134,6 +134,47 @@ test("no repository failing is `clear`; a cancelled, skipped or running run neit
   }
 });
 
+// --- a status run's success is a promotion, not a release (a11ign/agent-org#1273) -----------------------------------------------------
+
+/** The 2026-10-12 sequence, NEWEST FIRST as the API returns it: two failed push runs, a successful `status` run between them and two around them. The streak is TWO. */
+const AGENT_ORG_2026_10_12: Run[] = [
+  run(AGENT_ORG, 6106, "success", "2026-10-12T19:13:07Z", "completed", "status"),
+  run(AGENT_ORG, 6105, "failure", "2026-10-12T18:48:11Z"),
+  run(AGENT_ORG, 6104, "success", "2026-10-12T18:19:27Z", "completed", "status"),
+  run(AGENT_ORG, 6103, "success", "2026-10-12T18:17:46Z", "completed", "status"),
+  run(AGENT_ORG, 6102, "failure", "2026-10-12T18:13:33Z"),
+  run(AGENT_ORG, 6101, "success", "2026-10-12T18:12:18Z", "completed", "status"),
+];
+
+test("the 2026-10-12 sequence is a streak of TWO: the successful status runs neither clear it nor join it, and the second failure is an order to `ceo` quoting the first error line", () => {
+  assert.deepEqual(failureStreak(AGENT_ORG_2026_10_12).failures.map((r) => r.id), [6105, 6102]);
+  assert.equal(failureStreak(AGENT_ORG_2026_10_12).ended, false, "no push success is in the window");
+  const r = tripped([read(AGENT_ORG, AGENT_ORG_2026_10_12, LINE)]);
+  assert.equal(r.length, 1);
+  assert.equal(r[0].incidentOnly, undefined, "a second failure is not an incident only");
+  assert.match(r[0].detail, /FAILED 2 or more times running \(since run 6102\)/);
+  const orders = ordersOf([read(AGENT_ORG, AGENT_ORG_2026_10_12, LINE)]);
+  assert.equal(orders.length, 1);
+  assert.equal(orders[0].session, "ceo");
+  assert.ok(orders[0].prompt.includes(QUOTE));
+});
+
+test("a status run's SUCCESS newest of all does not clear the streak, however many follow it", () => {
+  const newest = run(AGENT_ORG, 6107, "success", "2026-10-12T19:30:00Z", "completed", "status");
+  assert.deepEqual(failureStreak([newest, ...AGENT_ORG_2026_10_12]).failures.map((r) => r.id), [6105, 6102]);
+  assert.equal(tripped([read(AGENT_ORG, [newest, ...AGENT_ORG_2026_10_12], LINE)]).length, 1);
+});
+
+test("a push's success clears; a dispatch's clears only when its release job published; a promote-only dispatch neither clears nor joins", () => {
+  const push = run(AGENT_ORG, 6110, "success", "2026-10-12T19:40:00Z");
+  assert.deepEqual(readings([read(AGENT_ORG, [push, ...AGENT_ORG_2026_10_12])]).map((x) => x.status), ["clear"]);
+  const published = { ...run(AGENT_ORG, 6111, "success", "2026-10-12T19:40:00Z", "completed", "workflow_dispatch"), published: true };
+  assert.deepEqual(readings([read(AGENT_ORG, [published, ...AGENT_ORG_2026_10_12])]).map((x) => x.status), ["clear"]);
+  const promoteOnly = { ...run(AGENT_ORG, 6112, "success", "2026-10-12T19:40:00Z", "completed", "workflow_dispatch"), published: false };
+  assert.equal(tripped([read(AGENT_ORG, [promoteOnly, ...AGENT_ORG_2026_10_12], LINE)]).length, 1);
+  assert.deepEqual(failureStreak([promoteOnly, ...AGENT_ORG_2026_10_12]).failures.map((r) => r.id), [6105, 6102]);
+});
+
 test("a repository that could not be read is UNKNOWN and NEVER clear, and does not hide another's trip", () => {
   const r = readings([read(PROJECT_REPO, null), read(AGENT_ORG, AGENT_ORG_STREAK, LINE)]);
   assert.deepEqual(r.map((x) => x.status), ["tripped", "unknown"]);
@@ -165,18 +206,18 @@ test("a SINGLE failure is the incident only: tripped, and no order to anyone", (
 
 test("a SECOND consecutive failure on one repository is an order to `ceo`, quoting the first error line, and a third is the SAME order", () => {
   assert.equal(RELEASE_FAILURES_TO_WAKE, 2);
-  const two = ordersOf([read(AGENT_ORG, AGENT_ORG_STREAK.slice(1), LINE)]);
+  const two = ordersOf([read(AGENT_ORG, [AGENT_ORG_STREAK[0], AGENT_ORG_STREAK[1], AGENT_ORG_STREAK[5]], LINE)]);
   assert.equal(two.length, 1);
   assert.equal(two[0].session, "ceo");
   assert.equal(two[0].cause, "org-health");
-  assert.match(two[0].prompt, /ORG HEALTH: `release-run-failed` HAS TRIPPED\. release\.yml on a11ign\/agent-org's main FAILED 3 times running/);
+  assert.match(two[0].prompt, /ORG HEALTH: `release-run-failed` HAS TRIPPED\. release\.yml on a11ign\/agent-org's main FAILED 2 times running/);
   assert.ok(two[0].prompt.includes(QUOTE));
-  assert.match(two[0].prompt, /It first tripped at 2026-10-11T08:42:59Z/);
+  assert.match(two[0].prompt, /It first tripped at 2026-10-11T09:10:59Z/);
+  assert.equal(two[0].causeKey, "ceo/org-health/release-run-failed@a11ign/agent-org@5004", "exactly two: the streak's first failed run is 5004");
+  const three = ordersOf([read(AGENT_ORG, AGENT_ORG_STREAK.slice(1), LINE)]);
+  assert.match(three[0].prompt, /FAILED 3 times running/);
   const five = ordersOf([read(AGENT_ORG, AGENT_ORG_STREAK, LINE)]);
   assert.equal(five[0].causeKey, "ceo/org-health/release-run-failed@a11ign/agent-org@5001", "keyed on the streak, so the suppression window keeps it one page");
-  const exactlyTwo = ordersOf([read(AGENT_ORG, [AGENT_ORG_STREAK[1], AGENT_ORG_STREAK[3], AGENT_ORG_STREAK[4], AGENT_ORG_STREAK[5]], LINE)]);
-  assert.equal(exactlyTwo[0].causeKey, "ceo/org-health/release-run-failed@a11ign/agent-org@5001");
-  assert.match(exactlyTwo[0].prompt, /FAILED 3 times running/);
 });
 
 test("the ORDER is per repository: one repository's single failure and another's streak give ONE order, for the streak", () => {

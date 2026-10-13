@@ -1574,24 +1574,31 @@ export function readLatestMerge(run: (args: string[]) => string, repos: readonly
 /** How many of the newest `release.yml` runs on `main` the release read looks at: the `status` runs it skips on every commit crowd the list, so the window is wide. */
 const RELEASE_RUN_WINDOW = 30;
 const RELEASE_JOBS_WINDOW = 100;
-/** The two conclusions that say whether a release happened. `cancelled`, `skipped`, `neutral` and a run still going say nothing, so they neither trip nor clear (#4001). */
-const RELEASE_VERDICTS = Object.freeze(["success", "failure"]);
+/**
+ * A run that says whether a release happened: any failure, and a success that PUBLISHED. A push to `main` publishes when it concludes success. A dispatch on `main` publishes only when its
+ * `release` job did (a dispatch carrying `action-tag-version` is the promote-only run, whose `release` job is skipped by its `needs`). A `status` run's success is a promotion, never a release,
+ * so it neither clears a streak nor joins one (a11ign/agent-org#1273: it cleared a streak of two on 2026-10-12). `cancelled`, `skipped`, `neutral` and a run still going say nothing (#4001).
+ */
+const isVerdict = (r: ReleaseRun): boolean => r.conclusion === "failure" || (r.conclusion === "success" && (r.event === "push" || (r.event === "workflow_dispatch" && r.published === true)));
 
-export type ReleaseRun = { id: number, event: string, status: string, conclusion: string | null, sha: string, createdAt: string, updatedAt: string, url: string };
+/**
+ * `published` is set only on a `workflow_dispatch` that concluded success: whether its `release` job did too (see {@link isVerdict}). Absent on every other run.
+ */
+export type ReleaseRun = { id: number, event: string, status: string, conclusion: string | null, sha: string, createdAt: string, updatedAt: string, url: string, published?: boolean };
 export type FailedJob = { id?: number, name: string, steps: string[] };
 /**
  * `jobs` and `pending` are read only when the newest verdict is a failure; `null` is a read that was refused
  */
 export type ReleaseRuns = { runs: ReleaseRun[], jobs?: FailedJob[] | null, pending?: string[] | null };
 
-/** @returns the newest run that concluded `success` or `failure`: the one that says whether the last release happened */
+/** @returns the newest run that says whether a release happened (see {@link isVerdict}): the one that says whether the last release happened */
 export function newestReleaseVerdict(runs: ReleaseRun[]): ReleaseRun | undefined {
-  return [...runs].filter((r) => RELEASE_VERDICTS.includes(String(r.conclusion))).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
+  return [...runs].filter(isVerdict).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt))[0];
 }
 
 /**
- * SIGNAL 18 (#4001): THE LAST RELEASE RUN ON `main` FAILED AND NOTHING HAS SUCCEEDED SINCE. The newest run that CONCLUDED decides: a later `success` clears it, and a run
- * that was cancelled, skipped or is still going neither trips nor clears it (the `status` runs `release.yml` skips on every commit must not read as a release). Any event
+ * SIGNAL 18 (#4001): THE LAST RELEASE RUN ON `main` FAILED AND NOTHING HAS SUCCEEDED SINCE. The newest run that says whether a release happened decides (see {@link isVerdict}): a later
+ * publishing `success` clears it, and a `status` run's success, or a run that was cancelled, skipped or is still going, neither trips nor clears it (a promotion is not a release). Any event
  * counts, because a failed release is a failed release whatever started it. A list with no verdict in it is UNKNOWN, never clear: a window of skipped runs says nothing.
  * The jobs and the pending changesets are the DETAIL of a failure already certain, so a refusal of either is said in the detail and does not turn the trip into an unknown.
  */
@@ -1624,16 +1631,27 @@ function pendingText(pending: string[] | null | undefined): string {
  * (that run's jobs, and `.changeset/` on `main`). `null` is a refused or unparseable list, a stated unknown and never "no failure". NEVER THROWS.
  */
 export function readReleaseRuns(run: (args: string[]) => string, repo: string): ReleaseRuns | null {
-  const runs = tryJson(() => run(["api", "--method", "GET", `repos/${repo}/actions/workflows/release.yml/runs`, "-f", "branch=main", "-f", `per_page=${RELEASE_RUN_WINDOW}`,
+  const runs: ReleaseRun[] | null = tryJson(() => run(["api", "--method", "GET", `repos/${repo}/actions/workflows/release.yml/runs`, "-f", "branch=main", "-f", `per_page=${RELEASE_RUN_WINDOW}`,
     "--jq", "[.workflow_runs[] | {id, event, status, conclusion, sha: .head_sha, createdAt: .created_at, updatedAt: .updated_at, url: .html_url}]"]));
   if (!Array.isArray(runs)) return null;
+  for (const r of runs) if (r.event === "workflow_dispatch" && r.conclusion === "success") r.published = releaseJobPublished(run, repo, r.id);
   const verdict = newestReleaseVerdict(runs);
   if (verdict?.conclusion !== "failure") return { runs };
-  const jobs = tryJson(() => run(["api", `repos/${repo}/actions/runs/${verdict.id}/jobs?per_page=${RELEASE_JOBS_WINDOW}`,
-    "--jq", "[.jobs[] | select(.conclusion == \"failure\") | {id, name, steps: [.steps[] | select(.conclusion == \"failure\") | .name]}]"]));
+  const jobs = releaseJobsOf(run, repo, verdict.id, "[.jobs[] | select(.conclusion == \"failure\") | {id, name, steps: [.steps[] | select(.conclusion == \"failure\") | .name]}]");
   const files = tryJson(() => run(["api", `repos/${repo}/contents/.changeset?ref=main`, "--jq", "[.[].name]"]));
   return { runs, jobs: Array.isArray(jobs) ? jobs : null,
     pending: Array.isArray(files) ? files.filter((name) => name.endsWith(".md") && name !== "README.md") : null };
+}
+
+/** @returns whether the run's `release` job concluded success: the one answer that tells a publishing dispatch from a promote-only one. A refused read is `false`, which neither clears nor trips. */
+function releaseJobPublished(run: (args: string[]) => string, repo: string, id: number): boolean {
+  const jobs = releaseJobsOf(run, repo, id, "[.jobs[] | select(.name == \"release\" and .conclusion == \"success\") | .id]");
+  return Array.isArray(jobs) && jobs.length > 0;
+}
+
+/** @returns the jobs of one run as `jq` shapes them: the one read of a run's jobs, so the `gh` call site is counted once (agent-org#1273, gh-call-baseline). `null` for a refusal or text that is not JSON. */
+function releaseJobsOf(run: (args: string[]) => string, repo: string, id: number, jq: string): any {
+  return tryJson(() => run(["api", `repos/${repo}/actions/runs/${id}/jobs?per_page=${RELEASE_JOBS_WINDOW}`, "--jq", jq]));
 }
 
 /** @returns the parsed output, or `null` for a refusal or text that is not JSON: a stated gap for the caller, never an empty answer */
@@ -1716,7 +1734,7 @@ export function readReleaseFailures(run: (args: string[]) => string, repos: read
  * `ended` is whether a success closed it: false is a window with no success in it, so the streak is a floor.
  */
 export function failureStreak(runs: ReleaseRun[]): { failures: ReleaseRun[]; ended: boolean } {
-  const verdicts = runs.filter((r) => RELEASE_VERDICTS.includes(String(r.conclusion))).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
+  const verdicts = runs.filter(isVerdict).sort((a, b) => Date.parse(b.createdAt) - Date.parse(a.createdAt));
   const failures = [];
   for (const verdict of verdicts) {
     if (verdict.conclusion !== "failure") return { failures, ended: true };
