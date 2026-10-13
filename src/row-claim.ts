@@ -1081,11 +1081,12 @@ export function failureReport(error: unknown): { exitCode: number; text: string;
 
 /**
  * agent-org#1262: THE REFUSALS THAT ARE THE CLAIM GUARD WORKING, by the text each guard prints. A refusal matching one is `claim-guard-held`, so it is no class and no repeat; the
- * worktree cap (#1036), a B4 overlap (`overlaps #N`, `overlaps the Region of #N`), a tree or branch that already exists, and a read the rate limit refused. Everything else is a
- * FAILURE of the claim path (an unreadable read that is not a rate limit, B4 not askable, a rule copy behind the release, an unknown tracker key) and stays `claim-refused`.
+ * worktree cap (#1036), a B4 overlap (`overlaps #N`, `overlaps the Region of #N`), a tree or branch that already exists, a read the rate limit refused, and a checkout whose copy of
+ * the rule is behind the release the host runs (`stale-rule-guard.ts`, #1014: the guard refusing from a stale copy is the guard working, a11ign#5282). Everything else is a
+ * FAILURE of the claim path (an unreadable read that is not a rate limit, B4 not askable, an unknown tracker key) and stays `claim-refused`.
  * A NEW guard refusal counts as a failure until it is named here: the default errs toward the signal, never away from it.
  */
-const GUARD_HELD_REFUSALS: readonly RegExp[] = [/live worktrees, at or over the cap of/, /ALREADY EXISTS/, /\boverlaps (?:the Region of )?#\d+/, /\brate limit\b/i];
+const GUARD_HELD_REFUSALS: readonly RegExp[] = [/live worktrees, at or over the cap of/, /ALREADY EXISTS/, /\boverlaps (?:the Region of )?#\d+/, /\brate limit\b/i, /BEHIND THE RELEASE THE HOST RUNS/];
 
 /** @param {string} refusal the whole refusal text @returns {string} the failure-ledger kind it is written under */
 function claimRefusalKind(refusal: string): string {

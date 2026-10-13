@@ -41,7 +41,11 @@ const CLASS_ROW_TITLE_END = " repeated: make its guard stop it everywhere";
 /** What `gh` is asked to keep of each row: the raw `issues` listing carries every body, which this never reads. */
 const ROW_PROJECTION = "[.[] | {number, state, closed_at, title, pull_request: (.pull_request != null), labels: [.labels[].name]}]";
 
-export type FailureClass = { id: string, name: string, guard: string | null, guardNote: string | null, kinds?: string[] };
+/**
+ * `countedSince` (agent-org#1316, a11ign/a11ign#5282) is the time from which the class's ledger refs COUNT: an earlier ref is the defect the guard fixed, not a repeat of it. Absent
+ * means every ref counts, as it always did.
+ */
+export type FailureClass = { id: string, name: string, guard: string | null, guardNote: string | null, kinds?: string[], countedSince?: number };
 /** a CLOSED row and the class ids its `class:` labels name; `closedAt` is epoch ms */
 export type ClassRow = { number: number, closedAt: number | null, classes: string[] };
 /** a ledger kind seen with two or more DISTINCT refs (`repeatsIn`), `refs` oldest first, and when the newest of them was recorded (epoch ms) */
@@ -62,16 +66,28 @@ const declaredKinds = (kinds: unknown): { kinds?: string[] } =>
   Array.isArray(kinds) && kinds.some((k) => typeof k === "string" && k !== "") ? { kinds: kinds.filter((k): k is string => typeof k === "string" && k !== "") } : {};
 
 /**
- * THE INDEX, parsed. `null` is text that is not an index (a bad parse, no `classes` list, an entry without a string `id`): a stated gap, since an index
- * read as empty would call every class label an unknown class.
+ * An entry's optional `countedSince` (agent-org#1316): an ISO time, read as epoch ms. Absent when none is declared. A value that is present and is not a time is `"invalid"`, which
+ * makes the whole index a stated gap: read as "count everything" it would put the storm back, and read as "count nothing" it would hide a real repeat.
+ */
+const declaredCountedSince = (value: unknown): { countedSince?: number } | "invalid" => {
+  if (value === undefined) return {};
+  const at = typeof value === "string" ? Date.parse(value) : Number.NaN;
+  return Number.isFinite(at) ? { countedSince: at } : "invalid";
+};
+
+/**
+ * THE INDEX, parsed. `null` is text that is not an index (a bad parse, no `classes` list, an entry without a string `id`, a `countedSince` that is not a time): a stated gap,
+ * since an index read as empty would call every class label an unknown class.
  * @param {string} text @returns {FailureClass[] | null}
  */
 export function parseFailureClasses(text: string): FailureClass[] | null {
   try {
     const classes = JSON.parse(text)?.classes;
     if (!Array.isArray(classes) || !classes.every((c) => typeof c?.id === "string" && c.id !== "")) return null;
-    return classes.map((c) => ({ id: c.id, name: String(c.name ?? ""), guard: typeof c.guard === "string" ? c.guard : null,
-      guardNote: typeof c.guardNote === "string" ? c.guardNote : null, ...declaredKinds(c.kinds) }));
+    const counted = classes.map((c) => declaredCountedSince(c.countedSince));
+    if (counted.includes("invalid")) return null;
+    return classes.map((c, i) => ({ id: c.id, name: String(c.name ?? ""), guard: typeof c.guard === "string" ? c.guard : null,
+      guardNote: typeof c.guardNote === "string" ? c.guardNote : null, ...declaredKinds(c.kinds), ...(counted[i] as { countedSince?: number }) }));
   } catch {
     return null;
   }
@@ -178,7 +194,7 @@ export function readClassRepeat(run: (args: string[]) => string, repo: string, i
   const closed = readClosedRowRepeats(run, repo, io);
   if ("unreadable" in closed) return closed;
   const { now = Date.now(), ledgerPath, readLedger = (path: string) => readFileSync(path, "utf8") } = io;
-  const withLedger = ledgerPath === undefined ? closed : { ...closed, ledger: readLedgerRepeats({ ledgerPath, read: readLedger, now }) };
+  const withLedger = ledgerPath === undefined ? closed : { ...closed, ledger: readLedgerRepeats({ ledgerPath, read: readLedger, now, index: closed.index }) };
   const fact = io.fileRow === undefined ? withLedger : { ...withLedger, filings: fileClassRepeats(withLedger, { run, repo, ...io, fileRow: io.fileRow, now }) };
   if (io.match !== undefined) queueUnclassedRows(run, repo, { ...io.match, now, log: io.log });
   return fact;
@@ -236,11 +252,15 @@ export function newestOccurrence(group: ClassGroup): { at: number | null, key: s
 /**
  * THE LEDGER'S REPEATS (#4450): every kind seen with two or more distinct refs, OVER ALL TIME, as a closed-row count is. The ledger is a file the host keeps: an absent file is a ledger with
  * no events (`[]`), and one that is there and cannot be read is `{ unreadable }`, which is never "no repeats".
- * @param {{ ledgerPath: string, read: (path: string) => string, now: number }} input
+ * A CLASS'S REFS COUNT FROM ITS `countedSince` (agent-org#1316): a ref recorded before it is the defect the guard has since fixed, so it is no occurrence of the class, and a class
+ * with one ref after the guard and one before is no repeat. Read per kind from the index, whose ids are the kinds (`groupByClass` matches a ledger repeat by the same id).
+ * @param {{ ledgerPath: string, read: (path: string) => string, now: number, index: FailureClass[] }} input
  */
-function readLedgerRepeats({ ledgerPath, read, now }: { ledgerPath: string, read: (path: string) => string, now: number }): LedgerRepeat[] | { unreadable: string } {
+function readLedgerRepeats({ ledgerPath, read, now, index }: { ledgerPath: string, read: (path: string) => string, now: number, index: FailureClass[] }): LedgerRepeat[] | { unreadable: string } {
   try {
-    const entries = parseFailureLedger(read(ledgerPath), ledgerPath).filter((entry) => entry.at <= now);
+    const countedSince = new Map(index.flatMap((c) => (c.countedSince === undefined ? [] : [[c.id, c.countedSince] as const])));
+    const entries = parseFailureLedger(read(ledgerPath), ledgerPath)
+      .filter((entry) => entry.at <= now && entry.at >= (countedSince.get(entry.classKey) ?? Number.NEGATIVE_INFINITY));
     return repeatsIn(entries, { windowMs: Number.POSITIVE_INFINITY, now }).map(({ classKey, refs }) => ({
       classKey, refs, newestAt: Math.max(...entries.filter((entry) => entry.classKey === classKey).map((entry) => entry.at)),
     }));
