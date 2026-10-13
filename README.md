@@ -76,15 +76,16 @@ takes them one each. `agent-org ticket:serve` starts a board on `127.0.0.1` and 
 
 - **Pick.** Your assigned Linear tickets that are not done or canceled, grouped by status the way Linear shows them, with Select All per
   group and for the page. Filter by Linear project (several at once) or by search, and fold any status group; both are remembered in the
-  browser. Under **Work in**, tick the repositories the selected tickets are worked in: each gets a worktree in every one, and its worker
-  can change only those. Choose the model and the effort, then Queue.
+  browser. Each ticket is worked in the repository its title names: the scope of `<type>(<scope>): <what>`, which is a repository in
+  `clones` or a package under one's `packages/` (`fix(ui-visual-explorer): ...` is worked in the repository holding that package). A
+  ticket whose title names neither cannot be queued until it is retitled. Choose the model and the effort, then Queue.
 - **Board.** Queued, Running, Draft PR, Needs human and Failed. A card can be removed while queued, stopped while running, and retried
   once it has failed. The number of workers at once can be changed live.
 - **Paused until you start it.** A new queue is paused, so queueing a ticket never also starts it: queue what you want, then press
   Start workers on the Board when what the workers need is ready. Pause stops new starts and leaves running workers alone, and the
   choice survives a restart of the board.
 
-Each run gets a worktree per repository at `<worktreeRoot>/<ticket>/<repo>`, on the ticket's own branch (`branchName` in Linear, so Linear
+Each run gets a worktree at `<worktreeRoot>/<ticket>/<repo>`, on the ticket's own branch (`branchName` in Linear, so Linear
 links the pull request), from the remote's default branch as `ls-remote` reports it. One herdr workspace per ticket opens in ticket mode's
 own session, never the org's, and Claude starts there with its brief. The worker reads each repository's `CLAUDE.md`/`AGENTS.md` for its
 commands, opens a DRAFT pull request per repository it changed, and writes an outcome file: `draft-pr`, `wrong-repo` or `needs-human`.

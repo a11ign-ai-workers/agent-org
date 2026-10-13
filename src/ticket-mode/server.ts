@@ -20,6 +20,7 @@ import { createPool, type PoolDeps } from "./pool.ts";
 import { amend, enqueue, loadQueue, remove, retry, saveQueue, setMax, setPaused, type Queue, type RunChoice } from "./queue.ts";
 import { readTicketSettings, type TicketSettings } from "./settings.ts";
 import type { Ticket, TicketSource } from "./source.ts";
+import { discoverPackages, resolveScope, type Packages } from "./scope.ts";
 
 const HERE = dirname(fileURLToPath(import.meta.url));
 const PAGE = join(HERE, "ui.html");
@@ -37,6 +38,8 @@ export type BoardDeps = Readonly<{
   token: string;
   queuePath: string;
   choicePath: string;
+  /** Each clone's packages, which a ticket's title scope is resolved against (`scope.ts`). */
+  packages: Packages;
   pool?: Pick<ReturnType<typeof createPool>, "tick" | "stop" | "reconcile" | "ensureSession">;
   poolDeps?: Omit<PoolDeps, "settings" | "source" | "hook">;
   now?: () => number;
@@ -58,13 +61,15 @@ export function refusal(request: Pick<IncomingMessage, "headers" | "method">, po
   return null;
 }
 
-/** The last repositories, model and effort chosen, so the page offers them again. */
-function readChoice(path: string, settings: TicketSettings): RunChoice {
-  const fallback: RunChoice = { repos: [], model: "opus", effort: "high" };
+type ModelChoice = Readonly<{ model: string; effort: string }>;
+
+/** The last model and effort chosen, so the page offers them again. */
+function readChoice(path: string): ModelChoice {
+  const fallback: ModelChoice = { model: "opus", effort: "high" };
   if (!existsSync(path)) return fallback;
   try {
-    const saved = JSON.parse(readFileSync(path, "utf8")) as RunChoice;
-    return { ...fallback, ...saved, repos: (saved.repos ?? []).filter((repo) => repo in settings.clones) };
+    const saved = JSON.parse(readFileSync(path, "utf8")) as Partial<ModelChoice>;
+    return { model: saved.model ?? fallback.model, effort: saved.effort ?? fallback.effort };
   } catch {
     return fallback;
   }
@@ -83,14 +88,12 @@ function checkEffort(effort: string): void {
   if (!EFFORTS.includes(effort)) throw new Error(`effort must be one of ${EFFORTS.join(", ")}`);
 }
 
-function validChoice(body: Json, settings: TicketSettings): RunChoice {
-  const repos = Array.isArray(body.repos) ? body.repos.map(String) : [];
+function validModelChoice(body: Json): ModelChoice {
   const model = String(body.model ?? "");
   const effort = String(body.effort ?? "");
-  checkRepos(repos, settings);
   checkModel(model);
   checkEffort(effort);
-  return { repos, model, effort };
+  return { model, effort };
 }
 
 /** An amend names only what it changes, and each part is held to the rules queueing uses. */
@@ -108,7 +111,8 @@ function validAmend(body: Json, settings: TicketSettings): Partial<RunChoice> {
 
 /** The request handler, with every dependency named, so a test drives it without a socket. */
 export function createBoard(deps: BoardDeps) {
-  const { settings, source, token } = deps;
+  const { settings, source, token, packages } = deps;
+  const repoOf = (ticket: Ticket) => resolveScope(ticket.title, packages);
   const now = deps.now ?? Date.now;
   let queue: Queue = loadQueue(deps.queuePath, settings.max);
   const store = { get: () => queue, set: (next: Queue) => { queue = next; saveQueue(deps.queuePath, next); } };
@@ -119,24 +123,31 @@ export function createBoard(deps: BoardDeps) {
 
   async function api(method: string, path: string, body: Json): Promise<[number, unknown]> {
     if (method === "GET" && path === "/api/config") {
-      return [200, { repos: Object.keys(settings.clones), models: MODELS, efforts: EFFORTS, choice: readChoice(deps.choicePath, settings), max: queue.max }];
+      return [200, { models: MODELS, efforts: EFFORTS, choice: readChoice(deps.choicePath), max: queue.max }];
     }
     if (method === "GET" && path === "/api/tickets") {
       const tickets = await source.assigned();
       known = new Map(tickets.map((ticket) => [ticket.key, ticket]));
-      return [200, tickets];
+      return [200, tickets.map((ticket) => ({ ...ticket, resolved: repoOf(ticket) }))];
     }
     if (method === "GET" && path === "/api/queue") return [200, queue];
     if (method === "POST" && path === "/api/queue") {
-      const choice = validChoice(body, settings);
+      const choice = validModelChoice(body);
       const keys = Array.isArray(body.keys) ? body.keys.map(String) : [];
-      const tickets: Ticket[] = [];
+      const runs: { ticket: Ticket; repo: string }[] = [];
+      const unscoped: string[] = [];
       for (const key of keys) {
         const ticket = known.get(key) ?? await source.read(key);
         if (ticket === null) throw new Error(`no ticket ${key}`);
-        tickets.push(ticket);
+        const resolved = repoOf(ticket);
+        if (resolved === null) unscoped.push(key);
+        else runs.push({ ticket, repo: resolved.repo });
       }
-      store.set(enqueue(queue, tickets, choice, now()));
+      // Nothing is queued unless every ticket says where its work lands: a partial queue would hide the ones that were left out.
+      if (unscoped.length > 0) {
+        throw new Error(`no repository in the title of ${unscoped.join(", ")}: retitle as <type>(<repo or package>): <what>, e.g. fix(ui-visual-explorer): ...`);
+      }
+      store.set(runs.reduce((next, { ticket, repo }) => enqueue(next, [ticket], { repos: [repo], ...choice }, now()), queue));
       mkdirSync(dirname(deps.choicePath), { recursive: true });
       writeFileSync(deps.choicePath, `${JSON.stringify(choice)}\n`);
       wake();
@@ -206,7 +217,8 @@ async function serve(): Promise<void> {
   const source = linearSource({ key: readLinearKey(settings.linearKey) });
   const token = randomBytes(24).toString("hex");
   const dir = join(settings.stateDir, "tickets");
-  const board = createBoard({ settings, source, token, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json") });
+  const packages = await discoverPackages(settings.clones);
+  const board = createBoard({ settings, source, token, packages, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json") });
   await board.pool.ensureSession();
   board.pool.reconcile();
   const server = createServer((request, response) => { void board.handle(request, response); });
