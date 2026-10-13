@@ -1079,7 +1079,7 @@ function spawnWorker(order: { session: string; causeKey: string; cause?: string;
     + `${claimed && claimer ? claimer.release(claimed, role.role, env) : ""}`;
   // agent-org#1169: A CLAIMED TREE IS NOT HANDED TO ITS WORKER UNTIL `typescript` RESOLVES FROM IT. Only a caller that passes a gate asks (`worktree.rebuildCheck`, ON);
   // a refusal here is undone like every refusal after the claim, so the row is free again and the next tick asks once more.
-  const unready = toolchain !== undefined && claimed !== undefined ? toolchain.reason(claimed.worktree) : null;
+  const unready = toolchain !== undefined && claimed !== undefined ? toolchain.reason(claimed.worktree, claimed.install) : null;
   if (toolchain !== undefined && unready !== null) {
     toolchain.refused(order, unready);
     return { refusal: unwound(`no spawn: ${unready}`) };
@@ -6547,15 +6547,16 @@ export function rebuildCheckOn(path: string = decisionSwitchesPath(PRIMARY_CHECK
 /**
  * The reason a claimed tree is NOT ready for its worker, or `null` when it is. A tree with no `package.json` has no toolchain to resolve, so it is not refused.
  * `exists` follows links, so a `node_modules` link that resolves nothing reads as absent, and that is the cause named.
+ * `install` is what the claim reported doing to the tree (agent-org#1265), so the reason says why the install did not leave one; `no install ran` when it reported none.
  */
-export function worktreeToolchainReason(tree: string, { exists = existsSync }: { exists?: (path: string) => boolean } = {}): string | null {
+export function worktreeToolchainReason(tree: string, { exists = existsSync, install = "no install ran" }: { exists?: (path: string) => boolean; install?: string } = {}): string | null {
   if (!exists(join(tree, "package.json"))) return null;
   if (exists(join(tree, "node_modules", "typescript", "package.json"))) return null;
-  return `\`typescript\` does not resolve from ${join(tree, "node_modules")}: the worktree's node_modules is absent, or a link that resolves nothing`;
+  return `\`typescript\` does not resolve from ${join(tree, "node_modules")}: the worktree's node_modules is absent, or a link that resolves nothing; the claim's install: ${install}`;
 }
 
 /** The gate `spawnWorker` asks about a claimed tree, and the writer it tells when it refuses ({@link sayToolchainRefusal}). */
-export type ToolchainGate = { reason: (tree: string) => string | null; refused: (order: { causeKey: string; startFresh?: boolean; }, reason: string) => void; };
+export type ToolchainGate = { reason: (tree: string, install?: string) => string | null; refused: (order: { causeKey: string; startFresh?: boolean; }, reason: string) => void; };
 
 /**
  * A ROW WHOSE WORKTREE IS REFUSED IS WRITTEN ON THE ROW, once per cause, so its owner reads why it was not started instead of finding a silent skip (#1169).
@@ -6623,7 +6624,9 @@ export type ClaimedRow = { row: number, branch: string, worktree: string, launch
   /** #4685: the tracker the row is in, absent for the first's. `row` alone is then the WRONG row's number, so a reader that acts on it asks this. */
   key?: string, adopted?: { from: string, dirty: number, unpushed: number, replaces?: boolean },
   /** #4630: this start REPLACES a Haiku worker that was ended for `reason`; its brief says so. The claim is the existing one. */
-  restart?: { from: string, reason: string } };
+  restart?: { from: string, reason: string },
+  /** agent-org#1265: what the claim reported doing to the tree's install (`installed`, `install failed: <line>` or `not ready: <what>`); absent when it ran none. */
+  install?: string };
 
 /** The claim a spawn makes before it has a pane, and the release for a spawn that fails after it. */
 export type SpawnClaimer = { claim: (order: { causeKey: string, title?: string, replaces?: { branch: string }[] }, role: string, env: Record<string, string>) => ClaimedRow | { refusal: string }, release: (claimed: ClaimedRow, role: string, env: Record<string, string>) => string,
@@ -6747,7 +6750,8 @@ export function spawnClaimer({ exec = defaultExec, exists = existsSync, worktree
       const landed = /^STARTED/m.test(ran.output) && CLAIM_LANDED.includes(Number(ran.status));
       if (landed && exists(claimed.worktree)) {
         if (claimed.adopted !== undefined && key === "") forget(row);
-        return claimed;
+        const install = installOfClaimLine(ran.output);
+        return install === undefined ? claimed : { ...claimed, install };
       }
       const why = landed ? `${claimed.worktree} was not created` : verdictLine(ran.output);
       const undone = landed || !CLAIM_NOT_LANDED.includes(Number(ran.status))
@@ -6757,6 +6761,16 @@ export function spawnClaimer({ exec = defaultExec, exists = existsSync, worktree
     release: (claimed, role, env) => releaseClaim(claimed, role, env, exec),
     tier: (claimed) => tierOfRow({ key: claimed.key ?? "", number: claimed.row }, { readRow, switchPath, routes }),
   };
+}
+
+/**
+ * The install outcome the claim reported for its tree (agent-org#1265): the last segment of its STARTED line, which `claimLineFor` writes only when the claim ran
+ * an install -- `installed`, `install failed: <first error line>` or `not ready: <what>`. `undefined` when the line names none: an adopted tree, or a tree with no
+ * lockfile or with its modules already there. The claim's stdout is the one channel this spawn has to it, because the claim runs as its own process (`ROW_CLAIM`).
+ */
+function installOfClaimLine(output: string): string | undefined {
+  const started = output.split("\n").find((line) => line.startsWith("STARTED")) ?? "";
+  return / \/ (installed|install failed: .+|not ready: .+)$/.exec(started)?.[1];
 }
 
 /**
@@ -8625,7 +8639,7 @@ async function main() {
     claimOrders: claimOrdersIn(claimOrdersPath(ledgerPath)),
     counts: deliveryCounts(ledgerPath), ineligibleReason: poolEngineerReason(poolEligibility(spares, drained), unavailable),
     registerSpawn: (role) => registerSpawn(spares, role), drained, claimable: spawnClaimability(), claimRefused: sayClaimRefusal(),
-    toolchain: rebuildCheckOn() ? { reason: (tree) => worktreeToolchainReason(tree), refused: sayToolchainRefusal() } : undefined,
+    toolchain: rebuildCheckOn() ? { reason: (tree, install) => worktreeToolchainReason(tree, { install }), refused: sayToolchainRefusal() } : undefined,
     oneShot: createOrchestratorOneShot({ readRow: readRowForTier }), ceoOneShot: createCeoOneShot({ readRow: readRowForTier }),
     memory: spawnMemoryGate(), hostLoad: readHostLoad, claimer: claimerFor(spares, ledgerPath, hostLayout, escalatedRoutes(claimOrdersText(ledgerPath), routes)), launch: hostLayout,
     registerReviewer: (session) => registerReviewer(reviewerPathsFrom(ledgerPath), session),
