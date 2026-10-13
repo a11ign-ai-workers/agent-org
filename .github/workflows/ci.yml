@@ -57,7 +57,16 @@ permissions:
   contents: read
 
 jobs:
+  # THE SUITE RUNS AS FOUR SHARDS AT ONCE, through rstest's own `--shard` and a matrix. As one job it took 425 s of a 456 s job for 680 files on one 4-core runner
+  # (run 38391781529, 2026-10-13), and most of that is tests that spawn processes, which no worker cap speeds up on a runner they share. rstest splits the files
+  # by count, and that run's per-file times put each quarter at 95 to 115 s. `gate` needs `suite`, whose result is `success` only when every shard's is, and
+  # `fail-fast` is off, so one red shard does not cancel the others before they report. A step that reads the whole tree rather than running tests runs on shard 1 only.
+  # The matrix is the one place the count is written: every step reads it as `strategy.job-total`, and a script reads it by `env:`, so `ci-suite-shards.test.ts` can run it.
   suite:
+    strategy:
+      fail-fast: false
+      matrix:
+        shard: [1, 2, 3, 4]
     runs-on: ubuntu-latest
     steps:
       # The WHOLE history: `lib/pin-ratchet.mjs` reads the base with git from this checkout (a11ign/a11ign#3245). A `merge_group` run needs `HEAD^1`, which a depth-1
@@ -69,8 +78,10 @@ jobs:
         with:
           node-version: 24.21.0
       - name: Every path a workflow names exists in this repository
+        if: matrix.shard == 1
         run: node .github/scripts/workflow-paths.ts
       - name: Leak scan -- refuses a private LAN IPv4 address or a named SSH key file anywhere in the tree
+        if: matrix.shard == 1
         run: node .github/scripts/leak-scan.ts
       - name: The project under test -- a11ign/a11ign at PROJECT_REF, read-only, no token beyond the job's own read-only one
         uses: actions/checkout@v7
@@ -115,7 +126,7 @@ jobs:
       # body edit re-runs it. The body goes by `env:` and never argv, which is the CLI's own rule (an author's text is one opaque string). Lookup failure exits 2 (CANNOT ASK) and fails the job:
       # the check does not go quiet when the API is unwell.
       - name: The declared Closes matches what GitHub will actually close, for this repository's own pull requests (agent-org#863)
-        if: github.event_name == 'pull_request'
+        if: github.event_name == 'pull_request' && matrix.shard == 1
         working-directory: project
         env:
           GH_TOKEN: ${{ github.token }}
@@ -130,14 +141,18 @@ jobs:
         id: rstest-build-cache
         with:
           path: project/packages/agent-org/node_modules/.cache/rstest-*
-          key: rstest-build-${{ runner.os }}-${{ hashFiles('package.json', 'scripts/rstest/rstest.config.ts') }}
+          # One cache per shard: a shard builds only its own files, and a key the four shared would keep whichever shard saved first.
+          key: rstest-build-${{ runner.os }}-shard-${{ matrix.shard }}-of-${{ strategy.job-total }}-${{ hashFiles('package.json', 'scripts/rstest/rstest.config.ts') }}
       - name: rstest build cache HIT or MISS, printed so the run log can be quoted
         run: |
           echo "rstest build cache: ${{ steps.rstest-build-cache.outputs.cache-hit == 'true' && 'HIT' || 'MISS' }}"
       # NOTHING IS DROPPED: the files on disk must be the files rstest runs. A test file its `include` does not reach fails here, naming it, before anything runs, and would otherwise be a test that
       # silently does not run.
       - name: Every test file is run by rstest
+        if: matrix.shard == 1
         working-directory: project
+        env:
+          SHARDS: ${{ strategy.job-total }}
         run: |
           # `comm` needs its inputs in the order `sort` made, and the two disagree about punctuation in a UTF-8 locale: byte order for both.
           export LC_ALL=C
@@ -149,13 +164,18 @@ jobs:
           echo "on disk: $(echo "$ondisk" | wc -l); rstest: $(echo "$listed" | wc -l)"
           missing=$(comm -23 <(echo "$ondisk") <(echo "$listed"))
           [ -z "$missing" ] || { echo "run by NO runner:"; echo "$missing"; exit 1; }
-      - name: The tool's suite under rstest -- every *.test.ts and *.test.mjs, run from the project's root, with --trace
+          # THE SHARDS TOGETHER ARE EVERY FILE, EACH ONCE: a file no shard lists would never run, and one two shards list would run twice.
+          sharded=$(for i in $(seq 1 "$SHARDS"); do NO_COLOR=1 $rstest list --config "$config" --filesOnly --shard "$i/$SHARDS" | grep -E '^src/.*\.test\.(ts|mjs)$'; done | sort)
+          [ "$sharded" = "$listed" ] || { echo "the shards do not list every file exactly once:"; diff <(echo "$listed") <(echo "$sharded"); exit 1; }
+      - name: The tool's suite under rstest -- this shard's share of every *.test.ts and *.test.mjs, run from the project's root, with --trace
         working-directory: project
         env:
           # The copy above has no `.git`, so a pinned population cannot read its base from where it sits. This is the checkout it was copied from, and the one place
           # that names it (`TOOL_REPO_ENV` in `lib/pin-ratchet.mjs`); without it the pins are judged STRICTLY, every entry declared and nothing grandfathered.
           AGENT_ORG_TOOL_REPO: ${{ github.workspace }}
-        run: node_modules/.bin/rstest run --config packages/agent-org/scripts/rstest/rstest.config.ts --trace # in-project
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
+        run: node_modules/.bin/rstest run --config packages/agent-org/scripts/rstest/rstest.config.ts --trace --shard "$SHARD/$SHARDS" # in-project
       # A CACHE THAT IS NEVER WRITTEN RESTORES NOTHING AND STILL READS GREEN (a11ign/a11ign#1319): the build cache is on, so the directory must now hold files, or the HIT or MISS line above describes
       # a cache that does not exist.
       - name: rstest build cache must hold files after the tests
@@ -165,11 +185,12 @@ jobs:
           echo "files under node_modules/.cache/rstest-* after the tests: $files"
           [ "$files" -gt 0 ] || { echo "rstest ran with performance.buildCache on and wrote no cache files"; exit 1; }
       # ADR 0043: "CI runs `rstest run --trace` once, the summary archived as an artifact", the per-phase split and the top 10 files that a speed-up is read from.
+      # One summary per shard, each of its own share: an artifact name may be uploaded once per run.
       - name: The trace summary, archived
         if: always()
         uses: actions/upload-artifact@v7
         with:
-          name: rstest-trace
+          name: rstest-trace-${{ matrix.shard }}
           # `.rstest` is a hidden directory, which neither `**` nor the action's default reaches: the first run of this step matched no file, said so in a warning, and uploaded nothing.
           path: project/packages/agent-org/.rstest/trace-*.summary.md
           include-hidden-files: true
