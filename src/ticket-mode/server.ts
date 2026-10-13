@@ -40,6 +40,8 @@ export type BoardDeps = Readonly<{
   choicePath: string;
   /** Each clone's packages, which a ticket's title scope is resolved against (`scope.ts`). */
   packages: Packages;
+  /** Clones whose packages could not be read, with the reason: a title scoped to one of their packages cannot resolve until they can. */
+  unreadable?: Readonly<Record<string, string>>;
   pool?: Pick<ReturnType<typeof createPool>, "tick" | "stop" | "reconcile" | "ensureSession">;
   poolDeps?: Omit<PoolDeps, "settings" | "source" | "hook">;
   now?: () => number;
@@ -112,6 +114,7 @@ function validAmend(body: Json, settings: TicketSettings): Partial<RunChoice> {
 /** The request handler, with every dependency named, so a test drives it without a socket. */
 export function createBoard(deps: BoardDeps) {
   const { settings, source, token, packages } = deps;
+  const unreadable = deps.unreadable ?? {};
   const repoOf = (ticket: Ticket) => resolveScope(ticket.title, packages);
   const now = deps.now ?? Date.now;
   let queue: Queue = loadQueue(deps.queuePath, settings.max);
@@ -123,7 +126,7 @@ export function createBoard(deps: BoardDeps) {
 
   async function api(method: string, path: string, body: Json): Promise<[number, unknown]> {
     if (method === "GET" && path === "/api/config") {
-      return [200, { models: MODELS, efforts: EFFORTS, choice: readChoice(deps.choicePath), max: queue.max }];
+      return [200, { models: MODELS, efforts: EFFORTS, choice: readChoice(deps.choicePath), max: queue.max, unreadable }];
     }
     if (method === "GET" && path === "/api/tickets") {
       const tickets = await source.assigned();
@@ -145,7 +148,9 @@ export function createBoard(deps: BoardDeps) {
       }
       // Nothing is queued unless every ticket says where its work lands: a partial queue would hide the ones that were left out.
       if (unscoped.length > 0) {
-        throw new Error(`no repository in the title of ${unscoped.join(", ")}: retitle as <type>(<repo or package>): <what>, e.g. fix(ui-visual-explorer): ...`);
+        const blind = Object.entries(unreadable).map(([repo, why]) => `${repo} (${why})`);
+        const unread = blind.length === 0 ? "" : `. Packages could not be read for ${blind.join(", ")}, so a package scope may be among these`;
+        throw new Error(`no repository in the title of ${unscoped.join(", ")}: retitle as <type>(<repo or package>): <what>, e.g. fix(ui-visual-explorer): ...${unread}`);
       }
       store.set(runs.reduce((next, { ticket, repo }) => enqueue(next, [ticket], { repos: [repo], ...choice }, now()), queue));
       mkdirSync(dirname(deps.choicePath), { recursive: true });
@@ -217,8 +222,9 @@ async function serve(): Promise<void> {
   const source = linearSource({ key: readLinearKey(settings.linearKey) });
   const token = randomBytes(24).toString("hex");
   const dir = join(settings.stateDir, "tickets");
-  const packages = await discoverPackages(settings.clones);
-  const board = createBoard({ settings, source, token, packages, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json") });
+  const { packages, unreadable } = await discoverPackages(settings.clones);
+  for (const [repo, why] of Object.entries(unreadable)) process.stderr.write(`ticket:serve: could not read the packages of ${repo}: ${why}\n`);
+  const board = createBoard({ settings, source, token, packages, unreadable, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json") });
   await board.pool.ensureSession();
   board.pool.reconcile();
   const server = createServer((request, response) => { void board.handle(request, response); });

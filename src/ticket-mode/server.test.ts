@@ -14,14 +14,14 @@ const ticket = (key: string, title = `fix(nbl-ui-netbox): ${key}`) => ({ key, ti
 const PACKAGES = { "nbl-ui-netbox": ["ui-netbox", "ui-visual-explorer"], "platform-monorepo": [] };
 const TOKEN = "a".repeat(48);
 
-function board(port = 4747) {
+function board(port = 4747, unreadable: Record<string, string> = {}) {
   const dir = tmpDir("ticket-server-");
   const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/r/netbox", "platform-monorepo": "/r/pm" }, stateDir: dir, tickets: { port } });
   const assigned = [ticket("NBF-1"), ticket("NBF-2"), ticket("NBF-3", "Visual Explorer UI - Fit to View does nothing"), ticket("NBF-4", "fix(ci): lint-staged")];
   const source: TicketSource = { assigned: async () => assigned, read: async (key) => (key === "VE-9" ? ticket("VE-9", "feat(ui-visual-explorer): zoom") : null), download: async () => [] };
   const ticks: string[] = [];
   const pool = { tick: async () => { ticks.push("tick"); }, stop: (key: string) => { ticks.push(`stop ${key}`); }, reconcile: () => {}, ensureSession: async () => {} };
-  const made = createBoard({ settings, source, token: TOKEN, packages: PACKAGES, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json"), pool, now: () => 7 });
+  const made = createBoard({ settings, source, token: TOKEN, packages: PACKAGES, unreadable, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json"), pool, now: () => 7 });
   return { ...made, ticks, dir };
 }
 
@@ -72,6 +72,17 @@ test("a ticket whose title names no repository is refused with how to retitle it
   await assert.rejects(b.api("POST", "/api/queue", { keys: ["NBF-1", "NBF-3", "NBF-4"], model: "opus", effort: "high" }),
     /no repository in the title of NBF-3, NBF-4: retitle as <type>\(<repo or package>\): <what>/);
   assert.deepEqual(b.store.get().entries, [], "NBF-1 resolved, but a partial queue would hide the two that did not");
+});
+
+test("a clone whose packages could not be read is named to the page and in the refusal, so an unscoped ticket is not blamed on its title alone", async () => {
+  const b = board(4747, { "platform-monorepo": "ssh: connect to host refused" });
+  const [, config] = await b.api("GET", "/api/config", {}) as [number, any];
+  assert.deepEqual(config.unreadable, { "platform-monorepo": "ssh: connect to host refused" });
+  await b.api("GET", "/api/tickets", {});
+  await assert.rejects(b.api("POST", "/api/queue", { keys: ["NBF-4"], model: "opus", effort: "high" }),
+    /Packages could not be read for platform-monorepo \(ssh: connect to host refused\), so a package scope may be among these/);
+  const [, clean] = await board().api("GET", "/api/config", {}) as [number, any];
+  assert.deepEqual(clean.unreadable, {}, "control: nothing is reported when every clone read");
 });
 
 test("an unknown model or an unknown ticket is refused, and nothing is queued", async () => {

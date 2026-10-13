@@ -22,14 +22,23 @@ test("a scope resolves to a repository by name, or to the repository holding a p
   assert.equal(resolveScope("Visual Explorer UI - x", PACKAGES), null);
 });
 
-test("packages are read from each clone's remote default branch, and a clone that cannot be read has none", async () => {
+test("packages are read from each clone's remote default branch", async () => {
   const calls: string[] = [];
   const git: Git = async (cwd, args) => {
     calls.push(`${cwd} ${args.join(" ")}`);
-    if (cwd === "/broken") throw new Error("not a repository");
     if (args[0] === "ls-remote") return "ref: refs/heads/develop\tHEAD\n";
     return "packages/ui-settings\npackages/ui-shell\n";
   };
-  assert.deepEqual(await discoverPackages({ "nbl-ui-platform": "/clones/platform", gone: "/broken" }, git), { "nbl-ui-platform": ["ui-settings", "ui-shell"], gone: [] });
+  assert.deepEqual(await discoverPackages({ "nbl-ui-platform": "/clones/platform" }, git), { packages: { "nbl-ui-platform": ["ui-settings", "ui-shell"] }, unreadable: {} });
   assert.ok(calls.includes("/clones/platform ls-tree -d --name-only origin/develop packages/"), "the default branch the remote names, not the checkout");
+});
+
+test("a clone that cannot be read is reported with its reason, not given an empty package list", async () => {
+  const git: Git = async (cwd, args) => {
+    if (cwd === "/broken") throw new Error("not a repository");
+    return args[0] === "ls-remote" ? "ref: refs/heads/main\tHEAD\n" : "packages/ui-shell\n";
+  };
+  const found = await discoverPackages({ ok: "/ok", gone: "/broken" }, git);
+  assert.deepEqual(found.packages, { ok: ["ui-shell"] });
+  assert.deepEqual(found.unreadable, { gone: "not a repository" });
 });

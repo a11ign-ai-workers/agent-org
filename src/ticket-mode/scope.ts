@@ -28,20 +28,25 @@ export function resolveScope(title: string, packages: Packages): Resolved | null
   return repo === undefined ? null : { repo, package: scope };
 }
 
+/** The packages each readable clone holds, and why each unreadable clone could not be read. */
+export type Discovery = Readonly<{ packages: Packages; unreadable: Readonly<Record<string, string>> }>;
+
 /**
- * Each clone's `packages/` directories on its remote default branch, read from the clone's own remote-tracking ref (no fetch, so it costs no
- * network per repository; a package added since the clone last fetched is found after its next fetch). A clone that cannot be read has none.
+ * Each clone's `packages/` directories on its remote default branch (`ls-remote` names the branch, `ls-tree` reads the clone's own
+ * remote-tracking ref, so a package added since the clone last fetched is found after its next fetch). A clone that cannot be read is NOT given
+ * an empty package list: it is reported under `unreadable` with the reason, because an empty list would make its tickets look unscoped.
  */
-export async function discoverPackages(clones: Readonly<Record<string, string>>, git: Git = defaultGit): Promise<Packages> {
-  const found: Record<string, string[]> = {};
+export async function discoverPackages(clones: Readonly<Record<string, string>>, git: Git = defaultGit): Promise<Discovery> {
+  const packages: Record<string, string[]> = {};
+  const unreadable: Record<string, string> = {};
   for (const [repo, clone] of Object.entries(clones)) {
     try {
       const base = parseDefaultBranch(await git(clone, ["ls-remote", "--symref", "origin", "HEAD"]));
       const listing = await git(clone, ["ls-tree", "-d", "--name-only", `origin/${base}`, "packages/"]);
-      found[repo] = listing.split("\n").map((line) => line.trim().replace(/^packages\//, "")).filter((name) => name !== "");
-    } catch {
-      found[repo] = [];
+      packages[repo] = listing.split("\n").map((line) => line.trim().replace(/^packages\//, "")).filter((name) => name !== "");
+    } catch (err) {
+      unreadable[repo] = String((err as Error)?.message ?? err);
     }
   }
-  return found;
+  return { packages, unreadable };
 }

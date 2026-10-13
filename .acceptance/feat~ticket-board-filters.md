@@ -2,7 +2,7 @@ Ticket mode reads each ticket's repository from its title scope (`src/ticket-mod
 
 Acceptance:
 ```bash
-npx rstest run --config scripts/rstest/rstest.config.ts src/ticket-mode/server.test.ts src/ticket-mode/scope.test.ts
+npx rstest run --config scripts/rstest/rstest.config.ts src/ticket-mode/server.test.ts src/ticket-mode/scope.test.ts src/ticket-mode/ui.test.ts
 ```
 
 Consumer-declaration: none -- the page only; no setting or API changes.
