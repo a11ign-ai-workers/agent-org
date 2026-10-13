@@ -3948,3 +3948,59 @@ test("#3058: only a LEADING `cd <dir> &&` is skipped -- a mid-line `cd`, a `;`, 
   assert.equal(twice.verdict, "prose");
   assert.match(twice.verdict === "prose" ? twice.reason : "", /"cd"/);
 });
+
+// --- #1327: the corpus pattern named a CALL, and charged it wherever the call's text appeared -- including inside a string literal,
+// where a sentence that merely MENTIONS `runsRoot()` is not a read of anything. Only the call-shaped pattern ignores string content: the
+// two env-var spellings are real reads even when written as a string (`process.env["A11Y_RUNS_ROOT"]`), so their cases below stay charged.
+// The fixtures build the resolver's call through `spell()`, for the same self-reference reason as the #731 section. ---
+
+test("#1327: a file whose ONLY `runsRoot(` is inside a quoted string or a template with no substitution is NOT charged `corpus`", () => {
+  const dir = mkdtempSync(join(tmpdir(), "acceptance-strings-"));
+  try {
+    const mention = spell("runsRo", "ot()");
+    const entry = join(dir, "reason-string.test.mjs");
+    writeFileSync(entry, [
+      `const reason = "resolves under ${mention} -- not a gate";`,
+      "const note = `" + mention + " is a sentence`;",
+      "export { reason, note };",
+    ].join("\n"));
+    assert.deepEqual(deriveClosureRequirements(entry), [],
+      "a sentence that names the call inside a string reads nothing, so it derives no requirement");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#1327 CONTROL: a real `runsRoot()` call is still charged `corpus` -- the same text as code, not as a string", () => {
+  const dir = mkdtempSync(join(tmpdir(), "acceptance-strings-"));
+  try {
+    const entry = join(dir, "real-call.test.mjs");
+    writeFileSync(entry, `const root = ${spell("runsRo", "ot()")};\nexport { root };\n`);
+    assert.deepEqual(deriveClosureRequirements(entry).map((h) => h.requirement), ["corpus"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#1327 CONTROL: the env-var spelling of the corpus override is still charged, even written as a string literal", () => {
+  const dir = mkdtempSync(join(tmpdir(), "acceptance-strings-"));
+  try {
+    const entry = join(dir, "env-override.test.mjs");
+    writeFileSync(entry, `const override = process.env["${spell("A11Y_RUNS_", "ROOT")}"];\nexport { override };\n`);
+    assert.deepEqual(deriveClosureRequirements(entry).map((h) => h.requirement), ["corpus"],
+      "an env-var read is a real read spelled as a string; blanking string content must not let it through");
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
+
+test("#1327: a `${ runsRoot() }` substitution inside a template literal is code and stays charged, while the prose around it is not", () => {
+  const dir = mkdtempSync(join(tmpdir(), "acceptance-strings-"));
+  try {
+    const entry = join(dir, "template-substitution.test.mjs");
+    writeFileSync(entry, "export const where = `the root is ${" + spell("runsRo", "ot()") + "} and runsRoot() is prose`;\n");
+    assert.deepEqual(deriveClosureRequirements(entry).map((h) => h.requirement), ["corpus"]);
+  } finally {
+    rmSync(dir, { recursive: true, force: true });
+  }
+});
