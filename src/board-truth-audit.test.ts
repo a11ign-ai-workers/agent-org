@@ -94,6 +94,15 @@ test("(2) an open row a merged PR closes is found; one a PR names with `Closes: 
   assert.deepEqual(found({ openRows: [row(10, ["ready"])], mergedPrs: [{ number: 900, body: "Closes other/repo#10" }] }, QUESTIONS.CLOSER_MERGED), []);
 });
 
+test("(2) a merged PR that names its row by repository closes that row of this tracker, and no row of another repository (a11ign/agent-org#1280)", () => {
+  const merged = (body: string) => facts({ repo: "a11ign/agent-org", openRows: [row(10, ["ready"]), row(1204, ["backlog"])], mergedPrs: [{ number: 579, body }] });
+  assert.deepEqual(found(merged("Closes a11ign/agent-org#1204"), QUESTIONS.CLOSER_MERGED), [1204], "agent-org#1204 is open and its PR merged: the qualified line names it");
+  assert.deepEqual(found(merged("Closes A11IGN/agent-org#1204"), QUESTIONS.CLOSER_MERGED), [1204], "GitHub reads the owner and name case-insensitively");
+  assert.deepEqual(found(merged("Closes #10, a11ign/agent-org#1204 and #1205"), QUESTIONS.CLOSER_MERGED), [10, 1204], "a list may mix the two forms; #1205 is open nowhere here");
+  assert.deepEqual(found(merged("Closes #1204"), QUESTIONS.CLOSER_MERGED), [1204], "unqualified still means a row of the tracker the PR is read for");
+  assert.deepEqual(found(merged("Closes other/repo#1204"), QUESTIONS.CLOSER_MERGED), [], "a row number in another repository never closes this tracker's row");
+});
+
 test("(2) the copied `Closes` parser reads every body as `declaredRowsFromBody` does", () => {
   const bodies = ["Closes #10", "Closes: #10, #11", "closes #10 and #11", "Closes: none -- a docs change", "Closes other/repo#10", "Closes #10, other/repo#11", "Acceptance: x\nCloses #4\nCloses #5", "", "prose Closes #10 mid-line", null];
   for (const body of bodies) assert.deepEqual(closesOf(body), declaredRowsFromBody(body), JSON.stringify(body));
@@ -372,6 +381,7 @@ test("the reader: a failed closed-row or merged-PR read is UNREAD (null), a part
   const read = readBoardFacts("a/b", { run, agents: () => standing, now: NOW, trackers: [] });
   assert.equal(read.closedRows, null);
   assert.deepEqual(read.mergedPrs, [{ number: 900, body: "Closes #10" }]);
+  assert.equal(read.repo, "a/b", "the tracker's own repository is what a qualified Closes is matched against (#1280)");
   assert.deepEqual(read.liveSessions, ["ceo", "orchestrator", "worker-11"]);
   assert.equal(read.waitFacts, null, "the wait facts are the tick's, so they are unread here");
   assert.ok(calls.filter((args) => args[0] !== "api").every((args) => args.slice(-2).join(" ") === "--repo a/b"));
