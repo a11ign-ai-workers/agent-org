@@ -3,10 +3,14 @@
 Acceptance:
 
 ```bash
-cd ~/repos/agent-org && node --test src/ci-failure-class-boards.test.ts
+node --test src/ci-failure-class-boards.test.ts
 ```
 
 Closes a11ign/a11ign#5405
+
+Acceptance note: the row writes `cd ~/repos/agent-org && node --test ...`. A leading `cd` runs in the primary checkout (`~/repos/agent-org`, detached at v0.191.2), which does not hold this test until it merges, so the row's form cannot pass from this branch. The command above runs in this branch's own tree, which is what the PR's Acceptance means. Product-manager should correct the row's command.
+
+Mutation: (A) the filed row is not boarded, (B) the next tick never boards the row it joins, (C) a row already carrying out-of-release is boarded again; each made the new test file go red, and each was reverted to the committed file.
 
 Measured: the command above printed `pass 3, fail 0` at this head (rebased onto the fetched main tip b7bf31ac). `pnpm exec rstest run` over `src/ci-failure-class-boards.test.ts`, `src/ci-failure-class.test.ts` and `src/packaging/gh-call-ratchet.test.ts` printed `VERDICT pass: 40 tests in 3 files`. Mutations, each run and reverted to the committed file: (A) the filed row is not boarded -- the card-then-Backlog test and the refused-board test fail; (B) the next tick never boards the row it joins -- the refused-board test fails; (C) a row already carrying `out-of-release` is boarded again -- the already-boarded test fails.
 
