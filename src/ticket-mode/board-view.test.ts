@@ -48,11 +48,11 @@ test("toggling adds or removes a value and leaves the old set alone", () => {
   assert.deepEqual([...before], ["Backlog"]);
 });
 
-test("folded groups and chosen projects are remembered, and a browser that refuses storage or holds junk gets the defaults", () => {
+test("open sections and chosen projects are remembered, and a browser that refuses storage or holds junk gets the defaults", () => {
   const kept = new Map<string, string>();
   const storage = { getItem: (name: string) => kept.get(name) ?? null, setItem: (name: string, value: string) => { kept.set(name, value); } };
-  remember(storage, "ticket-mode.folded", new Set(["Backlog", "Todo"]));
-  assert.deepEqual([...recall(storage, "ticket-mode.folded")], ["Backlog", "Todo"]);
+  remember(storage, "ticket-mode.open", new Set(["Backlog", "Todo"]));
+  assert.deepEqual([...recall(storage, "ticket-mode.open")], ["Backlog", "Todo"]);
   const refusing = { getItem: () => { throw new Error("SecurityError"); }, setItem: () => { throw new Error("QuotaExceeded"); } };
   assert.deepEqual([...recall(refusing, "x")], []);
   assert.doesNotThrow(() => remember(refusing, "x", new Set(["a"])));
