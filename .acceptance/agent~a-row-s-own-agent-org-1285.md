@@ -8,4 +8,4 @@ Measured: against the original `row-claim.ts` from HEAD, 4 of 6 fail (the adopti
 
 Not here, and named: an origin-only branch with no local ref still goes through `rowBranchRefusal` as before; this change covers a local branch only. The repository declares no lint script or lint configuration, so lint was not run.
 
-Closes a11ign/a11ign#1285
+Closes a11ign/agent-org#1285
