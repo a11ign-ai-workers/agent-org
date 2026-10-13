@@ -1,3 +1,4 @@
+// no-token: gh -- recordClaimRefusal writes only the ledger file, under a temporary directory; every refusal here is a fixed text, and nothing in this file spawns gh.
 /**
  * `src/row-claim.ts`, agent-org#1262 (a11ign/a11ign#5282, class `claim-refused`): A REFUSAL THAT IS THE CLAIM GUARD WORKING IS NOT A FAILURE OF THE CLAIM PATH.
  * The worktree cap, a B4 overlap and a tree that already exists are written as `claim-guard-held`, which `class-repeat` does not count; the four failures (an unreadable

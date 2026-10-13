@@ -14,4 +14,4 @@ Affected suites, `node --test` from the worktree, after merging `origin/main` in
 
 Named, not changed here: `.agent-org/failure-classes.json` in `a11y-witness` still says a `claim-refused` refusal is the claim guard working. That file lives in another repository and the row says read it only, so its guardNote is left as it is.
 
-Hand-run: the Acceptance command is refused in CI's `acceptance` job because `src/row-claim.ts` reaches `gh` through its import closure (`ensureLabelsExist`), and that job has no credential. The test itself needs none: `recordClaimRefusal` writes only the ledger file. Run by hand from the worktree with `GH_TOKEN` and `GITHUB_TOKEN` unset: 5 of 5 pass.
+CI's `acceptance` job refused the command while the test had no `// no-token:` declaration, because `src/row-claim.ts` reaches `gh` through its import closure (`ensureLabelsExist`) and that job has no credential. The test's first line now declares `// no-token: gh`: `recordClaimRefusal` writes only the ledger file, and nothing in the test spawns `gh`. Run from the worktree with `GH_TOKEN` and `GITHUB_TOKEN` unset: 5 of 5 pass.
