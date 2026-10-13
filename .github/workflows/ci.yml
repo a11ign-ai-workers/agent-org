@@ -61,7 +61,7 @@ jobs:
   # (run 38391781529, 2026-10-13), and most of that is tests that spawn processes, which no worker cap speeds up on a runner they share. rstest splits the files
   # by count, and that run's per-file times put each quarter at 95 to 115 s. `gate` needs `suite`, whose result is `success` only when every shard's is, and
   # `fail-fast` is off, so one red shard does not cancel the others before they report. A step that reads the whole tree rather than running tests runs on shard 1 only.
-  # The matrix is the one place the count is written: every step reads it as `strategy.job-total`.
+  # The matrix is the one place the count is written: every step reads it as `strategy.job-total`, and a script reads it by `env:`, so `ci-suite-shards.test.ts` can run it.
   suite:
     strategy:
       fail-fast: false
@@ -151,6 +151,8 @@ jobs:
       - name: Every test file is run by rstest
         if: matrix.shard == 1
         working-directory: project
+        env:
+          SHARDS: ${{ strategy.job-total }}
         run: |
           # `comm` needs its inputs in the order `sort` made, and the two disagree about punctuation in a UTF-8 locale: byte order for both.
           export LC_ALL=C
@@ -163,7 +165,7 @@ jobs:
           missing=$(comm -23 <(echo "$ondisk") <(echo "$listed"))
           [ -z "$missing" ] || { echo "run by NO runner:"; echo "$missing"; exit 1; }
           # THE SHARDS TOGETHER ARE EVERY FILE, EACH ONCE: a file no shard lists would never run, and one two shards list would run twice.
-          sharded=$(for i in $(seq 1 ${{ strategy.job-total }}); do NO_COLOR=1 $rstest list --config "$config" --filesOnly --shard "$i/${{ strategy.job-total }}" | grep -E '^src/.*\.test\.(ts|mjs)$'; done | sort)
+          sharded=$(for i in $(seq 1 "$SHARDS"); do NO_COLOR=1 $rstest list --config "$config" --filesOnly --shard "$i/$SHARDS" | grep -E '^src/.*\.test\.(ts|mjs)$'; done | sort)
           [ "$sharded" = "$listed" ] || { echo "the shards do not list every file exactly once:"; diff <(echo "$listed") <(echo "$sharded"); exit 1; }
       - name: The tool's suite under rstest -- this shard's share of every *.test.ts and *.test.mjs, run from the project's root, with --trace
         working-directory: project
@@ -171,7 +173,9 @@ jobs:
           # The copy above has no `.git`, so a pinned population cannot read its base from where it sits. This is the checkout it was copied from, and the one place
           # that names it (`TOOL_REPO_ENV` in `lib/pin-ratchet.mjs`); without it the pins are judged STRICTLY, every entry declared and nothing grandfathered.
           AGENT_ORG_TOOL_REPO: ${{ github.workspace }}
-        run: node_modules/.bin/rstest run --config packages/agent-org/scripts/rstest/rstest.config.ts --trace --shard ${{ matrix.shard }}/${{ strategy.job-total }} # in-project
+          SHARD: ${{ matrix.shard }}
+          SHARDS: ${{ strategy.job-total }}
+        run: node_modules/.bin/rstest run --config packages/agent-org/scripts/rstest/rstest.config.ts --trace --shard "$SHARD/$SHARDS" # in-project
       # A CACHE THAT IS NEVER WRITTEN RESTORES NOTHING AND STILL READS GREEN (a11ign/a11ign#1319): the build cache is on, so the directory must now hold files, or the HIT or MISS line above describes
       # a cache that does not exist.
       - name: rstest build cache must hold files after the tests
