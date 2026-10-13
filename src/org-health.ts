@@ -73,7 +73,7 @@ import { sandboxGitEnv } from "./lib/git-env.ts";
 import { isAppLogin, spenderPhraseFor } from "./gh-ledger.ts";
 import { GITHUB_ROLES, homeHostConfig, hostConfigPath, roleIdentity, stateEntryPath, type HostConfig } from "./host-config.ts";
 // A LEAF too (node builtins only): the append-only log of events that never become a closed row, where a refused claim is written and read back.
-import { CLAIM_REFUSED_KIND, FAILURE_LEDGER_FILE, parseFailureLedger } from "./failure-ledger.ts";
+import { CLAIM_GUARD_HELD_KIND, CLAIM_REFUSED_KIND, FAILURE_LEDGER_FILE, parseFailureLedger } from "./failure-ledger.ts";
 // A LEAF (`claim-labels.ts` imports nothing), so the label is read from where it is declared, as `repeating-lines.ts` does.
 import { READY_LABEL, STATE_LABELS, stateLabelFindings } from "./claim-labels.ts";
 import { boardTruthTable } from "./board-truth-audit.ts";
@@ -700,7 +700,7 @@ export function claimRefusalStormReading({ now, refusals }: { now: number; refus
 }
 
 /**
- * THE FACT FOR `claimRefusalStormReading`: the failure ledger's `claim-refused` lines. A ledger that is not there is `[]`, because nothing has written one, which is what a
+ * THE FACT FOR `claimRefusalStormReading`: the failure ledger's `claim-refused` lines and its `claim-guard-held` lines (agent-org#1262: the guard working still counts as a refusal here). A ledger that is not there is `[]`, because nothing has written one, which is what a
  * host that has refused no claim holds; one that cannot be read, or holds a line that does not parse (`parseFailureLedger` throws, an event read wrong is a storm drawn
  * wrong), is `null`. NEVER THROWS.
  */
@@ -714,7 +714,7 @@ export function readClaimRefusals({ path, read = (file) => readFileSync(file, "u
       if ((err as NodeJS.ErrnoException | null)?.code === "ENOENT") return [];
       throw err;
     }
-    return parseFailureLedger(text, file).filter((entry) => entry.classKey === CLAIM_REFUSED_KIND).map(({ at, ref }) => ({ at, reason: ref }));
+    return parseFailureLedger(text, file).filter((entry) => entry.classKey === CLAIM_REFUSED_KIND || entry.classKey === CLAIM_GUARD_HELD_KIND).map(({ at, ref }) => ({ at, reason: ref }));
   } catch {
     return null;
   }

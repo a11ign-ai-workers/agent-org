@@ -89,7 +89,7 @@ import { templateFieldsReason, lookupIssueBody } from "./row-claim/template-fiel
 import { scopeHash, claimedScopeOf, CLAIM_RECORD_SCOPE } from "./claim-scope.ts"; // #4759: the leaf the tick compares the record with the live row from
 import { staleRuleReason } from "./row-claim/stale-rule-guard.ts";
 import { stateEntryPath } from "./host-config.ts";
-import { CLAIM_REFUSED_KIND, FAILURE_LEDGER_FILE, recordFailure } from "./failure-ledger.ts"; // #972: a refusal is a line of the ledger the storm signal reads
+import { CLAIM_GUARD_HELD_KIND, CLAIM_REFUSED_KIND, FAILURE_LEDGER_FILE, recordFailure } from "./failure-ledger.ts"; // #972: a refusal is a line of the ledger the storm signal reads
 // #2031 EXTRACTED THE RULE THIS FILE DEFINED, and the extraction is the whole of this file's change.
 // `work-gate.ts` now asks the same question of every Ready row, and #2031's own filing names the reason
 // it may not re-derive it: "both parse a trailing `-<n>` out of an `ls-remote` listing, and #2014's
@@ -1072,8 +1072,21 @@ export function failureReport(error: unknown): { exitCode: number; text: string;
 }
 
 /**
- * #972: EVERY REFUSAL THIS FILE PRINTS (`NOT CLAIMED:` or `COULD NOT DETERMINE:`) IS ALSO ONE `claim-refused` LINE OF THE FAILURE LEDGER, the line `claimRefusalStormReading`
- * (agent-org#889) counts. The reason is the refusal's FIRST line, with its tabs spaced out, so the line parses. Called AFTER the verdict is printed and never throws into the claim:
+ * agent-org#1262: THE REFUSALS THAT ARE THE CLAIM GUARD WORKING, by the text each guard prints. A refusal matching one is `claim-guard-held`, so it is no class and no repeat; the
+ * worktree cap (#1036), a B4 overlap (`overlaps #N`, `overlaps the Region of #N`), a tree or branch that already exists, and a read the rate limit refused. Everything else is a
+ * FAILURE of the claim path (an unreadable read that is not a rate limit, B4 not askable, a rule copy behind the release, an unknown tracker key) and stays `claim-refused`.
+ * A NEW guard refusal counts as a failure until it is named here: the default errs toward the signal, never away from it.
+ */
+const GUARD_HELD_REFUSALS: readonly RegExp[] = [/live worktrees, at or over the cap of/, /ALREADY EXISTS/, /\boverlaps (?:the Region of )?#\d+/, /\brate limit\b/i];
+
+/** @param {string} refusal the whole refusal text @returns {string} the failure-ledger kind it is written under */
+function claimRefusalKind(refusal: string): string {
+  return GUARD_HELD_REFUSALS.some((pattern) => pattern.test(refusal)) ? CLAIM_GUARD_HELD_KIND : CLAIM_REFUSED_KIND;
+}
+
+/**
+ * #972: EVERY REFUSAL THIS FILE PRINTS (`NOT CLAIMED:` or `COULD NOT DETERMINE:`) IS ALSO ONE LINE OF THE FAILURE LEDGER, the line `claimRefusalStormReading`
+ * (agent-org#889) counts: `claim-refused` for a failure of the claim path, `claim-guard-held` for the guard working (agent-org#1262). The reason is the refusal's FIRST line, with its tabs spaced out, so the line parses. Called AFTER the verdict is printed and never throws into the claim:
  * an append that is refused is said on stderr by `recordFailure`, and the verdict and exit code are what they were. A landed claim is never passed here.
  * @param {string} refusal the text after the prefix
  * @param {{ logPath?: string, now?: number }} [where] the ledger (the host's, by default) and the time (now, by default)
@@ -1081,7 +1094,7 @@ export function failureReport(error: unknown): { exitCode: number; text: string;
 export function recordClaimRefusal(refusal: string, { logPath = stateEntryPath(FAILURE_LEDGER_FILE), now = Date.now() }: { logPath?: string; now?: number; } = {}): void {
   try {
     const ref = refusal.split("\n")[0].replace(/\t/g, " ").trim() || "no reason given";
-    recordFailure({ logPath, classKey: CLAIM_REFUSED_KIND, ref, now });
+    recordFailure({ logPath, classKey: claimRefusalKind(refusal), ref, now });
   } catch (cause) {
     process.stderr.write(`row-claim: could not record a refusal in the failure ledger (${String((cause as Error)?.message ?? cause).split("\n")[0]}) -- the verdict stands.\n`);
   }

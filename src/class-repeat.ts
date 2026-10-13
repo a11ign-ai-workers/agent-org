@@ -12,7 +12,7 @@ import { createHash } from "node:crypto";
 import { mkdirSync, readFileSync, realpathSync, renameSync, writeFileSync } from "node:fs";
 import { dirname, join } from "node:path";
 import { fileURLToPath, pathToFileURL } from "node:url";
-import { FAILURE_LEDGER_FILE, UNCLASSIFIED_KIND, UNIDENTIFIED_CALLER_KIND, parseFailureLedger, repeatsIn } from "./failure-ledger.ts";
+import { CLAIM_GUARD_HELD_KIND, FAILURE_LEDGER_FILE, UNCLASSIFIED_KIND, UNIDENTIFIED_CALLER_KIND, parseFailureLedger, repeatsIn } from "./failure-ledger.ts";
 import { decisionLogPathFrom, decisionSwitchesPath, readSwitches, type DecisionDeps } from "./decision-provider.ts";
 import { matchFailureClass, recordLabelOutcome, type ClassMatch, type Incident } from "./class-match.ts";
 import { homeHostConfig, stateEntryPath, type HostConfig } from "./host-config.ts";
@@ -190,12 +190,12 @@ export function readClassRepeat(run: (args: string[]) => string, repo: string, i
  */
 export type ClassGroup = { id: string, entry: FailureClass | null, rows: ClassRow[], events: string[], eventsNewestAt: number | null };
 
-/** The ledger keys that COUNT orders (`prompt-session.ts`, #4452) and name no failure class; one list, imported from the ledger, not a second spelling. */
-const LEDGER_COUNTER_KINDS: ReadonlySet<string> = new Set([UNCLASSIFIED_KIND, UNIDENTIFIED_CALLER_KIND]);
+/** The ledger keys that COUNT and name no failure class: orders (`prompt-session.ts`, #4452) and the claim guard working (#1262); one list, imported from the ledger, not a second spelling. */
+const LEDGER_COUNTER_KINDS: ReadonlySet<string> = new Set([UNCLASSIFIED_KIND, UNIDENTIFIED_CALLER_KIND, CLAIM_GUARD_HELD_KIND]);
 
 /**
  * EVERY CLASS ID THE ROWS OR THE LEDGER NAME, with its rows newest first. One row under two classes is an instance of each. Membership is the label and, for a ledger kind, the kind's name
- * and nothing else. A ledger repeat of an id no row carries is a group with no rows. A ledger COUNTER (`unclassified`, `unidentified-caller-order`) is no class at all: it is left out, so it is neither a
+ * and nothing else. A ledger repeat of an id no row carries is a group with no rows. A ledger COUNTER (`unclassified`, `unidentified-caller-order`, and `claim-guard-held`, a refusal that is the guard working, agent-org#1262) is no class at all: it is left out, so it is neither a
  * stranger read as `UNKNOWN` every tick nor a candidate for a class row (#4618). A key that is neither indexed nor a counter is still a stranger, which is what the reading is for.
  * @param {FailureClass[]} index @param {ClassRow[]} rows @param {LedgerRepeat[]} [ledger] @returns {ClassGroup[]}
  */
