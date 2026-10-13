@@ -70,15 +70,40 @@ function readChoice(path: string, settings: TicketSettings): RunChoice {
   }
 }
 
-function validChoice(body: Json, settings: TicketSettings): RunChoice {
-  const repos = Array.isArray(body.repos) ? body.repos.map(String) : [];
+function checkRepos(repos: string[], settings: TicketSettings): void {
   const unknown = repos.filter((repo) => !(repo in settings.clones));
   if (unknown.length > 0) throw new Error(`not in the host file's clones: ${unknown.join(", ")}`);
+}
+
+function checkModel(model: string): void {
+  if (!MODELS.includes(model)) throw new Error(`model must be one of ${MODELS.join(", ")}`);
+}
+
+function checkEffort(effort: string): void {
+  if (!EFFORTS.includes(effort)) throw new Error(`effort must be one of ${EFFORTS.join(", ")}`);
+}
+
+function validChoice(body: Json, settings: TicketSettings): RunChoice {
+  const repos = Array.isArray(body.repos) ? body.repos.map(String) : [];
   const model = String(body.model ?? "");
   const effort = String(body.effort ?? "");
-  if (!MODELS.includes(model)) throw new Error(`model must be one of ${MODELS.join(", ")}`);
-  if (!EFFORTS.includes(effort)) throw new Error(`effort must be one of ${EFFORTS.join(", ")}`);
+  checkRepos(repos, settings);
+  checkModel(model);
+  checkEffort(effort);
   return { repos, model, effort };
+}
+
+/** An amend names only what it changes, and each part is held to the rules queueing uses. */
+function validAmend(body: Json, settings: TicketSettings): Partial<RunChoice> {
+  const change: Partial<RunChoice> = {};
+  if (body.repos !== undefined) {
+    if (!Array.isArray(body.repos)) throw new Error("repos must be a list");
+    change.repos = body.repos.map(String);
+    checkRepos(change.repos, settings);
+  }
+  if (body.model !== undefined) { change.model = String(body.model); checkModel(change.model); }
+  if (body.effort !== undefined) { change.effort = String(body.effort); checkEffort(change.effort); }
+  return change;
 }
 
 /** The request handler, with every dependency named, so a test drives it without a socket. */
@@ -125,7 +150,7 @@ export function createBoard(deps: BoardDeps) {
     const action = /^\/api\/queue\/([A-Za-z0-9_-]+)\/(amend|remove|retry|stop)$/.exec(path);
     if (method === "POST" && action) {
       const [, key, verb] = action;
-      if (verb === "amend") store.set(amend(queue, key, { ...(body.repos ? { repos: (body.repos as unknown[]).map(String) } : {}), ...(body.model ? { model: String(body.model) } : {}), ...(body.effort ? { effort: String(body.effort) } : {}) }));
+      if (verb === "amend") store.set(amend(queue, key, validAmend(body, settings)));
       if (verb === "remove") store.set(remove(queue, key));
       if (verb === "retry") store.set(retry(queue, key, now()));
       if (verb === "stop") pool.stop(key);

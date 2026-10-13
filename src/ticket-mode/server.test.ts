@@ -61,6 +61,19 @@ test("a repository not in the host file, an unknown model or an unknown ticket i
   assert.deepEqual(b.store.get().entries, []);
 });
 
+test("an amend is held to the rules queueing uses: an unknown repository, model or effort is refused and the entry is unchanged", async () => {
+  const b = board();
+  await b.api("GET", "/api/tickets", {});
+  await b.api("POST", "/api/queue", { keys: ["NBF-1"], repos: ["nbl-ui-netbox"], model: "opus", effort: "high" });
+  const before = JSON.stringify(b.store.get());
+  await assert.rejects(b.api("POST", "/api/queue/NBF-1/amend", { repos: ["nbl-ui-elsewhere"] }), /not in the host file's clones/);
+  await assert.rejects(b.api("POST", "/api/queue/NBF-1/amend", { model: "gpt" }), /model must be one of/);
+  await assert.rejects(b.api("POST", "/api/queue/NBF-1/amend", { effort: "extreme" }), /effort must be one of/);
+  assert.equal(JSON.stringify(b.store.get()), before);
+  await b.api("POST", "/api/queue/NBF-1/amend", { model: "sonnet", repos: ["platform-monorepo"] });
+  assert.deepEqual(b.store.get().entries.map((e) => [e.repos, e.model, e.effort]), [[["platform-monorepo"], "sonnet", "high"]]);
+});
+
 test("remove, stop and max go through the board", async () => {
   const b = board();
   await b.api("GET", "/api/tickets", {});
