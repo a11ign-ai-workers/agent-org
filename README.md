@@ -69,6 +69,46 @@ The trade-offs, which are why this is an option and not the default:
 - **The key is a standing secret** on the host; a leaked token is good for an hour, a leaked key until the app's key is revoked.
 - **The minter needs `node` and the network**; with neither the role runs on its personal account and the incident says so.
 
+## Ticket mode: a local board that turns the tickets you pick into draft pull requests
+
+The org (the gate, rows, the board, the reviewer) decides its own work. Ticket mode does not: you pick tickets, and a pool of Claude workers
+takes them one each. `agent-org ticket:serve` starts a board on `127.0.0.1` and prints its URL, which carries a one-time token.
+
+- **Pick.** Your assigned Linear tickets that are not done or canceled, grouped by status the way Linear shows them, with Select All per
+  group and for the page. Choose the repositories each ticket goes to (one or several), the model and the effort, then Queue.
+- **Board.** Queued, Running, Draft PR, Needs human and Failed. A card can be removed while queued, stopped while running, and retried
+  once it has failed. The number of workers at once can be changed live.
+
+Each run gets a worktree per repository at `<worktreeRoot>/<ticket>/<repo>`, on the ticket's own branch (`branchName` in Linear, so Linear
+links the pull request), from the remote's default branch as `ls-remote` reports it. One herdr workspace per ticket opens in ticket mode's
+own session, never the org's, and Claude starts there with its brief. The worker reads each repository's `CLAUDE.md`/`AGENTS.md` for its
+commands, opens a DRAFT pull request per repository it changed, and writes an outcome file: `draft-pr`, `wrong-repo` or `needs-human`.
+Nothing is written to Linear.
+
+**What a worker may not do** is enforced by `ticket:hook`, which the worktree's `.claude/settings.local.json` names, so a session herdr
+resumes after a restart keeps it. A stop with no outcome file is refused twice in a row. These are refused outright: a pull request that
+is not a draft, `gh pr ready`, `merge` and `review`, requesting a reviewer, `gh workflow run`, a force push, and every MCP connector.
+
+**Configuration** is machine facts only, in the host file `$AGENT_ORG_HOST` names. Only `clones` is required, and it lists every repository
+the board offers:
+
+```json
+{ "clones": { "nbl-ui-netbox": "/path/to/nbl-ui-netbox", "platform-monorepo": "/path/to/platform-monorepo" },
+  "tickets": { "max": 3 } }
+```
+
+| key | default |
+|---|---|
+| `tickets.max` | `3` workers at once. A new one also waits while the 1-minute load average is above the core count |
+| `tickets.port` | `4747` |
+| `tickets.herdrSession` | `tickets` |
+| `tickets.worktreeRoot` | `<stateDir>/tickets/worktrees` |
+| `tickets.linearKey` | `{ "keychain": "agent-org-linear" }` (macOS Keychain service), or `{ "path": "/abs/file" }` |
+| `stateDir` | `~/.local/state/agent-org`: the queue, each ticket's brief, attachments and outcome |
+
+The Linear key is a personal API key, so ticket mode reads as you and needs no workspace admin. On macOS, store it once with
+`security add-generic-password -a "$USER" -s agent-org-linear -w`, which prompts for it without echoing it.
+
 ## What an install holds
 
 `src/` (the programs and their data, without `*.test.*`), `host/` (the unit templates `host:install` reads), `LICENSE`, `README.md` and
