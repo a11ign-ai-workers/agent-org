@@ -3,8 +3,10 @@ The reviewer reviews with a `row-review` skill (Spec item table, Tests and corre
 Acceptance:
 
 ```bash
-bash -c 'cd ~/repos/agent-org && npx rstest run --config scripts/rstest/rstest.config.ts src/review-eval.test.ts && node scripts/review-eval.ts --set blind-2026-10-12 --require 9/11'
+npx rstest run --config scripts/rstest/rstest.config.ts src/review-eval.test.ts
 ```
+
+Hand-run: the row's Acceptance is `bash -c 'cd ~/repos/agent-org && npx rstest run --config scripts/rstest/rstest.config.ts src/review-eval.test.ts && node scripts/review-eval.ts --set blind-2026-10-12 --require 9/11'`. Its `cd` into the primary checkout would read a tree that carries this change only after the merge, and its second command is a live eval (`codex exec` over eleven pull requests, about eight minutes, which CI's acceptance job has neither the model nor the network for). So the unit test above is what CI runs, and the eval is run on the host from this worktree: `node scripts/review-eval.ts --set blind-2026-10-12 --require 9/11` (its output is quoted below). After the merge the row's own line is the same two commands in the primary checkout.
 
 Closes a11ign/agent-org#1268
 
