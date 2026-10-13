@@ -11,6 +11,8 @@ import { isBrokenRed } from "./red-pr.ts";
 
 export const PIN_BUMP_WINDOW_DAYS = 7;
 export const STUCK_RENOVATE_PR_MINUTES = 60;
+/** THE FLAG THAT PUTS THE COUNT ON #928 (agent-org#1245): default OFF, switched by `machinery:flag`, read by `org-retro.ts`. */
+export const PIN_BUMP_FLAG = "retro.pinBump";
 
 const MS_PER_MINUTE = 60_000;
 const MS_PER_DAY = 24 * 60 * MS_PER_MINUTE;
@@ -69,6 +71,18 @@ export function pinBumpMeasure({ now, rows, repos }: { now: number; rows: FiledR
     pinRows: handFiledPinRowCount({ now, rows }),
     repos: repos.map(({ repo, prs }) => renovateCountOf({ now, repo, prs })),
   };
+}
+
+/**
+ * Whether `PIN_BUMP_FLAG` is ON in the canary state's text, the way `machineryFlagOn(parseCanaryState(text), name)` says it in org-health.ts. Written
+ * out here because org-health is a hub whose import graph reaches `gh`, and the daily reading must not reach it for one flag. The test holds the two equal.
+ * Absent or empty is OFF; a text that is not `{ flags, samples, memo }` throws; the flag is ON only when its record says `on: true`.
+ */
+export function pinBumpFlagOn(text: string | null): boolean {
+  if (text === null || text.trim() === "") return false;
+  const raw = JSON.parse(text) as { flags?: Record<string, { on?: boolean; } | undefined>; samples?: unknown; };
+  if (typeof raw !== "object" || raw === null || typeof raw.flags !== "object" || !Array.isArray(raw.samples)) throw new Error("machinery-canary.json is not { flags, samples, memo }");
+  return raw.flags?.[PIN_BUMP_FLAG]?.on === true;
 }
 
 /** The one line the daily reading posts on #928: both figures, the repository count, `unknown` where a read was refused, and the named thresholds. */

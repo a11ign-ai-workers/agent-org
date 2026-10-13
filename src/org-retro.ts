@@ -57,6 +57,8 @@ import { unwaitedStockRows, unwaitedLines, ghTrackerReader } from "./unwaited-st
 import { untieredReadyRows, untieredLines, ghReadyReader, untieredOffer, untieredSweepKey, parseUntieredMemory, UNTIERED_MEMORY_FILE, type UntieredRow } from "./untiered-ready-rows.ts";
 import { HAIKU_TIER_LABEL } from "./worker-profile.ts";
 // THE "UNDERSPECIFIED" FEEDBACK LOOP (a11ign#5117): a leaf, so the retro stays importable before any install.
+// THE PIN/BUMP COUNT (agent-org#1245): the leaf that counts it, and the one flag that puts it on #928 (`machinery:flag`, default OFF).
+import { PIN_BUMP_FLAG, PIN_BUMP_WINDOW_DAYS, pinBumpFlagOn, pinBumpLine, pinBumpMeasure, type FiledRow, type PinBumpMeasure, type RepoPrs } from "./pin-bump-measure.ts";
 import { UNNAMED_FIELD, underspecifiedLines, underspecifiedReading, underspecifiedStops, type UnderspecifiedReading } from "./spec-lint.ts";
 import { commentsSince } from "./ticket-port/comments-since.ts";
 import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5076: the claimed rows and the merged list are connections, never a search
@@ -493,7 +495,7 @@ export function buildReport(reads: {
         merged: any[] | null; mergedRepositories?: ReturnType<typeof readMerged> | null; openPrs: any[] | null; journal: string | null; ledger: string | null;
         turns: any[] | null; handFixes: ReturnType<typeof readHandFixLedger> | null; readings?: Readings; dora?: ReturnType<typeof readDora> | null;
         unwaited?: ReturnType<typeof unwaitedStockRows> | null; untiered?: ReturnType<typeof untieredReadyRows> | null; failureLedger?: string | null; blockingRecord?: string | null; idleClaims?: IdleClaimIncident[] | null; idleClaimedHours?: IdleClaimedHours | null; mergedRowOpen?: MergedRowOpenIncident[] | null; inertOptions?: InertOptionReading | null; safetyDenials?: SafetyCheckDenialReading | null;
-        underspecified?: UnderspecifiedReading | null; closedSharedRows?: any[] | null;
+        underspecified?: UnderspecifiedReading | null; closedSharedRows?: any[] | null; pinBump?: PinBumpMeasure | null;
     }, now: number) {
   const window = { since: now - WINDOW_MS, until: now };
   const lines = reads.journal === null ? null : journalLines(reads.journal, window);
@@ -513,6 +515,7 @@ export function buildReport(reads: {
     handFixes: reads.handFixes,
     corrections: correctionsPerDay(parsedFailureLedger(reads.failureLedger), new Date(now)),
     unwaited: reads.unwaited ?? null,
+    pinBump: reads.pinBump ?? null,
     untiered: reads.untiered ?? null,
     blocking: topBlockerOf(reads.blockingRecord, now),
     circularWaits: circularWaitsOf(reads.blockingRecord, now),
@@ -893,11 +896,16 @@ function sharedFailureLines(shared: SharedFailures): string[] {
  * The report as the text `ceo` is handed and posts on #928.
  * @param {ReturnType<typeof buildReport>} report @returns {string}
  */
+/** The pin/bump line (agent-org#1245): one line when the flag is ON, and none when it is OFF, so a report with the flag off is the report it was. */
+function pinBumpLines(measure: PinBumpMeasure | null): string[] {
+  return measure === null ? [] : [pinBumpLine(measure)];
+}
+
 export function renderReport(report: ReturnType<typeof buildReport>): string {
   const from = new Date(report.window.since).toISOString();
   const to = new Date(report.window.until).toISOString();
   return [`ORG RETROSPECTIVE ${report.date} -- the 24 hours ${from} to ${to}`, "",
-    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...blockingLines(report.blocking), ...circularWaitLines(report.circularWaits), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...sharedFailureLines(report.sharedFailures), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...underspecifiedLines(report.underspecified), ...specLintRefusedLines(report.specLintRefused), ...emergencyPriorityLines(report.emergencyPriority), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
+    ...mergedLines(report), ...stallLines(report), ...journalDerivedLines(report), ...redLines(report.red), ...pinBumpLines(report.pinBump), ...blockingLines(report.blocking), ...circularWaitLines(report.circularWaits), ...idleClaimLines(report.idleClaims), ...idleClaimedHoursLines(report.idleClaimedHours), ...mergedRowOpenLines(report.mergedRowOpen), ...inertOptionLines(report.inertOptions), ...safetyDenialLines(report.safetyDenials), ...sharedFailureLines(report.sharedFailures), ...spendLines(report), ...unwaitedLines(report.unwaited), ...untieredLines(report.untiered), ...underspecifiedLines(report.underspecified), ...specLintRefusedLines(report.specLintRefused), ...emergencyPriorityLines(report.emergencyPriority), ...doraLines(report.dora), ...trendLines(report), ""].join("\n");
 }
 
 /**
@@ -1263,6 +1271,26 @@ function readOpenRows({ repo, read }: { repo: string; read: (args: string[]) => 
     ...(claims.has(row.number) ? { claimedAt: claimedAtOf(claims.get(row.number)!) } : {}) }));
 }
 
+/** The canary state file's name: `CANARY_STATE_FILE` in org-health.ts, written out here because org-health is a hub this leaf does not reach. */
+const CANARY_STATE = "machinery-canary.json";
+
+/** Whether `PIN_BUMP_FLAG` is ON. Absent or unreadable is OFF: `pinBumpFlagOn` throws on a file that is not a canary state, and `attemptDora` answers that as `null`. */
+const readPinBumpFlag = (stateDir: string): boolean => attemptDora(() => pinBumpFlagOn(readText(join(stateDir, CANARY_STATE)))) === true;
+
+/**
+ * THE PIN/BUMP READ (agent-org#1245), made only when `PIN_BUMP_FLAG` is ON: the home repository's issues, all states, read as a plain list (never a
+ * search, #5074), and every population repository's open pull requests. A list at its ceiling or refused is `null`, and the leaf counts a `null` as `unknown`, never 0.
+ */
+export function pinBumpRead({ now, read = ghJson, declaration = homeProjectDeclaration() }: { now: number; read?: (args: string[]) => any[] | null; declaration?: { repo: string; dora: { repo: string; }[]; }; }): PinBumpMeasure {
+  const issues = listRead(read, ["issue", "list", "-R", declaration.repo, "--state", "all", "--limit", String(LIST_LIMIT), "--json", "title,body,author,createdAt"]);
+  const rows: FiledRow[] | null = issues === null ? null : issues.map((row) => ({ title: row.title ?? "", body: row.body ?? null, author: row.author?.login ?? null, createdAt: row.createdAt }));
+  const repos: RepoPrs[] = mergedPopulation(declaration).map((repo) => {
+    const prs = listRead(read, ["pr", "list", "-R", repo, "--state", "open", "--limit", String(LIST_LIMIT), "--json", "number,author,createdAt,statusCheckRollup,labels"]);
+    return { repo, prs: prs === null ? null : prs.map((pr) => ({ ...pr, author: pr.author?.login ?? null })) };
+  });
+  return pinBumpMeasure({ now, rows, repos });
+}
+
 /**
  * THE RETRO'S MEMORY OF ITS MERGED READS AND ACCEPTANCE FILES (agent-org#1081), kept in the state entry (`RETRO_READS_FILE`) by the gate's daily pass only.
  * `marks`: per `repo|select`, the merged rows the last walk left and the newest `updatedAt` it saw; a later walk reads only the pages above that mark.
@@ -1520,12 +1548,13 @@ function retroClasses({ now, stateDir, unit = "a11ign-work-tick.service", memory
   readInertOptionReading = (at, recorded) => attemptDora(() => readInertOptions({ now: at, recorded, memory })),
   readDenials = (at) => readSafetyCheckDenials({ since: at - WINDOW_MS }),
   readUnderspecifiedStops = (at) => attemptDora(() => readUnderspecified({ now: at })),
-  readSharedRows = readClosedSharedRows }: {
+  readSharedRows = readClosedSharedRows, pinBumpOn = () => readPinBumpFlag(stateDir), readPinBump = (at) => pinBumpRead({ now: at }) }: {
         now: number; stateDir: string; unit?: string; memory?: RetroReads; readHandFixes?: (now: number) => ReturnType<typeof readHandFixLedger>;
         readDoraReport?: (now: number) => ReturnType<typeof readDora> | null; readUnwaited?: (now: number) => ReturnType<typeof unwaitedStockRows>; readUntiered?: () => ReturnType<typeof untieredReadyRows>; readMergedRepositories?: (now: number) => ReturnType<typeof readMerged>;
         readAgentListing?: () => Agent[] | null; readIdleHours?: (now: number) => IdleClaimedHours | null; readOpenRowIncidents?: (now: number) => MergedRowOpenIncident[] | null;
         readInertOptionReading?: (now: number, recorded: string[]) => InertOptionReading | null; readDenials?: (now: number) => SafetyCheckDenialReading | null;
         readUnderspecifiedStops?: (now: number) => UnderspecifiedReading | null; readSharedRows?: () => any[] | null;
+        pinBumpOn?: () => boolean; readPinBump?: (now: number) => PinBumpMeasure;
     }) {
   const since = now - WINDOW_MS;
   return [
@@ -1558,6 +1587,8 @@ function retroClasses({ now, stateDir, unit = "a11ign-work-tick.service", memory
     // a declaration that will not parse is a refused read, like the DORA one
     { name: "unwaited", read: () => ({ unwaited: attemptDora(() => readUnwaited(now)) }) },
     { name: "untiered", read: () => ({ untiered: attemptDora(() => readUntiered()) }) },
+    // THE PIN/BUMP COUNT (agent-org#1245): a class of its own, so a flag that is OFF makes none of its reads
+    ...(pinBumpOn() ? [{ name: "pin and bump", read: () => ({ pinBump: readPinBump(now) }) }] : []),
     { name: "dora", read: () => ({ dora: attemptDora(() => readDoraReport(now)) }) },
   ];
 }
