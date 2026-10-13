@@ -52,7 +52,7 @@ const TICKETS = [
 ];
 
 /** Run the page's script against a fake document, with `storage` as its localStorage. Resolves once the first render has happened. */
-async function page(storage: Map<string, string>, config: Record<string, unknown> = {}) {
+async function page(storage: Map<string, string>, config: Record<string, unknown> = {}, entries: unknown[] = []) {
   const byId = new Map<string, Node_>();
   const posts: { path: string; body: any }[] = [];
   const document = {
@@ -65,7 +65,7 @@ async function page(storage: Map<string, string>, config: Record<string, unknown
     const body = init.body === undefined ? undefined : JSON.parse(init.body);
     if (init.method === "POST") posts.push({ path, body });
     const value = path === "/api/config" ? { models: ["opus"], efforts: ["high"], choice: { model: "opus", effort: "high" }, max: 3, ...config }
-      : path === "/api/tickets" ? TICKETS : { entries: [], max: 3, paused: true };
+      : path === "/api/tickets" ? TICKETS : { entries, max: 3, paused: true };
     return { ok: true, json: async () => value, statusText: "" };
   };
   const localStorage = { getItem: (k: string) => storage.get(k) ?? null, setItem: (k: string, v: string) => { storage.set(k, v); } };
@@ -144,4 +144,50 @@ test("Select all takes the visible tickets, and Queue sends exactly those with t
   const body = p.posts.find((x) => x.path === "/api/queue")?.body;
   assert.deepEqual(body?.keys, ["T-1", "T-3"], "T-2 and T-4 are filtered out");
   assert.equal("repos" in (body ?? {}), false, "the worker chooses the repository");
+});
+
+const entry = (key: string, fields: Record<string, unknown>) => ({ ticket: { key, title: `title ${key}`, url: "" }, repos: [], model: "opus", effort: "high", queuedAt: 1, ...fields });
+const RUNS = [
+  entry("Q-1", { phase: "queued" }),
+  entry("R-1", { phase: "running", startedAt: 5 }),
+  entry("W-1", { phase: "running", startedAt: 6, waiting: true }),
+  entry("D-1", { phase: "finished", startedAt: 2, finishedAt: 7, outcome: { kind: "draft-pr", prs: [{ repo: "nbl-ui-netbox", url: "https://github.com/x/y/pull/12" }] } }),
+  entry("M-1", { phase: "finished", startedAt: 2, finishedAt: 8, trackerState: "completed", outcome: { kind: "draft-pr", prs: [] } }),
+  entry("F-1", { phase: "finished", startedAt: 2, finishedAt: 3, outcome: { kind: "crashed", reason: "herdr refused" } }),
+];
+/** The runs view's rows and filter buttons, as the page drew them. */
+const runRows = (p: Awaited<ReturnType<typeof page>>) => p.$("runs").children.filter((n) => n.className === "run");
+const filterButton = (p: Awaited<ReturnType<typeof page>>, label: string) => p.$("filters").children.find((b) => b.children.some((c) => c.text() === label))!;
+
+test("the runs view lists every run with its status icon, most recently active first", async () => {
+  const p = await page(new Map(), {}, RUNS);
+  const rows = runRows(p);
+  assert.equal(rows.length, 6);
+  const icons = rows.map((r) => r.children[0].className);
+  assert.deepEqual(icons, ["icon st-completed", "icon st-awaiting-review", "icon st-needs-you", "icon st-working", "icon st-failed", "icon st-queued"]);
+});
+
+test("each filter shows its count, and choosing one shows only its runs and is remembered", async () => {
+  const storage = new Map<string, string>();
+  const p = await page(storage, {}, RUNS);
+  assert.equal(filterButton(p, "All runs").children.at(-1)!.text(), "6");
+  assert.equal(filterButton(p, "Needs you").children.at(-1)!.text(), "1");
+  assert.equal(filterButton(p, "Completed").children.at(-1)!.text(), "1");
+  assert.equal(filterButton(p, "Cancelled").children.at(-1)!.text(), "0");
+  filterButton(p, "Failed").fire("click");
+  assert.deepEqual(runRows(p).map((r) => r.children[0].className), ["icon st-failed"]);
+  assert.equal(filterButton(p, "Failed").attrs["aria-pressed"], "true");
+  assert.deepEqual(JSON.parse(storage.get("ticket-mode.run-filter")!), ["failed"]);
+  filterButton(p, "Cancelled").fire("click");
+  assert.equal(p.$("runs").text(), "No runs are cancelled.");
+});
+
+test("a row offers only the actions its state allows, and a completed run is not retried", async () => {
+  const p = await page(new Map(), {}, RUNS);
+  const buttons = (key: string) => runRows(p).find((r) => r.text().includes(key))!.all().filter((n) => n.tag === "button").map((b) => b.textContent);
+  assert.deepEqual(buttons("Q-1"), ["Remove"]);
+  assert.deepEqual(buttons("R-1"), ["Stop"]);
+  assert.deepEqual(buttons("F-1"), ["Retry"]);
+  assert.deepEqual(buttons("M-1"), []);
+  assert.ok(runRows(p).find((r) => r.text().includes("D-1"))!.text().includes("nbl-ui-netbox #12"), "the draft's pull request is linked by repo and number");
 });

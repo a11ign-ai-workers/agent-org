@@ -40,6 +40,8 @@ export type Entry = Readonly<{
   waiting?: boolean;
   outcome?: Outcome;
   tokens?: Readonly<{ input: number; output: number }>;
+  /** The ticket's state type in the tracker once the run has finished, as last read: `completed` once its pull requests merged. */
+  trackerState?: string;
 }>;
 
 /**
@@ -117,6 +119,22 @@ export function observe(queue: Queue, key: string, status: string): Queue {
 
 export function finish(queue: Queue, key: string, outcome: Outcome, now: number, tokens?: Entry["tokens"]): Queue {
   return replace(queue, key, (entry) => ({ ...entry, phase: "finished", outcome, finishedAt: now, workspace: undefined, waiting: false, ...(tokens ? { tokens } : {}) }));
+}
+
+/** The tracker states a finished run can end in, after which its ticket is not read again. */
+const SETTLED = new Set(["completed", "canceled", "duplicate"]);
+
+/** The keys of finished runs whose ticket the tracker has not yet settled: the ones worth asking about again. */
+export function unsettledKeys(queue: Queue): string[] {
+  return queue.entries.filter((entry) => entry.phase === "finished" && !SETTLED.has(entry.trackerState ?? "")).map((entry) => entry.ticket.key);
+}
+
+/** Record the tracker's state for each finished run it named. */
+export function recordTrackerStates(queue: Queue, states: ReadonlyMap<string, string>): Queue {
+  return { ...queue, entries: queue.entries.map((entry) => {
+    const state = states.get(entry.ticket.key);
+    return entry.phase === "finished" && state !== undefined ? { ...entry, trackerState: state } : entry;
+  }) };
 }
 
 /**

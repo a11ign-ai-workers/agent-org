@@ -29,6 +29,8 @@ const VIEW = join(HERE, "board-view.ts");
 const BIN = join(HERE, "..", "bin.ts");
 const COOKIE = "ticket_token";
 const TICK_MS = 30_000;
+/** How often the tracker is asked whether finished runs' tickets are done. A merge is not urgent news, and every read is a Linear request. */
+const TRACKER_MS = 120_000;
 const MODELS = ["opus", "sonnet", "haiku"];
 const EFFORTS = ["low", "medium", "high", "xhigh", "max"];
 
@@ -40,7 +42,7 @@ export type BoardDeps = Readonly<{
   token: string;
   queuePath: string;
   choicePath: string;
-  pool?: Pick<ReturnType<typeof createPool>, "tick" | "stop" | "reconcile" | "ensureSession">;
+  pool?: Pick<ReturnType<typeof createPool>, "tick" | "stop" | "reconcile" | "ensureSession" | "refreshTracker">;
   poolDeps?: Omit<PoolDeps, "settings" | "source" | "hook">;
   now?: () => number;
 }>;
@@ -218,6 +220,8 @@ async function serve(): Promise<void> {
     if (!process.argv.includes("--no-open") && process.platform === "darwin") execFileSync("open", [url]);
   });
   setInterval(() => { void board.pool.tick(); }, TICK_MS);
+  void board.pool.refreshTracker();
+  setInterval(() => { void board.pool.refreshTracker(); }, TRACKER_MS);
 }
 
 if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.argv[1]) : "").href) {

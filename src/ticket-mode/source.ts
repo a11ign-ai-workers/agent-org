@@ -31,4 +31,10 @@ export interface TicketSource {
   read(key: string): Promise<Ticket | null>;
   /** Fetch the files the ticket's description links to into `dir`, returning their paths. Short-lived links make this a step of preparing a worker. */
   download(ticket: Ticket, dir: string): Promise<readonly string[]>;
+  /**
+   * Each key's state TYPE in the tracker (`completed`, `canceled`, `started`, ...), for the keys the tracker knows. It is how the board learns a run's
+   * pull requests landed: Linear's GitHub integration moves an issue to a completed state when its pull request merges. A source without it never
+   * marks a run completed. Throws when the tracker cannot be asked.
+   */
+  stateTypes?(keys: readonly string[]): Promise<ReadonlyMap<string, string>>;
 }

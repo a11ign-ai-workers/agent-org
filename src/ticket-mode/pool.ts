@@ -16,7 +16,7 @@ import { availableParallelism, homedir, loadavg } from "node:os";
 import { join } from "node:path";
 import { agentStartArgs, closedNote, herdrReason, openPane, readAgents } from "../herdr-agents.ts";
 import {
-  finish, isLive, markRunning, markStarting, nextStarts, observe, recordRepos,
+  finish, isLive, markRunning, markStarting, nextStarts, observe, recordRepos, recordTrackerStates, unsettledKeys,
   type Entry, type Outcome, type Queue,
 } from "./queue.ts";
 import type { TicketSource } from "./source.ts";
@@ -391,7 +391,19 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     }
   }
 
-  return { tick, stop, reconcile, ensureSession };
+  /** Ask the tracker where each finished run's ticket stands, so a run whose pull requests merged reads as completed. A refused read changes nothing. */
+  async function refreshTracker(): Promise<void> {
+    const keys = unsettledKeys(store.get());
+    if (keys.length === 0 || source.stateTypes === undefined) return;
+    try {
+      const states = await source.stateTypes(keys);
+      update((queue) => recordTrackerStates(queue, states));
+    } catch {
+      // the tracker could not be asked: the next refresh asks again
+    }
+  }
+
+  return { tick, stop, reconcile, ensureSession, refreshTracker };
 }
 
 export type Pool = ReturnType<typeof createPool>;

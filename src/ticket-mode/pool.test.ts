@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import { countTokens, createPool, findTranscript, herdrName, isStartDialog, parseOutcome, ticketDir, ticketFolder, worktreesIn } from "./pool.ts";
-import { emptyQueue, enqueue, retry, setPaused, type Queue } from "./queue.ts";
+import { emptyQueue, enqueue, finish, retry, setPaused, type Queue } from "./queue.ts";
 import { parseTicketSettings } from "./settings.ts";
 import type { Ticket, TicketSource } from "./source.ts";
 
@@ -280,4 +280,34 @@ test("a paused queue starts nothing, however much room there is", async () => {
   await pool.tick();
   assert.equal(entry("NBF-1").phase, "queued");
   assert.ok(!h.calls.some((args) => args.includes("create")), "no workspace was opened");
+});
+
+test("the tracker is asked about finished runs only, its answer is recorded, and a refused read changes nothing", async () => {
+  const asked: string[][] = [];
+  let answer: Map<string, string> | Error = new Map([["NBF-1", "completed"]]);
+  const tracker: TicketSource = { ...source, stateTypes: async (keys) => { asked.push([...keys]); if (answer instanceof Error) throw answer; return answer; } };
+  const root = tmpDir("ticket-pool-tracker-");
+  const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/repos/nbl-ui-netbox" }, stateDir: join(root, "state") });
+  let queue: Queue = finish(enqueue(emptyQueue(2), [ticket("NBF-1"), ticket("NBF-2")], { model: "sonnet", effort: "high" }, 0), "NBF-1", { kind: "draft-pr", prs: [] }, 5);
+  const store = { get: () => queue, set: (next: Queue) => { queue = next; } };
+  const pool = createPool(store, { settings, source: tracker, hook: { node: "/node", bin: "/b" }, herdr: () => "{}", now: () => 9, load: () => ({ load: 0, cores: 1 }), transcriptsRoot: root, wait: async () => {} });
+  await pool.refreshTracker();
+  assert.deepEqual(asked, [["NBF-1"]], "the queued NBF-2 is not asked about");
+  assert.equal(queue.entries.find((e) => e.ticket.key === "NBF-1")!.trackerState, "completed");
+  await pool.refreshTracker();
+  assert.equal(asked.length, 1, "a completed ticket is not asked about again");
+  queue = finish(queue, "NBF-2", { kind: "crashed", reason: "r" }, 6);
+  answer = new Error("Linear answered 500");
+  await pool.refreshTracker();
+  assert.equal(queue.entries.find((e) => e.ticket.key === "NBF-2")!.trackerState, undefined);
+});
+
+test("a source that cannot read states never marks a run completed", async () => {
+  const root = tmpDir("ticket-pool-nostates-");
+  const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/repos/nbl-ui-netbox" }, stateDir: join(root, "state") });
+  let queue: Queue = finish(enqueue(emptyQueue(2), [ticket("NBF-1")], { model: "sonnet", effort: "high" }, 0), "NBF-1", { kind: "draft-pr", prs: [] }, 5);
+  const store = { get: () => queue, set: (next: Queue) => { queue = next; } };
+  const pool = createPool(store, { settings, source, hook: { node: "/node", bin: "/b" }, herdr: () => "{}", now: () => 9, load: () => ({ load: 0, cores: 1 }), transcriptsRoot: root, wait: async () => {} });
+  await pool.refreshTracker();
+  assert.equal(queue.entries[0].trackerState, undefined);
 });
