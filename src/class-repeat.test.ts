@@ -246,6 +246,42 @@ test("a ledger holding two refs under each counter and no closed rows reads CLEA
   assert.ok(typo[0].detail.includes("`class:mystery-kind`") && !typo[0].detail.includes("unclassified"));
 });
 
+// agent-org#1316 (a11ign/a11ign#5282): a class's ledger refs count from its `countedSince`. The refs before it are the defect the guard fixed, so they are no repeat.
+const COUNTED_SINCE = "2026-10-08T13:00:00Z";
+const COUNTED_INDEX = JSON.stringify({ classes: [{ id: "claim-refused", name: "the claim refused", guard: "the claim guard", guardNote: null, countedSince: COUNTED_SINCE }] });
+const at = (iso: string) => Date.parse(iso);
+const refLine = (key: string, iso: string, ref: string) => `${key}\t${at(iso)}\t${ref}`;
+const countedRepeats = (ledger: string[], index = COUNTED_INDEX) =>
+  readClassRepeat(tracker([]).run, REPO, { root: "/project", read: () => index, now: NOW, ledgerPath: "/state/failure-ledger", readLedger: () => ledger.join("\n") });
+
+test("parseFailureClasses reads countedSince as the time it names, and refuses a value that is not a time", () => {
+  assert.equal(parseFailureClasses(COUNTED_INDEX)?.[0].countedSince, at(COUNTED_SINCE));
+  assert.equal(parseFailureClasses(INDEX)?.[0].countedSince, undefined, "absent means every ref counts, as it always did");
+  assert.equal(parseFailureClasses(JSON.stringify({ classes: [{ id: "x", countedSince: "last tuesday" }] })), null, "a malformed time is a stated gap, not a silent count-everything");
+});
+
+test("a ref before countedSince and one after are one occurrence, so no repeat (the guard fixed the earlier one)", () => {
+  const fact = countedRepeats([refLine("claim-refused", "2026-10-08T12:00:00Z", "old defect"), refLine("claim-refused", "2026-10-08T13:30:00Z", "new defect")]);
+  assert.ok(!("unreadable" in fact));
+  assert.deepEqual(fact.ledger, [], "one ref after the line is one occurrence, and the one before it does not count");
+});
+
+test("two refs after countedSince are a repeat, and the ref before it is not one of them (the twin of the case above)", () => {
+  const fact = countedRepeats([
+    refLine("claim-refused", "2026-10-08T12:00:00Z", "old defect"),
+    refLine("claim-refused", "2026-10-08T13:30:00Z", "new defect 1"),
+    refLine("claim-refused", "2026-10-08T13:40:00Z", "new defect 2"),
+  ]);
+  assert.ok(!("unreadable" in fact));
+  assert.deepEqual(fact.ledger, [{ classKey: "claim-refused", refs: ["new defect 1", "new defect 2"], newestAt: at("2026-10-08T13:40:00Z") }]);
+});
+
+test("countedSince is per class: another kind's refs before its line still repeat", () => {
+  const fact = countedRepeats([refLine("other-kind", "2026-10-08T12:00:00Z", "a"), refLine("other-kind", "2026-10-08T12:10:00Z", "b")]);
+  assert.ok(!("unreadable" in fact) && Array.isArray(fact.ledger));
+  assert.deepEqual(fact.ledger.map(({ classKey }) => classKey), ["other-kind"], "a class with no countedSince counts every ref it has");
+});
+
 const REAL = join(HOME_CHECKOUT, FAILURE_CLASSES_PATH);
 test("the project's real failure-classes.json parses and every class has an id, a name and a guard or a guardNote",
   { skip: existsSync(REAL) ? false : `${REAL} is absent on this host (the project checkout is not at a commit that has the seed, #4125)` }, () => {

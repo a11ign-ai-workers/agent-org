@@ -1,8 +1,8 @@
 // no-token: gh -- recordClaimRefusal writes only the ledger file, under a temporary directory; every refusal here is a fixed text, and nothing in this file spawns gh.
 /**
  * `src/row-claim.ts`, agent-org#1262 (a11ign/a11ign#5282, class `claim-refused`): A REFUSAL THAT IS THE CLAIM GUARD WORKING IS NOT A FAILURE OF THE CLAIM PATH.
- * The worktree cap, a B4 overlap and a tree that already exists are written as `claim-guard-held`, which `class-repeat` does not count; the four failures (an unreadable
- * read, B4 not askable, a rule copy behind the release, an unknown tracker key) stay `claim-refused`. Both kinds are read by `readClaimRefusals`, so signal 26 still counts every refusal.
+ * The worktree cap, a B4 overlap, a tree that already exists and a rule copy behind the release are written as `claim-guard-held`, which `class-repeat` does not count; the three failures
+ * (an unreadable read, B4 not askable, an unknown tracker key) stay `claim-refused`. Both kinds are read by `readClaimRefusals`, so signal 26 still counts every refusal.
  *
  * THE REF of a failure stays the refusal's first line, which is what it is today (the cause), and is what the existing `row-claim-refusal-cause.test.ts` pins.
  *
@@ -31,17 +31,19 @@ const WORKTREE_CAP = "this checkout holds 356 live worktrees, at or over the cap
 const TREE_EXISTS = "--worktree=../wt-15 ALREADY EXISTS, stamped by `worker-agent-org-1000`. Refusing before any write.";
 const B4_OVERLAP = "overlaps #878 in a11ign/agent-org, which already touches: .github/workflows/ci.yml. B4: no two open pull requests touch the same file -- sequence with that PR's author, or narrow this row's region to what does not overlap.";
 
-// THE FAILURE OF THE CLAIM PATH: four refusals, copied the same way.
+// THE GUARD WORKING, AS A STALE CHECKOUT: the rule copy behind the release, copied from the text stale-rule-guard.ts prints (agent-org#1316).
+const RULE_BEHIND = "THIS CHECKOUT'S COPY OF THE RULE IS 3 COMMIT(S) BEHIND THE RELEASE THE HOST RUNS (v0.183.3).";
+
+// THE FAILURE OF THE CLAIM PATH: three refusals, copied the same way.
 const UNREADABLE_READ = "row-claim: could not read issue #15 from a11ign/agent-org -- refusing to guess whether it is claimed. Command failed: gh issue view 15";
 const B4_NOT_ASKABLE = "B4 COULD NOT BE ASKED which rows are already claimed: that list could not be read, so this row's Region cannot be compared with theirs. INCONCLUSIVE, not clear -- retry the claim (the gate offers the row again by itself).";
-const RULE_BEHIND = "THIS CHECKOUT'S COPY OF THE RULE IS 3 COMMIT(S) BEHIND THE RELEASE THE HOST RUNS (v0.183.3).";
 const UNKNOWN_TRACKER = "no tracker with key `nope` is declared in .agent-org/project.json (declared: the empty key); nothing is defaulted to another tracker's row of the same number";
 
 // A read the rate limit refused: one outage, the guard working (ceo's reading on the row).
 const RATE_LIMITED_READ = "row-claim: could not read issue #15 from a11ign/agent-org -- refusing to guess whether it is claimed. Command failed: gh issue view 15\ngh said: GraphQL: API rate limit already exceeded for user ID 328832207.";
 
-const GUARD_HELD = [WORKTREE_CAP, TREE_EXISTS, B4_OVERLAP];
-const FAILURES = [UNREADABLE_READ, B4_NOT_ASKABLE, RULE_BEHIND, UNKNOWN_TRACKER];
+const GUARD_HELD = [WORKTREE_CAP, TREE_EXISTS, B4_OVERLAP, RULE_BEHIND];
+const FAILURES = [UNREADABLE_READ, B4_NOT_ASKABLE, UNKNOWN_TRACKER];
 
 /** Each refusal written, in order, one ledger line per call at a minute apart; returns the ledger's path, read back as lines. */
 function ledgerOf(name: string, refusals: string[]): string[] {
@@ -63,12 +65,10 @@ test("POSITIVE CONTROL: each failure of the claim path writes claim-refused, wit
 });
 
 test("POSITIVE CONTROL: each refusal that is the guard working writes claim-guard-held, and no claim-refused line", () => {
-  const lines = ledgerOf("guard-held", [...GUARD_HELD, RATE_LIMITED_READ]);
-  const kinds = lines.map((line) => line.split("\t")[0]);
-  assert.deepEqual(kinds, [CLAIM_GUARD_HELD_KIND, CLAIM_GUARD_HELD_KIND, CLAIM_GUARD_HELD_KIND, CLAIM_GUARD_HELD_KIND]);
-  assert.equal(lines[0].split("\t")[2], firstLineOf(WORKTREE_CAP));
-  assert.equal(lines[1].split("\t")[2], firstLineOf(TREE_EXISTS));
-  assert.equal(lines[2].split("\t")[2], firstLineOf(B4_OVERLAP));
+  const refusals = [...GUARD_HELD, RATE_LIMITED_READ];
+  const lines = ledgerOf("guard-held", refusals);
+  assert.deepEqual(lines.map((line) => line.split("\t")[0]), refusals.map(() => CLAIM_GUARD_HELD_KIND));
+  refusals.forEach((refusal, i) => assert.equal(lines[i].split("\t")[2], firstLineOf(refusal), refusal));
 });
 
 test("NEGATIVE CONTROL: a guard refusal is not a claim-refused line, and a failure is not a claim-guard-held line", () => {
