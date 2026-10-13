@@ -249,6 +249,8 @@ function ghFake(over: { jobs?: Record<number, Job>; issues?: any[]; pulls?: Reco
     const [cmd, sub] = args;
     const read = readsRowsByLabel(args); // #5039: the incident rows are read by label over graphql, not by `issue list`
     if (read !== null) return connectionOf(issues.filter((i) => i.state === read.state.toLowerCase()));
+    // #5405: the Project-membership read a board write makes first. No fixture issue is on the board, so each boarding adds it.
+    if (cmd === "api" && args.includes("graphql") && args.some((a) => a.includes("projectItems"))) return JSON.stringify({ data: { repository: { issue: { projectItems: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } } });
     const path = args.find((a) => a.startsWith("repos/")) ?? "";
     if (cmd === "api" && /actions\/jobs\/\d+\/logs/.test(path)) return (over.jobs ?? {})[Number(/jobs\/(\d+)/.exec(path)![1])]?.log ?? (() => { throw new Error("refused"); })();
     if (cmd === "api" && /actions\/jobs\/\d+$/.test(path)) return JSON.stringify((over.jobs ?? {})[Number(/jobs\/(\d+)/.exec(path)![1])] ?? (() => { throw new Error("refused"); })());

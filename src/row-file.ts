@@ -1796,14 +1796,29 @@ function projectItemsPage(issueNumber: number, cursor: string | null, run: typeo
  * @returns {string | null} the Status option name, or `null` if the issue is not on this tracker's Project at all
  */
 export function fetchIssueBoardStatus(issueNumber: number, { run = defaultRun, tracker = homeTracker() }: { run?: typeof defaultRun; tracker?: Tracker; } = {}): string | null {
+  return boardItemOf(issueNumber, run, tracker)?.fieldValueByName?.name ?? null;
+}
+
+/**
+ * #5405: is issue `issueNumber` on the tracker's Project AT ALL, whatever its Status? `fetchIssueBoardStatus` cannot answer that: its `null` is
+ * "not on the board" AND "on it with no Status", and a retry that cannot tell them apart adds an item that is already there. Throws when unreadable.
+ * @param {number} issueNumber @param {{ run?: typeof defaultRun, tracker?: Tracker }} [deps]
+ * @returns {boolean}
+ */
+export function isIssueOnBoard(issueNumber: number, { run = defaultRun, tracker = homeTracker() }: { run?: typeof defaultRun; tracker?: Tracker; } = {}): boolean {
+  return boardItemOf(issueNumber, run, tracker) !== undefined;
+}
+
+/** The issue's item on the tracker's Project, read page by page until it is found or the pages run out; `undefined` when it is not on the board. */
+function boardItemOf(issueNumber: number, run: typeof defaultRun, tracker: Tracker): any | undefined {
   let cursor: string | null = null;
   do {
     const page = projectItemsPage(issueNumber, cursor, run, tracker.repo);
     const onThisProject = page.nodes.find((n) => isBoardOf(tracker, n?.project));
-    if (onThisProject) return onThisProject.fieldValueByName?.name ?? null;
+    if (onThisProject) return onThisProject;
     cursor = page.hasNextPage ? page.endCursor : null;
   } while (cursor !== null);
-  return null;
+  return undefined;
 }
 
 /** @param {Tracker} tracker @param {{ number?: unknown, owner?: { login?: unknown } } | undefined} project @returns {boolean} */

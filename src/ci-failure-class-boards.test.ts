@@ -1,4 +1,4 @@
-// no-token: none -- a fake `gh` answers the by-label read and records every write; nothing here spawns `gh`
+// no-token: none -- a fake `gh` answers the by-label read and the Project-membership read and records every write; nothing here spawns `gh`
 // #5405: a machine-filed incident row is BOARDED when it is filed. `recordIncident` is handed a fake `run`, and the tests read back the calls it made.
 import assert from "node:assert/strict";
 import { test } from "node:test";
@@ -18,13 +18,33 @@ const group: SharedGroup = {
 const urlOf = (number: number): string => `https://github.com/${REPO}/issues/${number}`;
 const silent = (): void => {};
 const isItemAdd = (args: string[]): boolean => args[0] === "project" && args[1] === "item-add";
+const isItemEdit = (args: string[]): boolean => args[0] === "project" && args[1] === "item-edit";
+const isLabelWrite = (args: string[]): boolean => args[0] === "issue" && args[1] === "edit" && args.includes(OUT_OF_RELEASE_LABEL);
 
-/** A fake `gh`. `issues` is what the by-label read answers; `refuse` names the calls that throw; every other call is recorded and answered empty (a create answers its URL). */
-function fakeGh({ issues = [], refuse = () => false }: { issues?: FakeRow[]; refuse?: (args: string[]) => boolean } = {}) {
+/** The issue a Project-membership read asks about (`row-file`'s `projectItems` query), or `null` for any other call. */
+const membershipOf = (args: string[]): number | null => {
+  if (args[0] !== "api" || args[1] !== "graphql" || !args.some((a) => a.includes("projectItems"))) return null;
+  return Number(/issue\(number: (\d+)\)/.exec(args.join(" "))![1]);
+};
+/** The answer GitHub gives for one issue: its one Project item, with no Status, when it is on the board; no items otherwise. */
+const membershipAnswer = (onBoard: boolean) => ({
+  data: { repository: { issue: { projectItems: {
+    pageInfo: { hasNextPage: false, endCursor: null },
+    nodes: onBoard ? [{ project: { number: PROJECT_NUMBER, owner: { login: PROJECT_OWNER } }, fieldValueByName: null }] : [],
+  } } } },
+});
+
+/** A fake `gh`. `issues` is what the by-label read answers; `onBoard` lists the issues already on Project 1; `refuse` names the calls that throw; every other call is recorded and answered empty (a create answers its URL). */
+function fakeGh({ issues = [], onBoard = [], refuse = () => false }: { issues?: FakeRow[]; onBoard?: number[]; refuse?: (args: string[]) => boolean } = {}) {
   const writes: string[][] = [];
   const run: Run = (args) => {
     const read = readsRowsByLabel(args);
     if (read !== null) return connectionOf(issues.filter((row) => (row.state === "CLOSED") === (read.state === "CLOSED")));
+    const membership = membershipOf(args);
+    if (membership !== null) {
+      if (refuse(args)) throw new Error("gh refused");
+      return JSON.stringify(membershipAnswer(onBoard.includes(membership)));
+    }
     writes.push(args);
     if (refuse(args)) throw new Error("gh refused");
     return args[0] === "issue" && args[1] === "create" ? `${urlOf(NEW_ROW)}\n` : "";
@@ -60,6 +80,39 @@ test("a refused board step is not reported as filed, and the next tick boards th
   assert.equal(recordIncident(group, { run: second.run, log: silent }), NEW_ROW, "the next tick joins the open row");
   assert.ok(second.writes.some(isItemAdd), "and boards it, because it does not yet carry the release declaration");
   assert.ok(second.writes.some((args) => args[0] === "issue" && args[1] === "edit" && args.includes(OUT_OF_RELEASE_LABEL)), "its labels are set");
+});
+
+test("a refused Status write is not reported as filed, and the retry does not add the card a second time", () => {
+  const first = fakeGh({ refuse: isItemEdit });
+  const log: string[] = [];
+  assert.equal(recordIncident(group, { run: first.run, log: (line) => log.push(line) }), null, "not reported as filed while its Status is missing");
+  assert.match(log.join(""), /the next tick retries/);
+  assert.ok(first.writes.some(isItemAdd), "the card was added before its Status was refused");
+  assert.ok(!first.writes.some(isLabelWrite), "and no label was written after the refusal");
+  const open: FakeRow = { number: NEW_ROW, body: createdBody(first.writes), labels: ["ci-shared-failure"] };
+  const second = fakeGh({ issues: [open], onBoard: [NEW_ROW] });
+  assert.equal(recordIncident(group, { run: second.run, log: silent }), NEW_ROW, "the next tick joins the open row");
+  assert.ok(!second.writes.some(isItemAdd), "the card is already on the board, with no Status: it is not added again");
+  assert.ok(second.writes.some(isItemEdit), "its Status is set");
+  assert.ok(second.writes.some(isLabelWrite), "and its labels after it");
+});
+
+test("an unreadable board writes nothing to the board, and is not reported as filed", () => {
+  const { run, writes } = fakeGh({ refuse: (args) => membershipOf(args) !== null });
+  const log: string[] = [];
+  assert.equal(recordIncident(group, { run, log: (line) => log.push(line) }), null, "not reported as filed while whether the card is on the board is unknown");
+  assert.match(log.join(""), /the next tick retries/);
+  assert.deepEqual(writes.filter((args) => args[0] === "project"), [], "no card is added or moved on a guess");
+});
+
+test("a joined row whose board is refused is not reported as filed", () => {
+  const filed = fakeGh();
+  recordIncident(group, { run: filed.run, log: silent });
+  const open: FakeRow = { number: 7, body: createdBody(filed.writes), labels: ["ci-shared-failure"] };
+  const { run } = fakeGh({ issues: [open], refuse: isItemAdd });
+  const log: string[] = [];
+  assert.equal(recordIncident(group, { run, log: (line) => log.push(line) }), null, "the row exists, but it is not boarded: not reported as filed");
+  assert.match(log.join(""), /could not board #7.*the next tick retries/);
 });
 
 test("a row already boarded is joined without a second board write", () => {

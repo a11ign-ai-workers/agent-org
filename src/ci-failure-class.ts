@@ -13,6 +13,7 @@ import { CLAIM_LABEL } from "./claim-labels.ts";
 import { REPO } from "./project-identity.ts"; // #2616: the project's repository comes from its declaration, never a literal
 import { PROJECT_NUMBER, PROJECT_OWNER } from "./board-snapshot-scope.ts"; // #5405: the incident row is boarded on the home board when it is filed
 import { BACKLOG_LABEL, OUT_OF_RELEASE_LABEL } from "./project-vocabulary.ts";
+import { isIssueOnBoard } from "./row-file.ts"; // #5405: the retry asks whether the card is already on the board before it adds it
 import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5039
 import { decide, MAX_STATE_BYTES, type DecisionDeps, type Question } from "./decision-provider.ts";
 
@@ -595,21 +596,27 @@ const bodyOf = (group: SharedGroup, prs: readonly string[]): string => [
 
 // #5405: THE INCIDENT ROW IS ON THE BOARD WHEN IT IS FILED. A bare `gh issue create` left it off Project 1, where `row-off-board` trips on it and nothing can board it. Order is
 // row-file's: the card, then its Status, then the labels LAST, so a row that carries `out-of-release` is one whose Status was already set.
+// A RETRY AFTER A PARTIAL BOARD: the card may already be on Project 1 (item-add landed, the Status did not). The card is added only when the issue is NOT on the board at
+// all -- a second item-add is refused or duplicates it, and `isIssueOnBoard` is the read that tells "absent" from "on it with no Status". An unreadable board throws: the next tick retries.
 const BOARD_STATUS = "Backlog";
 function boardIncident(number: number, run: Run): void {
   const url = `https://github.com/${REPO}/issues/${number}`;
-  run(["project", "item-add", String(PROJECT_NUMBER), "--owner", PROJECT_OWNER, "--url", url]);
+  if (!isIssueOnBoard(number, { run: (_cmd, args) => run(args) })) {
+    run(["project", "item-add", String(PROJECT_NUMBER), "--owner", PROJECT_OWNER, "--url", url]);
+  }
   run(["project", "item-edit", String(PROJECT_NUMBER), "--owner", PROJECT_OWNER, "--url", url, "--field", "Status", "--value", BOARD_STATUS]);
   run(["issue", "edit", String(number), "--add-label", BACKLOG_LABEL, "--add-label", OUT_OF_RELEASE_LABEL]);
 }
 
-/** A row filed before #5405, or one whose boarding was refused, carries no release declaration: board it now. The row exists, so a refusal is logged, not thrown: the hold stays. */
-function healBoard(row: IncidentRow, run: Run, log: (line: string) => void): void {
-  if (row.labels?.includes(OUT_OF_RELEASE_LABEL)) return;
+/** A row filed before #5405, or one whose boarding was refused, carries no release declaration: board it now. The row exists, so a refusal is logged, not thrown. Returns `false` when the board was refused. */
+function healBoard(row: IncidentRow, run: Run, log: (line: string) => void): boolean {
+  if (row.labels?.includes(OUT_OF_RELEASE_LABEL)) return true;
   try {
     boardIncident(row.number, run);
+    return true;
   } catch (error) {
     log(`ci-shared-failure: could not board #${row.number} (${String((error as Error).message).split("\n")[0]}); the next tick retries\n`);
+    return false;
   }
 }
 
@@ -631,7 +638,8 @@ export function recordIncident(group: SharedGroup, { run, log }: { run: Run; log
     const noted = listOf(found.body, PRS_LINE);
     const merged = [...new Set([...noted, ...group.noted])];
     if (merged.length !== noted.length) run(["issue", "edit", String(found.number), "--body", bodyOf(group, merged)]);
-    healBoard(found, run, log);
+    // #5405: a row whose board was refused is NOT filed: the caller is told so, and the next tick joins it and boards it.
+    if (!healBoard(found, run, log)) return null;
     return found.number;
   } catch (error) {
     log(`ci-shared-failure: could not file or join the incident for ${group.key} (${String((error as Error).message).split("\n")[0]}); the next tick retries\n`);
