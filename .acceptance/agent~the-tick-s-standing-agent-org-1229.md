@@ -6,7 +6,7 @@ Acceptance:
 node --test src/work-gate/tick-record-row.test.ts
 ```
 
-Closes #1229
+Closes a11ign/agent-org#1229
 
 Measured: the command above printed `pass 2, fail 0` at this head. Mutation (labels reduced to `lane:ceo`, restored byte-identical): the boarding test fails and the positive control still passes. `pnpm run typecheck` is clean; `work-tick-health`, `work-tick` and `gh-call-ratchet` tests pass (41). This repository has no `lint` or `verify` script.
 
