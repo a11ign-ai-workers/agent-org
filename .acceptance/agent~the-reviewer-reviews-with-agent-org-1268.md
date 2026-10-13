@@ -14,9 +14,17 @@ Health-signals: approved-unqueued, wakes-held
 Flag: `review.rowReviewSkill`, OFF by default (`agent-org machinery:flag on review.rowReviewSkill --session=<you>`; the switch row is a11ign/a11ign#5325). Off, the order names no skill.
 Revert: `agent-org machinery:flag off review.rowReviewSkill --session=<you>`, or revert this PR; the installed skill is read by nothing until an order names it.
 
-Eval (gpt-5.6-luna, effort medium, `--jobs 4`, nothing posted), the run that this head's SKILL.md produced:
+## Measured
 
+The unit test, and the eval (gpt-5.6-luna, effort medium, `--jobs 4`, nothing posted) with the SKILL.md at this head:
+
+```bash
+npx rstest run --config scripts/rstest/rstest.config.ts src/review-eval.test.ts
+VERDICT pass: 23 tests in 1 file
 ```
+
+```bash
+node scripts/review-eval.ts --set blind-2026-10-12 --require 9/11 --jobs 4
 row-review eval (gpt-5.6-luna, effort medium)
 AGREE    agent-org#1243         blind: not convinced reviewer: not convinced
 AGREE    agent-org#1138         blind: not convinced reviewer: not convinced
@@ -37,9 +45,9 @@ A second run of the same head: 9/11, not convinced 5/5, PASS; the disagreements 
 
 What the eval run measured, and what it did not: the reviewer is `codex exec` in a read-only sandbox in a depth-1 checkout of the head, handed the pull request, the row and the diff as files, with the skill installed under `.agents/skills/`. It does not run the Acceptance command and cannot post. A reading that fails (a pull request, a row, a diff, a checkout, a reply with no verdict) counts as a disagreement, never a skip.
 
-Measured: `src/review-eval.test.ts` printed `VERDICT pass: 23 tests in 1 file` at this head; `npm run typecheck` exits 0. The full `pnpm test` (run before the fixes named under Outside-Region for `multi-board-gate`, `machinery-flag-switch`, `project-config` and `work-gate`'s history population) printed `VERDICT fail: 8 of 11105 tests failed in 659 files`: those four were this change's and are fixed (the skill's install tests now live in `host-units.test.ts`, which is already in that population); the other four, `host-install-agent-org-launcher`'s launcher test, `live-tree-independence`'s two #3233 cases and `release-tag-on-merge`'s lockfile case, fail the same way on `4e9bed32` (a detached checkout of main, run for this). I did not re-run the whole suite after the fixes; I re-ran the nine affected files, which printed `VERDICT fail: 4 of 658 tests failed in 9 files`, those four.
+Beyond those two: `src/review-eval.test.ts` printed `VERDICT pass: 23 tests in 1 file` at this head; `npm run typecheck` exits 0. The full `pnpm test` (run before the fixes named under Outside-Region for `multi-board-gate`, `machinery-flag-switch`, `project-config` and `work-gate`'s history population) printed `VERDICT fail: 8 of 11105 tests failed in 659 files`: those four were this change's and are fixed (the skill's install tests now live in `host-units.test.ts`, which is already in that population); the other four, `host-install-agent-org-launcher`'s launcher test, `live-tree-independence`'s two #3233 cases and `release-tag-on-merge`'s lockfile case, fail the same way on `4e9bed32` (a detached checkout of main, run for this). I did not re-run the whole suite after the fixes; I re-ran the nine affected files, which printed `VERDICT fail: 4 of 658 tests failed in 9 files`, those four.
 
-Mutation (each restored from a copy and compared byte-identical): `hostUnitDrift` without `...rowReviewSkillDrift(deps)` failed the wiring test (1 of 182); `host:install` without `rowReviewSkillInstall()` failed its test (1 of 182); `decide` handing `rowReviewSkill: false` failed the order test (1 of 7); the flag always on failed 2 of 7; the flag ignoring the canary state failed 1 of 7; `verdictOf` reading `not convinced` as `convinced` failed 7 of 23; `score` forgetting that every `not convinced` must agree failed 2 of 23.
+Mutation: each restored from a copy and compared byte-identical; `hostUnitDrift` without `...rowReviewSkillDrift(deps)` failed the wiring test (1 of 182); `host:install` without `rowReviewSkillInstall()` failed its test (1 of 182); `decide` handing `rowReviewSkill: false` failed the order test (1 of 7); the flag always on failed 2 of 7; the flag ignoring the canary state failed 1 of 7; `verdictOf` reading `not convinced` as `convinced` failed 7 of 23; `score` forgetting that every `not convinced` must agree failed 2 of 23.
 
 Outside-Region: src/work-gate/tick.ts — `decide` reads the flag where orders are decided and hands it to `perPullRequestOrders` (`rowReviewSkillFlagOn`), which the row's `pr-orders.ts` alone cannot do.
 Outside-Region: src/machinery-flag.ts — `review.rowReviewSkill` must be in `FLAG_REGISTRY` or `machinery:flag on` refuses it.
