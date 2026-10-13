@@ -10,8 +10,8 @@
 //   - no outcome file, and done, or idle after it was seen working: finished, `no-outcome`;
 //   - its workspace missing from two complete listings in a row, or `unknown` twice: `crashed`;
 //   - any other status (a dialog, a prompt waiting on a person) is shown on the board as waiting, and the run continues.
-import { execFileSync, spawn } from "node:child_process";
-import { existsSync, mkdirSync, readdirSync, readFileSync, writeFileSync } from "node:fs";
+import { execFile, execFileSync, spawn } from "node:child_process";
+import { existsSync, mkdirSync, readdirSync, readFileSync, rmSync, writeFileSync } from "node:fs";
 import { availableParallelism, homedir, loadavg } from "node:os";
 import { join } from "node:path";
 import { agentStartArgs, closedNote, herdrReason, openPane, readAgents } from "../herdr-agents.ts";
@@ -21,8 +21,8 @@ import {
 } from "./queue.ts";
 import type { TicketSettings } from "./settings.ts";
 import type { TicketSource } from "./source.ts";
-import { addWorktree, excludeFromGit, worktreePath, type Git } from "./worktree.ts";
-import { BRIEF_FILE, OUTCOME_FILE, briefText, firstPrompt, workerFlags, workerSettings, type HookCommand, type WorktreeRef } from "./worker-files.ts";
+import { addWorktree, excludeFromGit, reuseWorktree, worktreePath, type Git } from "./worktree.ts";
+import { BRIEF_FILE, OUTCOME_FILE, STOP_COUNT_FILE, briefText, firstPrompt, workerFlags, workerSettings, type HookCommand, type WorktreeRef } from "./worker-files.ts";
 
 /** herdr waits on Claude's start; a slow one has been measured past 30 s (`wake.ts`'s start budget), so a start gets 90. */
 const START_TIMEOUT_MS = 90_000;
@@ -34,6 +34,15 @@ export type Herdr = (args: string[], timeoutMs?: number) => string;
 
 const defaultHerdr: Herdr = (args, timeoutMs = 30_000) => execFileSync("herdr", args, { encoding: "utf8", timeout: timeoutMs });
 
+/** herdr for the one slow call, `agent start`, so a start does not stop the board answering. */
+export type HerdrAsync = (args: string[], timeoutMs: number) => Promise<string>;
+
+const defaultHerdrAsync: HerdrAsync = (args, timeoutMs) => new Promise((resolve, reject) => {
+  execFile("herdr", args, { encoding: "utf8", timeout: timeoutMs }, (err, stdout) => (err ? reject(Object.assign(err, { stdout })) : resolve(stdout)));
+});
+
+const defaultWait = (ms: number): Promise<void> => new Promise((resolve) => setTimeout(resolve, ms));
+
 /** Start a session's headless herdr server, detached, so it outlives this process as the org's does under its own unit. */
 const defaultStartServer = (session: string): void => {
   spawn("herdr", ["--session", session, "server"], { detached: true, stdio: "ignore" }).unref();
@@ -44,6 +53,8 @@ export type PoolDeps = Readonly<{
   source: TicketSource;
   hook: HookCommand;
   herdr?: Herdr;
+  /** `agent start`; when absent it is `herdr` itself if that was given, so a test that injects one injects both. */
+  herdrAsync?: HerdrAsync;
   git?: Git;
   now?: () => number;
   /** The 1-minute load average and the cores it is compared with. */
@@ -52,8 +63,8 @@ export type PoolDeps = Readonly<{
   transcriptsRoot?: string;
   /** Start the session's headless herdr server; called only when its listing does not answer. */
   startServer?: (session: string) => void;
-  /** Wait between asking a just-started server whether it answers. */
-  sleep?: (ms: number) => void;
+  /** Wait between looks at a just-started server or agent. */
+  wait?: (ms: number) => Promise<void>;
 }>;
 
 /** The pool holds the queue through these two, so the server stays its one writer. */
@@ -147,6 +158,9 @@ export function countTokens(file: string | null): { input: number; output: numbe
 export function createPool(store: QueueStore, deps: PoolDeps) {
   const { settings, source, hook } = deps;
   const herdr = deps.herdr ?? defaultHerdr;
+  const injected = deps.herdr;
+  const herdrAsync: HerdrAsync = deps.herdrAsync ?? (injected ? async (args, timeoutMs) => injected(args, timeoutMs) : defaultHerdrAsync);
+  const wait = deps.wait ?? defaultWait;
   const now = deps.now ?? Date.now;
   const transcripts = deps.transcriptsRoot ?? join(homedir(), ".claude", "projects");
   const session = { session: settings.herdrSession };
@@ -175,10 +189,13 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     const { ticket } = entry;
     const dir = ticketDir(settings, ticket.key);
     mkdirSync(dir, { recursive: true });
+    // An earlier run's outcome and stop count would end this run before it began.
+    for (const file of [OUTCOME_FILE, STOP_COUNT_FILE]) rmSync(join(dir, file), { force: true });
     const worktrees = entry.repos.map((repo) => {
       const clone = settings.clones[repo];
       if (clone === undefined) throw new Error(`${repo} is not in the host file's clones`);
-      return addWorktree({ repo, clone, path: worktreePath(settings.worktreeRoot, ticket.key, repo), branch: ticket.branch }, deps.git);
+      const where = { repo, clone, path: worktreePath(settings.worktreeRoot, ticket.key, repo), branch: ticket.branch };
+      return entry.retried === true && existsSync(where.path) ? reuseWorktree(where, deps.git) : addWorktree(where, deps.git);
     });
     const attachments = await source.download(ticket, dir);
     writeFileSync(join(dir, BRIEF_FILE), briefText({ ticket, worktrees, ticketDir: dir, attachments }));
@@ -191,7 +208,7 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
   }
 
   /** Open the workspace and start Claude in it. Returns the workspace, or throws with herdr's reason after closing anything it opened. */
-  function start(entry: Entry, worktrees: WorktreeRef[], dir: string): string {
+  async function start(entry: Entry, worktrees: WorktreeRef[], dir: string): Promise<string> {
     const key = entry.ticket.key;
     const name = herdrName(key);
     const run = (args: string[]) => herdr(args);
@@ -199,7 +216,7 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     if ("refusal" in opened) throw new Error(opened.refusal);
     const tail = [firstPrompt(dir), ...workerFlags({ name: key, model: entry.model, effort: entry.effort, addDirs: [dir, ...worktrees.slice(1).map((w) => w.path)] })];
     try {
-      herdr(agentStartArgs(name, "claude", opened.pane, tail, session), START_TIMEOUT_MS);
+      await herdrAsync(agentStartArgs(name, "claude", opened.pane, tail, session), START_TIMEOUT_MS);
     } catch (err) {
       // A start can outlast its timeout and still succeed: ask the listing before calling it a failure.
       const listed = readAgents(run, session)?.find((agent) => agent.label === name);
@@ -257,13 +274,13 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     const id = entry.workspace === undefined ? undefined : claudeSessions.get(entry.workspace);
     update((queue) => finish(queue, entry.ticket.key, outcome, now(), countTokens(id === undefined ? null : findTranscript(transcripts, id))));
     misses.delete(entry.ticket.key);
+    answered.delete(herdrName(entry.ticket.key));
   }
 
   /** Just after a start, answer the start dialogs as they appear, rather than one per tick: a few short waits, then the tick takes over. */
-  function settleStart(entry: Entry): void {
-    const sleep = deps.sleep ?? ((ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
+  async function settleStart(entry: Entry): Promise<void> {
     for (let attempt = 0; attempt < 6; attempt += 1) {
-      sleep(1500);
+      await wait(1500);
       const status = readAgents((args) => herdr(args), session)?.find((agent) => agent.label === herdrName(entry.ticket.key))?.status;
       if (status === "working" || status === "idle" || status === "done") return;
       answerStartDialog(entry);
@@ -277,9 +294,14 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
       update((queue) => markStarting(queue, entry.ticket.key, now()));
       try {
         const { worktrees, dir } = await prepare(entry);
-        const workspace = start(entry, worktrees, dir);
+        const workspace = await start(entry, worktrees, dir);
+        // Stopped while it was starting: the stop is the person's last word, so the workspace it raced is closed and the run stays stopped.
+        if (store.get().entries.find((e) => e.ticket.key === entry.ticket.key)?.phase !== "starting") {
+          closedNote((args) => herdr(args), workspace, session);
+          continue;
+        }
         update((queue) => markRunning(queue, entry.ticket.key, workspace));
-        settleStart(entry);
+        await settleStart(entry);
       } catch (err) {
         update((queue) => finish(queue, entry.ticket.key, { kind: "crashed", reason: String((err as Error)?.message ?? err).split("\n")[0] }, now()));
       }
@@ -311,26 +333,32 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
    * The session's herdr server answers, starting it when it does not. Ticket mode's session is its own, so no unit keeps it running the way the
    * org's is kept: the first pool to need it starts it, and it outlives the pool, so workers survive a restart of the board.
    */
-  function ensureSession(): void {
+  async function ensureSession(): Promise<void> {
     const run = (args: string[]) => herdr(args);
     if (readAgents(run, session) !== null) return;
     (deps.startServer ?? defaultStartServer)(settings.herdrSession);
-    const sleep = deps.sleep ?? ((ms: number) => Atomics.wait(new Int32Array(new SharedArrayBuffer(4)), 0, 0, ms));
     for (let attempt = 0; attempt < 20; attempt += 1) {
-      sleep(250);
+      await wait(250);
       if (readAgents(run, session) !== null) return;
     }
     throw new Error(`herdr's ${settings.herdrSession} session did not start; start it with: herdr --session ${settings.herdrSession} server`);
   }
 
   let busy = false;
-  /** One pass: watch the live runs, then fill free slots. Passes never overlap. */
+  let again = false;
+  /** One pass: watch the live runs, then fill free slots. Passes never overlap; a call during a pass runs one more pass after it. */
   async function tick(): Promise<void> {
-    if (busy) return;
+    if (busy) {
+      again = true;
+      return;
+    }
     busy = true;
     try {
-      watch();
-      await fill();
+      do {
+        again = false;
+        watch();
+        await fill();
+      } while (again);
     } finally {
       busy = false;
     }

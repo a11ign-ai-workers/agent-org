@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import { countTokens, createPool, findTranscript, herdrName, isStartDialog, parseOutcome, ticketDir } from "./pool.ts";
-import { emptyQueue, enqueue, type Queue } from "./queue.ts";
+import { emptyQueue, enqueue, retry, type Queue } from "./queue.ts";
 import { parseTicketSettings } from "./settings.ts";
 import type { Ticket, TicketSource } from "./source.ts";
 import type { Git } from "./worktree.ts";
@@ -32,8 +32,9 @@ function herdr(status: Map<string, string>, screen: { text: string } = { text: "
 }
 
 /** A git whose remote's default is `develop`, where no branch exists yet and `worktree add` makes the directory. */
-const git: Git = (_cwd, args) => {
+const git: Git = (cwd, args) => {
   if (args[0] === "ls-remote") return "ref: refs/heads/develop\tHEAD\n";
+  if (args.includes("--abbrev-ref")) return `${cwd.split("/").at(-2)?.toLowerCase()}\n`; // a worktree at <root>/<KEY>/<repo> is on the key's branch
   if (args[0] === "rev-parse" && args.includes("--verify")) throw new Error("no such branch");
   if (args[0] === "worktree") mkdirSync(args[args.length - 2], { recursive: true });
   if (args[0] === "check-ignore") return "";
@@ -48,7 +49,7 @@ function setup(max = 2, keys = ["NBF-1", "NBF-2", "NBF-3"]) {
   const status = new Map<string, string>();
   const screen = { text: "" };
   const h = herdr(status, screen);
-  const pool = createPool(store, { settings, source, hook: { node: "/node", bin: "/tool/src/bin.ts" }, herdr: h.run, git, now: () => 100, load: () => ({ load: 1, cores: 14 }), transcriptsRoot: join(root, "transcripts"), sleep: () => {} });
+  const pool = createPool(store, { settings, source, hook: { node: "/node", bin: "/tool/src/bin.ts" }, herdr: h.run, git, now: () => 100, load: () => ({ load: 1, cores: 14 }), transcriptsRoot: join(root, "transcripts"), wait: async () => {} });
   const entry = (key: string) => queue.entries.find((e) => e.ticket.key === key)!;
   return { settings, pool, status, h, entry, store, root, screen };
 }
@@ -152,7 +153,7 @@ test("tokens are read from the session's own transcript, found by its id in whic
   assert.deepEqual(countTokens(null), { input: 0, output: 0 });
 });
 
-test("a session whose herdr server does not answer is started once, and waited for", () => {
+test("a session whose herdr server does not answer is started once, and waited for", async () => {
   const root = tmpDir("ticket-session-");
   const settings = parseTicketSettings({ clones: { a: "/r/a" }, stateDir: root });
   let up = false;
@@ -163,10 +164,10 @@ test("a session whose herdr server does not answer is started once, and waited f
   };
   let queue = emptyQueue(1);
   const pool = createPool({ get: () => queue, set: (q) => { queue = q; } }, {
-    settings, source, hook: { node: "n", bin: "b" }, herdr: run, git, sleep: () => { up = true; }, startServer: (s) => started.push(s),
+    settings, source, hook: { node: "n", bin: "b" }, herdr: run, git, wait: async () => { up = true; }, startServer: (s) => started.push(s),
   });
-  pool.ensureSession();
-  pool.ensureSession();
+  await pool.ensureSession();
+  await pool.ensureSession();
   assert.deepEqual(started, ["tickets"], "started in ticket mode's own session, and only when it did not answer");
 });
 
@@ -203,4 +204,44 @@ test("a run showing a start dialog for its worktree is answered with down-enter 
   for (let i = 0; i < 6; i += 1) await pool.tick();
   assert.equal(answers().length, 4, "a dialog that keeps coming back is answered four times, then left");
   assert.equal(entry("NBF-1").waiting, true);
+});
+
+test("a retry continues in the run's own worktree, and the earlier outcome does not end it before it starts", async () => {
+  const { pool, status, entry, settings, store } = setup(1, ["NBF-1"]);
+  await pool.tick();
+  status.set(herdrName("NBF-1"), "working");
+  await pool.tick();
+  status.set(herdrName("NBF-1"), "idle");
+  await pool.tick();
+  assert.deepEqual(entry("NBF-1").outcome, { kind: "no-outcome" });
+  writeFileSync(join(ticketDir(settings, "NBF-1"), "outcome.json"), JSON.stringify({ kind: "needs-human", reason: "stale" }));
+  store.set(retry(store.get(), "NBF-1", 200));
+  status.set(herdrName("NBF-1"), "idle");
+  await pool.tick();
+  assert.equal(entry("NBF-1").phase, "running", "the stale outcome was cleared, so an idle agent that has not worked yet is not finished");
+  assert.ok(!existsSync(join(ticketDir(settings, "NBF-1"), "outcome.json")));
+});
+
+test("a run stopped while it was starting stays stopped, and the workspace its start raced is closed", async () => {
+  const root = tmpDir("ticket-race-");
+  const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/repos/nbl-ui-netbox" }, stateDir: root });
+  let queue: Queue = enqueue(emptyQueue(1), [ticket("NBF-1")], { repos: ["nbl-ui-netbox"], model: "sonnet", effort: "high" }, 0);
+  const store = { get: () => queue, set: (next: Queue) => { queue = next; } };
+  const h = herdr(new Map());
+  let pool: ReturnType<typeof createPool>;
+  // The person presses Stop while Claude is starting.
+  const herdrAsync = async (args: string[]) => { pool.stop("NBF-1"); return h.run(args); };
+  pool = createPool(store, { settings, source, hook: { node: "n", bin: "b" }, herdr: h.run, herdrAsync, git, wait: async () => {}, load: () => ({ load: 0, cores: 1 }) });
+  await pool.tick();
+  assert.deepEqual(queue.entries[0].outcome, { kind: "stopped" });
+  assert.ok(h.calls.some((args) => args.includes("close") && args.includes("w1")), "the raced workspace is closed");
+});
+
+test("a tick asked for during a tick runs once more after it, so a ticket queued meanwhile does not wait for the next interval", async () => {
+  const { pool, entry, store } = setup(2, ["NBF-1"]);
+  const first = pool.tick();
+  store.set(enqueue(store.get(), [ticket("NBF-2")], { repos: ["nbl-ui-netbox"], model: "sonnet", effort: "high" }, 1));
+  await pool.tick();
+  await first;
+  assert.equal(entry("NBF-2").phase, "running");
 });

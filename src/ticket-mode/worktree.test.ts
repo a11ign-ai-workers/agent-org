@@ -6,7 +6,7 @@ import { readFileSync, realpathSync } from "node:fs";
 import { join } from "node:path";
 import { sandboxGitEnv, withGitSandbox } from "@a11ign/toolchain/lib/git-sandbox";
 import { tmpDir } from "../lib/tmp-fixture.ts";
-import { addWorktree, excludeFromGit, parseDefaultBranch, worktreePath, type Git } from "./worktree.ts";
+import { addWorktree, excludeFromGit, parseDefaultBranch, reuseWorktree, worktreePath, type Git } from "./worktree.ts";
 
 const git: Git = (cwd, args) => execFileSync("git", args, { cwd, env: sandboxGitEnv(), encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] });
 
@@ -65,5 +65,15 @@ test("a generated file is excluded once through the clone's shared exclude, and 
     const appended: string[] = [];
     excludeFromGit(path, generated, { git, append: (_p, line) => appended.push(line) });
     assert.deepEqual(appended, [], "already ignored, so nothing is appended");
+  });
+});
+
+test("a retry reuses the worktree only when it is on the ticket's branch", () => {
+  withGitSandbox((sandbox) => {
+    const { clone, root } = remoteAndClone(sandbox);
+    const path = worktreePath(root, "NBF-5", "repo-a");
+    addWorktree({ repo: "repo-a", clone, path, branch: "nbf-5-fix" }, git);
+    assert.deepEqual(reuseWorktree({ repo: "repo-a", clone, path, branch: "nbf-5-fix" }, git), { repo: "repo-a", path, base: "develop" });
+    assert.throws(() => reuseWorktree({ repo: "repo-a", clone, path, branch: "nbf-5-other" }, git), /not this ticket's earlier run/);
   });
 });

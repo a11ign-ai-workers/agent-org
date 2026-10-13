@@ -169,14 +169,14 @@ export function createBoard(deps: BoardDeps) {
   return { handle, api, pool, store };
 }
 
-function serve(): void {
+async function serve(): Promise<void> {
   refuseUnknownFlags(["--no-open"], { entry: import.meta.url, command: "agent-org ticket:serve" });
   const settings = readTicketSettings();
   const source = linearSource({ key: readLinearKey(settings.linearKey) });
   const token = randomBytes(24).toString("hex");
   const dir = join(settings.stateDir, "tickets");
   const board = createBoard({ settings, source, token, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json") });
-  board.pool.ensureSession();
+  await board.pool.ensureSession();
   board.pool.reconcile();
   const server = createServer((request, response) => { void board.handle(request, response); });
   server.listen(settings.port, "127.0.0.1", () => {
@@ -187,4 +187,9 @@ function serve(): void {
   setInterval(() => { void board.pool.tick(); }, TICK_MS);
 }
 
-if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.argv[1]) : "").href) serve();
+if (import.meta.url === pathToFileURL(process.argv[1] ? realpathSync(process.argv[1]) : "").href) {
+  serve().catch((err) => {
+    process.stderr.write(`ticket:serve: ${String((err as Error)?.message ?? err)}\n`);
+    process.exit(1);
+  });
+}

@@ -44,6 +44,16 @@ export function addWorktree({ repo, clone, path, branch }: { repo: string; clone
   return { repo, path, base };
 }
 
+/**
+ * The worktree an earlier run of the same ticket left, to continue in on a retry: it must be at `path` and on `branch`. Throws when it is not,
+ * because then it is not that run's.
+ */
+export function reuseWorktree({ repo, clone, path, branch }: { repo: string; clone: string; path: string; branch: string }, git: Git = defaultGit): Prepared {
+  const on = git(path, ["rev-parse", "--abbrev-ref", "HEAD"]).trim();
+  if (on !== branch) throw new Error(`${repo}: ${path} is on ${on}, not ${branch}, so it is not this ticket's earlier run`);
+  return { repo, path, base: parseDefaultBranch(git(clone, ["ls-remote", "--symref", "origin", "HEAD"])) };
+}
+
 /** Where a ticket's worktree for one repository goes: `<root>/<ticket>/<repo>`, so one ticket's repositories sit side by side. */
 export function worktreePath(root: string, ticket: string, repo: string): string {
   return join(root, ticket, repo);

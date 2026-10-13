@@ -15,12 +15,10 @@
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { OUTCOME_FILE } from "./worker-files.ts";
+import { OUTCOME_FILE, STOP_COUNT_FILE } from "./worker-files.ts";
 
 export type HookResult = Readonly<{ code: 0 | 2; say: readonly string[] }>;
 
-/** The count of refused stops in a row, beside the outcome file. */
-const STOP_COUNT_FILE = "stop-refusals";
 export const MAX_STOP_REFUSALS = 2;
 
 const ALLOW: HookResult = { code: 0, say: [] };

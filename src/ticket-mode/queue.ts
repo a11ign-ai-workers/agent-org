@@ -30,6 +30,8 @@ export type Entry = Readonly<{
   queuedAt: number;
   startedAt?: number;
   finishedAt?: number;
+  /** This is a retry: the earlier run's worktrees are continued in, not made again. */
+  retried?: boolean;
   /** The herdr workspace the run's agent is in, while it has one. */
   workspace?: string;
   /** Seen `working` at least once, so a later `idle` means a finished turn and not a prompt not yet taken. */
@@ -77,7 +79,7 @@ export function retry(queue: Queue, key: string, now: number): Queue {
   const entry = find(queue, key);
   if (entry === undefined || entry.phase !== "finished" || entry.outcome?.kind === "draft-pr") return queue;
   const { ticket, repos, model, effort } = entry;
-  return { ...queue, entries: [...queue.entries.filter((e) => e.ticket.key !== key), { ticket, repos, model, effort, phase: "queued", queuedAt: now }] };
+  return { ...queue, entries: [...queue.entries.filter((e) => e.ticket.key !== key), { ticket, repos, model, effort, phase: "queued", queuedAt: now, retried: true }] };
 }
 
 export function setMax(queue: Queue, max: number): Queue {

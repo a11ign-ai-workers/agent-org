@@ -12,6 +12,8 @@ import type { Ticket } from "./source.ts";
 /** The file a worker writes last, and the one thing the pool and the stop hook read to know a run has ended. */
 export const OUTCOME_FILE = "outcome.json";
 export const BRIEF_FILE = "brief.md";
+/** The stop hook's count of refused stops in a row, beside the outcome file. */
+export const STOP_COUNT_FILE = "stop-refusals";
 
 export type WorktreeRef = Readonly<{ repo: string; path: string; base: string }>;
 
@@ -39,7 +41,7 @@ ${files}
 
 ${repos}
 
-Each worktree is already on the ticket's branch. Read each repository's \`CLAUDE.md\` and \`AGENTS.md\` before you change anything, and use the install, test and typecheck commands they give, scoped to the package you change.
+Each worktree is already on the ticket's branch. It may hold an earlier run's commits on this ticket: if so, continue from them rather than starting again. Read each repository's \`CLAUDE.md\` and \`AGENTS.md\` before you change anything, and use the install, test and typecheck commands they give, scoped to the package you change.
 
 ## What to do
 
