@@ -76,6 +76,10 @@ test("the same list with a LATER SUCCESS clears; a success older than the failur
   assert.equal(reading(failedWith()).status, "tripped", "the 14:00Z success is older than both failures");
 });
 
+test("a status run's SUCCESS newer than the failure does not clear it (a11ign/agent-org#1273)", () => {
+  assert.equal(reading(failedWith([run(37650000000, "status", "success", "2026-10-07T15:40:00Z"), ...THAT_DAY])).status, "tripped");
+});
+
 test("a cancelled, skipped or still-running run NEITHER trips NOR clears", () => {
   for (const [conclusion, status] of [["cancelled", "completed"], ["skipped", "completed"], [null, "in_progress"], ["neutral", "completed"]] as const) {
     const later = run(37650000000, "status", conclusion, "2026-10-07T15:40:00Z", status);
@@ -168,6 +172,18 @@ test("the reader makes ONE call while the newest verdict is a success, and three
   assert.deepEqual(fact?.jobs, GUARDS);
   assert.deepEqual(fact?.pending, PENDING, "README.md and config.json are not changesets");
   assert.equal(reading(fact).status, "tripped");
+});
+
+test("a dispatch's success clears only when its release job published: a promote-only one is read from its jobs and neither clears nor trips", () => {
+  const dispatch = run(2, "workflow_dispatch", "success", "2026-10-07T15:40:00Z");
+  const published = fakeGh({ [RUNS]: JSON.stringify([dispatch, ...THAT_DAY]), "runs/2/jobs": JSON.stringify([880001]) });
+  assert.equal(reading(readReleaseRuns(published.gh, REPO)).status, "clear");
+  assert.equal(published.calls.length, 2, "one call for the runs and one for the dispatch's jobs");
+
+  const promoteOnly = fakeGh({ [RUNS]: JSON.stringify([dispatch, ...THAT_DAY]), "runs/2/jobs": "[]", "runs/37643562214/jobs": JSON.stringify(GUARDS), "contents/.changeset": JSON.stringify(PENDING) });
+  const fact = readReleaseRuns(promoteOnly.gh, REPO);
+  assert.equal(reading(fact).status, "tripped", "the dispatch that did not publish does not clear the failure before it");
+  assert.equal(reading(fact).discriminator, `${SIGNAL}@37643562214`);
 });
 
 test("the reader's refusals are nulls, never an empty answer: the list, the jobs and the changesets", () => {
