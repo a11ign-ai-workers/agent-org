@@ -13,14 +13,21 @@
 // A DECLARATION THAT CANNOT BE READ MAKES THE WHOLE ANSWER UNKNOWN, never a list: a flag looked for in a file that did not parse would be reported unset on no evidence, which is a false
 // work list handed to the one session that acts on it. An OPTIONAL file that is simply not there (`seats.json` in a project with no seats) holds no key and is not a fault; `project.json` and `host.json` are required, and a missing one is a wrong path, which is unknown too.
 //
-// A LEAF: it reads files and one `git log` per unset flag and runs no tick; `org-health.ts` turns its answer into a reading.
+// THE CANARY HALF (agent-org#1324): a flag whose other home is the canary state is decided there, not in a declaration, so the same count reads `machinery-canary.json` through
+// `org-health.ts`'s `parseCanaryState` (the reader `machinery-flag.ts` uses). A flag ABSENT from that state, merged more than two hours before the read, and named by no open row
+// in a `ready` or `in-progress` state is the sixth merged-but-off kind of finding. An unreadable state, or a read of the open rows that did not happen, is UNKNOWN.
+//
+// A LEAF: it reads files and one `git log` per unset flag and runs no tick; `org-health.ts` turns its answer into a reading. The canary half imports `org-health.ts` at runtime,
+// which is safe because `org-health.ts` imports this module as a type only.
 import { execFileSync } from "node:child_process";
-import { readdirSync, readFileSync } from "node:fs";
+import { existsSync, readdirSync, readFileSync } from "node:fs";
 import { dirname, join, relative, resolve } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "./lib/git-env.ts";
-import { hostConfigPath } from "./host-config.ts";
+import { hostConfigPath, stateEntryPath } from "./host-config.ts";
 import { HOME_CHECKOUT } from "./project-config.ts";
+import { CLAIM_LABEL, READY_LABEL } from "./claim-labels.ts";
+import { CANARY_STATE_FILE, emptyCanaryState, parseCanaryState, type CanaryState } from "./org-health.ts";
 
 /** The tool's root by this file's own location (`org-health.ts`'s `TOOL_ROOT`): the registry is read from the code that is running, not from the project's tree. */
 const TOOL_ROOT = resolve(dirname(fileURLToPath(import.meta.url)), "..");
@@ -59,8 +66,20 @@ export type UnsetFlag = ShippedFlag & {
   /** That merge's pull request number, or `null` under the same conditions. */
   pr: number | null;
 };
-/** What the tick reads: `unset` is the violation, and `unknown` is a read that could not be made (never an empty `unset`). */
-export type FlagLedger = { shipped: number; unset: UnsetFlag[]; } | { unknown: string; };
+/** An open row as `readOpenRows` returns it: the title, the body and the labels by name. */
+export type OpenRow = { title: string; body?: string | null; labels?: { name: string; }[]; };
+/** A flag that is absent from the canary state, merged more than two hours before the read, and named by no open row. */
+export type CanaryAbsentFlag = UnsetFlag;
+/**
+ * What the tick reads: `unset` is the declaration violation, `canaryAbsent` the canary violation, and `unknown` is a read that could not be made (never an empty list in its place).
+ * `canaryAbsent` is optional so a caller that built a ledger by hand, with no canary half, still type-checks.
+ */
+export type FlagLedger = { shipped: number; unset: UnsetFlag[]; canaryAbsent?: CanaryAbsentFlag[]; } | { unknown: string; };
+
+/** Two hours: the window a merged flag may sit absent from the canary state before the switch row is owed (the row's "2 h"). */
+export const CANARY_ABSENT_MS = 2 * 60 * 60 * 1000;
+/** The labels of an open row that is still owed its switch: `ready` (not yet claimed) and `in-progress` (claimed). */
+const OWED_LABELS: readonly string[] = Object.freeze([READY_LABEL, CLAIM_LABEL]);
 
 /** @returns every non-test `.ts` or `.mjs` under `dir`, as paths relative to `root`; `node_modules` and `fixtures` are not source */
 function sourcesUnder(dir: string, root: string, list: (dir: string) => { name: string; directory: boolean; }[]): string[] {
@@ -134,13 +153,60 @@ export function mergeOf(flag: ShippedFlag, { toolRoot = TOOL_ROOT, run = (args: 
 }
 
 /**
- * THE COUNT: the tool's shipped flags read against the declarations. `unknown` names the file that could not be parsed, or that `src/` could not be listed. A tree that holds NO flag is
- * `unknown` too, not clean: this registry has held seven or more since 2026-10-12, so none found is a walk that did not work (`copyDriftReading`'s rule for an empty discovery).
+ * THE CANARY STATE, read the way `machinery-flag.ts` reads it: an absent file is empty (no flag has been switched), and a file that will not parse is UNKNOWN, because a state read
+ * wrong would forget a flag that is on and report it absent.
+ * @param path the canary state's path, `stateEntryPath(CANARY_STATE_FILE)` by default
+ */
+export function readCanaryState(path: string): CanaryState | { unknown: string; } {
+  try {
+    return existsSync(path) ? parseCanaryState(readFileSync(path, "utf8")) : emptyCanaryState();
+  } catch (cause) {
+    return { unknown: `${path} could not be read (${String((cause as Error)?.message ?? cause).split("\n")[0].slice(0, 160)}), so no canary switch is known` };
+  }
+}
+
+/** @returns whether a flag's other home is the canary state, by the reason `FLAGS_WITH_ANOTHER_HOME` gives for it (every entry says so today). */
+const canaryHomed = (key: string, anotherHome: Readonly<Record<string, string>>): boolean => Object.hasOwn(anotherHome, key) && /writes the canary state/.test(anotherHome[key]);
+
+/** @returns whether an open row names `key` in its title or body and is still owed its switch (`ready` or `in-progress`); the key is matched whole, so `rows.autoUnpark` is not `rows.autoUnparkX` */
+const namesOwedKey = (row: OpenRow, key: string): boolean => (row.labels ?? []).some(({ name }) => OWED_LABELS.includes(name))
+  && new RegExp(`(^|[^\\w.])${key.replace(/\./g, "\\.")}(?![\\w.])`).test(`${row.title}\n${row.body ?? ""}`);
+
+/**
+ * THE CANARY VIOLATION, PURE: the canary-homed flags that are absent from `state`, merged more than `CANARY_ABSENT_MS` before `now`, and named by no owed open row.
+ * A flag the state carries, on or off, is decided and not counted. A merge date git could not give makes the whole answer unknown, because the two-hour test cannot be made for it.
+ * @param openRows the open rows, or `null` when they could not be read; a null read with a flag past its window is unknown, never a clean list
+ */
+export function canaryAbsentFlags({ shipped, state, openRows, now, merge, anotherHome = FLAGS_WITH_ANOTHER_HOME }: {
+  shipped: readonly ShippedFlag[]; state: CanaryState; openRows: readonly OpenRow[] | null; now: number;
+  merge: (flag: ShippedFlag) => { mergedAt: string | null; pr: number | null; }; anotherHome?: Readonly<Record<string, string>>;
+}): CanaryAbsentFlag[] | { unknown: string; } {
+  const past: CanaryAbsentFlag[] = [];
+  for (const flag of shipped) {
+    if (!canaryHomed(flag.key, anotherHome) || Object.hasOwn(state.flags, flag.key)) continue;
+    const merged = merge(flag);
+    if (merged.mergedAt === null) return { unknown: `${flag.key} is absent from ${CANARY_STATE_FILE} and git did not say when it merged, so its two hours cannot be counted` };
+    if (now - Date.parse(merged.mergedAt) > CANARY_ABSENT_MS) past.push({ ...flag, ...merged });
+  }
+  if (past.length === 0) return [];
+  if (openRows === null) return { unknown: `the open rows could not be read, so the rows that name ${past.map((flag) => `\`${flag.key}\``).join(", ")} are not known` };
+  return past.filter((flag) => !openRows.some((row) => namesOwedKey(row, flag.key)));
+}
+
+/**
+ * THE COUNT: the tool's shipped flags read against the declarations, and the canary-homed ones against the canary state. `unknown` names the file that could not be parsed, or that
+ * `src/` could not be listed. A tree that holds NO flag is `unknown` too, not clean: this registry has held seven or more since 2026-10-12, so none found is a walk that did not work
+ * (`copyDriftReading`'s rule for an empty discovery).
  * @param projectRoot the checkout whose `.agent-org/` holds the project's declarations
  * @param hostPath the host declaration, `$AGENT_ORG_HOST` or the file beside the checkout
+ * @param canary the canary state, or `{ unknown }` when it could not be read; by default the file `machinery-flag.ts` reads
+ * @param openRows the open rows (`readOpenRows`), or `null` when the read was refused
+ * @param now the time of the read, in epoch milliseconds
  */
-export function readFlagLedger({ toolRoot = TOOL_ROOT, projectRoot = HOME_CHECKOUT, hostPath = hostConfigPath(), read = (path) => readFileSync(path, "utf8"), list = listDirectory, merge = (flag) => mergeOf(flag, { toolRoot }) }:
-  { toolRoot?: string; projectRoot?: string; hostPath?: string; read?: (path: string) => string; list?: (dir: string) => { name: string; directory: boolean; }[]; merge?: (flag: ShippedFlag) => { mergedAt: string | null; pr: number | null; }; } = {}): FlagLedger {
+export function readFlagLedger({ toolRoot = TOOL_ROOT, projectRoot = HOME_CHECKOUT, hostPath = hostConfigPath(), read = (path) => readFileSync(path, "utf8"), list = listDirectory, merge = (flag) => mergeOf(flag, { toolRoot }),
+  canary = () => readCanaryState(stateEntryPath(CANARY_STATE_FILE)), openRows = null, now = Date.now() }:
+  { toolRoot?: string; projectRoot?: string; hostPath?: string; read?: (path: string) => string; list?: (dir: string) => { name: string; directory: boolean; }[]; merge?: (flag: ShippedFlag) => { mergedAt: string | null; pr: number | null; };
+    canary?: () => CanaryState | { unknown: string; }; openRows?: readonly OpenRow[] | null; now?: number; } = {}): FlagLedger {
   const shipped = discoverFlags({ toolRoot, read, list });
   if (shipped === null) return { unknown: `${join(toolRoot, "src")} could not be listed, so no flag was found` };
   if (shipped.length === 0) return { unknown: `no \`*_FLAG\` constant was found under ${join(toolRoot, "src")}, so none was compared` };
@@ -161,5 +227,15 @@ export function readFlagLedger({ toolRoot = TOOL_ROOT, projectRoot = HOME_CHECKO
       return { unknown: `${path} is not valid JSON (${String((cause as Error)?.message ?? cause).split("\n")[0].slice(0, 160)}), so no flag is known unset` };
     }
   }
-  return { shipped: shipped.length, unset: unsetFlags({ shipped, declarations }).map((flag) => ({ ...flag, ...merge(flag) })) };
+  const state = canary();
+  if ("unknown" in state) return state;
+  const canaryAbsent = canaryAbsentFlags({ shipped, state, openRows, now, merge });
+  if ("unknown" in canaryAbsent) return canaryAbsent;
+  return { shipped: shipped.length, unset: unsetFlags({ shipped, declarations }).map((flag) => ({ ...flag, ...merge(flag) })), canaryAbsent };
 }
+
+/**
+ * THE GATE'S READ OF THE LEDGER, named so a test can run it (agent-org#1324): the gate hands `orgHealthNow` this thunk with the open rows it read, so the canary half can
+ * tell an owed row from a missing one. The gate passes no `deps`; a test passes the reads `readFlagLedger` takes, and the thunk runs them the way the gate does.
+ */
+export const readFlagSwitchesFor = (openRows: readonly OpenRow[] | null, deps: Omit<Parameters<typeof readFlagLedger>[0] & object, "openRows"> = {}): (() => FlagLedger) => () => readFlagLedger({ ...deps, openRows });

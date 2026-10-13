@@ -34,7 +34,7 @@
 //   claim-refusal-storm          > 10 / 15 min   more than ten claims refused inside fifteen minutes, naming the most frequent reason. THE BOUND IS THE CHAIRMAN'S,
 //                                            not a percentile: 163 refusals in 66 minutes (08:09-09:15) stopped every worker start, the fixer's included.
 // THE "MERGED BUT OFF" COUNT, agent-org#1135 (class `hand-reroute`, a11ign#4437):
-//   flag-without-a-switch        any         a `*_FLAG` the code ships (`src/flag-switch-ledger.ts`) whose key no declaration file carries, `false` counting as decided. Named once a day with the date
+//   flag-without-a-switch        any         a `*_FLAG` the code ships (`src/flag-switch-ledger.ts`) whose key no declaration file carries, `false` counting as decided; or, for a flag whose home is the canary state, one absent from `machinery-canary.json` more than two hours after its merge with no open `ready`/`in-progress` row naming it (agent-org#1324). Named once a day with the date
 //                                            of the merge that added it, to `product-manager`, who files the a11ign switch row the chairman's rule (a11ign#928, 2026-10-12) asks for with the change.
 // THE TICK RECORD, agent-org#1208 (a11ign#928: a slow tick is recorded on one standing row and wakes nobody):
 //   tick-record-unwritten        any         the standing comment a slow tick edits could not be written (or the project declares no row). A DIGEST that rides the next order and is
@@ -736,11 +736,16 @@ export function flagSwitchReading({ day, ledger }: { day: string; ledger: FlagLe
   const signal = SIGNALS.FLAG_WITHOUT_SWITCH;
   if (ledger === null) return unknown(signal, "the flags the code ships could not be read against the declarations");
   if ("unknown" in ledger) return unknown(signal, ledger.unknown);
-  if (ledger.unset.length === 0) return clear(signal);
-  const lines = ledger.unset.map((flag) => `- \`${flag.key}\` (${flag.name} in ${flag.file}), merged ${flag.mergedAt === null ? "on a date git did not give" : flag.mergedAt.slice(0, 10)}${flag.pr === null ? "" : ` in #${flag.pr}`}`);
+  const absent = ledger.canaryAbsent ?? [];
+  if (ledger.unset.length === 0 && absent.length === 0) return clear(signal);
+  const line = (flag: { key: string; name: string; file: string; mergedAt: string | null; pr: number | null; }) => `- \`${flag.key}\` (${flag.name} in ${flag.file}), merged ${flag.mergedAt === null ? "on a date git did not give" : flag.mergedAt.slice(0, 10)}${flag.pr === null ? "" : ` in #${flag.pr}`}`;
+  const parts: string[] = [];
+  if (ledger.unset.length > 0) parts.push(`${ledger.unset.length} of ${ledger.shipped} flags the code ships ${ledger.unset.length === 1 ? "is" : "are"} OFF because no declaration sets ${ledger.unset.length === 1 ? "it" : "them"}:\n${ledger.unset.map(line).join("\n")}`);
+  // agent-org#1324: a flag whose home is the canary state and that the state does not carry two hours after its merge, with no owed row naming it
+  if (absent.length > 0) parts.push(`${absent.length} ${absent.length === 1 ? "flag is" : "flags are"} merged and ABSENT from ${CANARY_STATE_FILE} for over two hours, with no open \`ready\` or \`in-progress\` row naming ${absent.length === 1 ? "it" : "them"}:\n${absent.map(line).join("\n")}`);
   return { signal, status: "tripped", firstTrippedAt: null,
-    discriminator: `${signal}@${day}:${ledger.unset.map((flag) => flag.key).sort().join(",")}`,
-    detail: `${ledger.unset.length} of ${ledger.shipped} flags the code ships ${ledger.unset.length === 1 ? "is" : "are"} OFF because no declaration sets ${ledger.unset.length === 1 ? "it" : "them"}:\n${lines.join("\n")}` };
+    discriminator: `${signal}@${day}:${[...ledger.unset, ...absent].map((flag) => flag.key).sort().join(",")}`,
+    detail: parts.join("\n") };
 }
 
 /**

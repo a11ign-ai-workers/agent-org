@@ -30,6 +30,7 @@ import { join } from "node:path";
 import { fileURLToPath } from "node:url";
 import { sandboxGitEnv } from "../lib/git-env.ts";
 import { workGateSource } from "../lib/work-gate-source.ts";
+import type { CanaryState } from "../org-health.ts";
 
 // THE PROJECT THIS FILE RUNS AGAINST IS A RECORDED ONE (`org-health-fleet-build-fact.test.ts`'s rule): the host file is set FIRST and the tool imported AFTER it, dynamically, so
 // the Acceptance's `AGENT_ORG_HOST` (a11y-witness's live declaration) is never what a test below reads; every ledger read gets its own roots.
@@ -44,8 +45,8 @@ writeFileSync(HOST_FILE, JSON.stringify({ schema: 1, home: SCRATCH, binDir: join
 process.env.AGENT_ORG_HOST = HOST_FILE;
 
 const ledger = await import("../flag-switch-ledger.ts");
-const { discoverFlags, declaresKey, unsetFlags, mergeOf, readFlagLedger, FLAGS_WITH_ANOTHER_HOME } = ledger;
-const { SIGNALS, flagSwitchReading, orgHealthOrders, orgHealthReadings } = await import("../org-health.ts");
+const { discoverFlags, declaresKey, unsetFlags, mergeOf, readFlagLedger, readFlagSwitchesFor, readCanaryState, canaryAbsentFlags, CANARY_ABSENT_MS, FLAGS_WITH_ANOTHER_HOME } = ledger;
+const { SIGNALS, CANARY_STATE_FILE, emptyCanaryState, withMachineryFlag, flagSwitchReading, orgHealthOrders, orgHealthReadings } = await import("../org-health.ts");
 const { FLAG_REGISTRY } = await import("../machinery-flag.ts");
 const { buildReport, renderReport } = await import("../org-retro.ts");
 const { PIN_BUMP_FLAG } = await import("../pin-bump-measure.ts");
@@ -139,6 +140,12 @@ test("(2) FLAGS_WITH_ANOTHER_HOME is exactly the flags `machinery:flag` switches
 /** A tool tree holding the two flags below, and a project whose declarations the cases vary. */
 const TOOL = tree("tool", { "src/m.ts": 'export const HAIKU_BRIEF_FLAG = "workers.haikuBrief";\nexport const AUTO_UNPARK_FLAG = "rows.autoUnpark";\nexport const CHAIN_WAIT_FLAG = "queue.chainWaitWake";\n' });
 const merge = (flag: { key: string; }) => ({ mergedAt: flag.key === "rows.autoUnpark" ? "2026-10-12T08:01:58+00:00" : "2026-10-11T18:46:01+00:00", pr: flag.key === "rows.autoUnpark" ? 1118 : 1022 });
+const NOW = Date.parse("2026-10-13T12:00:00Z");
+/** agent-org#1324: a canary state that carries EVERY canary-homed flag, off, so the canary half counts none; the existing cases below are about the declarations. */
+function canaryDecided(names: readonly string[] = Object.keys(FLAGS_WITH_ANOTHER_HOME)): CanaryState {
+  return names.reduce((state, name) => withMachineryFlag(state, { name, on: false }), emptyCanaryState());
+}
+const DECIDED = { canary: () => canaryDecided(), openRows: [], now: NOW };
 function project(label: string, files: Record<string, string>) {
   const root = tree(label, Object.fromEntries(Object.entries(files).map(([name, text]) => [name === "host.json" ? "host/host.json" : `.agent-org/${name}`, text])));
   return { projectRoot: root, hostPath: join(root, "host", "host.json") };
@@ -146,9 +153,9 @@ function project(label: string, files: Record<string, string>) {
 
 test("(3) the ledger reads every declaration file: decided in host.json or decisions.json, an absent seats.json is no fault, and what is left is named with its merge", () => {
   const where = project("decided", { "project.json": "{}", "decisions.json": '{ "rows.autoUnpark": false }', "host.json": '{ "workers": { "haikuBrief": true } }' });
-  assert.deepEqual(readFlagLedger({ toolRoot: TOOL, ...where, merge }), { shipped: 3, unset: [] }, "both decided (one flat and false, one nested and true) and the third has another home");
+  assert.deepEqual(readFlagLedger({ ...DECIDED, toolRoot: TOOL, ...where, merge }), { shipped: 3, unset: [], canaryAbsent: [] }, "both decided (one flat and false, one nested and true) and the third has another home");
   const half = project("half", { "project.json": "{}", "host.json": "{}" });
-  const answer = readFlagLedger({ toolRoot: TOOL, ...half, merge });
+  const answer = readFlagLedger({ ...DECIDED, toolRoot: TOOL, ...half, merge });
   assert.ok(!("unknown" in answer));
   assert.deepEqual(answer.unset.map(({ key, mergedAt, pr }) => ({ key, mergedAt, pr })), [
     { key: "workers.haikuBrief", mergedAt: "2026-10-11T18:46:01+00:00", pr: 1022 },
@@ -157,25 +164,25 @@ test("(3) the ledger reads every declaration file: decided in host.json or decis
 
 test("(3) a declaration that cannot be read is UNKNOWN and never a list, and so is a missing required file or a tree with no flag", () => {
   const malformed = project("malformed", { "project.json": "{}", "decisions.json": "{ not json", "host.json": "{}" });
-  const bad = readFlagLedger({ toolRoot: TOOL, ...malformed, merge });
+  const bad = readFlagLedger({ ...DECIDED, toolRoot: TOOL, ...malformed, merge });
   assert.ok("unknown" in bad && /decisions\.json is not valid JSON/.test(bad.unknown), `names the file: ${JSON.stringify(bad)}`);
   const noHost = project("nohost", { "project.json": "{}" });
-  const missing = readFlagLedger({ toolRoot: TOOL, ...noHost, merge });
+  const missing = readFlagLedger({ ...DECIDED, toolRoot: TOOL, ...noHost, merge });
   assert.ok("unknown" in missing && /host\.json could not be read/.test(missing.unknown), `a wrong $AGENT_ORG_HOST would otherwise name every flag: ${JSON.stringify(missing)}`);
   const noProject = project("noproject", { "host.json": "{}" });
-  assert.ok("unknown" in readFlagLedger({ toolRoot: TOOL, ...noProject, merge }), "project.json is required too");
-  const empty = readFlagLedger({ toolRoot: tree("empty", { "src/none.ts": "export const X = 1;\n" }), ...project("ok", { "project.json": "{}", "host.json": "{}" }), merge });
+  assert.ok("unknown" in readFlagLedger({ ...DECIDED, toolRoot: TOOL, ...noProject, merge }), "project.json is required too");
+  const empty = readFlagLedger({ ...DECIDED, toolRoot: tree("empty", { "src/none.ts": "export const X = 1;\n" }), ...project("ok", { "project.json": "{}", "host.json": "{}" }), merge });
   assert.ok("unknown" in empty && /no `\*_FLAG` constant/.test(empty.unknown), "a walk that found nothing has not found a clean tree");
 });
 
 test("(3) the real tree against a declaration that sets nothing names the flags the row lists, and against one that sets them all names none", () => {
-  const nothing = readFlagLedger({ ...project("real-nothing", { "project.json": "{}", "host.json": "{}" }), merge: () => ({ mergedAt: null, pr: null }) });
+  const nothing = readFlagLedger({ ...DECIDED, ...project("real-nothing", { "project.json": "{}", "host.json": "{}" }), merge: () => ({ mergedAt: null, pr: null }) });
   assert.ok(!("unknown" in nothing));
   const keys = nothing.unset.map((flag) => flag.key);
   for (const key of ["workers.haikuBrief", "workers.orchestratorOneShot", "rows.specLint"]) assert.ok(keys.includes(key), `${key} is counted`);
   for (const key of Object.keys(FLAGS_WITH_ANOTHER_HOME)) assert.ok(!keys.includes(key), `${key} is not`);
   const all = Object.fromEntries((discoverFlags() ?? []).map((flag) => [flag.key, false]));
-  const decided = readFlagLedger({ ...project("real-all", { "project.json": "{}", "decisions.json": JSON.stringify(all), "host.json": "{}" }), merge: () => ({ mergedAt: null, pr: null }) });
+  const decided = readFlagLedger({ ...DECIDED, ...project("real-all", { "project.json": "{}", "decisions.json": JSON.stringify(all), "host.json": "{}" }), merge: () => ({ mergedAt: null, pr: null }) });
   assert.ok(!("unknown" in decided));
   assert.deepEqual(decided.unset, [], "every key set `false` is decided, so nothing is counted");
 });
@@ -275,6 +282,80 @@ test("(6) through the gate's `orgHealthNow`: a reader that finds unset flags yie
 
 test("(6) WIRING: the gate's call site hands `orgHealthNow` the real reader, so the signal is not dead for want of a fact (#2980's lesson)", () => {
   const gate = workGateSource();
-  assert.match(gate, /readFlagSwitches: \(\) => readFlagLedger\(\)/);
-  assert.match(gate, /import \{ readFlagLedger \} from "\.\/flag-switch-ledger\.ts"/);
+  assert.match(gate, /readFlagSwitches: readFlagSwitchesFor\(openRowsRead\),/, "agent-org#1324: the gate hands the open rows it read to the canary half, through the helper the next test runs");
+  assert.match(gate, /import \{ readFlagSwitchesFor \} from "\.\/flag-switch-ledger\.ts"/);
+});
+
+// agent-org#1324: THE CANARY HALF. A flag whose home is the canary state is counted by its absence from `machinery-canary.json` two hours after its merge, not by a declaration.
+const PACING_TREE = tree("canary", { "src/g.ts": 'export const PACING_FLAG = "gate.graphqlPacing";\n' });
+const pacingMergedHoursAgo = (hours: number | null) => () => ({ mergedAt: hours === null ? null : new Date(NOW - hours * 3_600_000).toISOString(), pr: 1240 });
+type Row = { title: string; body: string; labels: { name: string; }[]; };
+const named = (labels: string[], title = "switch row", body = ""): Row => ({ title, body, labels: labels.map((name) => ({ name })) });
+/** The count of canary findings a case reads, and a throw when the read was unknown (every case that counts expects a read). */
+const absent = (args: Parameters<typeof canaryLedger>[0]) => { const answer = canaryLedger(args); if ("unknown" in answer) throw new Error(answer.unknown); return answer.canaryAbsent?.length; };
+/** The gate's canary half on the one shipped canary-homed flag, `gate.graphqlPacing`, with the state, the open rows and the merge age the case gives. */
+function canaryLedger({ state = emptyCanaryState(), openRows = [] as Row[] | null, hours = 3 }: { state?: CanaryState | { unknown: string; }; openRows?: Row[] | null; hours?: number | null; } = {}) {
+  return readFlagLedger({ toolRoot: PACING_TREE, ...project(`canary-${hours}`, { "project.json": "{}", "host.json": "{}" }), canary: () => state, openRows, now: NOW, merge: pacingMergedHoursAgo(hours) });
+}
+
+test("(7) agent-org#1324 POSITIVE CONTROL: a canary-homed flag absent from the canary state, merged three hours before the read and named by no open row, is one finding", () => {
+  const answer = canaryLedger({ hours: 3, openRows: [] });
+  assert.ok(!("unknown" in answer), `the read is made: ${JSON.stringify(answer)}`);
+  assert.deepEqual(answer.canaryAbsent?.map(({ key, pr, mergedAt }) => ({ key, pr, mergedAt })), [{ key: "gate.graphqlPacing", pr: 1240, mergedAt: new Date(NOW - 3 * 3_600_000).toISOString() }]);
+  assert.deepEqual(answer.unset, [], "the declarations do not count a flag with another home");
+  const reading = flagSwitchReading({ day: "2026-10-13", ledger: answer });
+  assert.equal(reading.status, "tripped");
+  assert.match(reading.detail, new RegExp(`ABSENT from ${CANARY_STATE_FILE}[\\s\\S]*\`gate\\.graphqlPacing\``), "the detail names the key and the state it is absent from");
+  assert.equal(reading.discriminator, `${SIGNALS.FLAG_WITHOUT_SWITCH}@2026-10-13:gate.graphqlPacing`);
+});
+
+test("(7) agent-org#1324: an open row in a ready or in-progress state that names the key clears the finding; a row in another state, one naming another key, or none does not", () => {
+  assert.equal(absent({ openRows: [named(["in-progress"], "Pacing switch", "turns gate.graphqlPacing on")] }), 0, "a claimed row whose body names the key");
+  assert.equal(absent({ openRows: [named(["ready"], "gate.graphqlPacing: switch it")] }), 0, "a ready row whose title names the key");
+  assert.equal(absent({ openRows: [named(["done"], "gate.graphqlPacing: switch it")] }), 1, "CONTROL: a row not owed its switch does not name the flag");
+  assert.equal(absent({ openRows: [named(["ready"], "gate.graphqlPacingWindow: switch it")] }), 1, "CONTROL: the key is matched whole, so a longer key is another flag");
+  assert.equal(absent({ openRows: [named(["ready"], "unrelated row")] }), 1, "CONTROL: a row that names nothing");
+});
+
+test("(7) agent-org#1324: a flag merged less than two hours before the read is not yet owed its row; a flag the canary state carries, on or off, is decided", () => {
+  assert.equal(absent({ hours: 1 }), 0, "one hour: inside the window");
+  assert.equal(absent({ hours: 3 }), 1, "CONTROL: the same flag, three hours on, is counted");
+  assert.equal(CANARY_ABSENT_MS, 2 * 60 * 60 * 1000);
+  const off = withMachineryFlag(emptyCanaryState(), { name: "gate.graphqlPacing", on: false });
+  assert.equal(absent({ state: off, hours: 3 }), 0, "present as off is a decision");
+  const on = withMachineryFlag(emptyCanaryState(), { name: "gate.graphqlPacing", on: true });
+  assert.equal(absent({ state: on, hours: 3 }), 0, "present as on is a decision");
+});
+
+test("(7) agent-org#1324: the two-hour line is exact, so a flag merged exactly two hours before the read is not yet past it, and a second more is (break: `>` to `>=` -- the first case goes red)", () => {
+  const ageMs = (ago: number) => readFlagLedger({ toolRoot: PACING_TREE, ...project("canary-boundary", { "project.json": "{}", "host.json": "{}" }), canary: () => emptyCanaryState(), openRows: [], now: NOW, merge: () => ({ mergedAt: new Date(NOW - ago).toISOString(), pr: 1240 }) });
+  const count = (answer: ReturnType<typeof ageMs>) => { if ("unknown" in answer) throw new Error(answer.unknown); return answer.canaryAbsent?.length; };
+  assert.equal(count(ageMs(CANARY_ABSENT_MS)), 0, "exactly two hours: not more than two hours, so not yet owed");
+  assert.equal(count(ageMs(CANARY_ABSENT_MS + 1000)), 1, "CONTROL: one second past the line is counted");
+});
+
+test("(7) agent-org#1324: the gate's read hands the ledger the open rows it read, so an owed row it names is not counted and a row set that was not read is UNKNOWN (break: the helper drops `openRows` -- the first case goes red)", () => {
+  const read = (openRows: Row[] | null) => readFlagSwitchesFor(openRows, { toolRoot: PACING_TREE, ...project("canary-thunk", { "project.json": "{}", "host.json": "{}" }), canary: () => emptyCanaryState(), now: NOW, merge: pacingMergedHoursAgo(3) })();
+  const owed = read([named(["ready"], "gate.graphqlPacing: switch it")]);
+  assert.ok(!("unknown" in owed), "the owed row is read");
+  assert.equal(owed.canaryAbsent?.length, 0, "a named owed row is not counted");
+  const bare = read([]);
+  assert.ok(!("unknown" in bare), "no rows is a read");
+  assert.equal(bare.canaryAbsent?.length, 1, "CONTROL: with no row naming the flag, it is counted");
+  assert.ok("unknown" in read(null), "a row set that was not read is UNKNOWN for a flag past its window");
+});
+
+test("(7) agent-org#1324: an unreadable canary state is UNKNOWN, a missing one is empty, and a read of the open rows that did not happen is UNKNOWN when a flag is past its window", () => {
+  const bad = join(SCRATCH, "machinery-canary-bad.json");
+  writeFileSync(bad, "{ not json");
+  const unreadable = readCanaryState(bad);
+  assert.ok("unknown" in unreadable && unreadable.unknown.startsWith(bad), `the reader names the file: ${JSON.stringify(unreadable)}`);
+  assert.ok("unknown" in canaryLedger({ state: unreadable, hours: 3 }), "an unreadable state makes the answer unknown");
+  const missing = readCanaryState(join(SCRATCH, "no-such-canary.json"));
+  assert.deepEqual(missing, emptyCanaryState(), "CONTROL: an absent file is empty, as `machinery-flag.ts` reads it");
+  assert.ok(!("unknown" in canaryLedger({ state: missing, hours: 3, openRows: [] })), "CONTROL: and the same tree with an empty state is a read");
+  assert.ok("unknown" in canaryLedger({ hours: 3, openRows: null }), "the open rows were not read, so a flag past its window cannot be cleared");
+  assert.ok(!("unknown" in canaryLedger({ hours: 1, openRows: null })), "CONTROL: nothing is past its window, so the open rows are not needed");
+  assert.ok("unknown" in canaryLedger({ hours: null, openRows: [] }), "git did not say when it merged, so its two hours cannot be counted");
+  assert.deepEqual(canaryAbsentFlags({ shipped: [], state: emptyCanaryState(), openRows: null, now: NOW, merge: pacingMergedHoursAgo(3) }), [], "CONTROL: no shipped flag, nothing to read");
 });

@@ -42,7 +42,7 @@ import { repeatingLinesTick } from "./repeating-lines.ts";
 import { readToolAgreement, fileReleaseIncidents, type ReleaseRuns, type CanaryState } from "./org-health.ts";
 import { stateEntryPath } from "./host-config.ts";
 import { TICK_COST_FILE, TICK_RECORD_FILE, readTickRecordState, tickHealthOf, type TickHealth } from "./work-tick-health.ts"; // agent-org#1208: the tick's own record, read by the gate for its `org-health` lines
-import { readFlagLedger } from "./flag-switch-ledger.ts"; // agent-org#1135: the gate is the one caller that reads the project's declarations; `orgHealthNow` otherwise does not ask
+import { readFlagSwitchesFor } from "./flag-switch-ledger.ts"; // agent-org#1135: the gate is the one caller that reads the project's declarations; `orgHealthNow` otherwise does not ask
 import { readNodeStrips } from "./node-strips-types.ts";
 import { liveClassRepeatIo, readClassRepeat } from "./class-repeat.ts";
 // #2938: THE DAILY RETROSPECTIVE, in its own leaf for the same reason: it reads the journal, the ledger and a day of PRs once, and says what it found.
@@ -664,7 +664,7 @@ function main() {
   const releaseSeen: { runs?: ReleaseRuns | null } = {}; // a11ign#5100: the release read `orgHealthNow` makes, kept for the canary, so it costs no second call
   orders.push(...endGateSpan("reviewerAuth", reviewerAuthTick({ orders })), ...endGateSpan("repeatingLines", repeatingLinesTick({ settle: (groups) => settleCitedRepeatingLines(groups, { openRows: [...(openRowsRead ?? []), ...otherScopes.flatMap(({ read }) => read.openRows ?? [])], portFor: portOf }) })), ...endGateSpan("orgHealth", orgHealthSkipped(pacing, primaryRead) ? [] : orgHealthTogether({ prsRead: prs, keyedPrsRead: pullRequestsOfOthers(otherScopes), readyRead: readyRows, openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), decideArgs, decided, held: incident.held, pools }, { readToolAgreement, readNodeStrips,
     raiseReleaseIncidents: (reads) => { fileReleaseIncidents(reads, { run: defaultRun, tracker: repoNow() }); }, // agent-org#887: every repository the org releases; the project's runs are read in the wave below
-    readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readFlagSwitches: () => readFlagLedger(), readTickRecord: () => readTickRecordState(stateEntryPath(TICK_RECORD_FILE)), readTickHealth: tickHealthNow, readWaits: unparkingWaits(() => waitReads, { run: defaultRun }) },
+    readClassRepeat: () => readClassRepeat(defaultRun, repoNow(), liveClassRepeatIo()), readReleaseBehind: releaseBehindNow, readFlagSwitches: readFlagSwitchesFor(openRowsRead), readTickRecord: () => readTickRecordState(stateEntryPath(TICK_RECORD_FILE)), readTickHealth: tickHealthNow, readWaits: unparkingWaits(() => waitReads, { run: defaultRun }) },
     // agent-org#1225: the org's gh reads asked together (the wave), then the effects above, in their order, on the data the wave read
     { repo: repoNow(), openRowsRead, claimedComments: claimedCommentsForClock(allOpen, claimedComments), now: Date.now(), onReleaseRuns: (runs) => { releaseSeen.runs = runs; } })),
     ...endGateSpan("rulingOrders", rulingOrdersNow({ prsRead: prs, openRowsRead, now: Date.now() })), ...chairmanAsksNow(openRowsRead),
