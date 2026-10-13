@@ -11,6 +11,8 @@
 // beside `routesForStarts`, just before delivery. {@link readCiFailure} reads the facts there; they are CODE's reading of GitHub (REST, the core pool) and never the provider's.
 import { CLAIM_LABEL } from "./claim-labels.ts";
 import { REPO } from "./project-identity.ts"; // #2616: the project's repository comes from its declaration, never a literal
+import { PROJECT_NUMBER, PROJECT_OWNER } from "./board-snapshot-scope.ts"; // #5405: the incident row is boarded on the home board when it is filed
+import { BACKLOG_LABEL, OUT_OF_RELEASE_LABEL } from "./project-vocabulary.ts";
 import { readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5039
 import { decide, MAX_STATE_BYTES, type DecisionDeps, type Question } from "./decision-provider.ts";
 
@@ -585,24 +587,51 @@ export function standingOf(group: SharedGroup, { open, closed, nowMs }: { open: 
 
 const bodyOf = (group: SharedGroup, prs: readonly string[]): string => [
   `A failure shared by ${prs.length} open pull request(s), found by the gate: one incident, and the workers of these PRs are not woken for it.`, "",
+  "SIGNAL for `orchestrator`: this row carries no claimable work. It is on the board at Backlog so the failure is visible; the pull requests it names are the work.", "",
   `Check: ${group.signature.check}`, `Step: ${group.signature.step}`, `First error line: ${group.signature.line}`, "",
   `Shared-failure-prs: ${prs.join(", ")}`, "",
   "When the pull request that closes this row MERGES, the gate updates each PR above from main so CI runs against the fix. Close this row with the fix's `Closes`.", markerOf(group.key),
 ].join("\n");
 
+// #5405: THE INCIDENT ROW IS ON THE BOARD WHEN IT IS FILED. A bare `gh issue create` left it off Project 1, where `row-off-board` trips on it and nothing can board it. Order is
+// row-file's: the card, then its Status, then the labels LAST, so a row that carries `out-of-release` is one whose Status was already set.
+const BOARD_STATUS = "Backlog";
+function boardIncident(number: number, run: Run): void {
+  const url = `https://github.com/${REPO}/issues/${number}`;
+  run(["project", "item-add", String(PROJECT_NUMBER), "--owner", PROJECT_OWNER, "--url", url]);
+  run(["project", "item-edit", String(PROJECT_NUMBER), "--owner", PROJECT_OWNER, "--url", url, "--field", "Status", "--value", BOARD_STATUS]);
+  run(["issue", "edit", String(number), "--add-label", BACKLOG_LABEL, "--add-label", OUT_OF_RELEASE_LABEL]);
+}
+
+/** A row filed before #5405, or one whose boarding was refused, carries no release declaration: board it now. The row exists, so a refusal is logged, not thrown: the hold stays. */
+function healBoard(row: IncidentRow, run: Run, log: (line: string) => void): void {
+  if (row.labels?.includes(OUT_OF_RELEASE_LABEL)) return;
+  try {
+    boardIncident(row.number, run);
+  } catch (error) {
+    log(`ci-shared-failure: could not board #${row.number} (${String((error as Error).message).split("\n")[0]}); the next tick retries\n`);
+  }
+}
+
+/** Files the incident row and boards it. A refused board throws, so the row is NOT reported filed: the next tick finds it by its marker and boards it then. */
+function fileIncident(group: SharedGroup, run: Run): number | null {
+  run(["label", "create", SHARED_FAILURE_LABEL, "--force", "--description", "One CI failure shared by several open pull requests"]);
+  const title = `CI failure shared by ${group.prs.length} PRs: ${group.signature.check}: ${group.signature.line}`.slice(0, 120);
+  const out = run(["issue", "create", "--title", title, "--label", SHARED_FAILURE_LABEL, "--body", bodyOf(group, group.noted)]);
+  const number = Number(/\/issues\/(\d+)/.exec(out)?.[1] ?? NaN) || null;
+  if (number !== null) boardIncident(number, run);
+  return number;
+}
+
 /** File the incident row for `group`, or add its PRs to the open one. Returns the row number, or `null` when `gh` refused (the next tick retries). */
 export function recordIncident(group: SharedGroup, { run, log }: { run: Run; log: (line: string) => void }): number | null {
   try {
     const found = readRows(run, "open").find((row) => String(row.body).includes(markerOf(group.key)));
-    if (found === undefined) {
-      run(["label", "create", SHARED_FAILURE_LABEL, "--force", "--description", "One CI failure shared by several open pull requests"]);
-      const title = `CI failure shared by ${group.prs.length} PRs: ${group.signature.check}: ${group.signature.line}`.slice(0, 120);
-      const out = run(["issue", "create", "--title", title, "--label", SHARED_FAILURE_LABEL, "--body", bodyOf(group, group.noted)]);
-      return Number(/\/issues\/(\d+)/.exec(out)?.[1] ?? NaN) || null;
-    }
+    if (found === undefined) return fileIncident(group, run);
     const noted = listOf(found.body, PRS_LINE);
     const merged = [...new Set([...noted, ...group.noted])];
     if (merged.length !== noted.length) run(["issue", "edit", String(found.number), "--body", bodyOf(group, merged)]);
+    healBoard(found, run, log);
     return found.number;
   } catch (error) {
     log(`ci-shared-failure: could not file or join the incident for ${group.key} (${String((error as Error).message).split("\n")[0]}); the next tick retries\n`);

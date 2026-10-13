@@ -261,7 +261,8 @@ function ghFake(over: { jobs?: Record<number, Job>; issues?: any[]; pulls?: Reco
     if (cmd === "api" && /\/pulls\/\d+$/.test(path)) return JSON.stringify((over.pulls ?? {})[Number(/pulls\/(\d+)/.exec(path)![1])] ?? { state: "open", head: { sha: "abc" }, base: { ref: "main" } });
     writes.push(args);
     if (cmd === "issue" && sub === "create") { issues.push({ number: 900 + issues.length, state: "open", createdAt: new Date().toISOString(), body: args[args.indexOf("--body") + 1] }); return "https://github.com/a11ign/a11ign/issues/900"; }
-    if (cmd === "issue" && sub === "edit") { const row = issues.find((i) => i.number === Number(args[2])); row.body = args[args.indexOf("--body") + 1]; }
+    // #5405: a label edit (the boarding of a new row) carries no `--body`, and must leave the body as it is
+    if (cmd === "issue" && sub === "edit" && args.includes("--body")) { const row = issues.find((i) => i.number === Number(args[2])); row.body = args[args.indexOf("--body") + 1]; }
     return "";
   };
   return { run, writes, issues };
