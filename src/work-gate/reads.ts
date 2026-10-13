@@ -607,8 +607,11 @@ export function readPrs(run: (args: string[]) => string = defaultRun, conditiona
     rememberOpenPrs({ memoryPath, repo, prs: narrowed.prs, readAtMs: narrowed.readAtMs });
     return withPagedFiles(narrowed.prs, { run });
   }
-  process.stderr.write(`work-gate: the open list is read whole (${narrowed.reason}: ${narrowed.detail})\n`);
   const whole = readPrsWhole(run, conditional);
+  // A repository with NO open pull requests is never remembered (below), so its list reads whole every tick and its old entry ages for as long as it
+  // stays empty: the line would repeat each tick about a state that is not a fault (2026-10-13: one repository was empty for 2 h 20 min, 60 ticks).
+  // Said only when there was something to patch, or a list that was not empty.
+  if (whole === null || whole.length > 0) process.stderr.write(`work-gate: the open list is read whole (${narrowed.reason}: ${narrowed.detail})\n`);
   // An EMPTY list is never remembered: the first-wave rehearsal answers every call `[]`, and a remembered `[]` would be served as the repository's list
   // (every pull request but the named ones gone). A repository with no open pull requests reads whole each tick, which is one cheap call.
   if (whole !== null && whole.length > 0) rememberOpenPrs({ memoryPath, repo, prs: whole, readAtMs: nowMs });
