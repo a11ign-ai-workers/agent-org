@@ -583,3 +583,41 @@ test("a body that cannot be read leaves the line OUT rather than hashing nothing
   assert.doesNotMatch(record, /Claimed-scope/);
   assert.equal(claimRecordFrom([record]).scope, null, "`null` is could-not-read, never a hash of an empty body");
 });
+
+// --- 3. #1281: a claim on a row whose `Waiting-for:` is unmet ----------------------------------------------------------------
+
+/** The fake, with `gh api repos/<r>/issues/<n>` answering for the referenced item `state`. */
+function withReferenced(state: "open" | "closed", seed: Parameters<typeof fakeGithub>[0]) {
+  const gh = fakeGithub(seed);
+  const inner = gh.run;
+  const run = (cmd: string, args: string[]): string => {
+    if (cmd === "gh" && args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/1055$/.test(args[1] ?? "")) {
+      return JSON.stringify({ state, closed_at: state === "closed" ? "2026-10-09T00:00:00Z" : null, updated_at: "2026-10-09T00:00:00Z", merged_at: state === "closed" ? "2026-10-09T00:00:00Z" : null, labels: [] });
+    }
+    return inner(cmd, args);
+  };
+  return { ...gh, run };
+}
+const WAITING_BODY = `${BODY}\nWaiting-for: merged #1055\n`;
+
+test("#1281: a claim on a row whose `Waiting-for:` is unmet is refused before any write, and accepted once the wait is true", () => {
+  const open = withReferenced("open", { second: ["ready"], bodies: { second: WAITING_BODY } });
+  const refused = claimRow(ROW, SESSION, { run: open.run, tracker: TRACKER, ...CLAIM_DEPS });
+  assert.equal(refused.claimed, false);
+  assert.match((refused as { reason: string }).reason, /Waiting-for: merged #1055/);
+  assert.deepEqual(issueWrites(open.writes), [], "nothing was written");
+  assert.deepEqual(open.second().labels, ["ready"]);
+
+  const met = withReferenced("closed", { second: ["ready"], bodies: { second: WAITING_BODY } });
+  assert.deepEqual(claimRow(ROW, SESSION, { run: met.run, tracker: TRACKER, ...CLAIM_DEPS }), { claimed: true, statusMoved: true });
+  const none = withReferenced("open", { second: ["ready"] });
+  assert.deepEqual(claimRow(ROW, SESSION, { run: none.run, tracker: TRACKER, ...CLAIM_DEPS }), { claimed: true, statusMoved: true }, "no line, no refusal");
+});
+
+test("#1281: a row the gate released on its unmet wait (no claim labels left) is refused its re-claim by the same holder", () => {
+  const gh = withReferenced("open", { second: ["ready", "was-ready"], bodies: { second: WAITING_BODY } });
+  gh.second().comments.push(claimRecordComment({ session: SESSION, branch: "agent/x-agent-org-575", worktree: "../wt-agent-org-575", released: true }));
+  const result = claimRow(ROW, SESSION, { run: gh.run, tracker: TRACKER, ...CLAIM_DEPS });
+  assert.equal(result.claimed, false);
+  assert.deepEqual(issueWrites(gh.writes), []);
+});

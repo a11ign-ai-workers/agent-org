@@ -48,6 +48,9 @@ export function withClosingRowOwners(prs: any[], openRows: any[], rowsRepo?: str
     if (closing === "split") return pr;
     const owner = closing ?? branchRowOwner(pr, held);
     if (owner) return { ...pr, rowOwner: owner };
+    // agent-org#1271: an empty list is a rows read that was refused or never ran, not a read of nothing open. The pull request still falls to `ceo`
+    // for its order, but `unresolvedOwnerEvents` must not record it as the ladder failing, so it is marked as unread rather than as nobody's.
+    if (openRows.length === 0) return { ...pr, ownerRowsUnread: true };
     return { ...pr, ...rowsNobodyHolds(pr, openRows, rowsRepo) };
   });
 }

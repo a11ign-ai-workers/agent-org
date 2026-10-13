@@ -76,9 +76,9 @@ import { withBoardSnapshot, PROJECT_OWNER, PROJECT_NUMBER } from "./board-snapsh
 import { runnerReason, laneReason, drainReason, oneRowReason } from "./row-claim/runner-rule.ts";
 import { readStandIns, type LaneStandIn } from "./row-claim/lane-stand-in.ts";
 import { activeDrain, sparePathsFrom, ledgerPathFrom, isSpareRole, isPersistentRole, readSpareRegistry } from "./wake.ts";
-import { readWithFirstWaveTogether, runBatch, readChairmanPriority, CHAIRMAN_PRIORITY_LABEL, EMERGENCY_PRIORITY_LABEL, readEmergencyPriority, readEmergencyPriorityOption } from "./work-gate.ts"; // #3566, slice 4: `wake.ts` above already loads it, and it never loads this file. #4793: and the gate's own reading of whose a chairman row is. #989: and the gate's own verdict on which emergency row is honoured
+import { readWaitRef, readWithFirstWaveTogether, runBatch, readChairmanPriority, CHAIRMAN_PRIORITY_LABEL, EMERGENCY_PRIORITY_LABEL, readEmergencyPriority, readEmergencyPriorityOption } from "./work-gate.ts"; // #3566, slice 4: `wake.ts` above already loads it, and it never loads this file. #4793: and the gate's own reading of whose a chairman row is. #989: and the gate's own verdict on which emergency row is honoured
 import { lookup } from "./merge-guard/lookups.ts";
-import { readJsonObject, writeJsonObject, cloneOfKey } from "./claim-stall.ts";
+import { readJsonObject, writeJsonObject, cloneOfKey, unmetWaitingFor } from "./claim-stall.ts";
 import { inBuildReason, lookupHeldRows, lookupOtherHeldIssues } from "./row-claim/own-pr-health-rule.ts";
 import { resolveBlockedByOverride, blockedByExceptionNote } from "./row-claim/blocked-by-rule.ts";
 import { blockedByEdgeReason, lookupBlockedByEdge } from "./row-claim/blocked-by-edge-rule.ts";
@@ -1275,6 +1275,10 @@ function preWriteChecks({ issueNumber, mySession, before, drained, instance, ado
     // #2407: ONE INSTANCE, ONE ROW -- the same "new row only" placement, for a spare that holds or has held another.
     const oneRow = oneRowReason(mySession, issueNumber, instance);
     if (oneRow) return { refusal: { claimed: false, reason: oneRow }, blockedByNote: null, scope: null };
+    // #1281: A row whose `Waiting-for:` is still unmet is not finishable, and the gate releases a claim on one. Taking it again would hold the
+    // slot for the length of the wait, so the new claim is refused until the condition is true. A resume is not refused: the holder is there.
+    const unmet = unmetWaitingFor(body, repo, (ref) => readWaitRef(ref, ghRunForBody));
+    if (unmet !== null) return { refusal: { claimed: false, reason: `\`Waiting-for: ${unmet}\` is not yet true: the row cannot be finished until it is, and a claim on it is released again. Claim it once the condition holds.` }, blockedByNote: null, scope: null };
     const { reason: ineligible, walked, emergency } = sessionEligibility(issueNumber, mySession, { run: preWrite, adoptedBranch, repo });
     // #4793: a priority row that B4 let past holders SAYS SO on the row, through the note a `--blocked-by` exception already leaves (#989: and the incident, for an emergency one).
     blockedByNote = walkedPastNote(issueNumber, walked, emergency);
@@ -1642,16 +1646,16 @@ function gitRefExists(args: string[], absentStatus: number, what: string, run: t
  * `origin/main` is the ref as this clone last fetched it, which can only be BEHIND origin, so a stale one refuses a branch that is
  * in fact merged and never frees one that is not.
  * @param {string} branch @param {typeof defaultRun} run
- * @returns {{ exists: false } | { exists: true, free: true, tip: string } | { exists: true, free: false, why: string }}
+ * @returns {{ exists: false } | { exists: true, free: true, tip: string } | { exists: true, free: false, held: boolean, why: string }}
  */
-function localBranchReading(branch: string, run: typeof defaultRun): { exists: false; } | { exists: true; free: true; tip: string; } | { exists: true; free: false; why: string; } {
+function localBranchReading(branch: string, run: typeof defaultRun): { exists: false; } | { exists: true; free: true; tip: string; } | { exists: true; free: false; held: boolean; why: string; } {
   const tip = localBranchTip(branch, run);
   if (tip === null) return { exists: false };
   const holder = worktreeHolding(branch, run);
   const merged = mergedIntoMain(branch, run);
   const standing = merged.merged ? "merged into origin/main" : merged.why;
-  if (holder.held) return { exists: true, free: false, why: `${standing}, and held by the worktree ${holder.path ?? holder.why}` };
-  if (!merged.merged) return { exists: true, free: false, why: standing };
+  if (holder.held) return { exists: true, free: false, held: true, why: `${standing}, and held by the worktree ${holder.path ?? holder.why}` };
+  if (!merged.merged) return { exists: true, free: false, held: false, why: standing };
   return { exists: true, free: true, tip };
 }
 
@@ -1811,7 +1815,11 @@ export function worktreeTargetReason({ branch, worktree, issueNumber, adopt, myS
   }
   const local = localBranchReading(branch, run);
   if (local.exists && !local.free) {
-    return `--branch=${branch} ALREADY EXISTS locally (${branchOwnerText(branch, run)}), ${local.why}. Refusing before any write.`;
+    // This row's own unmerged work is adopted in place, with its commits, and returns here before the origin checks below would refuse it
+    // for being on origin. A tree standing on the branch is still a refusal: `claimWithWorktree` would have two trees on one branch.
+    if (!local.held && isOwnRowBranch(branch, issueNumber, run)) return null;
+    return `--branch=${branch} ALREADY EXISTS locally (${branchOwnerText(branch, run)}), ${local.why}. Refusing before any write.`
+      + (local.held ? "" : localBranchRemedy(branch, issueNumber));
   }
   if (gitRefExists(["ls-remote", "--exit-code", "--heads", "origin", branch], 2, `branch ${branch} on origin`, run)) {
     return `--branch=${branch} ALREADY EXISTS on origin (${branchOwnerText(branch, run)}). Refusing before any write.`;
@@ -1819,6 +1827,62 @@ export function worktreeTargetReason({ branch, worktree, issueNumber, adopt, myS
   const rowBranches = rowBranchesOnOrigin(issueNumber, run);
   if (rowBranches.length > 0) return rowBranchRefusal(issueNumber, rowBranches);
   return null;
+}
+
+/**
+ * The row a branch name is for: its trailing `-<n>`, which is where the standard `agent/<slug>-<repo>-<n>` form ends. `null` when the
+ * name carries no number.
+ * @param {string} branch @returns {number | null}
+ */
+function rowNumberOfBranch(branch: string): number | null {
+  const match = /-(\d+)$/.exec(branch);
+  return match ? Number(match[1]) : null;
+}
+
+/**
+ * Every branch a claim record names, oldest first. A RELEASE names none, so the newest record is not the only one to read: a row claimed,
+ * released and claimed again names its first branch only in the first record.
+ * @param {string[]} comments comment bodies, oldest first
+ * @returns {string[]}
+ */
+function claimedBranchesOf(comments: string[]): string[] {
+  const key = new RegExp(`^${CLAIM_RECORD_BRANCH}\\s*(.+)$`, "m");
+  return comments.filter((c) => c.includes(CLAIM_RECORD_MARKER)).flatMap((record) => {
+    const match = key.exec(record);
+    return match ? [match[1].trim()] : [];
+  });
+}
+
+/**
+ * Is the existing local `branch` THIS ROW'S OWN WORK, to be adopted in place rather than refused? Yes when an earlier claim record of the
+ * row names it, or when its trailing number is this row's AND origin holds it (the pushed form of the standard name). A branch of another
+ * row, or a local-only branch no record names, is not. A claim record that cannot be read is "no": the owner is unknown, so the refusal
+ * stands, as it did before this read existed.
+ * @param {string} branch @param {number} issueNumber @param {typeof defaultRun} run
+ * @returns {boolean}
+ */
+function isOwnRowBranch(branch: string, issueNumber: number, run: typeof defaultRun): boolean {
+  try {
+    if (claimedBranchesOf(fetchClaimComments(issueNumber, { run })).includes(branch)) return true;
+    return rowNumberOfBranch(branch) === issueNumber
+      && gitRefExists(["ls-remote", "--exit-code", "--heads", "origin", branch], 2, `branch ${branch} on origin`, run);
+  } catch {
+    return false;
+  }
+}
+
+/**
+ * The remedy that works for an existing local branch this row does not own. A branch carrying this row's number that origin does not hold
+ * is pushed, and a pushed one is adopted; any other is another row's work, which that row keeps or which is deleted if nothing on it is wanted.
+ * @param {string} branch @param {number} issueNumber @returns {string}
+ */
+function localBranchRemedy(branch: string, issueNumber: number): string {
+  if (rowNumberOfBranch(branch) === issueNumber) {
+    return ` Its trailing -${issueNumber} is this row's and origin does not hold it: push it (\`git push origin ${branch}\`) and claim again, `
+      + `and it is adopted as this row's own work. If the number is a coincidence, delete it (\`git branch -D ${branch}\`) and claim again.`;
+  }
+  return " Its name is not this row's and no claim record of this row names it: leave it to the row it belongs to, or, if nothing on it is "
+    + `wanted, delete it (\`git branch -D ${branch}\`) and claim again.`;
 }
 
 /**
@@ -2017,7 +2081,7 @@ export function implicitAdoptSession({ worktree, mySession, exists, owner, prede
  * @param {{ branch: string, worktree: string }} target @param {typeof defaultRun} run
  * @returns {string}
  */
-function undoCreatedWorktree({ branch, worktree }: { branch: string; worktree: string; }, run: typeof defaultRun, record = recordRemoval): string {
+function undoCreatedWorktree({ branch, worktree, keepBranch = false }: { branch: string; worktree: string; keepBranch?: boolean; }, run: typeof defaultRun, record = recordRemoval): string {
   // #2782: THE ONE REMOVER THAT DOES NOT ASK THE ROW'S CLAIM, deliberately. It runs because the claim was LOST, so the row
   // carries the WINNER's `session:` label by construction and `claimRefusal` would refuse every time; what makes it safe is that
   // `worktreeTargetReason` refused an existing path before this call made the tree, so nothing in it predates this call.
@@ -2027,6 +2091,8 @@ function undoCreatedWorktree({ branch, worktree }: { branch: string; worktree: s
     record({ ...line, event: "removing" });
     run("git", ["worktree", "remove", "--force", worktree]);
     record({ ...line, event: "removed" });
+    // An ADOPTED branch is the row's own work with commits no remote may hold: removing the tree keeps the branch, which `-D` would lose.
+    if (keepBranch) return `the worktree ${worktree} it had just checked out was removed, and branch ${branch} was KEPT: it is this row's own work`;
     run("git", ["branch", "-D", branch]);
     return `the worktree ${worktree} and branch ${branch} it had just created were removed`;
   } catch (cause) {
@@ -2074,8 +2140,8 @@ function worktreeCapReason(live: number): string {
 /**
  * #1432: CLAIM, CREATING THE WORKTREE -- `row-claim claim --branch=<b> --worktree=<p>`. In order: refuse if the path or
  * branch exists, or (#2014) if origin already holds a branch for THIS ROW; fetch; `git worktree add -b <b> <p>
- * origin/main`; stamp it; claim. A claim that is refused or loses
- * its race removes what this created. A failure after the worktree landed carries it in #1399's landed list.
+ * origin/main` (or, for THIS ROW'S OWN existing branch, `git worktree add <p> <b>`, adopting its commits -- see `branchTaking`); stamp it; claim.
+ * A claim that is refused or loses its race removes what this created, and keeps an adopted branch. A failure after the worktree landed carries it in #1399's landed list.
  *
  * a11ign/a11ign#4737: `clone` is the checkout of the repository a ROW OF ANOTHER TRACKER's work is in (`host.json`'s `clones.<key>`), and given it every
  * `git` call of this claim -- the target's checks, the fetch, the `worktree add`, the removal -- runs IN it, and a relative `--worktree` is the path
@@ -2112,9 +2178,12 @@ export function claimWithWorktree(issueNumber: number, mySession: string, { bran
   const landed: string[] = [];
   return withLandedWrites(issueNumber, landed, () => {
     run("git", ["fetch", "--quiet", "origin"]);
-    const replaced = replacedMergedTip(branch, run);
-    run("git", ["worktree", "add", replaced ? "-B" : "-b", branch, tree, "origin/main"]);
-    landed.push(`created worktree ${tree} on ${replaced ? "recreated" : "new"} branch ${branch} from origin/main`);
+    const taken = branchTaking(branch, issueNumber, run);
+    const adopted = taken.how === "adopted";
+    run("git", adopted ? ["worktree", "add", tree, branch] : ["worktree", "add", taken.how === "replaced" ? "-B" : "-b", branch, tree, "origin/main"]);
+    landed.push(adopted
+      ? `created worktree ${tree} on the row's own existing branch ${branch}, adopted with its commits`
+      : `created worktree ${tree} on ${taken.how === "replaced" ? "recreated" : "new"} branch ${branch} from origin/main`);
     stamp(tree, mySession);
     landed.push(`stamped ${tree} as ${mySession}'s`);
     let result: ReturnType<typeof claimRow>;
@@ -2123,12 +2192,12 @@ export function claimWithWorktree(issueNumber: number, mySession: string, { bran
       result = claim(issueNumber, mySession, { run: ranIn, ...claimDeps, branch, worktree: tree });
     } catch (cause) {
       if (claimDeps.tracker === undefined) throw cause;
-      throw takenBack(cause, { issueNumber, mySession, branch, worktree: tree, run, tracker: claimDeps.tracker, release, landed });
+      throw takenBack(cause, { issueNumber, mySession, branch, worktree: tree, run, tracker: claimDeps.tracker, release, landed, keepBranch: adopted });
     }
-    if (!result.claimed) return { claimed: false, reason: `${result.reason} -- and ${undoCreatedWorktree({ branch, worktree: tree }, run)}` };
+    if (!result.claimed) return { claimed: false, reason: `${result.reason} -- and ${undoCreatedWorktree({ branch, worktree: tree, keepBranch: adopted }, run)}` };
     // agent-org#871: the claim stands first; an install that fails is a line in its report, never a reason to take the row back.
     const install = installLockedDependencies(tree, { exec, exists });
-    const made = replaced ? { ...result, replacedTip: replaced } : result;
+    const made = taken.how === "replaced" ? { ...result, replacedTip: taken.tip } : result;
     return install === null ? made : { ...made, install };
   });
 }
@@ -2144,9 +2213,9 @@ export function claimWithWorktree(issueNumber: number, mySession: string, { bran
  *   release: typeof declineRow, landed: string[] }} what
  * @returns {Error}
  */
-function takenBack(cause: unknown, { issueNumber, mySession, branch, worktree, run, tracker, release, landed }: {
+function takenBack(cause: unknown, { issueNumber, mySession, branch, worktree, run, tracker, release, landed, keepBranch }: {
         issueNumber: number; mySession: string; branch: string; worktree: string; run: typeof defaultRun; tracker: Tracker;
-        release: typeof declineRow; landed: string[];
+        release: typeof declineRow; landed: string[]; keepBranch: boolean;
     }): Error {
   const written = landedWritesOf(cause);
   landed.push(...(written ?? []));
@@ -2161,25 +2230,29 @@ function takenBack(cause: unknown, { issueNumber, mySession, branch, worktree, r
       notes.push(`the row's labels in ${tracker.repo} could NOT be taken back: ${(releaseCause as Error).message}`);
     }
   }
-  notes.push(undoCreatedWorktree({ branch, worktree }, run));
+  notes.push(undoCreatedWorktree({ branch, worktree, keepBranch }, run));
   landed.push(`UNDONE in the same call: ${notes.join("; ")}`);
   return new Error(`${(cause as Error).message} -- UNDONE IN THE SAME CALL: ${notes.join("; ")}`, { cause });
 }
 
 /**
- * #3745: the tip a leftover local branch of the claim's name held, when the claim is about to recreate the name over it -- `null` for
- * the ordinary case of no such branch. `worktreeTargetReason` has already let it through (merged, held by no worktree), and this
- * ASKS AGAIN after the fetch, because the fetch is what moves `origin/main` and a branch force-pushed away from main would make the
- * first answer wrong. Throws, before anything is written, if the old tip is not an ancestor of `origin/main`: recreating the name
- * must leave the old tip reachable from main, or it would be the loss the refusal exists to prevent.
- * @param {string} branch @param {typeof defaultRun} run
- * @returns {string | null}
+ * #3745 and the adoption of this row's own work: HOW THE CLAIM TAKES ITS BRANCH. ASKED AGAIN after the fetch, because the fetch is what moves
+ * `origin/main` and a branch force-pushed away from main would make the first answer wrong. `worktreeTargetReason` has already let the name
+ * through, and this says which of three ways it goes:
+ *   - `new`: no such local branch, so `-b` makes it from origin/main;
+ *   - `replaced`: a leftover that holds nothing (merged into origin/main, held by no tree), so `-B` recreates the name; the tip is returned, and
+ *     `tip` must be an ancestor of `origin/main` or the recreate would be the loss the refusal exists to prevent (#3745);
+ *   - `adopted`: THIS ROW's own unmerged work (see `isOwnRowBranch`), checked out as it is, its commits kept.
+ * Anything else throws before any write: recreating or adopting a name nobody can account for is the loss the refusal exists to prevent.
+ * @param {string} branch @param {number} issueNumber @param {typeof defaultRun} run
+ * @returns {{ how: "new" } | { how: "replaced", tip: string } | { how: "adopted" }}
  */
-function replacedMergedTip(branch: string, run: typeof defaultRun): string | null {
+function branchTaking(branch: string, issueNumber: number, run: typeof defaultRun): { how: "new"; } | { how: "replaced"; tip: string; } | { how: "adopted"; } {
   const tip = localBranchTip(branch, run);
-  if (tip === null) return null;
+  if (tip === null) return { how: "new" };
   const reading = localBranchReading(branch, run);
-  if (reading.exists && reading.free) return tip;
+  if (reading.exists && reading.free) return { how: "replaced", tip };
+  if (reading.exists && !reading.free && !reading.held && isOwnRowBranch(branch, issueNumber, run)) return { how: "adopted" };
   throw new Error(`row-claim: --branch=${branch} exists locally and is not free to recreate after the fetch: `
     + `${reading.exists ? reading.why : "it vanished"}. Nothing was written.`);
 }

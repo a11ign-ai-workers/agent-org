@@ -1,0 +1,68 @@
+The reviewer reviews with a `row-review` skill (Spec item table, Tests and correctness, Standards). It is shipped as `src/skills/row-review/`, installed by `host:install`, named by `host:check`, and named in the reviewer's order only behind `review.rowReviewSkill` (agent-org#1268). It is proven by `scripts/review-eval.ts`, a re-runnable eval on the blind-labelled set.
+
+Acceptance:
+
+```bash
+npx rstest run --config scripts/rstest/rstest.config.ts src/review-eval.test.ts
+```
+
+Hand-run: the row's Acceptance is `bash -c 'cd ~/repos/agent-org && npx rstest run --config scripts/rstest/rstest.config.ts src/review-eval.test.ts && node scripts/review-eval.ts --set blind-2026-10-12 --require 9/11'`. Its `cd` into the primary checkout would read a tree that carries this change only after the merge, and its second command is a live eval (`codex exec` over eleven pull requests, about eight minutes, which CI's acceptance job has neither the model nor the network for). So the unit test above is what CI runs, and the eval is run on the host from this worktree: `node scripts/review-eval.ts --set blind-2026-10-12 --require 9/11` (its output is quoted below). After the merge the row's own line is the same two commands in the primary checkout.
+
+Closes a11ign/agent-org#1268
+
+Health-signals: approved-unqueued, wakes-held
+Flag: `review.rowReviewSkill`, OFF by default (`agent-org machinery:flag on review.rowReviewSkill --session=<you>`; the switch row is a11ign/a11ign#5325). Off, the order names no skill.
+Revert: `agent-org machinery:flag off review.rowReviewSkill --session=<you>`, or revert this PR; the installed skill is read by nothing until an order names it.
+
+## Measured
+
+The unit test, and the eval (gpt-5.6-luna, effort medium, `--jobs 4`, nothing posted) with the SKILL.md at this head:
+
+```bash
+npx rstest run --config scripts/rstest/rstest.config.ts src/review-eval.test.ts
+VERDICT pass: 23 tests in 1 file
+```
+
+```bash
+node scripts/review-eval.ts --set blind-2026-10-12 --require 9/11 --jobs 4
+row-review eval (gpt-5.6-luna, effort medium)
+AGREE    agent-org#1243         blind: not convinced reviewer: not convinced
+AGREE    agent-org#1138         blind: not convinced reviewer: not convinced
+AGREE    agent-org#1060         blind: not convinced reviewer: not convinced
+AGREE    agent-org#1211         blind: not convinced reviewer: not convinced
+AGREE    agent-org#1057         blind: not convinced reviewer: not convinced
+DISAGREE agent-org#1068         blind: convinced     reviewer: not convinced
+AGREE    agent-org#1063         blind: convinced     reviewer: convinced
+AGREE    agent-org#1100         blind: convinced     reviewer: convinced
+AGREE    agent-org#1149         blind: convinced     reviewer: convinced
+AGREE    agent-org#1078         blind: convinced     reviewer: convinced
+DISAGREE a11ign#5289            blind: convinced     reviewer: not convinced
+agreement 9/11 (not convinced 5/5), required 9/11 with every not-convinced agreeing
+PASS
+```
+
+A second run of the same head: 9/11, not convinced 5/5, PASS; the disagreements were agent-org#1068 and agent-org#1149 (a11ign#5289 agreed). The first run, before the three SKILL.md clarifications below, was 8/11 with all five `not convinced` agreeing (FAIL): agent-org#1068, #1100 and #1078 were refused. Across the three runs the five `not convinced` agreed 15 of 15; the six `convinced` are the ones that move, #1068 refused in every run.
+
+What the eval run measured, and what it did not: the reviewer is `codex exec` in a read-only sandbox in a depth-1 checkout of the head, handed the pull request, the row and the diff as files, with the skill installed under `.agents/skills/`. It does not run the Acceptance command and cannot post. A reading that fails (a pull request, a row, a diff, a checkout, a reply with no verdict) counts as a disagreement, never a skip.
+
+Beyond those two: `src/review-eval.test.ts` printed `VERDICT pass: 23 tests in 1 file` at this head; `npm run typecheck` exits 0. The full `pnpm test` (run before the fixes named under Outside-Region for `multi-board-gate`, `machinery-flag-switch`, `project-config` and `work-gate`'s history population) printed `VERDICT fail: 8 of 11105 tests failed in 659 files`: those four were this change's and are fixed (the skill's install tests now live in `host-units.test.ts`, which is already in that population); the other four, `host-install-agent-org-launcher`'s launcher test, `live-tree-independence`'s two #3233 cases and `release-tag-on-merge`'s lockfile case, fail the same way on `4e9bed32` (a detached checkout of main, run for this). I did not re-run the whole suite after the fixes; I re-ran the nine affected files, which printed `VERDICT fail: 4 of 658 tests failed in 9 files`, those four.
+
+Mutation: each restored from a copy and compared byte-identical; `hostUnitDrift` without `...rowReviewSkillDrift(deps)` failed the wiring test (1 of 182); `host:install` without `rowReviewSkillInstall()`, the call moved to the top of `main()` (outside the branch), and the call moved after the `--install` block (so a plain `host:check` installs) each failed the end-to-end test that runs `host-units.ts` as a process on a temp HOME (1 of 181 each; the first version of this evidence was a source-text search for the call, replaced after review); `decide` handing `rowReviewSkill: false` failed the order test (1 of 7); the flag always on failed 2 of 7; the flag ignoring the canary state failed 1 of 7; `verdictOf` reading `not convinced` as `convinced` failed 7 of 23; `score` forgetting that every `not convinced` must agree failed 2 of 23.
+
+Outside-Region: src/work-gate/tick.ts — `decide` reads the flag where orders are decided and hands it to `perPullRequestOrders` (`rowReviewSkillFlagOn`), which the row's `pr-orders.ts` alone cannot do.
+Outside-Region: src/machinery-flag.ts — `review.rowReviewSkill` must be in `FLAG_REGISTRY` or `machinery:flag on` refuses it.
+Outside-Region: src/flag-switch-ledger.ts — its ledger test requires every registered flag to have a declared switch, and this one's is a11ign/a11ign#5325.
+Outside-Region: .changeset/identity-canary-widens-on-proof.md — agent-org#1247's changeset on main lacks its opening `---`, so `changeset version` refuses it and every pull request's release-dry-run fails; this adds the one line.
+Outside-Region: src/packaging/host-units.test.ts — the install and check tests for the skill, and `identityHost` pins the skill's directory as it pins the door's, so two #2184 tests do not read the real host's `~/.codex`.
+Outside-Region: src/packaging/row-review-skill-order.test.ts — the flag-off and flag-on orders and `decide`'s reading, kept out of the host-units file because its fixture project declares no `roles` for the order module to read.
+Outside-Region: src/packaging/machinery-flag-switch.test.ts — the recorded registry now has ten flags.
+Outside-Region: src/packaging/multi-board-gate.test.ts — the recorded prompt hashes of the three reviewer orders change by exactly the removed sentence (166 to 154 and 180 to 168 bytes).
+Outside-Region: src/packaging/project-config.test.ts — `review-eval.ts` is declared as a file that names the repositories, because the labelled set is recorded pull requests of two named repositories.
+
+Not done, and why:
+(a) The flag is not turned on. The switch is a11ign/a11ign#5325, and the row's Done-when 4 is "merged flag-off".
+(b) The eval is 9/11 at the threshold, and the six `convinced` move between runs. #1068 is refused every time because its Done-when asks for an injected spawn that records the environment and its PR says the spawn is not injectable; the skill now says a recipe-shaped item is met by the same boundary through the seam the code has, and the reviewer still judges that one partial. I did not tune the skill further against one pull request.
+
+platform: not applicable; this is a skill file, an installer entry and an order sentence behind a flag.
+
+🤖 Generated with [Claude Code](https://claude.com/claude-code)

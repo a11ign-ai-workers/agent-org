@@ -1,0 +1,254 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ticket queue</title>
+<style>
+  :root { --bg: #f7f7f8; --panel: #fff; --text: #1d1d20; --muted: #6b6b76; --line: #e3e3e8; --accent: #3b5bdb; --ok: #2f9e44; --warn: #e8590c; --bad: #c92a2a; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #141417; --panel: #1d1d22; --text: #ececf1; --muted: #9a9aa6; --line: #2e2e36; --accent: #748ffc; --ok: #51cf66; --warn: #ff922b; --bad: #ff6b6b; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; gap: 16px; align-items: center; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 16px; margin: 0 12px 0 0; }
+  .tab { background: none; border: 0; padding: 6px 10px; border-radius: 6px; color: var(--muted); cursor: pointer; font: inherit; }
+  .tab[aria-selected="true"] { background: var(--bg); color: var(--text); font-weight: 600; }
+  main { padding: 16px 20px 120px; }
+  .error { color: var(--bad); margin: 8px 0; white-space: pre-wrap; }
+  input[type="search"] { width: 320px; max-width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); }
+  .group { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin: 12px 0; }
+  .group > h2 { font-size: 13px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
+  .group.collapsed > h2 { border-bottom: 0; }
+  .group.collapsed > .row { display: none; }
+  .fold { background: none; border: 0; padding: 0 2px; color: var(--muted); cursor: pointer; font: inherit; width: 16px; }
+  .group > h2 .name { cursor: pointer; }
+  .projects { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 4px 0 8px; }
+  .projects .label { color: var(--muted); margin-right: 4px; }
+  .chip { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+  .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .chip .n { opacity: .7; margin-left: 4px; }
+  .group > h2 .count { color: var(--muted); font-weight: 400; }
+  .row { display: grid; grid-template-columns: 24px 96px 1fr auto auto; gap: 10px; align-items: center; padding: 6px 12px; border-top: 1px solid var(--line); }
+  .row .pill { justify-self: end; }
+  .row:first-of-type { border-top: 0; }
+  .row.taken { opacity: .55; }
+  .key { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .pill { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  footer { position: fixed; bottom: 0; left: 0; right: 0; background: var(--panel); border-top: 1px solid var(--line); padding: 10px 20px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  footer[hidden] { display: none; }
+  footer fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  footer legend { float: left; margin-right: 6px; color: var(--muted); }
+  select, button.primary, button.small, input[type="number"] { font: inherit; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  button.small { font-size: 12px; padding: 2px 8px; cursor: pointer; }
+  .board { display: grid; grid-template-columns: repeat(5, minmax(220px, 1fr)); gap: 12px; align-items: start; }
+  .column { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-height: 120px; }
+  .column > h2 { font-size: 13px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  .card { padding: 10px 12px; border-top: 1px solid var(--line); display: grid; gap: 4px; }
+  .card:first-of-type { border-top: 0; }
+  .card .meta { color: var(--muted); font-size: 12px; }
+  .card .actions { display: flex; gap: 6px; margin-top: 4px; }
+  .waiting { color: var(--warn); font-size: 12px; font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .bar { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
+  .notice { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
+  .state { font-weight: 600; }
+  .state.paused { color: var(--warn); }
+  .state.started { color: var(--ok); }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ticket queue</h1>
+  <button class="tab" data-tab="pick" aria-selected="true">Pick</button>
+  <button class="tab" data-tab="board" aria-selected="false">Board</button>
+</header>
+<main>
+  <div id="error" class="error" role="alert"></div>
+  <section id="pick">
+    <div class="bar">
+      <input id="filter" type="search" placeholder="Filter by key, title or project">
+      <label><input id="all" type="checkbox"> Select all shown</label>
+      <span id="loaded" class="pill"></span>
+    </div>
+    <div class="projects" id="projects"></div>
+    <div id="paused-note" class="notice" hidden>Workers are paused. Tickets you queue wait on the Board until you start workers there.</div>
+    <div id="groups"></div>
+  </section>
+  <section id="board" hidden>
+    <div class="bar">
+      <span id="pool-state" class="state"></span>
+      <button class="primary" id="toggle-pause"></button>
+      <label>Workers at once <input id="max" type="number" min="1" style="width:64px"></label><button class="small" id="save-max">Save</button>
+    </div>
+    <div class="board" id="columns"></div>
+  </section>
+</main>
+<footer id="queue-bar">
+  <label>Model <select id="model"></select></label>
+  <label>Effort <select id="effort"></select></label>
+  <button class="primary" id="queue">Queue 0 tickets</button>
+</footer>
+<script type="module">
+// The decisions (what shows, how it groups, what can be selected, which column a run is in) are board-view.ts's, tested there.
+// This page only draws what they return and wires the clicks.
+import { COLUMNS, groupByStatus, projectCounts, projectOf, queueLabel, recall, remember, selectable, toggled, visibleTickets } from "/board-view.js";
+
+const el = (tag, props = {}, ...children) => {
+  const node = Object.assign(document.createElement(tag), props);
+  for (const child of children) if (child !== null && child !== undefined) node.append(child);
+  return node;
+};
+const $ = (id) => document.getElementById(id);
+const storage = (() => { try { return window.localStorage; } catch { return null; } })();
+const state = {
+  tickets: [], queue: { entries: [], max: 3, paused: true }, selected: new Set(),
+  folded: recall(storage, "ticket-mode.folded"), projects: recall(storage, "ticket-mode.projects"),
+};
+const PRIORITY = ["", "Urgent", "High", "Medium", "Low"];
+
+async function call(method, path, body) {
+  const response = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const value = await response.json();
+  if (!response.ok) throw new Error(value.error || response.statusText);
+  return value;
+}
+function report(err) { $("error").textContent = err ? String(err.message || err) : ""; }
+const entryFor = (key) => state.queue.entries.find((e) => e.ticket.key === key);
+const shown = () => visibleTickets(state.tickets, state.projects, $("filter").value);
+
+function renderProjects() {
+  const counts = projectCounts(state.tickets);
+  const chip = (label, pressed, onClick, n) => {
+    const b = el("button", { className: "chip", type: "button" }, label, n === undefined ? null : el("span", { className: "n" }, String(n)));
+    b.setAttribute("aria-pressed", String(pressed));
+    b.addEventListener("click", onClick);
+    return b;
+  };
+  const choose = (next) => { state.projects = next; remember(storage, "ticket-mode.projects", next); render(); };
+  $("projects").replaceChildren(el("span", { className: "label" }, "Projects"),
+    chip("All projects", state.projects.size === 0, () => choose(new Set())),
+    ...counts.map(([name, n]) => chip(name, state.projects.has(name), () => choose(toggled(state.projects, name)), n)));
+}
+
+function renderPick() {
+  renderProjects();
+  const tickets = shown();
+  const free = (t) => selectable(t, state.queue.entries);
+  const list = $("groups");
+  list.replaceChildren();
+  for (const [status, group] of groupByStatus(tickets)) {
+    const open = group.filter(free);
+    const all = el("input", { type: "checkbox", checked: open.length > 0 && open.every((t) => state.selected.has(t.key)), disabled: open.length === 0 });
+    all.addEventListener("change", () => { for (const t of open) all.checked ? state.selected.add(t.key) : state.selected.delete(t.key); render(); });
+    const folded = state.folded.has(status);
+    const fold = () => { state.folded = toggled(state.folded, status); remember(storage, "ticket-mode.folded", state.folded); renderPick(); };
+    const arrow = el("button", { className: "fold", type: "button", textContent: folded ? "▸" : "▾", title: folded ? "Expand" : "Collapse" });
+    arrow.setAttribute("aria-expanded", String(!folded));
+    arrow.addEventListener("click", fold);
+    const name = el("span", { className: "name", textContent: status });
+    name.addEventListener("click", fold);
+    const picked = group.filter((t) => state.selected.has(t.key)).length;
+    const box = el("div", { className: `group${folded ? " collapsed" : ""}` },
+      el("h2", {}, arrow, all, name, el("span", { className: "count" }, ` ${group.length}${picked ? ` · ${picked} selected` : ""}`)));
+    for (const t of group) {
+      const taken = entryFor(t.key);
+      const tick = el("input", { type: "checkbox", checked: state.selected.has(t.key), disabled: Boolean(taken) });
+      tick.addEventListener("change", () => { tick.checked ? state.selected.add(t.key) : state.selected.delete(t.key); render(); });
+      box.append(el("label", { className: `row${taken ? " taken" : ""}` }, tick, el("span", { className: "key" }, t.key),
+        el("span", {}, el("a", { href: t.url, target: "_blank", rel: "noreferrer" }, t.title)),
+        el("span", { className: "pill" }, projectOf(t)),
+        el("span", { className: "pill" }, taken ? `on the queue: ${taken.phase}` : PRIORITY[t.priority] || "No priority")));
+    }
+    list.append(box);
+  }
+  const open = tickets.filter(free);
+  $("all").checked = open.length > 0 && open.every((t) => state.selected.has(t.key));
+  $("loaded").textContent = `${tickets.length} of ${state.tickets.length} assigned to you shown, ${state.selected.size} selected`;
+}
+
+function since(ms) {
+  const minutes = Math.round((Date.now() - ms) / 60000);
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
+function card(e) {
+  const o = e.outcome;
+  const actions = el("div", { className: "actions" });
+  const act = (label, verb) => { const b = el("button", { className: "small", textContent: label }); b.addEventListener("click", () => call("POST", `/api/queue/${e.ticket.key}/${verb}`).then((q) => { state.queue = q; render(); }, report)); actions.append(b); };
+  if (e.phase === "queued") act("Remove", "remove");
+  if (e.phase === "starting" || e.phase === "running") act("Stop", "stop");
+  if (e.phase === "finished" && o && o.kind !== "draft-pr") act("Retry", "retry");
+  const detail = !o ? null
+    : o.kind === "draft-pr" ? el("div", {}, ...o.prs.map((pr) => el("div", {}, el("a", { href: pr.url, target: "_blank", rel: "noreferrer" }, `${pr.repo} draft`))))
+    : el("div", { className: "meta" }, o.kind === "wrong-repo" ? `Belongs in: ${o.where}` : o.kind === "needs-human" ? o.reason : o.kind === "crashed" ? o.reason : o.kind);
+  const when = e.phase === "finished" ? (e.startedAt ? `ran ${since(e.startedAt)} ago` : "") : e.startedAt ? `running ${since(e.startedAt)}` : `queued ${since(e.queuedAt)} ago`;
+  const tokens = e.tokens ? ` · ${Math.round(e.tokens.input / 1000)}k in / ${Math.round(e.tokens.output / 1000)}k out` : "";
+  const repos = e.repos && e.repos.length > 0 ? e.repos.join(", ") : e.phase === "queued" ? "repo: the worker chooses" : "repo: choosing";
+  return el("div", { className: "card" },
+    el("div", {}, el("a", { href: e.ticket.url, target: "_blank", rel: "noreferrer" }, e.ticket.key), ` ${e.ticket.title}`),
+    el("div", { className: "meta" }, `${repos} · ${e.model}/${e.effort} · ${when}${tokens}`),
+    e.waiting ? el("div", { className: "waiting" }, "Waiting on a person: open its herdr pane") : null,
+    detail, actions);
+}
+
+function renderBoard() {
+  $("columns").replaceChildren(...COLUMNS.map(({ title, holds }) => {
+    const entries = state.queue.entries.filter(holds);
+    return el("div", { className: "column" }, el("h2", {}, `${title} (${entries.length})`), ...entries.map(card));
+  }));
+  if (document.activeElement !== $("max")) $("max").value = state.queue.max;
+  const paused = state.queue.paused !== false;
+  $("pool-state").textContent = paused ? "Workers paused: nothing queued will start" : "Workers started: queued tickets start as slots free up";
+  $("pool-state").className = `state ${paused ? "paused" : "started"}`;
+  $("toggle-pause").textContent = paused ? "Start workers" : "Pause";
+  $("paused-note").hidden = !paused;
+}
+
+function renderFooter() {
+  $("queue").textContent = queueLabel(state.selected.size);
+  $("queue").disabled = state.selected.size === 0;
+}
+
+function render() { renderPick(); renderBoard(); renderFooter(); }
+
+function setup(config) {
+  $("model").replaceChildren(...config.models.map((m) => el("option", { value: m, textContent: m, selected: m === config.choice.model })));
+  $("effort").replaceChildren(...config.efforts.map((x) => el("option", { value: x, textContent: x, selected: x === config.choice.effort })));
+}
+
+for (const tab of document.querySelectorAll(".tab")) {
+  tab.addEventListener("click", () => {
+    for (const other of document.querySelectorAll(".tab")) other.setAttribute("aria-selected", String(other === tab));
+    $("pick").hidden = tab.dataset.tab !== "pick";
+    $("board").hidden = tab.dataset.tab !== "board";
+    $("queue-bar").hidden = tab.dataset.tab !== "pick";
+  });
+}
+$("filter").addEventListener("input", render);
+$("all").addEventListener("change", () => {
+  for (const t of shown().filter((t) => selectable(t, state.queue.entries))) $("all").checked ? state.selected.add(t.key) : state.selected.delete(t.key);
+  render();
+});
+$("queue").addEventListener("click", async () => {
+  try {
+    state.queue = await call("POST", "/api/queue", { keys: [...state.selected], model: $("model").value, effort: $("effort").value });
+    state.selected.clear();
+    report(null);
+    render();
+  } catch (err) { report(err); }
+});
+$("toggle-pause").addEventListener("click", () => call("POST", "/api/paused", { paused: state.queue.paused === false }).then((q) => { state.queue = q; render(); }, report));
+$("save-max").addEventListener("click", () => call("POST", "/api/max", { max: Number($("max").value) }).then((q) => { state.queue = q; render(); }, report));
+
+try {
+  setup(await call("GET", "/api/config"));
+  [state.tickets, state.queue] = await Promise.all([call("GET", "/api/tickets"), call("GET", "/api/queue")]);
+  render();
+} catch (err) { report(err); }
+setInterval(() => call("GET", "/api/queue").then((q) => { state.queue = q; renderBoard(); renderPick(); }, report), 5000);
+</script>
+</body>
+</html>

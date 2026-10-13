@@ -34,7 +34,7 @@ import { shippedUnits, unitState, unitDrift, driftReport, hostUnitsInstall, syst
   entriesFromCommand, ghSpawnReachedFrom, identityDrift, unitsSpendingGh, opaqueCommands, humanLoginOnHost, HUMAN_LOGIN_ON_HOST,
   retiredHere, addedOnSomeRef, orphanOrigin, shellCommandWords, shellSpawnsGh, shippedHostScripts,
   supersededHostScripts, unitEntryPoints, missingUnitPrograms, workingDirectoryOf,
-  programCandidates, hostIdentityDrift, hostIdentityNotes, hostIdentityInstall, ownedIdentityFiles, reviewerDoorInstall, compileCacheNotes,
+  programCandidates, hostIdentityDrift, hostIdentityNotes, hostIdentityInstall, ownedIdentityFiles, reviewerDoorInstall, rowReviewSkillInstall, rowReviewSkillDrift, rowReviewSkillPath, rowReviewSkillState, ROW_REVIEW_SKILL_FILES, ROW_REVIEW_SKILL_SOURCE, compileCacheNotes,
   WORKERS_README, HUMAN_ACCOUNT_ALLOWED, compileCacheDrift, declaredCompileCache, PROJECT_UNITS_DIR, shippedUnitText,
   shippedScriptText, leadsListText, modelEffortDrift, sessionModelDrift, sessionModelNotes, lastModelIn,
   liveClaudeSessions, codexTrustDrift, codexTrustedProjects, OPTIONAL_UNITS, HOST_OPTIONAL_UNITS, TOOL_ENTRIES, toolForm, LONG_RUNNING_TEMPLATES, unclassifiedEntries, declaredProjectKeys, windowEnd, windowEndNotes, workTickToolForm,
@@ -1824,9 +1824,12 @@ const identityHost = (where: { shippedDir: string, scriptDir: string, workersDir
   // PINNED SATISFIED TOO (#3316): `hostUnitDrift` now compares the reviewers' door, and an unpinned one reads the real host's.
   const reviewerBin = join(dirname(where.scriptDir), "reviewer-bin");
   reviewerDoorInstall({ reviewerBin, out: () => {} });
+  // AND THE REVIEWER'S SKILL (agent-org#1268): `hostUnitDrift` compares `~/.codex/skills/row-review` too, and an unpinned one reads the real host's.
+  const skillDir = join(dirname(where.scriptDir), "row-review-skill");
+  rowReviewSkillInstall({ skillDir, out: () => {} });
   writeFileSync(where.gitConfigPath, `[credential "https://github.com"]\n\thelper = \n`
     + `\thelper = !${where.scriptDir}/gh auth git-credential\n`);
-  return { ...where, reviewerBin };
+  return { ...where, reviewerBin, skillDir };
 };
 
 const UNIT_BODY = (workingDir: string) => "[Unit]\nDescription=board report\n[Service]\n"
@@ -2421,10 +2424,21 @@ test("#2332: END TO END -- `host:install` then `host:check --json` on a temp HOM
     assert.ok(identityFindings(before).length >= 3, "before the install: gh, the leads list and the README are all absent");
     const shadowNote = (out: string) => JSON.parse(out).notes.some((n: { problem: string }) => /SEAT WRAPPER/.test(n.problem));
     assert.ok(shadowNote(before), "the control: with no wrapper installed, a pane's shell is told it resolves `claude` elsewhere");
+    // agent-org#1268: THE ROW-REVIEW SKILL IS PLACED BY THE ENTRY POINT, not by a source search for the call. Neither `--json` nor a plain
+    // `host:check` may place it (a check that installs hides the drift it exists to report), and `--install` must, byte for byte.
+    const skillDir = join(home, ".codex", "skills", "row-review");
+    const skillFindings = (out: string) => JSON.parse(out).findings.filter((f: { problem: string }) => /^row-review skill/.test(f.problem)).map((f: { problem: string }) => f.problem);
+    assert.deepEqual(skillFindings(before), ["row-review skill NOT INSTALLED"], "before the install: `host:check --json` reports the skill missing");
+    run();
+    assert.equal(existsSync(skillDir), false, "and neither `--json` nor a plain `host:check` placed it");
     const install = run("--install");
     assert.match(install.stdout, /installed .*\/\.local\/bin\/gh/);
+    for (const name of ROW_REVIEW_SKILL_FILES) {
+      assert.equal(readFileSync(join(skillDir, name), "utf8"), readFileSync(join(ROW_REVIEW_SKILL_SOURCE, name), "utf8"), `\`host:install\` placed ${name} of the skill, byte for byte`);
+    }
     const after = JSON.parse(run("--json").stdout);
     assert.deepEqual(identityFindings(JSON.stringify(after)), [], "after the install every identity file matches");
+    assert.deepEqual(skillFindings(JSON.stringify(after)), [], "and `host:check --json` reads the skill as current");
     assert.equal(shadowNote(JSON.stringify(after)), false, "after the install the pane's shell resolves `claude` to the wrapper, so there is no note");
     // "COULD NOT BE ASKED" IS ITS OWN READING (and never a clean one): a shell that cannot answer leaves the note up, saying so, even with the wrapper installed.
     const detailOf = (out: string) => JSON.parse(out).notes.find((n: { problem: string }) => /SEAT WRAPPER/.test(n.problem))?.detail ?? "";
@@ -3427,4 +3441,75 @@ test("#4823: a pane that resolves claude to the symlink is reported; one that re
   assert.equal(unknown.length, 1);
   assert.match(unknown[0].detail, /could not be asked/);
   assert.doesNotMatch(unknown[0].detail, /resolves `claude` to/);
+});
+
+// --- agent-org#1268: THE REVIEWER'S row-review SKILL IS SHIPPED, INSTALLED BY `host:install` AND NAMED BY `host:check` ----------------------------------------
+// The order that names it, behind `review.rowReviewSkill`, is held in `row-review-skill-order.test.ts`. These tests live HERE, not in a file of their own, because a
+// new file that imports `host-units.ts` joins the gate's history-requirement population (#2174) and is taxed with `History: full`; this file is already in it.
+
+function inSkillHome(body: (home: string) => void): void {
+  body(tmpDir("row-review-skill-1268-"));
+}
+const skillHostOf = (home: string) => ({ host: { home } }) as unknown as Parameters<typeof rowReviewSkillPath>[0];
+/** Only the skill's own directory is placed; the rest of the host is the fixture's, which `hostUnitDrift` needs whole. */
+const skillPlacedAt = (home: string) => ({ skillDir: join(home, ".codex", "skills", "row-review") });
+const skillQuiet = { out: () => {} };
+
+// --- the file the repository ships --------------------------------------------------------------------------------------
+
+test("the shipped skill is the one the order names: its frontmatter says `row-review`, it has the three axes, and the licence is upstream's MIT", () => {
+  const skill = readFileSync(join(ROW_REVIEW_SKILL_SOURCE, "SKILL.md"), "utf8");
+  assert.match(skill, /^---\nname: row-review\ndescription: .+\n---\n/);
+  for (const heading of ["## Axis 1: Spec", "## Axis 2: Tests and correctness", "## Axis 3: Standards", "## Verdict"]) assert.ok(skill.includes(heading), heading);
+  assert.match(readFileSync(join(ROW_REVIEW_SKILL_SOURCE, "LICENSE"), "utf8"), /^MIT License\n\nCopyright \(c\) 2026 Matt Pocock/);
+  assert.deepEqual([...ROW_REVIEW_SKILL_FILES], ["SKILL.md", "LICENSE"]);
+});
+
+// --- `host:check` -------------------------------------------------------------------------------------------------------
+
+test("the skill is read from where Codex reads it: under the host's home, `.codex/skills/row-review`", () => {
+  assert.equal(rowReviewSkillPath({ host: { home: "/home/somebody" } } as never), "/home/somebody/.codex/skills/row-review");
+});
+
+test("`host:check`: NOT INSTALLED, then CURRENT after the install, then STALE when a file is edited or one is missing", () => {
+  inSkillHome((home) => {
+    const deps = skillHostOf(home);
+    assert.equal(rowReviewSkillState(deps).state, "NOT INSTALLED");
+    assert.equal(rowReviewSkillDrift(deps)[0].problem, "row-review skill NOT INSTALLED");
+    assert.match(rowReviewSkillDrift(deps)[0].detail, /host:install/);
+
+    const written = rowReviewSkillInstall({ ...deps, ...skillQuiet });
+    assert.deepEqual(written.map((p) => p.slice(rowReviewSkillPath(deps).length + 1)), ["SKILL.md", "LICENSE"]);
+    assert.equal(rowReviewSkillState(deps).state, "CURRENT");
+    assert.deepEqual(rowReviewSkillDrift(deps), [], "the one-change control: CURRENT is no finding");
+    for (const name of ROW_REVIEW_SKILL_FILES) assert.equal(readFileSync(join(rowReviewSkillPath(deps), name), "utf8"), readFileSync(join(ROW_REVIEW_SKILL_SOURCE, name), "utf8"));
+
+    writeFileSync(join(rowReviewSkillPath(deps), "SKILL.md"), "an older skill\n");
+    assert.deepEqual([rowReviewSkillState(deps).state, rowReviewSkillState(deps).differing], ["STALE", ["SKILL.md"]]);
+    assert.equal(rowReviewSkillDrift(deps)[0].problem, "row-review skill STALE");
+
+    rowReviewSkillInstall({ ...deps, ...skillQuiet });
+    rmSync(join(rowReviewSkillPath(deps), "LICENSE"));
+    assert.deepEqual([rowReviewSkillState(deps).state, rowReviewSkillState(deps).differing], ["STALE", ["LICENSE"]], "a half-installed skill is stale, not not-installed");
+  });
+});
+
+test("`host:check`: a shipped copy that cannot be read is SOURCE UNREADABLE, never CURRENT and never STALE", () => {
+  inSkillHome((home) => {
+    const deps = { ...skillHostOf(home), source: join(home, "no-such-skill") };
+    assert.equal(rowReviewSkillState(deps).state, "SOURCE UNREADABLE");
+    assert.match(rowReviewSkillDrift(deps)[0].detail, /could not be read/);
+    assert.throws(() => rowReviewSkillInstall({ ...deps, ...skillQuiet }), /cannot install the row-review skill/);
+  });
+});
+
+test("`host:check` is WIRED to it: hostUnitDrift carries the finding and drops it once installed", () => {
+  // THE MUTANT: deleting `...rowReviewSkillDrift(deps)` from `hostUnitDrift` kills none of the direct calls above.
+  inSkillHome((home) => {
+    const asked = { ...skillPlacedAt(home), systemctl: () => "LANG=C\n", shippedDir: home, installedDir: home };
+    const mine = () => (hostUnitDrift(asked as never) as { unit: string; problem: string; }[]).filter((d) => d.unit === rowReviewSkillPath(asked as never));
+    assert.deepEqual(mine().map((d) => d.problem), ["row-review skill NOT INSTALLED"]);
+    rowReviewSkillInstall({ ...asked, ...skillQuiet });
+    assert.deepEqual(mine(), []);
+  });
 });

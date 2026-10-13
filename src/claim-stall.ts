@@ -48,6 +48,7 @@ import { ownsPr } from "./pr-ownership.ts";
 import type { LabelEvent } from "./claim-provenance.ts";
 // #3453: where a keyed repository's clone lives (`host.json`'s `clones`), for the read of the worktrees a merged pull request's work was in. A leaf too.
 import { hostConfigPath, readHostConfig } from "./host-config.ts";
+import { parseWaits, conditionHolds, isItemWait, type RefFact } from "./wait-condition.ts";
 
 const MINUTE_MS = 60_000;
 
@@ -810,6 +811,23 @@ function waitReading(facts: ClaimFacts, waiting: string): Reading {
   if (facts.waitKind === undefined || facts.waitKind === null || !WAIT_RELEASE_KINDS.includes(facts.waitKind)) return kept;
   if (facts.work().state !== "none") return kept;
   return { kind: "release", why: "wait", lastMoveAt: null, idleMs: null, nudgedAt: null, waiting };
+}
+
+/**
+ * #1281 (class `row-not-finishable`): THE `Waiting-for:` A CLAIM WOULD BE TAKEN ON, read as `waitingForOf` reads it for a holder -- a line of the row's body whose
+ * condition `conditionHolds` says is `false`. A release on an unmet wait does not hold if the same wait is accepted again at the next claim, so the claim asks
+ * the question the gate's release did. `readRef` is the reader of one referenced item's state (`null` when it could not be read) and `repo` the tracker the
+ * row is in, which a bare `#n` of the line names. An UNKNOWN condition (`null`: an unread reference, `manual`, a line outside the grammar) is NOT unmet: a failed
+ * read never refuses a claim. A met condition is not refused, so the row is claimable the tick it becomes true.
+ * @param {string | null} body @param {string} repo @param {(ref: { repo: string, number: number }) => RefFact | null} readRef @returns {string | null} the unmet line's text
+ */
+export function unmetWaitingFor(body: string | null, repo: string, readRef: (ref: { repo: string; number: number; }) => RefFact | null): string | null {
+  for (const wait of parseWaits(body)) {
+    if (!isItemWait(wait)) continue;
+    const fact = readRef({ repo: wait.repo ?? repo, number: wait.number });
+    if (fact !== null && conditionHolds(wait, { items: { [wait.key]: fact } }) === false) return wait.text;
+  }
+  return null;
 }
 
 // --- THE FACTS OF ONE ROW ---------------------------------------------------------------------------------------------

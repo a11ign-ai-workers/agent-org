@@ -48,7 +48,7 @@ const NOBODY: { label: string; status: string }[] = [];
  * A host whose claim lands the row and creates `ROW_DIR`, and whose `git` answers as a clean tree. `existing` is what the filesystem holds before the spawn:
  * the claimed tree's `package.json`, and optionally its resolved `typescript`.
  */
-function fakeHost(existing: string[]) {
+function fakeHost(existing: string[], install?: string) {
   const fs = new Set(existing);
   const events: string[] = [];
   const exec = (command: string, args: string[]) => {
@@ -60,7 +60,9 @@ function fakeHost(existing: string[]) {
     }
     if (args[1] === "claim") {
       fs.add(ROW_DIR);
-      return { status: 0, output: `STARTED -- #${ROW} is now in-progress\n` };
+      // The STARTED line as `claimLineFor` writes it: the install's outcome is its last segment, and only when the claim ran an install.
+      const suffix = install === undefined ? "" : ` / ${install}`;
+      return { status: 0, output: `STARTED -- #${ROW} is now in-progress / session:${ROLE} / worktree ${ROW_DIR}${suffix}\n` };
     }
     fs.delete(ROW_DIR);
     return { status: 0, output: `DECLINED -- #${ROW} is unclaimed again\n` };
@@ -98,7 +100,7 @@ function spawn(host: ReturnType<typeof fakeHost>, herdr: ReturnType<typeof fakeH
 /** The gate as production wires it, over the fake host's filesystem: the question the real check asks, answered by the fake's `exists`. */
 function gateOver(host: ReturnType<typeof fakeHost>, written: string[]): ToolchainGate {
   return {
-    reason: (tree) => worktreeToolchainReason(tree, { exists: host.exists }),
+    reason: (tree, install) => worktreeToolchainReason(tree, { exists: host.exists, install }),
     refused: (_order, reason) => { written.push(reason); },
   };
 }
@@ -177,6 +179,31 @@ test("#1169 a real `node_modules` link that resolves nothing is named on disk; a
   const bare = join(SCRATCH, "bare-tree");
   mkdirSync(bare);
   assert.equal(worktreeToolchainReason(bare), null, "no package.json, no toolchain to resolve");
+});
+
+test("#1169 (agent-org#1265) a refusal names the claim's install when it failed: `install failed: <first error line>` is in the reason and on the row", () => {
+  const line = "install failed: ERR_PNPM_FETCH_404 GET https://registry.example/typescript: Not Found";
+  const host = fakeHost([`${ROW_DIR}/package.json`], line);
+  const herdr = fakeHerdr();
+  const written: string[] = [];
+  const got = spawn(host, herdr, gateOver(host, written));
+
+  assert.deepEqual(got.sent, [], JSON.stringify(got));
+  assert.equal(got.refused.length, 1, JSON.stringify(got));
+  assert.ok(got.refused[0].includes(`the claim's install: ${line}`), `the refusal carries the install line: ${JSON.stringify(got)}`);
+  assert.ok(written[0].includes(`the claim's install: ${line}`), `the row carries the install line: ${written[0]}`);
+  assert.ok(host.events.some((e) => e.includes("row-claim.ts decline")), `the claim is still released: ${host.events.join(" | ")}`);
+});
+
+test("#1169 (agent-org#1265) a refusal says `no install ran` when the claim's STARTED line carries no install outcome", () => {
+  const host = fakeHost([`${ROW_DIR}/package.json`]);
+  const herdr = fakeHerdr();
+  const written: string[] = [];
+  const got = spawn(host, herdr, gateOver(host, written));
+
+  assert.equal(got.refused.length, 1, JSON.stringify(got));
+  assert.ok(got.refused[0].includes("the claim's install: no install ran"), `the refusal says no install ran: ${JSON.stringify(got)}`);
+  assert.ok(written[0].includes("the claim's install: no install ran"), `the row says no install ran: ${written[0]}`);
 });
 
 test("#1169 `worktree.rebuildCheck` is read from decisions.json and is OFF unless it is `true`", () => {
