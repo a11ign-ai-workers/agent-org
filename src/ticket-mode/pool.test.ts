@@ -5,7 +5,7 @@ import { existsSync, mkdirSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import { countTokens, createPool, findTranscript, herdrName, isStartDialog, parseOutcome, ticketDir } from "./pool.ts";
-import { emptyQueue, enqueue, retry, type Queue } from "./queue.ts";
+import { emptyQueue, enqueue, retry, setPaused, type Queue } from "./queue.ts";
 import { parseTicketSettings } from "./settings.ts";
 import type { Ticket, TicketSource } from "./source.ts";
 import type { Git } from "./worktree.ts";
@@ -44,7 +44,7 @@ const git: Git = async (cwd, args) => {
 function setup(max = 2, keys = ["NBF-1", "NBF-2", "NBF-3"]) {
   const root = tmpDir("ticket-pool-");
   const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/repos/nbl-ui-netbox", "nbl-ui-platform-libs": "/repos/libs" }, stateDir: join(root, "state") });
-  let queue: Queue = enqueue(emptyQueue(max), keys.map(ticket), { repos: ["nbl-ui-netbox"], model: "sonnet", effort: "high" }, 0);
+  let queue: Queue = setPaused(enqueue(emptyQueue(max), keys.map(ticket), { repos: ["nbl-ui-netbox"], model: "sonnet", effort: "high" }, 0), false);
   const store = { get: () => queue, set: (next: Queue) => { queue = next; } };
   const status = new Map<string, string>();
   const screen = { text: "" };
@@ -225,7 +225,7 @@ test("a retry continues in the run's own worktree, and the earlier outcome does 
 test("a run stopped while it was starting stays stopped, and the workspace its start raced is closed", async () => {
   const root = tmpDir("ticket-race-");
   const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/repos/nbl-ui-netbox" }, stateDir: root });
-  let queue: Queue = enqueue(emptyQueue(1), [ticket("NBF-1")], { repos: ["nbl-ui-netbox"], model: "sonnet", effort: "high" }, 0);
+  let queue: Queue = setPaused(enqueue(emptyQueue(1), [ticket("NBF-1")], { repos: ["nbl-ui-netbox"], model: "sonnet", effort: "high" }, 0), false);
   const store = { get: () => queue, set: (next: Queue) => { queue = next; } };
   const h = herdr(new Map());
   let pool: ReturnType<typeof createPool>;
@@ -244,4 +244,12 @@ test("a tick asked for during a tick runs once more after it, so a ticket queued
   await pool.tick();
   await first;
   assert.equal(entry("NBF-2").phase, "running");
+});
+
+test("a paused queue starts nothing, however much room there is", async () => {
+  const { pool, store, entry, h } = setup(3, ["NBF-1"]);
+  store.set(setPaused(store.get(), true));
+  await pool.tick();
+  assert.equal(entry("NBF-1").phase, "queued");
+  assert.ok(!h.calls.some((args) => args.includes("create")), "no workspace was opened");
 });

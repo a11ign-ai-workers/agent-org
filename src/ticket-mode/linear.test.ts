@@ -36,7 +36,7 @@ test("assigned() reads every page of the viewer's unfinished tickets, sending th
   assert.equal((requests[0].init.headers as Record<string, string>).Authorization, "lin_api_secret");
   const second = JSON.parse(String(requests[1].init.body));
   assert.equal(second.variables.after, "c1", "the second page starts where the first ended");
-  assert.match(second.query, /nin: \["completed", "canceled"\]/, "finished tickets are not offered");
+  assert.match(second.query, /nin: \["completed", "canceled", "duplicate"\]/, "finished tickets are not offered, nor duplicates, which Linear types on their own");
 });
 
 test("read() finds a ticket by its team and number, returns null for a key Linear has no ticket for, and throws when Linear cannot be asked", async () => {

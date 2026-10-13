@@ -17,7 +17,7 @@ import { fileURLToPath, pathToFileURL } from "node:url";
 import { refuseUnknownFlags } from "../lib/cli-flags.ts";
 import { linearSource, readLinearKey } from "./linear.ts";
 import { createPool, type PoolDeps } from "./pool.ts";
-import { amend, enqueue, loadQueue, remove, retry, saveQueue, setMax, type Queue, type RunChoice } from "./queue.ts";
+import { amend, enqueue, loadQueue, remove, retry, saveQueue, setMax, setPaused, type Queue, type RunChoice } from "./queue.ts";
 import { readTicketSettings, type TicketSettings } from "./settings.ts";
 import type { Ticket, TicketSource } from "./source.ts";
 
@@ -139,6 +139,12 @@ export function createBoard(deps: BoardDeps) {
       store.set(enqueue(queue, tickets, choice, now()));
       mkdirSync(dirname(deps.choicePath), { recursive: true });
       writeFileSync(deps.choicePath, `${JSON.stringify(choice)}\n`);
+      wake();
+      return [200, queue];
+    }
+    if (method === "POST" && path === "/api/paused") {
+      if (typeof body.paused !== "boolean") throw new Error("paused must be true or false");
+      store.set(setPaused(queue, body.paused));
       wake();
       return [200, queue];
     }

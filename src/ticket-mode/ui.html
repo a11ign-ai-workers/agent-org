@@ -25,6 +25,7 @@
   .key { font-variant-numeric: tabular-nums; color: var(--muted); }
   .pill { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
   footer { position: fixed; bottom: 0; left: 0; right: 0; background: var(--panel); border-top: 1px solid var(--line); padding: 10px 20px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  footer[hidden] { display: none; }
   footer fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
   footer legend { float: left; margin-right: 6px; color: var(--muted); }
   select, button.primary, button.small, input[type="number"] { font: inherit; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
@@ -42,6 +43,10 @@
   a { color: var(--accent); text-decoration: none; }
   a:hover { text-decoration: underline; }
   .bar { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
+  .notice { background: var(--panel); border: 1px solid var(--line); border-left: 3px solid var(--warn); border-radius: 6px; padding: 8px 12px; margin-bottom: 8px; }
+  .state { font-weight: 600; }
+  .state.paused { color: var(--warn); }
+  .state.started { color: var(--ok); }
 </style>
 </head>
 <body>
@@ -58,10 +63,15 @@
       <label><input id="all" type="checkbox"> Select all shown</label>
       <span id="loaded" class="pill"></span>
     </div>
+    <div id="paused-note" class="notice" hidden>Workers are paused. Tickets you queue wait on the Board until you start workers there.</div>
     <div id="groups"></div>
   </section>
   <section id="board" hidden>
-    <div class="bar"><label>Workers at once <input id="max" type="number" min="1" style="width:64px"></label><button class="small" id="save-max">Save</button></div>
+    <div class="bar">
+      <span id="pool-state" class="state"></span>
+      <button class="primary" id="toggle-pause"></button>
+      <label>Workers at once <input id="max" type="number" min="1" style="width:64px"></label><button class="small" id="save-max">Save</button>
+    </div>
     <div class="board" id="columns"></div>
   </section>
 </main>
@@ -163,6 +173,11 @@ function renderBoard() {
     columns.append(el("div", { className: "column" }, el("h2", {}, `${title} (${entries.length})`), ...entries.map(card)));
   }
   if (document.activeElement !== $("max")) $("max").value = state.queue.max;
+  const paused = state.queue.paused !== false;
+  $("pool-state").textContent = paused ? "Workers paused: nothing queued will start" : "Workers started: queued tickets start as slots free up";
+  $("pool-state").className = `state ${paused ? "paused" : "started"}`;
+  $("toggle-pause").textContent = paused ? "Start workers" : "Pause";
+  $("paused-note").hidden = !paused;
 }
 
 function renderFooter() {
@@ -190,6 +205,7 @@ for (const tab of document.querySelectorAll(".tab")) {
     for (const other of document.querySelectorAll(".tab")) other.setAttribute("aria-selected", String(other === tab));
     $("pick").hidden = tab.dataset.tab !== "pick";
     $("board").hidden = tab.dataset.tab !== "board";
+    $("queue-bar").hidden = tab.dataset.tab !== "pick";
   });
 }
 $("filter").addEventListener("input", render);
@@ -210,6 +226,7 @@ $("queue").addEventListener("click", async () => {
     render();
   } catch (err) { report(err); }
 });
+$("toggle-pause").addEventListener("click", () => call("POST", "/api/paused", { paused: state.queue.paused === false }).then((q) => { state.queue = q; render(); }, report));
 $("save-max").addEventListener("click", () => call("POST", "/api/max", { max: Number($("max").value) }).then((q) => { state.queue = q; render(); }, report));
 
 (async () => {

@@ -74,6 +74,18 @@ test("an amend is held to the rules queueing uses: an unknown repository, model 
   assert.deepEqual(b.store.get().entries.map((e) => [e.repos, e.model, e.effort]), [[["platform-monorepo"], "sonnet", "high"]]);
 });
 
+test("the board's queue starts paused, and Start and Pause go through the API", async () => {
+  const b = board();
+  const [, queue] = await b.api("GET", "/api/queue", {}) as [number, any];
+  assert.equal(queue.paused, true);
+  await b.api("POST", "/api/paused", { paused: false });
+  assert.equal(b.store.get().paused, false);
+  assert.deepEqual(b.ticks, ["tick"], "starting wakes the pool");
+  await assert.rejects(b.api("POST", "/api/paused", { paused: "no" }), /true or false/);
+  await b.api("POST", "/api/paused", { paused: true });
+  assert.equal(b.store.get().paused, true);
+});
+
 test("remove, stop and max go through the board", async () => {
   const b = board();
   await b.api("GET", "/api/tickets", {});

@@ -42,7 +42,11 @@ export type Entry = Readonly<{
   tokens?: Readonly<{ input: number; output: number }>;
 }>;
 
-export type Queue = Readonly<{ entries: readonly Entry[]; max: number }>;
+/**
+ * `paused`: no queued entry starts while it is true. A new queue starts PAUSED, so queueing is never also starting: a person can queue tickets
+ * before what the workers need is ready (a dev environment, a merge) and start them on the board when it is.
+ */
+export type Queue = Readonly<{ entries: readonly Entry[]; max: number; paused: boolean }>;
 
 export type RunChoice = Readonly<{ repos: readonly string[]; model: string; effort: string }>;
 
@@ -82,6 +86,10 @@ export function retry(queue: Queue, key: string, now: number): Queue {
   return { ...queue, entries: [...queue.entries.filter((e) => e.ticket.key !== key), { ticket, repos, model, effort, phase: "queued", queuedAt: now, retried: true }] };
 }
 
+export function setPaused(queue: Queue, paused: boolean): Queue {
+  return { ...queue, paused };
+}
+
 export function setMax(queue: Queue, max: number): Queue {
   if (!Number.isInteger(max) || max < 1) throw new Error(`max must be a whole number of 1 or more, not ${max}`);
   return { ...queue, max };
@@ -109,24 +117,24 @@ export function finish(queue: Queue, key: string, outcome: Outcome, now: number,
 }
 
 /**
- * The queued entries to start now, in queue order: none while the host is loaded past its cores (`wake.ts`'s `hostLoadRefusal` rule, where
+ * The queued entries to start now, in queue order: none while the queue is paused or the host is loaded past its cores (`wake.ts`'s `hostLoadRefusal` rule, where
  * exactly equal does not refuse), and otherwise as many as the free slots allow.
  */
 export function nextStarts(queue: Queue, load: number, cores: number): Entry[] {
-  if (load > cores) return [];
+  if (queue.paused || load > cores) return [];
   const free = queue.max - queue.entries.filter(isLive).length;
   return queue.entries.filter((entry) => entry.phase === "queued").slice(0, Math.max(0, free));
 }
 
 export function emptyQueue(max: number): Queue {
-  return { entries: [], max };
+  return { entries: [], max, paused: true };
 }
 
 /** The queue on disk, or an empty one with `max` when there is no file yet. */
 export function loadQueue(path: string, max: number): Queue {
   if (!existsSync(path)) return emptyQueue(max);
   const parsed = JSON.parse(readFileSync(path, "utf8")) as Queue;
-  return { entries: parsed.entries ?? [], max: parsed.max ?? max };
+  return { entries: parsed.entries ?? [], max: parsed.max ?? max, paused: parsed.paused ?? true };
 }
 
 /** Replace the file whole: write beside it, then rename over it. */

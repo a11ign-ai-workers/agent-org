@@ -4,7 +4,7 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import {
-  amend, emptyQueue, enqueue, finish, loadQueue, markRunning, markStarting, nextStarts, observe, remove, retry, saveQueue, setMax, type Queue,
+  amend, emptyQueue, enqueue, finish, loadQueue, markRunning, markStarting, nextStarts, observe, remove, retry, saveQueue, setMax, setPaused, type Queue,
 } from "./queue.ts";
 import type { Ticket } from "./source.ts";
 
@@ -30,8 +30,17 @@ test("amend and remove touch a queued entry only", () => {
   assert.deepEqual(keys(remove(remove(queue, "A"), "B")), ["A"], "a started entry is not removed");
 });
 
+test("a new queue is paused, and nothing starts until it is started; pausing again stops new starts", () => {
+  let queue = enqueue(emptyQueue(2), [ticket("A")], choice, 1);
+  assert.equal(queue.paused, true, "queueing is never also starting");
+  assert.deepEqual(nextStarts(queue, 0, 14), []);
+  queue = setPaused(queue, false);
+  assert.deepEqual(nextStarts(queue, 0, 14).map((e) => e.ticket.key), ["A"]);
+  assert.deepEqual(nextStarts(setPaused(queue, true), 0, 14), []);
+});
+
 test("nextStarts fills free slots in queue order, counts starting and running alike, and starts nothing past the host's cores", () => {
-  let queue = enqueue(emptyQueue(2), [ticket("A"), ticket("B"), ticket("C")], choice, 1);
+  let queue = setPaused(enqueue(emptyQueue(2), [ticket("A"), ticket("B"), ticket("C")], choice, 1), false);
   assert.deepEqual(nextStarts(queue, 1, 14).map((e) => e.ticket.key), ["A", "B"]);
   queue = markStarting(queue, "A", 2);
   assert.deepEqual(nextStarts(queue, 1, 14).map((e) => e.ticket.key), ["B"]);
@@ -69,4 +78,6 @@ test("the queue file round-trips, and a missing one is an empty queue", () => {
   const queue = enqueue(emptyQueue(2), [ticket("A")], choice, 1);
   saveQueue(path, queue);
   assert.deepEqual(loadQueue(path, 9), queue, "the saved max wins over the default");
+  saveQueue(path, setPaused(queue, false));
+  assert.equal(loadQueue(path, 9).paused, false, "a started queue stays started across a restart of the board");
 });
