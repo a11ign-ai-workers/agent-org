@@ -348,7 +348,8 @@ test("#992 (5) arm-pr: the refusal is COMMENTED once -- its marker holds the fil
   assert.doesNotMatch(text, /nothing needs doing here/, "something DOES need doing: the line to add");
 
   const marker = first.commented[0][first.commented[0].indexOf("--body") + 1].split("\n")[0];
-  const again = driveArm({ comments: [{ body: "unrelated" }, { body: `${marker}\nNot armed` }] });
+  // The seeded comment is what this code writes on a repeat tick: its marker, its disarm outcome, its refusal.
+  const again = driveArm({ comments: [{ body: "unrelated" }, { body: `${marker}\n**Disarmed: yes (disarmed).**\nNot armed` }] });
   assert.equal(again.commented.length, 0, "ONE comment for one file set");
   assert.equal(again.merged, false);
 

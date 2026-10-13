@@ -302,7 +302,11 @@ export function announceBlocked({ number, repo, verdict, run, error, lead }: {
   try {
     const existing = JSON.parse(run(["pr", "view", String(number), "--repo", repo, "--json", "comments"])).comments;
     if (!Array.isArray(existing)) throw new Error("the API returned no comment list");
-    if (existing.some((comment) => String(comment?.body ?? "").includes(marker))) return { posted: false };
+    // agent-org#1278: a marker comment that does not carry this run's lead is a refusal made before the disarm said so, and does not stand for this one.
+    if (existing.some((comment) => {
+      const body = String(comment?.body ?? "");
+      return body.includes(marker) && (!lead || body.includes(lead));
+    })) return { posted: false };
     run(["pr", "comment", String(number), "--repo", repo, "--body", `${marker}\n${lead ? `${lead}\n` : ""}**Not armed: ${verdict.why}.** ${tail}`]);
     return { posted: true };
   } catch (cause) {

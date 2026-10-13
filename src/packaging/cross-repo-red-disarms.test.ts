@@ -17,6 +17,7 @@
 import { test } from "node:test";
 import assert from "node:assert/strict";
 import { runArmPr, EXIT } from "../arm-pr.ts";
+import { crossRepoRedMarker } from "../cross-repo-red.ts";
 
 const LAB = "a11ign/lab";
 const LEG = "checks (cross-repo)";
@@ -37,12 +38,12 @@ const failLine = (file: string) => {
 const LOG = FILES.map(failLine).join("\n");
 
 type Seat = { armed: boolean; queued: boolean; merged: boolean };
-type Options = { disableIgnored?: boolean; dequeueRefused?: boolean; body?: string };
+type Options = { disableIgnored?: boolean; dequeueRefused?: boolean; body?: string; seeded?: string[] };
 
-/** A fake `gh` for one lab pull request, whose seat the writes change. Unknown calls answer `""`, as the doors' own fixtures do. */
-function world(seat: Seat, { disableIgnored = false, dequeueRefused = false, body = BODY }: Options = {}) {
+/** A fake `gh` for one lab pull request, whose seat the writes change. Unknown calls answer `""`, as the doors' own fixtures do. `seeded` are comments already on the PR. */
+function world(seat: Seat, { disableIgnored = false, dequeueRefused = false, body = BODY, seeded = [] }: Options = {}) {
   const calls: string[][] = [];
-  const comments: string[] = [];
+  const comments: string[] = [...seeded];
   const run = (_cmd: string, args: string[]): string => {
     calls.push(args);
     const line = args.join(" ");
@@ -162,4 +163,23 @@ test("#1278 (6) the disarm runs on a cross-repo-red verdict ONLY: a declared PR 
   assert.equal(out.disableCalls.length, 0, out.said);
   assert.equal(out.comments.length, 0, "an armed PR gets no refusal comment");
   assert.equal(out.plainMergeCalls.length, 1, "the declared PR arms, so it is merged-armed as usual");
+});
+
+// The refusal made before this change: its marker comment says "Not armed" and nothing about the disarm.
+const BEFORE_THIS_CHANGE = `${crossRepoRedMarker(FILES)}\n**Not armed: a red leg.** Nothing about the disarm.`;
+
+test("#1278 (7) a PR already refused BEFORE this change (its marker, no disarm line) is disarmed, and the disarm's outcome is posted on a new comment", () => {
+  const seat = { armed: true, queued: false, merged: false };
+  const out = drive(seat, { seeded: [BEFORE_THIS_CHANGE] });
+  assert.equal(seat.armed, false, "the state, read back, says auto-merge is off");
+  assert.equal(out.comments.length, 2, "the old comment stands, and the outcome is posted beside it");
+  assert.equal(out.comments[1].split("\n")[1], "**Disarmed: yes (disarmed).**", out.comments[1]);
+  assert.equal(out.code, EXIT.DONE, out.said);
+});
+
+test("#1278 (8) a refusal whose outcome is already on the PR (same marker AND same lead) posts nothing more, on a repeat tick", () => {
+  const seat = { armed: true, queued: false, merged: false };
+  const out = drive(seat, { seeded: [`${crossRepoRedMarker(FILES)}\n**Disarmed: yes (disarmed).**\n**Not armed: a red leg.**`] });
+  assert.equal(out.comments.length, 1, "the seeded comment already says this outcome, so nothing is posted");
+  assert.equal(out.code, EXIT.DONE, out.said);
 });
