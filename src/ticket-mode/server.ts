@@ -95,15 +95,15 @@ function validChoice(body: Json, settings: TicketSettings): RunChoice {
 
 /** An amend names only what it changes, and each part is held to the rules queueing uses. */
 function validAmend(body: Json, settings: TicketSettings): Partial<RunChoice> {
-  const change: Partial<RunChoice> = {};
-  if (body.repos !== undefined) {
-    if (!Array.isArray(body.repos)) throw new Error("repos must be a list");
-    change.repos = body.repos.map(String);
-    checkRepos(change.repos, settings);
-  }
-  if (body.model !== undefined) { change.model = String(body.model); checkModel(change.model); }
-  if (body.effort !== undefined) { change.effort = String(body.effort); checkEffort(change.effort); }
-  return change;
+  if (body.repos !== undefined && !Array.isArray(body.repos)) throw new Error("repos must be a list");
+  const repos = Array.isArray(body.repos) ? body.repos.map(String) : undefined;
+  const model = body.model === undefined ? undefined : String(body.model);
+  const effort = body.effort === undefined ? undefined : String(body.effort);
+  if (repos !== undefined) checkRepos(repos, settings);
+  if (model !== undefined) checkModel(model);
+  if (effort !== undefined) checkEffort(effort);
+  // `RunChoice` is read-only, so the change is built whole rather than assigned field by field.
+  return { ...(repos === undefined ? {} : { repos }), ...(model === undefined ? {} : { model }), ...(effort === undefined ? {} : { effort }) };
 }
 
 /** The request handler, with every dependency named, so a test drives it without a socket. */
