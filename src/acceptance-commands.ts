@@ -888,17 +888,42 @@ function loadTypescript(): typeof import("typescript") | null {
  *
  * @param [memo] the parse is kept here, so a file reached from many entries is parsed once
  */
-function reachableScope(codeOnly: string, fileName: string, imported: Set<string>, isEntry: boolean, memo: ClosureMemo = createClosureMemo()): { scope: string; referenced: Set<string> | null; } {
+function reachableScope(codeOnly: string, fileName: string, imported: Set<string>, isEntry: boolean, memo: ClosureMemo = createClosureMemo()): { scope: string; codeScope: string; referenced: Set<string> | null; } {
   const ts = loadTypescript();
-  if (ts === null) return { scope: codeOnly, referenced: null }; // no parser: scan everything, follow every name
+  // no parser: scan everything, follow every name, and read string content as code too -- the safe direction
+  if (ts === null) return { scope: codeOnly, codeScope: codeOnly, referenced: null };
   const source = parsedSource(memo, ts, fileName, codeOnly);
-  if (isEntry) return { scope: codeOnly, referenced: referencedNames(ts, source, null) };
+  if (isEntry) return { scope: codeOnly, codeScope: blankStringContent(ts, source, codeOnly), referenced: referencedNames(ts, source, null) };
   const kept = new Set(imported);
   for (let size = -1; size !== kept.size;) {
     size = kept.size;
     for (const name of referencedNames(ts, source, kept)) kept.add(name);
   }
-  return { scope: blankUnkept(ts, source, codeOnly, kept), referenced: referencedNames(ts, source, kept) };
+  const scope = blankUnkept(ts, source, codeOnly, kept);
+  return { scope, codeScope: blankStringContent(ts, source, scope), referenced: referencedNames(ts, source, kept) };
+}
+
+/**
+ * The text with the CONTENT of every string literal and template literal blanked: quotes, delimiters and newlines are kept, so
+ * offsets and `lineNumberOf` still hold. #1327: a call-shaped pattern matched on this copy, so a sentence that names `runsRoot()`
+ * inside a string is not charged as a read. A `${ ... }` substitution is code, not content, and stays as it was.
+ */
+function blankStringContent(ts: typeof import("typescript"), source: import("typescript").SourceFile, text: string): string {
+  const spans: [number, number][] = [];
+  const visit = (node: import("typescript").Node) => {
+    if (ts.isStringLiteral(node) || ts.isNoSubstitutionTemplateLiteral(node)) spans.push([node.getStart(source) + 1, node.getEnd() - 1]);
+    else if (ts.isTemplateHead(node) || ts.isTemplateMiddle(node)) spans.push([node.getStart(source) + 1, node.getEnd() - 2]);
+    else if (ts.isTemplateTail(node)) spans.push([node.getStart(source) + 1, node.getEnd() - 1]);
+    ts.forEachChild(node, visit);
+  };
+  ts.forEachChild(source, visit);
+  let out = "";
+  let from = 0;
+  for (const [start, end] of spans) {
+    out += text.slice(from, start) + text.slice(start, end).replace(/[^\n]/g, " ");
+    from = end;
+  }
+  return out + text.slice(from);
 }
 
 /**
@@ -1019,13 +1044,15 @@ const CLOSURE_REQUIREMENT_PATTERNS =
     // `runsRoot()` (packages/lab/src/dataset-paths.mjs) is the ONE function this repo reads `runs/`
     // through; its two documented override env vars are the ONE other door. Reading `runs/` any other way
     // would be a second, undocumented door CLAUDE.md's own corpus rule does not know about.
-    [/\brunsRoot\s*\(/, "corpus"],
+    // #1327: the call is matched in CODE, never in string content: a sentence that names `runsRoot()` reads nothing. The env-var
+    // spellings are NOT given that treatment -- `process.env["A11Y_RUNS_ROOT"]` is a real read spelled as a string.
+    [/\brunsRoot\s*\(/, "corpus", "code"],
     [new RegExp(`\\b(?:${fingerprint("RUNS_R", "OOT")}|${fingerprint("A11Y_RUNS_R", "OOT")})\\b`), "corpus"],
     // The shallow-checkout question this repo's own idiom asks (pre-push-resolve-toward-main.test.ts,
     // pre-push-stale-base.test.ts) -- a file asking it needs a real answer, which only a full-history
     // checkout can honestly give it.
     [new RegExp(fingerprint("--is-shallow-repo", "sitory") + "\\b"), "history"],
-  ] as [RegExp, "token" | "corpus" | "history"][]);
+  ] as [RegExp, "token" | "corpus" | "history", "code"?][]);
 
 // #827: THE MIRROR OF `// writes:`, ON THE TEST FILE RATHER THAN THE FILE THAT CALLS THE RISKY FUNCTION --
 // `board-markdown.test.ts` and `board-achievement-retirement.test.ts` each import only `document` from
@@ -1106,7 +1133,7 @@ function keepReferenced(bound: string[], referenced: Set<string> | null): Set<st
 /**
  * `visited` is every file each entry's walk read: an entry's answer can only change if one of those did, which is what lets a caller reuse it.
  */
-export type ClosureMemo = { sources: Map<string, { text: string, codeOnly: string }>, parsed: Map<string, import("typescript").SourceFile>, scopes: Map<string, { scope: string, referenced: Set<string> | null, matches: Map<number, RegExpExecArray | null> }>, edges: Map<string, { target: string, names: Set<string> }[]>, visited: Map<string, Set<string>> };
+export type ClosureMemo = { sources: Map<string, { text: string, codeOnly: string }>, parsed: Map<string, import("typescript").SourceFile>, scopes: Map<string, { scope: string, codeScope: string, referenced: Set<string> | null, matches: Map<number, RegExpExecArray | null> }>, edges: Map<string, { target: string, names: Set<string> }[]>, visited: Map<string, Set<string>> };
 /**
  * (#3549) WHAT ONE SCAN OF MANY ENTRIES SHARES. `deriveClosureRequirements` over a whole directory of tests walks the SAME modules once per entry, and
  * each visit read the file, stripped its comments, parsed it and blanked its bodies again: measured at 182 CPU-s for one pass over 190 files, nearly
@@ -1274,10 +1301,11 @@ export function deriveClosureRequirements(entry: string, memo: ClosureMemo = cre
     // second row, not a quiet extra in this one.
     const reach = scopeFor(memo, { file, codeOnly, names: union, isEntry: file === entry });
     const hereChain = [...chain, file];
-    CLOSURE_REQUIREMENT_PATTERNS.forEach(([pattern, requirement], index) => {
+    CLOSURE_REQUIREMENT_PATTERNS.forEach(([pattern, requirement, subject], index) => {
       if (found.has(requirement) || (requirement === "corpus" && exemptCorpus)
         || (requirement === "token" && exemptToken)) return;
-      const match = matchOf(reach, { index, pattern, text: requirement === "corpus" ? reach.scope : codeOnly });
+      const matchedText = requirement !== "corpus" ? codeOnly : subject === "code" ? reach.codeScope : reach.scope;
+      const match = matchOf(reach, { index, pattern, text: matchedText });
       if (match) recordHit({ requirement, file, text, codeOnly, match, chain: hereChain });
     });
     for (const { target, names: edgeNames } of closureEdges(file, reach.referenced, memo)) walk(target, hereChain, seen, edgeNames);
