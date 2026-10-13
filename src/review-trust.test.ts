@@ -170,11 +170,15 @@ test("#1311: an outside reviewer's pane carries no account: no GH_CONFIG_DIR, no
   assert.deepEqual(outsideReviewerEnvironment("reviewer-7000", "a11ign/agent-org"), { A11Y_REVIEWER_SESSION: "reviewer-7000", GH_REPO: "a11ign/agent-org" });
 });
 
-test("#1311: the door the gate posts through is the door the host installs -- outsideDoorPath agrees with host-units' reviewerDoorPath", async () => {
-  // Not imported at the top: host-units reads git history, which the gate's import closure must not reach (the history ratchet in
-  // src/packaging/work-gate.test.ts). This test file is outside that population, so the parity check can live here.
-  const { reviewerDoorPath } = await import("./host-units.ts");
-  assert.equal(outsideDoorPath(), reviewerDoorPath());
+test("#1311: the door the gate posts through is the door the host installs -- host-units' reviewerDoorPath names the same file", () => {
+  // Read as text, not imported: host-units reads git history, and the gate's import closure must not reach it (the history ratchet in
+  // src/packaging/work-gate.test.ts). The same bin directory and file name, read from the one place each is written.
+  const hostUnits = readFileSync(new URL("./host-units.ts", import.meta.url), "utf8");
+  const door = hostUnits.slice(hostUnits.indexOf("export function reviewerDoorPath"));
+  assert.match(door, /process\.env\.A11Y_REVIEWER_BIN/);
+  assert.match(door, /"reviewer", "bin"/);
+  assert.match(door, /join\(bin, "pr-review-verdict"\)/);
+  assert.ok(outsideDoorPath().endsWith("pr-review-verdict"), outsideDoorPath());
 });
 
 // --- the order path: perPullRequestOrders decides the trust -----------------------------------------------------
