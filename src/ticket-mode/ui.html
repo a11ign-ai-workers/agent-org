@@ -1,0 +1,225 @@
+<!doctype html>
+<html lang="en">
+<head>
+<meta charset="utf-8">
+<meta name="viewport" content="width=device-width, initial-scale=1">
+<title>Ticket queue</title>
+<style>
+  :root { --bg: #f7f7f8; --panel: #fff; --text: #1d1d20; --muted: #6b6b76; --line: #e3e3e8; --accent: #3b5bdb; --ok: #2f9e44; --warn: #e8590c; --bad: #c92a2a; }
+  @media (prefers-color-scheme: dark) { :root { --bg: #141417; --panel: #1d1d22; --text: #ececf1; --muted: #9a9aa6; --line: #2e2e36; --accent: #748ffc; --ok: #51cf66; --warn: #ff922b; --bad: #ff6b6b; } }
+  * { box-sizing: border-box; }
+  body { margin: 0; font: 14px/1.45 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
+  header { display: flex; gap: 16px; align-items: center; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  header h1 { font-size: 16px; margin: 0 12px 0 0; }
+  .tab { background: none; border: 0; padding: 6px 10px; border-radius: 6px; color: var(--muted); cursor: pointer; font: inherit; }
+  .tab[aria-selected="true"] { background: var(--bg); color: var(--text); font-weight: 600; }
+  main { padding: 16px 20px 120px; }
+  .error { color: var(--bad); margin: 8px 0; white-space: pre-wrap; }
+  input[type="search"] { width: 320px; max-width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); }
+  .group { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin: 12px 0; }
+  .group > h2 { font-size: 13px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
+  .group > h2 .count { color: var(--muted); font-weight: 400; }
+  .row { display: grid; grid-template-columns: 24px 96px 1fr auto auto; gap: 10px; align-items: center; padding: 6px 12px; border-top: 1px solid var(--line); }
+  .row:first-of-type { border-top: 0; }
+  .row.taken { opacity: .55; }
+  .key { font-variant-numeric: tabular-nums; color: var(--muted); }
+  .pill { font-size: 12px; padding: 1px 8px; border-radius: 999px; border: 1px solid var(--line); color: var(--muted); white-space: nowrap; }
+  footer { position: fixed; bottom: 0; left: 0; right: 0; background: var(--panel); border-top: 1px solid var(--line); padding: 10px 20px; display: flex; gap: 16px; align-items: center; flex-wrap: wrap; }
+  footer fieldset { border: 0; padding: 0; margin: 0; display: flex; gap: 10px; align-items: center; flex-wrap: wrap; }
+  footer legend { float: left; margin-right: 6px; color: var(--muted); }
+  select, button.primary, button.small, input[type="number"] { font: inherit; padding: 5px 10px; border-radius: 6px; border: 1px solid var(--line); background: var(--panel); color: var(--text); }
+  button.primary { background: var(--accent); border-color: var(--accent); color: #fff; font-weight: 600; cursor: pointer; }
+  button.primary:disabled { opacity: .5; cursor: default; }
+  button.small { font-size: 12px; padding: 2px 8px; cursor: pointer; }
+  .board { display: grid; grid-template-columns: repeat(5, minmax(220px, 1fr)); gap: 12px; align-items: start; }
+  .column { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; min-height: 120px; }
+  .column > h2 { font-size: 13px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); }
+  .card { padding: 10px 12px; border-top: 1px solid var(--line); display: grid; gap: 4px; }
+  .card:first-of-type { border-top: 0; }
+  .card .meta { color: var(--muted); font-size: 12px; }
+  .card .actions { display: flex; gap: 6px; margin-top: 4px; }
+  .waiting { color: var(--warn); font-size: 12px; font-weight: 600; }
+  a { color: var(--accent); text-decoration: none; }
+  a:hover { text-decoration: underline; }
+  .bar { display: flex; gap: 12px; align-items: center; margin-bottom: 8px; }
+</style>
+</head>
+<body>
+<header>
+  <h1>Ticket queue</h1>
+  <button class="tab" data-tab="pick" aria-selected="true">Pick</button>
+  <button class="tab" data-tab="board" aria-selected="false">Board</button>
+</header>
+<main>
+  <div id="error" class="error" role="alert"></div>
+  <section id="pick">
+    <div class="bar">
+      <input id="filter" type="search" placeholder="Filter by key, title or project">
+      <label><input id="all" type="checkbox"> Select all shown</label>
+      <span id="loaded" class="pill"></span>
+    </div>
+    <div id="groups"></div>
+  </section>
+  <section id="board" hidden>
+    <div class="bar"><label>Workers at once <input id="max" type="number" min="1" style="width:64px"></label><button class="small" id="save-max">Save</button></div>
+    <div class="board" id="columns"></div>
+  </section>
+</main>
+<footer id="queue-bar">
+  <fieldset><legend>Repos</legend><span id="repos"></span></fieldset>
+  <label>Model <select id="model"></select></label>
+  <label>Effort <select id="effort"></select></label>
+  <button class="primary" id="queue">Queue 0 tickets</button>
+</footer>
+<script>
+"use strict";
+const el = (tag, props = {}, ...children) => {
+  const node = Object.assign(document.createElement(tag), props);
+  for (const child of children) if (child !== null && child !== undefined) node.append(child);
+  return node;
+};
+const $ = (id) => document.getElementById(id);
+const state = { tickets: [], queue: { entries: [], max: 3 }, config: null, selected: new Set() };
+
+async function call(method, path, body) {
+  const response = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
+  const value = await response.json();
+  if (!response.ok) throw new Error(value.error || response.statusText);
+  return value;
+}
+function report(err) { $("error").textContent = err ? String(err.message || err) : ""; }
+
+const COLUMNS = [
+  ["Queued", (e) => e.phase === "queued"],
+  ["Running", (e) => e.phase === "starting" || e.phase === "running"],
+  ["Draft PR", (e) => e.outcome && e.outcome.kind === "draft-pr"],
+  ["Needs human", (e) => e.outcome && ["needs-human", "wrong-repo", "no-outcome"].includes(e.outcome.kind)],
+  ["Failed", (e) => e.outcome && ["crashed", "stopped"].includes(e.outcome.kind)],
+];
+const PRIORITY = ["", "Urgent", "High", "Medium", "Low"];
+const entryFor = (key) => state.queue.entries.find((e) => e.ticket.key === key);
+
+function renderPick() {
+  const words = $("filter").value.trim().toLowerCase();
+  const shown = state.tickets.filter((t) => !words || `${t.key} ${t.title} ${t.project || ""}`.toLowerCase().includes(words));
+  const groups = new Map();
+  for (const t of [...shown].sort((a, b) => a.statusOrder - b.statusOrder || a.priority - b.priority)) {
+    if (!groups.has(t.status)) groups.set(t.status, []);
+    groups.get(t.status).push(t);
+  }
+  const free = (t) => !entryFor(t.key);
+  const list = $("groups");
+  list.replaceChildren();
+  for (const [status, tickets] of groups) {
+    const selectable = tickets.filter(free);
+    const groupBox = el("input", { type: "checkbox", checked: selectable.length > 0 && selectable.every((t) => state.selected.has(t.key)), disabled: selectable.length === 0 });
+    groupBox.addEventListener("change", () => { for (const t of selectable) groupBox.checked ? state.selected.add(t.key) : state.selected.delete(t.key); render(); });
+    const group = el("div", { className: "group" }, el("h2", {}, groupBox, status, el("span", { className: "count" }, ` ${tickets.length}`)));
+    for (const t of tickets) {
+      const taken = entryFor(t.key);
+      const box = el("input", { type: "checkbox", checked: state.selected.has(t.key), disabled: Boolean(taken) });
+      box.addEventListener("change", () => { box.checked ? state.selected.add(t.key) : state.selected.delete(t.key); render(); });
+      group.append(el("label", { className: `row${taken ? " taken" : ""}` }, box, el("span", { className: "key" }, t.key),
+        el("span", {}, el("a", { href: t.url, target: "_blank", rel: "noreferrer" }, t.title)),
+        t.project ? el("span", { className: "pill" }, t.project) : el("span"),
+        el("span", { className: "pill" }, taken ? `on the queue: ${taken.phase}` : PRIORITY[t.priority] || "No priority")));
+    }
+    list.append(group);
+  }
+  const shownFree = shown.filter(free);
+  $("all").checked = shownFree.length > 0 && shownFree.every((t) => state.selected.has(t.key));
+  $("loaded").textContent = `${state.tickets.length} assigned to you, ${state.selected.size} selected`;
+}
+
+function since(ms) {
+  const minutes = Math.round((Date.now() - ms) / 60000);
+  return minutes < 60 ? `${minutes} min` : `${Math.floor(minutes / 60)} h ${minutes % 60} min`;
+}
+
+function card(e) {
+  const o = e.outcome;
+  const actions = el("div", { className: "actions" });
+  const act = (label, verb) => { const b = el("button", { className: "small", textContent: label }); b.addEventListener("click", () => call("POST", `/api/queue/${e.ticket.key}/${verb}`).then((q) => { state.queue = q; render(); }, report)); actions.append(b); };
+  if (e.phase === "queued") act("Remove", "remove");
+  if (e.phase === "starting" || e.phase === "running") act("Stop", "stop");
+  if (e.phase === "finished" && o && o.kind !== "draft-pr") act("Retry", "retry");
+  const detail = !o ? null
+    : o.kind === "draft-pr" ? el("div", {}, ...o.prs.map((pr) => el("div", {}, el("a", { href: pr.url, target: "_blank", rel: "noreferrer" }, `${pr.repo} draft`))))
+    : el("div", { className: "meta" }, o.kind === "wrong-repo" ? `Belongs in: ${o.where}` : o.kind === "needs-human" ? o.reason : o.kind === "crashed" ? o.reason : o.kind);
+  const when = e.phase === "finished" ? (e.startedAt ? `ran ${since(e.startedAt)} ago` : "") : e.startedAt ? `running ${since(e.startedAt)}` : `queued ${since(e.queuedAt)} ago`;
+  const tokens = e.tokens ? ` · ${Math.round(e.tokens.input / 1000)}k in / ${Math.round(e.tokens.output / 1000)}k out` : "";
+  return el("div", { className: "card" },
+    el("div", {}, el("a", { href: e.ticket.url, target: "_blank", rel: "noreferrer" }, e.ticket.key), ` ${e.ticket.title}`),
+    el("div", { className: "meta" }, `${e.repos.join(", ")} · ${e.model}/${e.effort} · ${when}${tokens}`),
+    e.waiting ? el("div", { className: "waiting" }, "Waiting on a person: open its herdr pane") : null,
+    detail, actions);
+}
+
+function renderBoard() {
+  const columns = $("columns");
+  columns.replaceChildren();
+  for (const [title, test] of COLUMNS) {
+    const entries = state.queue.entries.filter(test);
+    columns.append(el("div", { className: "column" }, el("h2", {}, `${title} (${entries.length})`), ...entries.map(card)));
+  }
+  if (document.activeElement !== $("max")) $("max").value = state.queue.max;
+}
+
+function renderFooter() {
+  const count = state.selected.size;
+  const repos = [...document.querySelectorAll("#repos input:checked")].map((b) => b.value);
+  $("queue").textContent = `Queue ${count} ticket${count === 1 ? "" : "s"}`;
+  $("queue").disabled = count === 0 || repos.length === 0;
+}
+
+function render() { renderPick(); renderBoard(); renderFooter(); }
+
+function setup(config) {
+  state.config = config;
+  $("repos").replaceChildren(...config.repos.map((repo) => {
+    const box = el("input", { type: "checkbox", value: repo, checked: config.choice.repos.includes(repo) });
+    box.addEventListener("change", renderFooter);
+    return el("label", {}, box, ` ${repo}`);
+  }));
+  $("model").replaceChildren(...config.models.map((m) => el("option", { value: m, textContent: m, selected: m === config.choice.model })));
+  $("effort").replaceChildren(...config.efforts.map((x) => el("option", { value: x, textContent: x, selected: x === config.choice.effort })));
+}
+
+for (const tab of document.querySelectorAll(".tab")) {
+  tab.addEventListener("click", () => {
+    for (const other of document.querySelectorAll(".tab")) other.setAttribute("aria-selected", String(other === tab));
+    $("pick").hidden = tab.dataset.tab !== "pick";
+    $("board").hidden = tab.dataset.tab !== "board";
+  });
+}
+$("filter").addEventListener("input", render);
+$("all").addEventListener("change", () => {
+  const words = $("filter").value.trim().toLowerCase();
+  for (const t of state.tickets) {
+    if ((words && !`${t.key} ${t.title} ${t.project || ""}`.toLowerCase().includes(words)) || entryFor(t.key)) continue;
+    $("all").checked ? state.selected.add(t.key) : state.selected.delete(t.key);
+  }
+  render();
+});
+$("queue").addEventListener("click", async () => {
+  const repos = [...document.querySelectorAll("#repos input:checked")].map((b) => b.value);
+  try {
+    state.queue = await call("POST", "/api/queue", { keys: [...state.selected], repos, model: $("model").value, effort: $("effort").value });
+    state.selected.clear();
+    report(null);
+    render();
+  } catch (err) { report(err); }
+});
+$("save-max").addEventListener("click", () => call("POST", "/api/max", { max: Number($("max").value) }).then((q) => { state.queue = q; render(); }, report));
+
+(async () => {
+  try {
+    setup(await call("GET", "/api/config"));
+    [state.tickets, state.queue] = await Promise.all([call("GET", "/api/tickets"), call("GET", "/api/queue")]);
+    render();
+  } catch (err) { report(err); }
+  setInterval(() => call("GET", "/api/queue").then((q) => { state.queue = q; renderBoard(); renderPick(); }, report), 5000);
+})();
+</script>
+</body>
+</html>

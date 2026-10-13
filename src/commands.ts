@@ -50,6 +50,8 @@ export const COMMANDS = {
   "spawn:cycles": "wake.ts",
   "stash:whose": "stash-whose.ts",
   "survey": "survey.ts",
+  "ticket:hook": "ticket-mode/hook.ts",
+  "ticket:serve": "ticket-mode/server.ts",
   "trace": "trace/trace.ts",
   "tracker:comment": "tracker-comment.ts",
   "wakes:per-row": "wakes-per-row.ts",
