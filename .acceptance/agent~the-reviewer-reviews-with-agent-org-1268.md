@@ -8,6 +8,7 @@ bash -c 'cd ~/repos/agent-org && npx rstest run --config scripts/rstest/rstest.c
 
 Closes a11ign/agent-org#1268
 
+Health-signals: approved-unqueued, wakes-held
 Flag: `review.rowReviewSkill`, OFF by default (`agent-org machinery:flag on review.rowReviewSkill --session=<you>`; the switch row is a11ign/a11ign#5325). Off, the order names no skill.
 Revert: `agent-org machinery:flag off review.rowReviewSkill --session=<you>`, or revert this PR; the installed skill is read by nothing until an order names it.
 
