@@ -25,6 +25,19 @@ test("the machine's notes join the brief under their own heading, and a machine 
   assert.equal(brief("  \n").includes("## On this machine"), false, "an empty notes file adds nothing");
 });
 
+test("a machine's plugins are enabled in the worker's own settings, and none are named when it has none", () => {
+  const base = { model: "sonnet", ticketDir: "/d", readDirs: [], hook: { node: "/n", bin: "/b" } };
+  assert.deepEqual((workerSettings({ ...base, plugins: ["nbl-ui@applied-ai"] }) as any).enabledPlugins, { "nbl-ui@applied-ai": true });
+  assert.equal("enabledPlugins" in workerSettings(base), false);
+});
+
+test("the brief asks for screenshots of a visible change, with the machine's own tools or a stated gap", () => {
+  const brief = briefText({ ticket, folder: "/f", ticketDir: "/d", attachments: [], clones, worktreeCommand: "w" });
+  assert.match(brief, /when the change is visible, shows it/);
+  assert.match(brief, /"Screenshot pending"/);
+  assert.equal(brief.includes("no browser"), false, "a worker may have one: the machine says how in its notes");
+});
+
 test("the settings file holds the permission mode, the model, the repositories to read and both hooks, by absolute path", () => {
   const settings = workerSettings({ model: "sonnet", ticketDir: "/state/tickets/NBF-1270", readDirs: Object.values(clones), hook: { node: "/usr/bin/node", bin: "/tool/src/bin.ts" } }) as any;
   assert.equal(settings.autoMemoryEnabled, false);

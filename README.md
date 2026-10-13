@@ -113,6 +113,7 @@ a worker can choose from:
 | `tickets.worktreeRoot` | `<stateDir>/tickets/worktrees` |
 | `tickets.linearKey` | `{ "keychain": "agent-org-linear" }` (macOS Keychain service), or `{ "path": "/abs/file" }` |
 | `tickets.brief` | none. A markdown file added to every worker's brief under "On this machine", read again for each run: how workers share the machine, such as the command that starts a dev server without taking a fixed port |
+| `tickets.plugins` | none. `["name@marketplace", ...]`: Claude Code plugins every worker runs with, already installed on the machine. A worker starts in its ticket's folder, where none of the person's project settings apply, so a plugin enabled only for a project would be missing |
 | `tickets.deny` | none. `[{ "pattern": "<regular expression>", "reason": "<why>" }]`: Bash commands the hook refuses as well as its own, each matched against the whole command, with the reason the worker is told |
 | `stateDir` | `~/.local/state/agent-org`: the queue, each ticket's brief, attachments and outcome |
 

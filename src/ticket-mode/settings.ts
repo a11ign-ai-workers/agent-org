@@ -3,8 +3,8 @@
 //
 // MACHINE FACTS ONLY, IN THE HOST FILE AGENT-ORG ALREADY READS. Which repositories this machine has checked out, where worktrees go, how many
 // workers it can carry and where the tracker's key lives are facts no repository can know, which is the host file's rule (`host-config.ts`'s
-// header). Nothing here is a fact about one repository: a worker chooses the repository and reads its own `CLAUDE.md`. The optional `brief` and
-// `deny` say how workers behave on this machine, for example how they share its dev servers with each other and with the person.
+// header). Nothing here is a fact about one repository: a worker chooses the repository and reads its own `CLAUDE.md`. The optional `brief`,
+// `deny` and `plugins` say how workers behave on this machine, for example how they share its dev servers with each other and with the person.
 //
 // READ RAW, AS `haiku-brief.ts` READS ITS KEY. `readHostConfig` ignores unknown keys, so `tickets` is inert to every existing reader, and this
 // module does not teach the strict reader a block only ticket mode uses. It imports neither `host-config.ts` nor `project-config.ts`: both
@@ -37,6 +37,8 @@ export type TicketSettings = Readonly<{
   /** A markdown file added to every worker's brief, or null. */
   brief: string | null;
   deny: readonly DenyRule[];
+  /** Claude Code plugins every worker runs with, as `name@marketplace`, installed on this machine already. */
+  plugins: readonly string[];
 }>;
 
 export class TicketSettingsRefusal extends Error {
@@ -68,6 +70,14 @@ function keySource(value: unknown): KeySource {
 }
 
 const DENY_RULE_SHAPE = "{ \"pattern\": \"<regular expression>\", \"reason\": \"<why>\" }";
+
+function pluginList(value: unknown): readonly string[] {
+  if (value === undefined) return [];
+  if (!Array.isArray(value) || !value.every((name) => typeof name === "string" && /^[\w.-]+@[\w.-]+$/.test(name))) {
+    throw new TicketSettingsRefusal("tickets.plugins", "must be a list of installed plugins as \"name@marketplace\", such as [\"nbl-ui@applied-ai\"]");
+  }
+  return Object.freeze([...value]);
+}
 
 function denyRules(value: unknown): readonly DenyRule[] {
   if (value === undefined) return [];
@@ -112,6 +122,7 @@ export function parseTicketSettings(host: unknown, home: string = homedir()): Ti
     linearKey: keySource(tickets.linearKey),
     brief: tickets.brief === undefined ? null : absolutePath(tickets.brief, "tickets.brief"),
     deny: denyRules(tickets.deny),
+    plugins: pluginList(tickets.plugins),
   });
 }
 

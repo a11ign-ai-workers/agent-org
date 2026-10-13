@@ -226,7 +226,7 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     writeFileSync(join(dir, DENY_FILE), `${JSON.stringify(settings.deny)}\n`);
     mkdirSync(join(folder, ".claude"), { recursive: true });
     writeFileSync(join(folder, SETTINGS_FILE),
-      `${JSON.stringify(workerSettings({ model: entry.model, ticketDir: dir, readDirs: Object.values(settings.clones), hook }), null, 2)}\n`);
+      `${JSON.stringify(workerSettings({ model: entry.model, ticketDir: dir, readDirs: Object.values(settings.clones), hook, plugins: settings.plugins }), null, 2)}\n`);
     return { folder, dir };
   }
 

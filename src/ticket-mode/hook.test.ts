@@ -22,12 +22,12 @@ test("a worker opens a draft and nothing past it: ready, merge, review, reviewer
   }
 });
 
-test("every connector is refused, and so are the two skills that reach outside the worker", () => {
+test("every connector is refused, and so is the skill that announces a pull request", () => {
   assert.equal(toolVerdict("mcp__claude_ai_Linear__save_comment", {}).code, 2);
   assert.equal(toolVerdict("mcp__plugin_slack_slack__slack_send_message", {}).code, 2);
-  assert.equal(toolVerdict("Skill", { skill: "tool-screenshot-app" }).code, 2);
   assert.equal(toolVerdict("Skill", { skill: "post-pr-to-slack" }).code, 2);
   assert.equal(toolVerdict("Skill", { skill: "clean-code-review" }).code, 0, "POSITIVE CONTROL: the review the brief asks for is allowed");
+  assert.equal(toolVerdict("Skill", { skill: "nbl-ui:tool-screenshot" }).code, 0, "a machine's own screenshot skill is allowed");
   assert.equal(toolVerdict("Edit", { file_path: "/x" }).code, 0);
 });
 

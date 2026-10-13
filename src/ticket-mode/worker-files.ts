@@ -56,8 +56,8 @@ ${repos}
 1. Find the cause in the code. Fix it, with a test that fails without the fix.
 2. Run the repository's checks on what you changed, then run the clean-code-review skill on your diff and fix what it finds.
 3. Commit with a conventional commit message.
-4. Push the branch and open ONE DRAFT pull request per repository you changed: \`gh pr create --draft\`, titled \`<type>(<scope>): <what changed>\`. The body links ${ticket.url}, says what changed and how you verified it, and ends with "Screenshot pending: ticket-mode workers have no browser." A pull request that needs another repository's unmerged one says so in its body.
-5. If a design gate asks for a design check, decline it with "unattended worker, no browser" and say so in the pull request body.
+4. Push the branch and open ONE DRAFT pull request per repository you changed: \`gh pr create --draft\`, titled \`<type>(<scope>): <what changed>\`. The body links ${ticket.url}, says what changed and how you verified it, and, when the change is visible, shows it: take screenshots with what this machine provides (see "On this machine" when there is such a section), or else end the body with "Screenshot pending". A pull request that needs another repository's unmerged one says so in its body.
+5. If a design gate asks for a design check, decline it with "unattended worker, no design tool access" and say so in the pull request body.
 
 Never mark a pull request ready, request a review, merge, force-push, run a workflow, or post to Slack. Those are the person's.
 ${notes?.trim() ? `\n## On this machine\n\n${notes.trim()}\n` : ""}
@@ -76,15 +76,19 @@ Write \`${ticketDir}/${OUTCOME_FILE}\` as the last thing you do, with exactly on
 /** The hook command a settings file names: this tool's `ticket:hook`, by absolute path, so it runs without the tool on `PATH`. */
 export type HookCommand = Readonly<{ node: string; bin: string }>;
 
-/** The ticket folder's `.claude/settings.local.json`. `readDirs` are the person's repositories, which the worker reads but never changes. */
-export function workerSettings({ model, ticketDir, readDirs, hook }: {
-  model: string; ticketDir: string; readDirs: readonly string[]; hook: HookCommand;
+/**
+ * The ticket folder's `.claude/settings.local.json`. `readDirs` are the person's repositories, which the worker reads but never changes.
+ * `plugins` are enabled here because a worker starts in the ticket's folder, where no project settings of the person's apply.
+ */
+export function workerSettings({ model, ticketDir, readDirs, hook, plugins = [] }: {
+  model: string; ticketDir: string; readDirs: readonly string[]; hook: HookCommand; plugins?: readonly string[];
 }): Record<string, unknown> {
   const command = (event: string) => ({ type: "command", command: hook.node, args: [hook.bin, "ticket:hook", event, ticketDir], timeout: 30 });
   return {
     autoMemoryEnabled: false,
     model,
     permissions: { defaultMode: "bypassPermissions", additionalDirectories: [ticketDir, ...readDirs] },
+    ...(plugins.length > 0 ? { enabledPlugins: Object.fromEntries(plugins.map((plugin) => [plugin, true])) } : {}),
     hooks: {
       Stop: [{ hooks: [command("stop")] }],
       PreToolUse: [{ matcher: "*", hooks: [command("pre-tool-use")] }],
