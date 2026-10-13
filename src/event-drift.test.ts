@@ -7,8 +7,10 @@ import assert from "node:assert/strict";
 import { cpSync, readFileSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { fileURLToPath } from "node:url";
+import type { Run } from "./ci-failure-class.ts";
 import type { Drift } from "./event-drift.ts";
 import type { GhRun } from "./tick-snapshot.ts";
+import { connectionOf, readsRowsByLabel } from "./packaging/rows-by-label-fixtures.ts";
 import { tmpDir, tmpDirForFile } from "./lib/tmp-fixture.ts";
 
 // THE PROJECT THIS FILE RUNS AGAINST IS A RECORDED ONE, as `tick-snapshot-events.test.ts` does: `event-drift.ts` imports `ci-failure-class.ts`, which resolves the checkout it serves
@@ -66,15 +68,55 @@ const filer = (accept: () => boolean = () => true) => {
   return { filed, fileDrift: (drifts: readonly Drift[]) => { filed.push([...drifts]); return accept(); } };
 };
 
+/** An incident row as the fake keeps it: what `gh` lists for an open or a closed incident. */
+type StoredRow = { number: number; body: string; state: "OPEN" | "CLOSED"; labels: { name: string }[]; createdAt: string; closedAt: string | null };
+
+/**
+ * A fake `gh` that keeps the incident rows `fileDrift` files (agent-org#1330): the by-label read lists them, `issue create` adds one, `issue edit` changes one, and
+ * every other call answers empty. `fileDrift` is the real one, run against this `gh`, so a join and a fold are read back from the rows and not assumed.
+ */
+function incidentStore() {
+  const rows: StoredRow[] = [];
+  const creates: string[][] = [];
+  const logs: string[] = [];
+  const run: Run = (args) => {
+    const read = readsRowsByLabel(args);
+    if (read !== null) return connectionOf(rows.filter((row) => row.state === read.state));
+    if (args.some((arg) => arg.includes("projectItems"))) return JSON.stringify({ data: { repository: { issue: { projectItems: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } } });
+    if (args[0] === "issue" && args[1] === "create") {
+      creates.push(args);
+      const number = 1000 + rows.length + 1;
+      rows.push({ number, body: args[args.indexOf("--body") + 1], state: "OPEN", labels: [], createdAt: new Date(T0).toISOString(), closedAt: null });
+      return `https://github.com/${REPO}/issues/${number}\n`;
+    }
+    if (args[0] === "issue" && args[1] === "edit") {
+      const row = rows.find((r) => r.number === Number(args[2]))!;
+      if (args.includes("--body")) row.body = args[args.indexOf("--body") + 1];
+      for (let i = 0; i < args.length; i++) if (args[i] === "--add-label") row.labels.push({ name: args[i + 1] });
+    }
+    return "";
+  };
+  return {
+    run, rows, creates, logs,
+    close: (number: number, atMs: number) => {
+      const row = rows.find((r) => r.number === number)!;
+      row.state = "CLOSED";
+      row.closedAt = new Date(atMs).toISOString();
+    },
+    fileDrift: (drifts: readonly Drift[]) => fileDrift(drifts, { run, log: (line) => logs.push(line) }),
+  };
+}
+
 /** A cache directory that has been read once at T0 (baseline: no drift is possible on a first reading). */
 function baselined(repos: string[] = [REPO]) {
   const dir = tmpDir("event-drift-");
   refreshTickSnapshot({ repos, homeRepo: REPO, configDir: dir, run: steady, nowMs: T0, events: healthy() });
   return dir;
 }
-const reconcileAll = (dir: string, repos: string[], run: GhRun, at: number, f: ReturnType<typeof filer>, changed: string[] = []) =>
+type Filer = { fileDrift: (drifts: readonly Drift[]) => boolean };
+const reconcileAll = (dir: string, repos: string[], run: GhRun, at: number, f: Filer, changed: string[] = []) =>
   refreshTickSnapshot({ repos, homeRepo: REPO, configDir: dir, run, nowMs: T0 + at * SEC, events: healthy(changed), fileDrift: f.fileDrift });
-const reconcile = (dir: string, run: GhRun, at: number, f: ReturnType<typeof filer>, changed: string[] = []) => reconcileAll(dir, [REPO], run, at, f, changed);
+const reconcile = (dir: string, run: GhRun, at: number, f: Filer, changed: string[] = []) => reconcileAll(dir, [REPO], run, at, f, changed);
 
 test("POSITIVE CONTROL: a probe whose tag AND content moved at a reconcile with no event files one incident naming the repository, the window and the probe", () => {
   const dir = baselined();
@@ -155,20 +197,64 @@ test("a moved tag whose body cannot be read as the list it was asked for is not 
   }
 });
 
-test("the probe pair runs ONCE at a due reconcile, and the same drift is not filed again by the next ticks; the next window files its own", () => {
+test("the probe pair runs ONCE at a due reconcile, and the same drift is not filed again by the next ticks; a second reconcile that finds the repository moved again joins the OPEN row", () => {
   const dir = baselined();
   const calls: string[][] = [];
-  const f = filer();
+  const store = incidentStore();
   const counting = (args: string[]) => { calls.push(args); return issuesMoved(args); };
-  reconcile(dir, counting, RECONCILE_SECONDS, f);
+  reconcile(dir, counting, RECONCILE_SECONDS, store);
   assert.equal(calls.length, 2);
-  reconcile(dir, counting, RECONCILE_SECONDS + 60, f);
-  reconcile(dir, counting, RECONCILE_SECONDS + 120, f);
-  assert.equal(f.filed.length, 1, "per tick it is filed once: the window moved when it was");
+  assert.equal(store.creates.length, 1, "the first reconcile files one row");
+  const first = store.rows[0].body;
+  reconcile(dir, counting, RECONCILE_SECONDS + 60, store);
+  reconcile(dir, counting, RECONCILE_SECONDS + 120, store);
+  assert.equal(store.creates.length, 1, "per tick it is filed once: the window moved when it was");
   assert.equal(calls.length, 2, "and the following ticks asked nothing");
-  reconcile(dir, instead(ISSUES, { tag: "t3", body: ISSUES_NEWER }), 2 * RECONCILE_SECONDS, f);
-  assert.equal(f.filed.length, 2, "a second reconcile that finds the repository moved again files its own incident");
-  assert.notEqual(groupOf(f.filed[0]).key, groupOf(f.filed[1]).key, "so its dedupe key is not the first window's");
+  reconcile(dir, instead(ISSUES, { tag: "t3", body: ISSUES_NEWER }), 2 * RECONCILE_SECONDS, store);
+  assert.equal(store.creates.length, 1, "a second reconcile that finds the same repository moved again joins the open row and files no second one");
+  assert.deepEqual(store.rows.map((row) => row.state), ["OPEN"]);
+  assert.equal(store.rows[0].body, first, "and the join leaves the first window in the row's Step, as it was filed");
+  assert.match(first, /reconcile window 2026-10-11T19:00:00Z to 2026-10-11T19:20:00Z/);
+});
+
+test("a repository set that moves again within the quiet window after its row CLOSED is folded into that row; after the window it files a row of its own", () => {
+  const dir = baselined();
+  const store = incidentStore();
+  reconcile(dir, issuesMoved, RECONCILE_SECONDS, store);
+  const closedAt = 2 * RECONCILE_SECONDS;
+  store.close(store.rows[0].number, T0 + closedAt * SEC);
+  reconcile(dir, instead(ISSUES, { tag: "t3", body: ISSUES_NEWER }), closedAt, store);
+  assert.equal(store.creates.length, 1, "inside the quiet window the closed row takes it: no row is filed");
+  assert.deepEqual(store.rows.map((row) => row.state), ["CLOSED"]);
+  assert.match(store.logs.join(""), new RegExp(`${REPO} moved again within the quiet window after incident #${store.rows[0].number} closed; folded into it, no row filed`));
+  const ISSUES_NEWEST = issuesOf("2026-10-12T10:00:00Z", "2026-10-11T19:50:00Z");
+  const late = closedAt + 24 * 60 * 60 + RECONCILE_SECONDS;
+  reconcile(dir, instead(ISSUES, { tag: "t4", body: ISSUES_NEWEST }), late, store);
+  assert.equal(store.creates.length, 2, "past the quiet window the next move is a row of its own");
+  assert.deepEqual(store.rows.map((row) => row.state), ["CLOSED", "OPEN"]);
+});
+
+test("a DIFFERENT repository set that drifts while the first row is open files its own row, and the first row is left as it was", () => {
+  const OTHER = "a11ign/other";
+  const dir = baselined([REPO, OTHER]);
+  const store = incidentStore();
+  reconcileAll(dir, [REPO, OTHER], issuesMoved, RECONCILE_SECONDS, store);
+  assert.equal(store.creates.length, 1, "the first pass drifts one repository: one row");
+  const first = store.rows[0].body;
+  const bothMoved = gh((path) => (path === ISSUES || path === probePaths(OTHER)[0] ? { tag: "t3", body: ISSUES_NEWER } : steadyReading(path)));
+  reconcileAll(dir, [REPO, OTHER], bothMoved, 2 * RECONCILE_SECONDS, store);
+  assert.equal(store.creates.length, 2, "the set is not the first set, so it is a row of its own");
+  assert.equal(store.rows[0].body, first, "and the first row is not rewritten");
+  assert.match(store.rows[1].body, new RegExp(`${REPO}: issues list; ${OTHER}: issues list moved`));
+});
+
+test("a closed-row read that fails files nothing and reports the filing as not made, so the next tick retries it", () => {
+  const drift: Drift = { repo: REPO, probe: "issues list", windowStartS: T0 / SEC, nowS: T0 / SEC + RECONCILE_SECONDS };
+  const logs: string[] = [];
+  const run: Run = () => { throw new Error("gh refused"); };
+  const filed = fileDrift([drift], { run, log: (line) => logs.push(line), record: () => { throw new Error("recorded without reading the rows"); } });
+  assert.equal(filed, false);
+  assert.match(logs.join(""), /could not read the incident rows \(gh refused\); the next tick retries/);
 });
 
 test("seven repositories drifted in one pass are filed as ONE incident naming every one of them", () => {
@@ -201,10 +287,10 @@ test("a filing `gh` refused is retried the next tick and not lost; once filed it
 test("the default filer reaches `recordIncident` with the group and reports its refusal as `false`", () => {
   const drift: Drift = { repo: REPO, probe: "issues list", windowStartS: T0 / SEC, nowS: T0 / SEC + RECONCILE_SECONDS };
   const seen: string[] = [];
-  const run = () => "";
+  const run = () => connectionOf([]);
   assert.equal(fileDrift([drift], { run, log: () => {}, record: (group, deps) => { seen.push(group.key); assert.equal(deps.run, run); return 982; } }), true);
   assert.equal(fileDrift([drift], { run, log: () => {}, record: () => null }), false);
-  assert.deepEqual(seen, [`event-drift:${REPO}@${T0 / SEC}`]);
+  assert.deepEqual(seen, [`event-drift:${REPO}`], "keyed by the repository set, with no window");
   assert.equal(probeName(ISSUES), "issues list");
 });
 
