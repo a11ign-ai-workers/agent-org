@@ -119,8 +119,10 @@ function ghFor({ comments, asker = ["agent-org:src/b.ts"] }: { comments: unknown
   };
 }
 const claimFor = (run: ReturnType<typeof ghFor>) => sessionEligibilityReason(ASKER, "worker-5000", { run, repo: TRACKER, repos: [AGENT_ORG] });
+// The name the injected `run` mock is keyed on: no process is spawned, so this is not a `gh` spawn and the `no-token` header holds.
+const INJECTED_GH = "gh";
 // THE READS THE RECORDER MAKES, as `row-claim` makes them: the `gh` mock behind a one-argument `run`, so a conclusive read is what the control reads.
-const readsOf = (run: ReturnType<typeof ghFor>) => ({ run: (args: string[]) => run("gh", args), repo: TRACKER, repos: [AGENT_ORG] });
+const readsOf = (run: ReturnType<typeof ghFor>) => ({ run: (args: string[]) => run(INJECTED_GH, args), repo: TRACKER, repos: [AGENT_ORG] });
 
 test("(2) POSITIVE CONTROL: a claim REFUSED on the swept Region after the overrun notice writes ONE sweep-overrun line, ref = the refused row", () => {
   const run = ghFor({ comments: [claimRecord(200), { body: `${OVERRUN_MARKER}\nnotice`, createdAt: new Date(NOW - 1 * MIN).toISOString() }] });
