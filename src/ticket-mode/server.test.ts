@@ -18,7 +18,10 @@ function board(port = 4747) {
   const settings = parseTicketSettings({ clones: { "nbl-ui-netbox": "/r/netbox", "platform-monorepo": "/r/pm" }, stateDir: dir, tickets: { port } });
   const source: TicketSource = { assigned: async () => [ticket("NBF-1"), ticket("NBF-2")], read: async (key) => (key === "VE-9" ? ticket("VE-9") : null), download: async () => [] };
   const ticks: string[] = [];
-  const pool = { tick: async () => { ticks.push("tick"); }, stop: (key: string) => { ticks.push(`stop ${key}`); }, reconcile: () => {}, ensureSession: async () => {}, refreshTracker: async () => {} };
+  const pool = {
+    tick: async () => { ticks.push("tick"); }, stop: (key: string) => { ticks.push(`stop ${key}`); }, close: (key: string) => { ticks.push(`close ${key}`); },
+    reconcile: () => {}, ensureSession: async () => {}, refreshTracker: async () => {},
+  };
   const made = createBoard({ settings, source, token: TOKEN, queuePath: join(dir, "queue.json"), choicePath: join(dir, "choice.json"), pool, now: () => 7 });
   return { ...made, ticks, dir };
 }
@@ -94,16 +97,23 @@ test("the board's queue starts paused, and Start and Pause go through the API", 
   assert.equal(b.store.get().paused, true);
 });
 
-test("remove, stop and max go through the board", async () => {
+test("remove, stop, close and max go through the board", async () => {
   const b = board();
   await b.api("GET", "/api/tickets", {});
   await b.api("POST", "/api/queue", { keys: ["NBF-1", "NBF-2"], model: "sonnet", effort: "high" });
   await b.api("POST", "/api/queue/NBF-1/remove", {});
   await b.api("POST", "/api/queue/NBF-2/stop", {});
+  await b.api("POST", "/api/queue/NBF-2/close", {});
   await b.api("POST", "/api/max", { max: 5 });
   assert.deepEqual(b.store.get().entries.map((e) => e.ticket.key), ["NBF-2"]);
   assert.ok(b.ticks.includes("stop NBF-2"));
+  assert.ok(b.ticks.includes("close NBF-2"), "a parked run's workspace is the pool's to close");
   assert.equal(b.store.get().max, 5);
+});
+
+test("the page is given the machine's terminal address, or null when it serves none", async () => {
+  const [, config] = await board().api("GET", "/api/config", {}) as [number, any];
+  assert.equal(config.terminal, null);
 });
 
 test("over HTTP: no token is 401, the printed URL sets the cookie, and the cookie then reaches the API", async () => {

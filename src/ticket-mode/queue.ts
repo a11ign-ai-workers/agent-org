@@ -9,6 +9,7 @@
 // the only writer of the file, which it replaces whole by rename, so a reader never sees half of one.
 import { existsSync, mkdirSync, readFileSync, renameSync, writeFileSync } from "node:fs";
 import { dirname } from "node:path";
+import { isParked } from "./board-view.ts";
 import type { Ticket } from "./source.ts";
 
 /** How a finished run ended. A worker writes the first three; the pool decides the rest. */
@@ -32,8 +33,10 @@ export type Entry = Readonly<{
   queuedAt: number;
   startedAt?: number;
   finishedAt?: number;
-  /** The herdr workspace the run's agent is in, while it has one. */
+  /** The herdr workspace the run's agent is in, while it has one. A finished run that still has one is parked: see {@link park}. */
   workspace?: string;
+  /** The herdr pane the run's agent is in, beside its workspace. */
+  pane?: string;
   /** Seen `working` at least once, so a later `idle` means a finished turn and not a prompt not yet taken. */
   seenWorking?: boolean;
   /** The agent is in a state that needs a person (a dialog, a prompt), as herdr reported it. */
@@ -78,10 +81,13 @@ export function remove(queue: Queue, key: string): Queue {
   return { ...queue, entries: queue.entries.filter((entry) => entry.ticket.key !== key || entry.phase !== "queued") };
 }
 
-/** Put a finished entry back at the end of the queue. A draft pull request is not retried: it is the result. */
+/**
+ * Put a finished entry back at the end of the queue. A draft pull request is not retried: it is the result. Nor is a parked run, until its
+ * workspace is closed: a second workspace would take the same herdr name.
+ */
 export function retry(queue: Queue, key: string, now: number): Queue {
   const entry = find(queue, key);
-  if (entry === undefined || entry.phase !== "finished" || entry.outcome?.kind === "draft-pr") return queue;
+  if (entry === undefined || entry.phase !== "finished" || entry.outcome?.kind === "draft-pr" || isParked(entry)) return queue;
   const { ticket, repos, model, effort } = entry;
   return { ...queue, entries: [...queue.entries.filter((e) => e.ticket.key !== key), { ticket, repos, model, effort, phase: "queued", queuedAt: now }] };
 }
@@ -104,8 +110,8 @@ export function recordRepos(queue: Queue, key: string, repos: readonly string[])
   return replace(queue, key, (entry) => ({ ...entry, repos }));
 }
 
-export function markRunning(queue: Queue, key: string, workspace: string): Queue {
-  return replace(queue, key, (entry) => ({ ...entry, phase: "running", workspace }));
+export function markRunning(queue: Queue, key: string, workspace: string, pane: string): Queue {
+  return replace(queue, key, (entry) => ({ ...entry, phase: "running", workspace, pane }));
 }
 
 /** What herdr says the agent is doing: `working` marks it seen, and any status but the four ordinary ones means it is waiting on a person. */
@@ -117,8 +123,30 @@ export function observe(queue: Queue, key: string, status: string): Queue {
   }));
 }
 
+function ended(entry: Entry, outcome: Outcome, now: number, tokens?: Entry["tokens"]): Entry {
+  return { ...entry, phase: "finished", outcome, finishedAt: now, waiting: false, ...(tokens ? { tokens } : {}) };
+}
+
+/** The run has ended and its workspace is gone. */
 export function finish(queue: Queue, key: string, outcome: Outcome, now: number, tokens?: Entry["tokens"]): Queue {
-  return replace(queue, key, (entry) => ({ ...entry, phase: "finished", outcome, finishedAt: now, workspace: undefined, waiting: false, ...(tokens ? { tokens } : {}) }));
+  return replace(queue, key, (entry) => ({ ...ended(entry, outcome, now, tokens), workspace: undefined, pane: undefined }));
+}
+
+/** The run has ended and keeps its workspace and pane, where a person can answer its agent. */
+export function park(queue: Queue, key: string, outcome: Outcome, now: number, tokens?: Entry["tokens"]): Queue {
+  return replace(queue, key, (entry) => ended(entry, outcome, now, tokens));
+}
+
+/** A person answered a parked run's agent, which is working again: the run is live once more, and its old outcome and tracker state are dropped. */
+export function markResumed(queue: Queue, key: string): Queue {
+  return replace(queue, key, (entry) => (isParked(entry)
+    ? { ...entry, phase: "running", outcome: undefined, finishedAt: undefined, trackerState: undefined, waiting: false, seenWorking: true }
+    : entry));
+}
+
+/** A parked run's workspace is closed: the run keeps its outcome and holds no workspace. */
+export function unpark(queue: Queue, key: string): Queue {
+  return replace(queue, key, (entry) => (isParked(entry) ? { ...entry, workspace: undefined, pane: undefined } : entry));
 }
 
 /** The tracker states a finished run can end in, after which its ticket is not read again. */

@@ -55,3 +55,8 @@ test("the flags end with --disallowedTools, so its list swallows no flag after i
   assert.deepEqual(flags.slice(0, 6), ["--model", "opus", "--effort", "high", "--name", "NBF-1270"]);
   assert.equal(firstPrompt("/state/tickets/NBF-1270"), "Read /state/tickets/NBF-1270/brief.md and follow it.");
 });
+
+test("the brief tells the worker that a person may answer it after it hands the ticket back, and that it then writes a new outcome", () => {
+  const brief = briefText({ ticket, folder: "/f", ticketDir: "/d", attachments: [], clones, worktreeCommand: "w" });
+  assert.match(brief, /A person may answer you here after a `needs-human` or `wrong-repo` outcome\. If one does, carry on with what they said, and write the outcome file again/);
+});

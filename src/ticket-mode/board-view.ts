@@ -4,6 +4,9 @@
 // WRITTEN HERE, IN TYPESCRIPT, SO ITS TESTS RUN IT, AND SENT TO THE BROWSER WITH THE TYPES STRIPPED (`server.ts` serves it as `/board-view.js`
 // through Node's own `stripTypeScriptTypes`). The page (`ui.html`) only draws what these functions return and wires the clicks. So it imports
 // nothing and uses no Node API: it must run as it is in a browser.
+//
+// A RULE THE PAGE AND THE POOL BOTH APPLY IS DEFINED HERE ONCE. Which outcomes hand a ticket back (`HANDED_BACK`) and what a parked run is
+// (`isParked`) decide what the board shows and what the pool does, so `queue.ts` and `pool.ts` import them from here rather than restating them.
 
 /** The fields of a ticket the board shows. */
 export type ViewTicket = Readonly<{ key: string; title: string; status: string; statusOrder: number; priority: number; project: string | null }>;
@@ -11,7 +14,7 @@ export type ViewTicket = Readonly<{ key: string; title: string; status: string; 
 /** The fields of a queue entry the board reads. */
 export type ViewEntry = Readonly<{
   ticket: Readonly<{ key: string }>; phase: string; outcome?: Readonly<{ kind: string }>; waiting?: boolean; trackerState?: string;
-  queuedAt?: number; startedAt?: number; finishedAt?: number;
+  queuedAt?: number; startedAt?: number; finishedAt?: number; workspace?: string; pane?: string;
 }>;
 
 /** Where a browser keeps the view's settings between visits; `localStorage` in the page. */
@@ -90,8 +93,11 @@ export const RUN_STATUSES: readonly Readonly<{ status: RunStatus; label: string 
   { status: "cancelled", label: "Cancelled" },
 ];
 
-/** Outcomes that hand the ticket back to a person: the worker could not decide, the work belongs elsewhere, or it stopped without saying. */
-const NEEDS_YOU = new Set(["needs-human", "wrong-repo", "no-outcome"]);
+/**
+ * Outcomes that hand the ticket back to a person: the worker could not decide, the work belongs elsewhere, or it stopped without saying. The
+ * board shows such a run as Needs you, and the pool parks it rather than closing its workspace, so the person can answer the agent there.
+ */
+export const HANDED_BACK: ReadonlySet<string> = new Set(["needs-human", "wrong-repo", "no-outcome"]);
 
 /**
  * A run's status. The tracker's word wins once the run has finished: a ticket it completed is done (Linear completes it when its pull request
@@ -104,7 +110,7 @@ export function runStatus(entry: ViewEntry): RunStatus {
   if (entry.trackerState === "canceled" || entry.trackerState === "duplicate") return "cancelled";
   const kind = entry.outcome?.kind ?? "";
   if (kind === "draft-pr") return "awaiting-review";
-  if (NEEDS_YOU.has(kind)) return "needs-you";
+  if (HANDED_BACK.has(kind)) return "needs-you";
   return kind === "stopped" ? "cancelled" : "failed";
 }
 
@@ -119,6 +125,33 @@ export function statusCounts(entries: readonly ViewEntry[]): Map<RunStatus, numb
 export function runsShown<T extends ViewEntry>(entries: readonly T[], filter: RunStatus | null): T[] {
   const latest = (entry: ViewEntry) => entry.finishedAt ?? entry.startedAt ?? entry.queuedAt ?? 0;
   return entries.filter((entry) => filter === null || runStatus(entry) === filter).sort((a, b) => latest(b) - latest(a));
+}
+
+/** A parked run: a finished one that kept its herdr workspace, so a person can still answer its agent there. It holds no slot. */
+export const isParked = (entry: ViewEntry): boolean => entry.phase === "finished" && entry.workspace !== undefined;
+
+/** What a person can do to a run from the board. */
+export type RunAction = "remove" | "stop" | "retry" | "close";
+
+/**
+ * The actions a run offers. A queued run can be removed and a live one stopped. A finished run that kept its workspace (parked) can be closed,
+ * and only once it is closed can it be retried. A draft pull request and a completed ticket are results, so they are not retried.
+ */
+export function runActions(entry: ViewEntry): RunAction[] {
+  if (entry.phase === "queued") return ["remove"];
+  if (entry.phase !== "finished") return ["stop"];
+  if (isParked(entry)) return ["close"];
+  return entry.outcome === undefined || entry.outcome.kind === "draft-pr" || runStatus(entry) === "completed" ? [] : ["retry"];
+}
+
+/**
+ * The web address of a run's live terminal: `template` (the host file's `tickets.terminal`) with the run's `{workspace}`, `{pane}` and `{key}`
+ * filled in, each encoded for a URL. Null when the machine serves no terminal or the run holds no pane.
+ */
+export function terminalLink(template: string | null, entry: ViewEntry): string | null {
+  if (template === null || entry.workspace === undefined || entry.pane === undefined) return null;
+  const values: Readonly<Record<string, string>> = { workspace: entry.workspace, pane: entry.pane, key: entry.ticket.key };
+  return template.replace(/\{(workspace|pane|key)\}/g, (_, name: string) => encodeURIComponent(values[name]));
 }
 
 /** The Queue button's words for `count` selected tickets. */
