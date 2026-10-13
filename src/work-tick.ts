@@ -35,7 +35,7 @@ import { writeTickScopes } from "./tick-scopes.ts";
 import { defaultRun, promptOrQueue, STANCE, EXIT as PROMPT_EXIT } from "./prompt-session.ts";
 import { PANE_DIALOG_RAISED_FILE, raisePaneDialogs, readRaised, writeRaised } from "./pane-dialog.ts";
 import { HOME_CHECKOUT, PROJECT_DECLARATION_PATH, homeProjectDeclaration } from "./project-config.ts";
-import { LANE_PREFIX } from "./project-vocabulary.ts";
+import { BACKLOG_LABEL, LANE_PREFIX, OUT_OF_RELEASE_LABEL } from "./project-vocabulary.ts";
 import { completionPath, writeCompletion } from "./lib/tick-completion.ts";
 import { toolVersionLine } from "./lib/tool-version.ts";
 import { refreshTickSnapshot, type TickEvents } from "./tick-snapshot.ts";
@@ -396,6 +396,19 @@ function readCostText(path: string): string {
 }
 
 /**
+ * THE TICK RECORD ROW IS CREATED ON THE BOARDING PATH (agent-org#1229, a11ign#5275). A bare `gh issue create` with `lane:ceo` alone never reached Project 1, and the
+ * gate's `row-off-board` order then asked for a Status the sanctioned `row-file --board` refuses to give a standing record (no Region, Acceptance or Open-check). The
+ * labels are what `row-file` writes for a Backlog row: the gate's `settleOffBoardRows` boards a row whose one state label names a Status, so this row is boarded at
+ * Backlog by the next tick past the grace and no order is sent; `out-of-release` is its release declaration, and `lane:ceo` keeps it from being claimed as work.
+ */
+export const TICK_RECORD_ROW_LABELS: readonly string[] = [`${LANE_PREFIX}ceo`, BACKLOG_LABEL, OUT_OF_RELEASE_LABEL];
+
+/** Create the tick's standing row in `repo` with {@link TICK_RECORD_ROW_LABELS}; answers its number. */
+export function createTickRecordRow(repo: string, run: (args: string[]) => string): number {
+  return createRow({ repo, title: TICK_RECORD_ROW_TITLE, labels: [...TICK_RECORD_ROW_LABELS], body: tickRecordRowBody(), run });
+}
+
+/**
  * The standing comment through the ticket port's argument builders and `ghRun`. The row is the declared `units.tickRecordIssue`, else the one this tick created before, else
  * one created NOW, once, `lane:ceo` and not `ready` so it is never offered as work (`standingRowFor`); it is never found by title. `{ refusal }` when it can be neither named
  * nor created, which is a refused write like any other (never a wake). Asked only when a write is due, so an ordinary tick reads and creates nothing.
@@ -410,7 +423,7 @@ function tickRecordIo(statePath: string): RecordIo | { refusal: string } {
   }
   const run = (args: string[]) => ghRun(args);
   const target = standingRowFor({ declarationText, state: readTickRecordState(statePath), statePath,
-    create: (repo) => createRow({ repo, title: TICK_RECORD_ROW_TITLE, labels: [`${LANE_PREFIX}ceo`], body: tickRecordRowBody(), run }) });
+    create: (repo) => createTickRecordRow(repo, run) });
   if ("refusal" in target) return target;
   const { repo, issue } = target;
   return {
