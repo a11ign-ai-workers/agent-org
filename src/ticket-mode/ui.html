@@ -5,11 +5,11 @@
 <meta name="viewport" content="width=device-width, initial-scale=1">
 <title>Ticket queue</title>
 <style>
-  :root { --bg: #f7f7f8; --panel: #fff; --text: #1d1d20; --muted: #6b6b76; --line: #e3e3e8; --accent: #3b5bdb; --ok: #2f9e44; --warn: #e8590c; --bad: #c92a2a; }
+  :root { --bg: #f7f7f8; --panel: #fff; --text: #1d1d20; --muted: #6b6b76; --line: #e3e3e8; --accent: #3b5bdb; --ok: #2f9e44; --warn: #e8590c; --bad: #c92a2a; --header: 56px; }
   @media (prefers-color-scheme: dark) { :root { --bg: #141417; --panel: #1d1d22; --text: #ececf1; --muted: #9a9aa6; --line: #2e2e36; --accent: #748ffc; --ok: #51cf66; --warn: #ff922b; --bad: #ff6b6b; } }
   * { box-sizing: border-box; }
   body { margin: 0; font: 14px/1.45 system-ui, -apple-system, sans-serif; background: var(--bg); color: var(--text); }
-  header { display: flex; gap: 16px; align-items: center; padding: 12px 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
+  header { display: flex; gap: 16px; align-items: center; height: var(--header); padding: 0 20px; border-bottom: 1px solid var(--line); background: var(--panel); position: sticky; top: 0; z-index: 2; }
   header h1 { font-size: 16px; margin: 0 12px 0 0; }
   .tab { background: none; border: 0; padding: 6px 10px; border-radius: 6px; color: var(--muted); cursor: pointer; font: inherit; }
   .tab[aria-selected="true"] { background: var(--bg); color: var(--text); font-weight: 600; }
@@ -17,11 +17,13 @@
   .error { color: var(--bad); margin: 8px 0; white-space: pre-wrap; }
   input[type="search"] { width: 320px; max-width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); }
   .group { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin: 12px 0; }
-  .group > h2 { font-size: 13px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
-  .group.collapsed > h2 { border-bottom: 0; }
+  .group > h2 { font-size: 14px; margin: 0; padding: 10px 12px; border-bottom: 1px solid var(--line); border-radius: 8px 8px 0 0; display: flex; gap: 10px; align-items: center;
+    cursor: pointer; user-select: none; background: var(--panel); position: sticky; top: var(--header); z-index: 1; }
+  .group > h2:hover { background: var(--bg); }
+  .group.collapsed > h2 { border-bottom: 0; border-radius: 8px; }
   .group.collapsed > .row { display: none; }
-  .fold { background: none; border: 0; padding: 0 2px; color: var(--muted); cursor: pointer; font: inherit; width: 16px; }
-  .group > h2 .name { cursor: pointer; }
+  .fold { background: none; border: 0; padding: 0; color: var(--text); cursor: pointer; font-size: 18px; line-height: 1; width: 20px; transition: transform .15s; }
+  .group.collapsed .fold { transform: rotate(-90deg); }
   .projects { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 4px 0 8px; }
   .projects .label { color: var(--muted); margin-right: 4px; }
   .chip { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
@@ -71,6 +73,7 @@
     <div class="bar">
       <input id="filter" type="search" placeholder="Filter by key, title or project">
       <label><input id="all" type="checkbox"> Select all shown</label>
+      <button class="small" id="fold-all" type="button"></button>
       <span id="loaded" class="pill"></span>
     </div>
     <div class="projects" id="projects"></div>
@@ -105,8 +108,11 @@ const $ = (id) => document.getElementById(id);
 const storage = (() => { try { return window.localStorage; } catch { return null; } })();
 const state = {
   tickets: [], queue: { entries: [], max: 3, paused: true }, selected: new Set(),
-  folded: recall(storage, "ticket-mode.folded"), projects: recall(storage, "ticket-mode.projects"),
+  // Sections start collapsed, so a first visit sees every status and its count before any list.
+  open: recall(storage, "ticket-mode.open"), projects: recall(storage, "ticket-mode.projects"),
 };
+const setOpen = (next) => { state.open = next; remember(storage, "ticket-mode.open", next); renderPick(); };
+const everyOpen = (statuses) => statuses.length > 0 && statuses.every((status) => state.open.has(status));
 const PRIORITY = ["", "Urgent", "High", "Medium", "Low"];
 
 async function call(method, path, body) {
@@ -139,20 +145,22 @@ function renderPick() {
   const free = (t) => selectable(t, state.queue.entries);
   const list = $("groups");
   list.replaceChildren();
-  for (const [status, group] of groupByStatus(tickets)) {
-    const open = group.filter(free);
-    const all = el("input", { type: "checkbox", checked: open.length > 0 && open.every((t) => state.selected.has(t.key)), disabled: open.length === 0 });
-    all.addEventListener("change", () => { for (const t of open) all.checked ? state.selected.add(t.key) : state.selected.delete(t.key); render(); });
-    const folded = state.folded.has(status);
-    const fold = () => { state.folded = toggled(state.folded, status); remember(storage, "ticket-mode.folded", state.folded); renderPick(); };
-    const arrow = el("button", { className: "fold", type: "button", textContent: folded ? "▸" : "▾", title: folded ? "Expand" : "Collapse" });
-    arrow.setAttribute("aria-expanded", String(!folded));
-    arrow.addEventListener("click", fold);
-    const name = el("span", { className: "name", textContent: status });
-    name.addEventListener("click", fold);
+  const groups = groupByStatus(tickets);
+  $("fold-all").textContent = everyOpen(groups.map(([status]) => status)) ? "Collapse all" : "Expand all";
+  for (const [status, group] of groups) {
+    const pickable = group.filter(free);
+    const all = el("input", { type: "checkbox", checked: pickable.length > 0 && pickable.every((t) => state.selected.has(t.key)), disabled: pickable.length === 0 });
+    all.addEventListener("change", () => { for (const t of pickable) all.checked ? state.selected.add(t.key) : state.selected.delete(t.key); render(); });
+    // The whole header toggles the section; ticking its checkbox must not.
+    all.addEventListener("click", (event) => event.stopPropagation());
+    const expanded = state.open.has(status);
+    const arrow = el("button", { className: "fold", type: "button", textContent: "▾", title: expanded ? "Collapse" : "Expand" });
+    arrow.setAttribute("aria-expanded", String(expanded));
     const picked = group.filter((t) => state.selected.has(t.key)).length;
-    const box = el("div", { className: `group${folded ? " collapsed" : ""}` },
-      el("h2", {}, arrow, all, name, el("span", { className: "count" }, ` ${group.length}${picked ? ` · ${picked} selected` : ""}`)));
+    const head = el("h2", {}, arrow, all, el("span", { className: "name", textContent: status }),
+      el("span", { className: "count" }, ` ${group.length}${picked ? ` · ${picked} selected` : ""}`));
+    head.addEventListener("click", () => setOpen(toggled(state.open, status)));
+    const box = el("div", { className: `group${expanded ? "" : " collapsed"}` }, head);
     for (const t of group) {
       const taken = entryFor(t.key);
       const tick = el("input", { type: "checkbox", checked: state.selected.has(t.key), disabled: Boolean(taken) });
@@ -228,6 +236,10 @@ for (const tab of document.querySelectorAll(".tab")) {
   });
 }
 $("filter").addEventListener("input", render);
+$("fold-all").addEventListener("click", () => {
+  const statuses = groupByStatus(shown()).map(([status]) => status);
+  setOpen(everyOpen(statuses) ? new Set() : new Set([...state.open, ...statuses]));
+});
 $("all").addEventListener("change", () => {
   for (const t of shown().filter((t) => selectable(t, state.queue.entries))) $("all").checked ? state.selected.add(t.key) : state.selected.delete(t.key);
   render();

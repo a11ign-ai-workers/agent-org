@@ -17,7 +17,8 @@ const SCRIPT = `(async () => {\n${MODULE.replace(IMPORT, "")}\n})();`;
 class Node_ {
   children: Node_[] = [];
   attrs: Record<string, string> = {};
-  listeners: Record<string, (() => void)[]> = {};
+  listeners: Record<string, ((event: { stopPropagation(): void }) => void)[]> = {};
+  parent: Node_ | null = null;
   className = "";
   textContent = "";
   value = "";
@@ -26,12 +27,19 @@ class Node_ {
   disabled = false;
   tag: string;
   constructor(tag: string) { this.tag = tag; }
-  append(...nodes: (Node_ | string)[]) { for (const n of nodes) this.children.push(typeof n === "string" ? Object.assign(new Node_("#text"), { textContent: n }) : n); }
+  append(...nodes: (Node_ | string)[]) {
+    for (const n of nodes) this.children.push(Object.assign(typeof n === "string" ? Object.assign(new Node_("#text"), { textContent: n }) : n, { parent: this }));
+  }
   replaceChildren(...nodes: Node_[]) { this.children = []; this.append(...nodes); }
   setAttribute(k: string, v: string) { this.attrs[k] = v; }
   getAttribute(k: string) { return this.attrs[k]; }
-  addEventListener(type: string, fn: () => void) { (this.listeners[type] ??= []).push(fn); }
-  fire(type: string) { for (const fn of this.listeners[type] ?? []) fn(); }
+  addEventListener(type: string, fn: (event: { stopPropagation(): void }) => void) { (this.listeners[type] ??= []).push(fn); }
+  /** Dispatch `type` here and bubble it up the parents, as a browser does, until a listener stops it. */
+  fire(type: string) {
+    let stopped = false;
+    const event = { stopPropagation: () => { stopped = true; } };
+    for (let node: Node_ | null = this; node !== null && !stopped; node = node.parent) for (const fn of node.listeners[type] ?? []) fn(event);
+  }
   text(): string { return this.textContent + this.children.map((c) => c.text()).join(""); }
   all(): Node_[] { return [this, ...this.children.flatMap((c) => c.all())]; }
 }
@@ -90,20 +98,41 @@ test("a remembered project filter is applied when the page loads again", async (
   assert.deepEqual(p.shownKeys(), ["T-1", "T-3"]);
 });
 
-test("a status group folds from its header, stays folded after a reload, and unfolds again", async () => {
+/** Which status sections are collapsed, in order. */
+const collapsed = (p: Awaited<ReturnType<typeof page>>) => p.groups().map((g) => g.className.includes("collapsed"));
+
+test("status sections start collapsed, open and close from anywhere on their header, and stay as left after a reload", async () => {
   const storage = new Map<string, string>();
   const first = await page(storage);
-  const folder = (p: typeof first) => p.groups()[0].all().find((n) => n.className === "fold")!;
-  assert.ok(!first.groups()[0].className.includes("collapsed"));
-  folder(first).fire("click");
-  assert.ok(first.groups()[0].className.includes("collapsed"));
-  assert.equal(first.groups()[1].className.includes("collapsed"), false, "only that group folds");
-  assert.deepEqual(JSON.parse(storage.get("ticket-mode.folded")!), ["Backlog"]);
+  assert.deepEqual(collapsed(first), [true, true], "a first visit sees every section collapsed");
+  first.groups()[0].children[0].all().find((n) => n.className === "name")!.fire("click");
+  assert.deepEqual(collapsed(first), [false, true], "a click on the section's name opens only that section");
+  assert.deepEqual(JSON.parse(storage.get("ticket-mode.open")!), ["Backlog"]);
   const reloaded = await page(storage);
-  assert.ok(reloaded.groups()[0].className.includes("collapsed"), "the reload keeps it folded");
-  folder(reloaded).fire("click");
-  assert.ok(!reloaded.groups()[0].className.includes("collapsed"));
-  assert.equal(storage.get("ticket-mode.folded"), "[]");
+  assert.deepEqual(collapsed(reloaded), [false, true], "the reload keeps it open");
+  reloaded.groups()[0].children[0].all().find((n) => n.className === "fold")!.fire("click");
+  assert.deepEqual(collapsed(reloaded), [true, true], "the arrow closes it");
+  assert.equal(storage.get("ticket-mode.open"), "[]");
+});
+
+test("ticking a section's checkbox selects its tickets and leaves the section as it was", async () => {
+  const p = await page(new Map());
+  const tick = p.groups()[0].children[0].all().find((n) => n.tag === "input")!;
+  tick.checked = true;
+  tick.fire("click");
+  tick.fire("change");
+  assert.deepEqual(collapsed(p), [true, true]);
+  assert.equal(p.$("queue").textContent, "Queue 3 tickets");
+});
+
+test("Expand all opens every section and becomes Collapse all, which closes them again", async () => {
+  const p = await page(new Map());
+  assert.equal(p.$("fold-all").textContent, "Expand all");
+  p.$("fold-all").fire("click");
+  assert.deepEqual(collapsed(p), [false, false]);
+  assert.equal(p.$("fold-all").textContent, "Collapse all");
+  p.$("fold-all").fire("click");
+  assert.deepEqual(collapsed(p), [true, true]);
 });
 
 test("Select all takes the visible tickets, and Queue sends exactly those with the model and effort and no repository", async () => {
