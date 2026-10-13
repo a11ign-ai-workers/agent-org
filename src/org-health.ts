@@ -1637,8 +1637,7 @@ export function readReleaseRuns(run: (args: string[]) => string, repo: string): 
   for (const r of runs) if (r.event === "workflow_dispatch" && r.conclusion === "success") r.published = releaseJobPublished(run, repo, r.id);
   const verdict = newestReleaseVerdict(runs);
   if (verdict?.conclusion !== "failure") return { runs };
-  const jobs = tryJson(() => run(["api", `repos/${repo}/actions/runs/${verdict.id}/jobs?per_page=${RELEASE_JOBS_WINDOW}`,
-    "--jq", "[.jobs[] | select(.conclusion == \"failure\") | {id, name, steps: [.steps[] | select(.conclusion == \"failure\") | .name]}]"]));
+  const jobs = releaseJobsOf(run, repo, verdict.id, "[.jobs[] | select(.conclusion == \"failure\") | {id, name, steps: [.steps[] | select(.conclusion == \"failure\") | .name]}]");
   const files = tryJson(() => run(["api", `repos/${repo}/contents/.changeset?ref=main`, "--jq", "[.[].name]"]));
   return { runs, jobs: Array.isArray(jobs) ? jobs : null,
     pending: Array.isArray(files) ? files.filter((name) => name.endsWith(".md") && name !== "README.md") : null };
@@ -1646,9 +1645,13 @@ export function readReleaseRuns(run: (args: string[]) => string, repo: string): 
 
 /** @returns whether the run's `release` job concluded success: the one answer that tells a publishing dispatch from a promote-only one. A refused read is `false`, which neither clears nor trips. */
 function releaseJobPublished(run: (args: string[]) => string, repo: string, id: number): boolean {
-  const jobs = tryJson(() => run(["api", `repos/${repo}/actions/runs/${id}/jobs?per_page=${RELEASE_JOBS_WINDOW}`,
-    "--jq", "[.jobs[] | select(.name == \"release\" and .conclusion == \"success\") | .id]"]));
+  const jobs = releaseJobsOf(run, repo, id, "[.jobs[] | select(.name == \"release\" and .conclusion == \"success\") | .id]");
   return Array.isArray(jobs) && jobs.length > 0;
+}
+
+/** @returns the jobs of one run as `jq` shapes them: the one read of a run's jobs, so the `gh` call site is counted once (agent-org#1273, gh-call-baseline). `null` for a refusal or text that is not JSON. */
+function releaseJobsOf(run: (args: string[]) => string, repo: string, id: number, jq: string): any {
+  return tryJson(() => run(["api", `repos/${repo}/actions/runs/${id}/jobs?per_page=${RELEASE_JOBS_WINDOW}`, "--jq", jq]));
 }
 
 /** @returns the parsed output, or `null` for a refusal or text that is not JSON: a stated gap for the caller, never an empty answer */
