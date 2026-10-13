@@ -63,6 +63,13 @@ export const CLAIM_REFUSED_KIND = "claim-refused";
 export const CLAIM_GUARD_HELD_KIND = "claim-guard-held";
 
 /**
+ * The event kind for ONE SWEEP OVERRUN THAT THE GUARD RELEASED: a sweep past its window whose lock `holdingAt` let go (agent-org#1314). The overrun comment on the row is the
+ * record; this line counts it. It is no class and no repeat: `class-repeat.ts` leaves it out of `groupByClass`, like `CLAIM_GUARD_HELD_KIND`. The `sweep-overrun` kind is
+ * kept for the refusal that follows an overrun (a claim refused on the swept Region), which is the failure.
+ */
+export const SWEEP_WINDOW_RELEASED_KIND = "sweep-window-released";
+
+/**
  * The event kind of ONE SPEC-LINT REFUSAL, one line per finding: `<kind>\t<ts ms>\t#<row> <field> <rule>` (agent-org#1017), so a count of lines is a count of
  * refused findings. Not seeded in `FAILURE_KINDS`, for the reason `CLAIM_REFUSED_KIND` gives. Written by `row-file.ts`'s `recordSpecLintRefusals` and read by the
  * retro's "Rows refused by the spec lint (24h)" line (`org-retro.ts`): it lives here so both can name it without the other.

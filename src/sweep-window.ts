@@ -8,13 +8,13 @@
 //   1. FREEZE: while the sweep is claimed, `row-claim` refuses any OTHER claim whose Region shares a file with the sweep's ({@link sweepFreezeAtClaim}).
 //   2. THE PULL REQUEST OPENS WITHIN {@link SWEEP_PR_OPEN_MINUTES}: a sweep with none that long after the claim is `stalled`, reported on the row (a row write, not an order).
 //   3. CI-FIX TIME IS BOXED at {@link SWEEP_CI_BOX_MINUTES}, counted from the pull request opening. Past it the window is `overrun` and RELEASED BY CONSTRUCTION: the freeze stops
-//      refusing, the overrun is recorded once (`sweep-overrun`) and the holder is told to revert or split. A sweep never holds the lock past its box.
+//      refusing, the overrun is recorded once (`sweep-window-released`) and the holder is told to revert or split. A sweep never holds the lock past its box.
 //   4. FOLLOW-UPS WAIT FOR THE MERGE: `row-file` refuses a session holding a claimed sweep to file a row whose Region overlaps the sweep's ({@link sweepFilingReason}).
 //
 // THE STATE IS PURE ({@link sweepWindowState}); the reads go through an injected `run`, so a test reaches no network.
 import { declaresSweep, openRestListing } from "./blast-radius.ts";
 import { claimRecordOf, type RowComment } from "./claim-stall.ts";
-import { FAILURE_LEDGER_FILE, recordFailures } from "./failure-ledger.ts";
+import { FAILURE_LEDGER_FILE, SWEEP_WINDOW_RELEASED_KIND, recordFailures } from "./failure-ledger.ts";
 import { stateEntryPath } from "./host-config.ts";
 import { gh, lookup } from "./merge-guard/lookups.ts";
 import { homeProjectDeclaration } from "./project-config.ts";
@@ -30,7 +30,7 @@ const MS_PER_MINUTE = 60_000;
 export const SWEEP_CI_BOX_MINUTES = 60;
 /** How long after the claim a sweep may go without an open pull request before it is `stalled`. */
 export const SWEEP_PR_OPEN_MINUTES = 15;
-/** The failure-ledger kind an overrun is recorded under. */
+/** The failure-ledger kind of a claim REFUSED on a swept Region after the sweep's overrun notice (agent-org#1314): the release went wrong for the claim it let through. */
 export const SWEEP_OVERRUN_KIND = "sweep-overrun";
 /** What the holder is told on an overrun. */
 export const OVERRUN_ADVICE = "revert or split; do not hold the lock";
@@ -160,7 +160,7 @@ export type ReportIo = {
 const stalledText = (sweep: SweepRow): string => `${STALLED_MARKER}\n**Sweep window: STALLED.** #${sweep.number} declares a \`Sweep:\` and has had no open pull request for ${SWEEP_PR_OPEN_MINUTES} minutes since its claim. `
   + `Its freeze still holds and its ${SWEEP_CI_BOX_MINUTES}-minute CI box starts at the deadline for opening one: open the pull request, or release the row.`;
 const overrunText = (sweep: SweepRow): string => `${OVERRUN_MARKER}\n**Sweep window: OVERRUN.** #${sweep.number} spent its ${SWEEP_CI_BOX_MINUTES}-minute CI box, so its window is RELEASED and other claims on its area are no longer refused. `
-  + `${OVERRUN_ADVICE}. Recorded as \`${SWEEP_OVERRUN_KIND}\`.`;
+  + `${OVERRUN_ADVICE}. Recorded as \`${SWEEP_WINDOW_RELEASED_KIND}\`.`;
 
 /** One report, never throwing into the claim that asked: a failed write is one stderr line, and the next ask (the marker is absent) tries again. */
 function attempt(what: string, write: () => void, report: (line: string) => void): void {
@@ -172,8 +172,8 @@ function attempt(what: string, write: () => void, report: (line: string) => void
 }
 
 /**
- * THE ROW WRITES a window's state calls for, once each: `stalled` is a comment on the row; `overrun` is a comment (the holder's notice) and a `sweep-overrun` line in the failure
- * ledger. A report is a ROW WRITE, not an order -- nobody is woken. The marker comment is what keeps it to one however many claims ask.
+ * THE ROW WRITES a window's state calls for, once each: `stalled` is a comment on the row; `overrun` is a comment (the holder's notice) and a `sweep-window-released` line in the
+ * failure ledger, a count that is no class and no repeat (agent-org#1314). A report is a ROW WRITE, not an order -- nobody is woken. The marker comment is what keeps it to one however many claims ask.
  */
 export function reportSweepWindows(sweeps: SweepRow[], { now, repo = REPO, run = gh, io = {} }: { now: number; repo?: string; run?: (args: string[]) => string; io?: ReportIo }): void {
   const { comment = (row, body) => void run(["issue", "comment", String(row), "--repo", repo, "--body", body]), record = recordFailures,
@@ -182,10 +182,27 @@ export function reportSweepWindows(sweeps: SweepRow[], { now, repo = REPO, run =
     const state = stateOf(sweep, now);
     if (state === "stalled" && !sweep.reported.stalled) attempt(`report #${sweep.number} stalled`, () => comment(sweep.number, stalledText(sweep)), report);
     if (state === "overrun" && !sweep.reported.overrun) {
-      attempt(`record #${sweep.number}'s overrun`, () => record({ logPath: logPath(), events: [{ classKey: SWEEP_OVERRUN_KIND, ref: `${repo}#${sweep.number}` }], now }), report);
+      attempt(`record #${sweep.number}'s overrun`, () => record({ logPath: logPath(), events: [{ classKey: SWEEP_WINDOW_RELEASED_KIND, ref: `${repo}#${sweep.number}` }], now }), report);
       attempt(`tell #${sweep.number}'s holder it overran`, () => comment(sweep.number, overrunText(sweep)), report);
     }
   }
+}
+
+/**
+ * THE REFUSAL AFTER AN OVERRUN (agent-org#1314): a claim REFUSED on a swept Region whose sweep has already posted its overrun notice. The release was the guard working; a claim
+ * the released area then turns away is the failure, so it is ONE `sweep-overrun` line, ref = the REFUSED row. The refusal is the one `row-claim` prints, read for the holder it
+ * names (`overlaps the Region of #N`); a refusal that names no swept holder, or a holder with no notice on its row, writes nothing. Called at the final verdict, never by `check`.
+ * Never throws into the claim that asked: a failed write is one stderr line, as for the row writes.
+ */
+export function recordOverrunRefusal(refusal: string, { issueNumber, reads = {}, now = Date.now(), io = {} }: { issueNumber: number; reads?: SweepReads; now?: number; io?: ReportIo }): void {
+  const named = /\boverlaps the Region of #(\d+)/.exec(refusal);
+  if (named === null) return;
+  const { record = recordFailures, logPath = () => stateEntryPath(FAILURE_LEDGER_FILE), report = (line) => process.stderr.write(`${line}\n`) } = io;
+  attempt(`record #${issueNumber}'s refusal after #${named[1]}'s overrun`, () => {
+    const holder = readSweepWindows(reads)?.find((sweep) => sweep.number === Number(named[1]));
+    if (holder?.reported.overrun !== true) return;
+    record({ logPath: logPath(), events: [{ classKey: SWEEP_OVERRUN_KIND, ref: `${reads.repo ?? REPO}#${issueNumber}` }], now });
+  }, report);
 }
 
 /** The claim's half: read, make the row writes the windows call for, then the verdict. */

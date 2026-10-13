@@ -84,7 +84,7 @@ import { resolveBlockedByOverride, blockedByExceptionNote } from "./row-claim/bl
 import { blockedByEdgeReason, lookupBlockedByEdge } from "./row-claim/blocked-by-edge-rule.ts";
 import { claimedRegionOverlapReason, fileOverlapReason, lookupClaimedRegions, lookupMyRegionFiles, lookupOpenPrFiles } from "./row-claim/file-overlap-rule.ts";
 import { isRowsByLabelRead, readRowsByLabel } from "./ticket-port/rows-by-label.ts"; // #5039: label reads without SEARCH
-import { readSweepWindows, sweepFreezeAtClaim, sweepFreezeOf, type SweepRow } from "./sweep-window.ts"; // #4603: a declared sweep freezes its Region for its window
+import { readSweepWindows, recordOverrunRefusal, sweepFreezeAtClaim, sweepFreezeOf, type SweepRow } from "./sweep-window.ts"; // #4603: a declared sweep freezes its Region for its window
 import { templateFieldsReason, lookupIssueBody } from "./row-claim/template-fields-rule.ts";
 import { scopeHash, claimedScopeOf, CLAIM_RECORD_SCOPE } from "./claim-scope.ts"; // #4759: the leaf the tick compares the record with the live row from
 import { staleRuleReason } from "./row-claim/stale-rule-guard.ts";
@@ -1293,7 +1293,11 @@ function preWriteChecks({ issueNumber, mySession, before, drained, instance, ado
     if (ineligible) {
       const eligibility = eligibilityWithBlockedBy({ issueNumber, mySession, ineligible, blockedBy },
         { ghRun: ghRunForBody, repo });
-      if (!eligibility.proceed) return { refusal: { claimed: false, reason: eligibility.reason }, blockedByNote: null, scope: null };
+      // #1314: a refusal on a swept Region after that sweep's overrun notice is the failure (`sweep-overrun`), written at the final verdict only: a chairman's yield lets it past.
+      if (!eligibility.proceed) {
+        recordOverrunRefusal(eligibility.reason, { issueNumber, reads: { run: ghRunForBody, repo } });
+        return { refusal: { claimed: false, reason: eligibility.reason }, blockedByNote: null, scope: null };
+      }
       blockedByNote = eligibility.blockedByNote;
     }
   }

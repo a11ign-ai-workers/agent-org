@@ -46,7 +46,7 @@ const {
 } = await import("./sweep-window.ts");
 const { reportB4, sessionEligibilityReason } = await import("./row-claim.ts");
 const { createIssue } = await import("./row-file.ts");
-const { FAILURE_LEDGER_FILE } = await import("./failure-ledger.ts");
+const { FAILURE_LEDGER_FILE, SWEEP_WINDOW_RELEASED_KIND } = await import("./failure-ledger.ts");
 
 const MIN = 60_000;
 const TRACKER = "a11ign/a11ign";
@@ -184,8 +184,9 @@ test("(1) a sweep that could not be read refuses as INCONCLUSIVE, never as clear
 test("(2) a sweep that OVERRAN is RELEASED: the claim is no longer refused, the overrun is recorded ONCE and the holder is told to revert or split", () => {
   const { run, written } = ghFor({ sweeps: [sweepRow], comments: [claimRecord(200)], prs: [sweepPr(61)] });
   assert.equal(claimFor(run), null, "past the box the freeze stops refusing");
-  assert.equal(ledger().split("\n").filter((line) => line.startsWith(`${SWEEP_OVERRUN_KIND}\t`)).length, 1, `the overrun is on the ledger once:\n${ledger()}`);
-  assert.match(ledger(), new RegExp(`${SWEEP_OVERRUN_KIND}\\t\\d+\\t${TRACKER}#${SWEEP}\\n`));
+  assert.equal(ledger().split("\n").filter((line) => line.startsWith(`${SWEEP_WINDOW_RELEASED_KIND}\t`)).length, 1, `the overrun is on the ledger once:\n${ledger()}`);
+  assert.match(ledger(), new RegExp(`${SWEEP_WINDOW_RELEASED_KIND}\\t\\d+\\t${TRACKER}#${SWEEP}\\n`));
+  assert.equal(ledger().split("\n").filter((line) => line.startsWith(`${SWEEP_OVERRUN_KIND}\t`)).length, 0, "a released overrun is no sweep-overrun line (agent-org#1314)");
   assert.equal(written.length, 1, "and told once");
   assert.match(String(written[0].at(-1)), new RegExp(OVERRUN_ADVICE));
   assert.match(String(written[0].at(-1)), /revert or split; do not hold the lock/);
@@ -194,7 +195,7 @@ test("(2) a sweep that OVERRAN is RELEASED: the claim is no longer refused, the 
   const second = ghFor({ sweeps: [sweepRow], comments: [claimRecord(200), { body: `${OVERRUN_MARKER}\nnotice`, createdAt: new Date().toISOString() }], prs: [sweepPr(61)] });
   assert.equal(claimFor(second.run), null);
   assert.deepEqual(second.written, [], "the marker on the row keeps the notice to one");
-  assert.equal(ledger().split("\n").filter((line) => line.startsWith(`${SWEEP_OVERRUN_KIND}\t`)).length, 1, "still one line");
+  assert.equal(ledger().split("\n").filter((line) => line.startsWith(`${SWEEP_WINDOW_RELEASED_KIND}\t`)).length, 1, "still one line");
 });
 
 test("(2) the pure rule agrees: the same sweep refuses at 59 minutes and releases at 61", () => {
