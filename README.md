@@ -78,6 +78,9 @@ takes them one each. `agent-org ticket:serve` starts a board on `127.0.0.1` and 
   group and for the page. Choose the repositories each ticket goes to (one or several), the model and the effort, then Queue.
 - **Board.** Queued, Running, Draft PR, Needs human and Failed. A card can be removed while queued, stopped while running, and retried
   once it has failed. The number of workers at once can be changed live.
+- **Paused until you start it.** A new queue is paused, so queueing a ticket never also starts it: queue what you want, then press
+  Start workers on the Board when what the workers need is ready. Pause stops new starts and leaves running workers alone, and the
+  choice survives a restart of the board.
 
 Each run gets a worktree per repository at `<worktreeRoot>/<ticket>/<repo>`, on the ticket's own branch (`branchName` in Linear, so Linear
 links the pull request), from the remote's default branch as `ls-remote` reports it. One herdr workspace per ticket opens in ticket mode's
