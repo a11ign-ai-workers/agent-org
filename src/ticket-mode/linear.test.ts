@@ -75,3 +75,17 @@ test("the key comes from the Keychain service or the file the host file names, a
     /no Linear key in the Keychain under agent-org-linear\. Store one with: security add-generic-password/, "a missing key names the one command that stores it");
   assert.throws(() => readLinearKey({ path: "/nope" }, () => "", () => { throw new Error("ENOENT"); }), /cannot be read/);
 });
+
+test("stateTypes() reads every key's state type in one aliased request by team and number, and leaves out a key Linear has no ticket for", async () => {
+  const { fetch, requests } = linear([{ data: {
+    k0: { nodes: [{ identifier: "NBF-1270", state: { type: "completed" } }] },
+    k1: { nodes: [] },
+    k2: { nodes: [{ identifier: "VE-61", state: { type: "started" } }] },
+  } }]);
+  const states = await linearSource({ key: "lin_api_secret", fetch }).stateTypes!(["NBF-1270", "NBF-9999", "ve-61", "not a key"]);
+  assert.deepEqual([...states], [["NBF-1270", "completed"], ["ve-61", "started"]]);
+  assert.equal(requests.length, 1, "one request for the whole batch");
+  const sent = JSON.parse(String(requests[0].init.body));
+  assert.deepEqual(sent.variables, { t0: "NBF", n0: 1270, t1: "NBF", n1: 9999, t2: "VE", n2: 61 }, "keys travel as variables, never in the query text");
+  assert.equal(sent.query.includes("NBF-1270"), false);
+});

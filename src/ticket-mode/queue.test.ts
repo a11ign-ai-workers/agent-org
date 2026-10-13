@@ -4,7 +4,8 @@ import assert from "node:assert/strict";
 import { join } from "node:path";
 import { tmpDir } from "../lib/tmp-fixture.ts";
 import {
-  amend, emptyQueue, enqueue, finish, loadQueue, markRunning, markStarting, nextStarts, observe, recordRepos, remove, retry, saveQueue, setMax, setPaused, type Queue,
+  amend, emptyQueue, enqueue, finish, loadQueue, markRunning, markStarting, nextStarts, observe, recordRepos, recordTrackerStates, remove, retry, saveQueue, setMax, setPaused,
+  unsettledKeys, type Queue,
 } from "./queue.ts";
 import type { Ticket } from "./source.ts";
 
@@ -84,4 +85,15 @@ test("the queue file round-trips, and a missing one is an empty queue", () => {
   assert.deepEqual(loadQueue(path, 9), queue, "the saved max wins over the default");
   saveQueue(path, setPaused(queue, false));
   assert.equal(loadQueue(path, 9).paused, false, "a started queue stays started across a restart of the board");
+});
+
+test("finished runs are read from the tracker until it settles their ticket, and a live run never is", () => {
+  let queue: Queue = enqueue(emptyQueue(3), [ticket("NBF-1"), ticket("NBF-2"), ticket("NBF-3")], { model: "opus", effort: "high" }, 0);
+  queue = finish(queue, "NBF-1", { kind: "draft-pr", prs: [] }, 5);
+  queue = finish(queue, "NBF-2", { kind: "needs-human", reason: "r" }, 5);
+  assert.deepEqual(unsettledKeys(queue), ["NBF-1", "NBF-2"], "NBF-3 is still queued");
+  queue = recordTrackerStates(queue, new Map([["NBF-1", "completed"], ["NBF-2", "started"], ["NBF-3", "completed"]]));
+  assert.equal(queue.entries.find((e) => e.ticket.key === "NBF-1")!.trackerState, "completed");
+  assert.equal(queue.entries.find((e) => e.ticket.key === "NBF-3")!.trackerState, undefined, "a queued run takes no tracker state");
+  assert.deepEqual(unsettledKeys(queue), ["NBF-2"], "a completed ticket is not asked about again");
 });

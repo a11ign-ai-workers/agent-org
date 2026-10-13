@@ -17,6 +17,8 @@ export const LINEAR_API = "https://api.linear.app/graphql";
 const UPLOADS = /https:\/\/uploads\.linear\.app\/[^\s)"'<>]+/g;
 const PAGE = 100;
 
+/** Keys read in one `stateTypes` request: each is an aliased query, and a long query text is one Linear may refuse. */
+const STATE_BATCH = 25;
 const ISSUE_FIELDS = "identifier title description url branchName priority state { name position } team { key } project { name }";
 
 type Fetch = typeof fetch;
@@ -92,6 +94,24 @@ export function linearSource({ key, fetch: request = fetch }: { key: string; fet
         { team: parts[1].toUpperCase(), number: Number(parts[2]) });
       const [found] = data.issues.nodes;
       return found === undefined ? null : toTicket(found);
+    },
+
+    async stateTypes(keys) {
+      // One request per batch, each key an aliased read by team and number, as `read` does it.
+      const states = new Map<string, string>();
+      const parsed = keys.map((key) => [key, /^([A-Za-z][A-Za-z0-9]*)-(\d+)$/.exec(key)] as const).filter((pair): pair is readonly [string, RegExpExecArray] => pair[1] !== null);
+      for (let start = 0; start < parsed.length; start += STATE_BATCH) {
+        const batch = parsed.slice(start, start + STATE_BATCH);
+        const params = batch.map((_, i) => `$t${i}: String!, $n${i}: Float!`).join(", ");
+        const reads = batch.map((_, i) => `k${i}: issues(first: 1, filter: { team: { key: { eq: $t${i} } }, number: { eq: $n${i} } }) { nodes { identifier state { type } } }`).join(" ");
+        const variables = Object.fromEntries(batch.flatMap(([, parts], i) => [[`t${i}`, parts[1].toUpperCase()], [`n${i}`, Number(parts[2])]]));
+        const data: Record<string, { nodes: { identifier: string; state: { type: string } }[] }> = await query(`query(${params}) { ${reads} }`, variables);
+        batch.forEach(([key], i) => {
+          const [found] = data[`k${i}`]?.nodes ?? [];
+          if (found !== undefined) states.set(key, found.state.type);
+        });
+      }
+      return states;
     },
 
     async download(ticket, dir) {

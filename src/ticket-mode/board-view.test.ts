@@ -1,7 +1,7 @@
 // no-token: gh -- pure functions, and a fake storage
 import { test } from "node:test";
 import assert from "node:assert/strict";
-import { COLUMNS, NO_PROJECT, groupByStatus, projectCounts, queueLabel, recall, remember, selectable, toggled, visibleTickets, type ViewTicket } from "./board-view.ts";
+import { NO_PROJECT, RUN_STATUSES, groupByStatus, projectCounts, queueLabel, recall, remember, runStatus, runsShown, selectable, statusCounts, toggled, visibleTickets, type ViewEntry, type ViewTicket } from "./board-view.ts";
 
 const t = (key: string, status: string, statusOrder: number, priority: number, project: string | null, title = key): ViewTicket =>
   ({ key, title, status, statusOrder, priority, project });
@@ -60,13 +60,47 @@ test("open sections and chosen projects are remembered, and a browser that refus
   assert.deepEqual([...recall(null, "x")], [], "no storage at all");
 });
 
-test("each run sits in exactly one board column", () => {
-  const where = (entry: Parameters<typeof COLUMNS[number]["holds"]>[0]) => COLUMNS.filter((c) => c.holds(entry)).map((c) => c.title);
-  assert.deepEqual(where({ ticket: { key: "A" }, phase: "queued" }), ["Queued"]);
-  assert.deepEqual(where({ ticket: { key: "A" }, phase: "starting" }), ["Running"]);
-  assert.deepEqual(where({ ticket: { key: "A" }, phase: "finished", outcome: { kind: "draft-pr" } }), ["Draft PR"]);
-  for (const kind of ["needs-human", "wrong-repo", "no-outcome"]) assert.deepEqual(where({ ticket: { key: "A" }, phase: "finished", outcome: { kind } }), ["Needs human"]);
-  for (const kind of ["crashed", "stopped"]) assert.deepEqual(where({ ticket: { key: "A" }, phase: "finished", outcome: { kind } }), ["Failed"]);
+const run = (fields: Partial<ViewEntry>): ViewEntry => ({ ticket: { key: "NBF-1" }, phase: "finished", ...fields });
+
+test("a live run is queued, in progress, or needs you while it waits on a person", () => {
+  assert.equal(runStatus(run({ phase: "queued" })), "queued");
+  assert.equal(runStatus(run({ phase: "starting" })), "working");
+  assert.equal(runStatus(run({ phase: "running" })), "working");
+  assert.equal(runStatus(run({ phase: "running", waiting: true })), "needs-you");
+});
+
+test("a finished run's outcome decides its status until the tracker settles the ticket", () => {
+  assert.equal(runStatus(run({ outcome: { kind: "draft-pr" } })), "awaiting-review");
+  for (const kind of ["needs-human", "wrong-repo", "no-outcome"]) assert.equal(runStatus(run({ outcome: { kind } })), "needs-you", kind);
+  assert.equal(runStatus(run({ outcome: { kind: "crashed" } })), "failed");
+  assert.equal(runStatus(run({ outcome: { kind: "stopped" } })), "cancelled");
+  assert.equal(runStatus(run({ outcome: { kind: "draft-pr" }, trackerState: "started" })), "awaiting-review", "a ticket still open in the tracker");
+});
+
+test("the tracker's word wins once it settles the ticket: completed once its pull requests merged, cancelled once it was canceled", () => {
+  assert.equal(runStatus(run({ outcome: { kind: "draft-pr" }, trackerState: "completed" })), "completed");
+  assert.equal(runStatus(run({ outcome: { kind: "needs-human" }, trackerState: "completed" })), "completed", "a person finished it by hand");
+  assert.equal(runStatus(run({ outcome: { kind: "draft-pr" }, trackerState: "canceled" })), "cancelled");
+  assert.equal(runStatus(run({ outcome: { kind: "draft-pr" }, trackerState: "duplicate" })), "cancelled");
+  assert.equal(runStatus(run({ phase: "running", trackerState: "completed" })), "working", "a live run is not settled by a stale reading");
+});
+
+test("every status is counted, a status with no runs at zero, and the filters list them in order", () => {
+  const counts = statusCounts([run({ phase: "queued" }), run({ phase: "queued" }), run({ outcome: { kind: "crashed" } })]);
+  assert.equal(counts.get("queued"), 2);
+  assert.equal(counts.get("failed"), 1);
+  assert.equal(counts.get("completed"), 0);
+  assert.deepEqual(RUN_STATUSES.map(({ status }) => status), ["needs-you", "working", "queued", "awaiting-review", "completed", "failed", "cancelled"]);
+});
+
+test("runs are listed most recently active first, and a filter keeps only its status", () => {
+  const entries = [
+    run({ ticket: { key: "OLD" }, phase: "queued", queuedAt: 1 }),
+    run({ ticket: { key: "DONE" }, outcome: { kind: "draft-pr" }, queuedAt: 2, startedAt: 3, finishedAt: 9 }),
+    run({ ticket: { key: "LIVE" }, phase: "running", queuedAt: 4, startedAt: 5 }),
+  ];
+  assert.deepEqual(runsShown(entries, null).map((e) => e.ticket.key), ["DONE", "LIVE", "OLD"]);
+  assert.deepEqual(runsShown(entries, "queued").map((e) => e.ticket.key), ["OLD"]);
 });
 
 test("the Queue button says what it will do", () => {

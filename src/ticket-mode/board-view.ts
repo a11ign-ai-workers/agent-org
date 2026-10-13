@@ -1,5 +1,5 @@
 // @ts-check
-// module: the ticket board page's logic -- which tickets show, how they group, what can be selected, which column a run sits in -- as pure functions
+// module: the ticket board page's logic -- which tickets show, how they group, what can be selected, what status a run has -- as pure functions
 //
 // WRITTEN HERE, IN TYPESCRIPT, SO ITS TESTS RUN IT, AND SENT TO THE BROWSER WITH THE TYPES STRIPPED (`server.ts` serves it as `/board-view.js`
 // through Node's own `stripTypeScriptTypes`). The page (`ui.html`) only draws what these functions return and wires the clicks. So it imports
@@ -9,7 +9,10 @@
 export type ViewTicket = Readonly<{ key: string; title: string; status: string; statusOrder: number; priority: number; project: string | null }>;
 
 /** The fields of a queue entry the board reads. */
-export type ViewEntry = Readonly<{ ticket: Readonly<{ key: string }>; phase: string; outcome?: Readonly<{ kind: string }> }>;
+export type ViewEntry = Readonly<{
+  ticket: Readonly<{ key: string }>; phase: string; outcome?: Readonly<{ kind: string }>; waiting?: boolean; trackerState?: string;
+  queuedAt?: number; startedAt?: number; finishedAt?: number;
+}>;
 
 /** Where a browser keeps the view's settings between visits; `localStorage` in the page. */
 export type Storage = Readonly<{ getItem(name: string): string | null; setItem(name: string, value: string): void }>;
@@ -73,14 +76,50 @@ export function remember(storage: Storage | null, name: string, values: Readonly
   }
 }
 
-/** The board's columns, in order, and the entries each holds. */
-export const COLUMNS: readonly Readonly<{ title: string; holds: (entry: ViewEntry) => boolean }>[] = [
-  { title: "Queued", holds: (e) => e.phase === "queued" },
-  { title: "Running", holds: (e) => e.phase === "starting" || e.phase === "running" },
-  { title: "Draft PR", holds: (e) => e.outcome?.kind === "draft-pr" },
-  { title: "Needs human", holds: (e) => ["needs-human", "wrong-repo", "no-outcome"].includes(e.outcome?.kind ?? "") },
-  { title: "Failed", holds: (e) => ["crashed", "stopped"].includes(e.outcome?.kind ?? "") },
+/** A run's status on the board, after GitHub's Actions runs: each has its own icon and filter. */
+export type RunStatus = "needs-you" | "working" | "queued" | "awaiting-review" | "completed" | "failed" | "cancelled";
+
+/** Every status, in the order the filters list them: what needs a person first, what is settled last. */
+export const RUN_STATUSES: readonly Readonly<{ status: RunStatus; label: string }>[] = [
+  { status: "needs-you", label: "Needs you" },
+  { status: "working", label: "In progress" },
+  { status: "queued", label: "Queued" },
+  { status: "awaiting-review", label: "Awaiting review" },
+  { status: "completed", label: "Completed" },
+  { status: "failed", label: "Failed" },
+  { status: "cancelled", label: "Cancelled" },
 ];
+
+/** Outcomes that hand the ticket back to a person: the worker could not decide, the work belongs elsewhere, or it stopped without saying. */
+const NEEDS_YOU = new Set(["needs-human", "wrong-repo", "no-outcome"]);
+
+/**
+ * A run's status. The tracker's word wins once the run has finished: a ticket it completed is done (Linear completes it when its pull request
+ * merges) and one it canceled is cancelled, whatever the run ended in. Before that, the outcome decides.
+ */
+export function runStatus(entry: ViewEntry): RunStatus {
+  if (entry.phase === "queued") return "queued";
+  if (entry.phase !== "finished") return entry.waiting ? "needs-you" : "working";
+  if (entry.trackerState === "completed") return "completed";
+  if (entry.trackerState === "canceled" || entry.trackerState === "duplicate") return "cancelled";
+  const kind = entry.outcome?.kind ?? "";
+  if (kind === "draft-pr") return "awaiting-review";
+  if (NEEDS_YOU.has(kind)) return "needs-you";
+  return kind === "stopped" ? "cancelled" : "failed";
+}
+
+/** How many runs have each status. */
+export function statusCounts(entries: readonly ViewEntry[]): Map<RunStatus, number> {
+  const counts = new Map<RunStatus, number>(RUN_STATUSES.map(({ status }) => [status, 0]));
+  for (const status of entries.map(runStatus)) counts.set(status, (counts.get(status) ?? 0) + 1);
+  return counts;
+}
+
+/** The runs a filter shows (every run for `null`), the most recently active first, as GitHub lists its runs. */
+export function runsShown<T extends ViewEntry>(entries: readonly T[], filter: RunStatus | null): T[] {
+  const latest = (entry: ViewEntry) => entry.finishedAt ?? entry.startedAt ?? entry.queuedAt ?? 0;
+  return entries.filter((entry) => filter === null || runStatus(entry) === filter).sort((a, b) => latest(b) - latest(a));
+}
 
 /** The Queue button's words for `count` selected tickets. */
 export const queueLabel = (count: number): string => (count === 0 ? "Select tickets to queue" : `Queue ${count} ticket${count === 1 ? "" : "s"}`);
