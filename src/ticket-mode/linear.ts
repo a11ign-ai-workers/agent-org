@@ -22,9 +22,17 @@ const ISSUE_FIELDS = "identifier title description url branchName priority state
 type Fetch = typeof fetch;
 
 /** The key, from where the host file says it lives. `security` prints the secret on stdout, which this returns and never logs. */
-export function readLinearKey(source: KeySource, security: (args: string[]) => string = (args) => execFileSync("security", args, { encoding: "utf8" }),
+export function readLinearKey(source: KeySource, security: (args: string[]) => string = (args) => execFileSync("security", args, { encoding: "utf8", stdio: ["ignore", "pipe", "pipe"] }),
   read: (path: string) => string = (path) => readFileSync(path, "utf8")): string {
-  const key = ("keychain" in source ? security(["find-generic-password", "-s", source.keychain, "-w"]) : read(source.path)).trim();
+  let stored: string;
+  try {
+    stored = "keychain" in source ? security(["find-generic-password", "-s", source.keychain, "-w"]) : read(source.path);
+  } catch {
+    throw new Error("keychain" in source
+      ? `ticket mode: no Linear key in the Keychain under ${source.keychain}. Store one with: security add-generic-password -a "$USER" -s ${source.keychain} -w`
+      : `ticket mode: the Linear key file ${source.path} cannot be read`);
+  }
+  const key = stored.trim();
   if (key === "") throw new Error(`ticket mode: the Linear key at ${"keychain" in source ? `Keychain service ${source.keychain}` : source.path} is empty`);
   return key;
 }

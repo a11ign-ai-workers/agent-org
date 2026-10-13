@@ -71,4 +71,7 @@ test("the key comes from the Keychain service or the file the host file names, a
   assert.deepEqual(calls, [["find-generic-password", "-s", "agent-org-linear", "-w"]]);
   assert.equal(readLinearKey({ path: "/k" }, () => { throw new Error("not used"); }, () => " lin_api_y \n"), "lin_api_y");
   assert.throws(() => readLinearKey({ keychain: "s" }, () => "\n"), /is empty/);
+  assert.throws(() => readLinearKey({ keychain: "agent-org-linear" }, () => { throw new Error("SecKeychainSearchCopyNext"); }),
+    /no Linear key in the Keychain under agent-org-linear\. Store one with: security add-generic-password/, "a missing key names the one command that stores it");
+  assert.throws(() => readLinearKey({ path: "/nope" }, () => "", () => { throw new Error("ENOENT"); }), /cannot be read/);
 });
