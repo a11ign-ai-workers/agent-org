@@ -62,8 +62,15 @@ export function ownsPr(claim: Claim, pr: OwnablePr): typeof RUNGS[number] | null
 /**
  * `owner-unresolved` events (#4450): a pull request the owner ladder could name nobody for (its `ceo` rung). `sourceOf` is the ladder (`ownerOfPr`), handed in so this stays a leaf.
  * THE REF IS THE PULL REQUEST (`<repo>#<n>`), so one that stays unowned is one event however many ticks see it.
+ * agent-org#1271: a pull request the ladder could not look up because the open rows were not read (`ownerRowsUnread`, set by `withClosingRowOwners`) is
+ * left out and counted on `say`: a refused read is not the ladder failing to name an owner, and a tick that read nothing must not file one.
  * @param {any[]} prs @param {(pr: any) => { source: string }} sourceOf @param {string} homeRepo the repository of a pull request that carries no `repo`
+ * @param {(line: string) => void} say where the count of the pull requests left out goes (stderr, like the other recorders)
  */
-export function unresolvedOwnerEvents(prs: any[], sourceOf: (pr: any) => { source: string }, homeRepo: string): FailureEvent[] {
-  return prs.filter((pr) => sourceOf(pr).source === "ceo").map((pr) => ({ classKey: "owner-unresolved", ref: `${pr?.repo || homeRepo}#${pr?.number}` }));
+export function unresolvedOwnerEvents(prs: any[], sourceOf: (pr: any) => { source: string }, homeRepo: string,
+  say: (line: string) => void = (line) => process.stderr.write(`${line}\n`)): FailureEvent[] {
+  const unowned = prs.filter((pr) => sourceOf(pr).source === "ceo");
+  const unread = unowned.filter((pr) => pr?.ownerRowsUnread === true).length;
+  if (unread > 0) say(`owner-unresolved: ${unread} pull request(s) not recorded, the open rows were not read this tick`);
+  return unowned.filter((pr) => pr?.ownerRowsUnread !== true).map((pr) => ({ classKey: "owner-unresolved", ref: `${pr?.repo || homeRepo}#${pr?.number}` }));
 }
