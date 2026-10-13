@@ -36,12 +36,15 @@ const has = (args: string[], ...words: string[]) => words.every((word) => args.i
 const fieldsOf = (args: string[]) => args[args.indexOf("--json") + 1] ?? "";
 const isWrite = (args: string[]) => args[0] === "label" || (args[0] === "issue" && args[1] === "edit")
   || (args[0] === "api" && args[1] === "--method");
+// agent-org#1302: the row's labels and state are read over REST, `gh api repos/<repo>/issues/<n>`, not `gh issue view`
+const isLabelRead = (args: string[]) => args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/3566$/.test(args[1] ?? "");
 
 /** What `gh` answers, by argv: a row with nothing in its way, whose body is `options.body`. */
 function ghAnswer(args: string[], options: Options = {}): string {
   if ((options.refuse ?? []).some((word) => args.includes(word))) {
     throw Object.assign(new Error("Command failed: gh"), { status: 1, stderr: "HTTP 502", stdout: "" });
   }
+  if (isLabelRead(args)) return JSON.stringify({ number: 3566, title: "A row", labels: options.labels ?? [], state: "open" });
   if (args[0] === "issue" && args[1] === "view") {
     if (fieldsOf(args) === "blockedBy") return JSON.stringify({ blockedBy: { nodes: [] } });
     if (fieldsOf(args).split(",").includes("body")) return JSON.stringify({ body: options.body ?? NO_REGION, labels: (options.labels ?? []) });
@@ -120,10 +123,10 @@ test("NOTHING FROM THE FIRST WRITE ON IS BATCHED: the label reads either side of
   const left: Call[] = [];
   claim({ run: sequentialRun(left), batch: fakeBatch(batches) });
   assert.deepEqual(batches[0].filter((call) => isWrite(call.args)), [], "a write is never rehearsed or batched");
-  const labelReads = left.filter((call) => call.args[0] === "issue" && call.args[1] === "view" && fieldsOf(call.args) === "number,title,labels,state");
+  const labelReads = left.filter((call) => isLabelRead(call.args));
   assert.ok(labelReads.length >= 2, "the labels are read before the checks and again right before the write, each through `run`");
-  assert.deepEqual(batches[0].filter((call) => fieldsOf(call.args) === "number,title,labels,state"), [], "and neither is in the batch");
-  assert.equal(left[0].args.includes("number,title,labels,state"), true, "the first thing the claim asks is still the labels, on its own");
+  assert.deepEqual(batches[0].filter((call) => isLabelRead(call.args)), [], "and neither is in the batch");
+  assert.equal(isLabelRead(left[0].args), true, "the first thing the claim asks is still the labels, on its own");
 });
 
 // #5039: THE CLAIMED ROWS ARE ONE READ NOW. B2's held rows used to be their own search (`--label in-progress --label session:<me>`), and B4's Regions

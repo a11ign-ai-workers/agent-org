@@ -144,7 +144,9 @@ function board(labels: string[], state = "OPEN") {
       held.labels = [...held.labels.filter((l) => !changed("--remove-label").includes(l)), ...changed("--add-label")];
       return "";
     }
-    return args[1] === "view" ? JSON.stringify({ number: 3643, title: "A row", state: held.state, labels: held.labels.map((name) => ({ name })) }) : "";
+    // agent-org#1302: the row's labels and state are read over REST, `gh api repos/<repo>/issues/<n>`, whose state is lower case
+    return args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/\d+$/.test(args[1] ?? "")
+      ? JSON.stringify({ number: 3643, title: "A row", state: held.state.toLowerCase(), labels: held.labels.map((name) => ({ name })) }) : "";
   };
   return { held, edits, run };
 }

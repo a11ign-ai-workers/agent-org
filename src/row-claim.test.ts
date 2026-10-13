@@ -104,14 +104,22 @@ function fakeGithub(seed: { first?: string[], second?: string[], bodies?: { firs
     if (cmd !== "gh") return fail(`${cmd} is not gh`);
     const flag = args.indexOf("--repo");
     const api = args[0] === "api" ? /^repos\/([^/]+\/[^/]+)\/issues\/(\d+)\/labels$/.exec(args[args.indexOf("PUT") + 1] ?? "") : null;
+    // agent-org#1302: the row's labels and state, and its comments as pages, are read over REST
+    const rest = args[0] === "api" ? /^repos\/([^/]+\/[^/]+)\/issues\/(\d+)(\/comments\?per_page=100)?$/.exec(args[1] ?? "") : null;
     // The by-label read of the claimed rows (#5039) names its repository as `-F owner=` / `-F name=`, not `--repo`: record THAT, so "every read goes to the tracker's repository" stays a reading.
     const argOf = (key: string) => args.find((a) => a.startsWith(`${key}=`))?.slice(key.length + 1);
     const byLabel = readsRowsByLabel(args) !== null;
-    const repo = flag >= 0 ? args[flag + 1] : api ? api[1] : byLabel ? `${argOf("owner")}/${argOf("name")}` : null;
+    const repo = flag >= 0 ? args[flag + 1] : api ? api[1] : rest ? rest[1] : byLabel ? `${argOf("owner")}/${argOf("name")}` : null;
     calls.push({ args, repo });
     if (byLabel) return connectionOf([]);
-    const number = Number(api ? api[2] : args[2]);
+    const number = Number(api ? api[2] : rest ? rest[2] : args[2]);
     const issue = issues.get(`${repo}#${number}`);
+    if (rest) {
+      if (!issue) return fail(`api ${number} -- Not Found in ${repo}`);
+      // REST answers the issue's state in lower case, and its comments as pages of the list (the `--paginate --slurp` shape)
+      if (rest[3]) return JSON.stringify([issue.comments.map((body) => ({ body }))]);
+      return JSON.stringify({ number, title: "A row", labels: issue.labels.map((name) => ({ name })), state: issue.state.toLowerCase() });
+    }
     if (args[0] === "issue" && args[1] === "view") {
       if (!issue) return fail(`issue view ${number} -- Could not resolve to an issue in ${repo}`);
       const fields = args[args.indexOf("--json") + 1];

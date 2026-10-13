@@ -240,7 +240,8 @@ test("#2403: `row-claim` creates `session:worker-<n>` before adding it, so the f
   let reads = 0;
   const run = (_cmd: string, args: string[]) => {
     calls.push(args);
-    if (args[1] === "view") {
+    // agent-org#1302: the row's labels are read over REST, `gh api repos/<repo>/issues/<n>`
+    if (args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/\d+$/.test(args[1] ?? "")) {
       reads += 1;
       const labels = reads === 1 ? [] : [{ name: CLAIM_LABEL }, { name: "session:worker-12" }, { name: STARTED_LABEL }];
       return JSON.stringify({ number: 2403, title: "A row", labels });

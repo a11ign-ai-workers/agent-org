@@ -71,15 +71,18 @@ const BODY_NAMING_NO_TEST = "## Region\nsrc/row-claim.ts\n\n## Acceptance\nnpx r
 const BODY_NAMING_A_TEST = BODY_NAMING_NO_TEST.replace("Tests-first: TBD", `Tests-first: ${TEST_PATH}`);
 
 /** A `gh` for one `ready` row with this body that records every write. */
+// agent-org#1302: the row's labels and state are read over REST, `gh api repos/<repo>/issues/<n>`, not `gh issue view`
+const isLabelRead = (args: string[]) => args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/\d+$/.test(args[1] ?? "");
+
 function claimStub(body: string, writes: string[][]) {
   let labelReads = 0;
   return (_cmd: string, args: string[]): string => {
     if (args[1] === "edit" || args[1] === "comment") writes.push(args);
-    if (args[1] === "view" && args.includes("number,title,labels,state")) {
+    if (isLabelRead(args)) {
       labelReads += 1;
       const mine = ["session:worker-5109", "in-progress"];
       const labels = labelReads === 1 ? ["ready"] : [...mine, "started", "was-ready"];
-      return JSON.stringify({ number: ROW, title: "A row", state: "OPEN", labels: labels.map((name) => ({ name })) });
+      return JSON.stringify({ number: ROW, title: "A row", state: "open", labels: labels.map((name) => ({ name })) });
     }
     if (args[1] === "view" && args.includes("body,labels")) return JSON.stringify({ body, labels: [{ name: "ready" }] });
     if (args[1] === "view") throw new Error("simulated: this fixture answers no blockedBy");

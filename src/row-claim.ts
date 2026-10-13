@@ -223,7 +223,7 @@ export function claimRecordComment({ session, branch, worktree, nothing, scope, 
  *
  * Newest wins, and only comments carrying the marker are read -- a row can be claimed, released and
  * claimed again, and each of those appended its own record. `comments` is oldest-first, the order
- * `gh issue view --json comments` returns.
+ * the REST comments list returns (agent-org#1302).
  * @param {string[]} comments comment bodies, oldest first
  * @returns {{ branch: string | null, worktree: string | null, recorded: boolean, scope: string | null, nothing?: true }} `nothing` is present only for a
  *   #3407 nothing-claim, so every reading that does not know of it is unchanged. `scope` (#4739) is the `Claimed-scope:` hash, `null` for no
@@ -312,7 +312,9 @@ function readsOnce(run: typeof defaultRun): typeof defaultRun {
   const answers: Map<string, string> = new Map();
   return (cmd, args) => {
     // #5039: the claimed rows are a connection read now, not an `issue list`, and the claim asks for them from three places (B4, B2 and the sweep freeze).
-    const isRowRead = cmd === "gh" && ((args[0] === "issue" && (args[1] === "view" || args[1] === "list")) || isRowsByLabelRead(args));
+    // agent-org#1302: a row's own labels and comments are read over REST now, so the REST read is one of the reads this answers once too.
+    const isRowRead = cmd === "gh" && ((args[0] === "issue" && (args[1] === "view" || args[1] === "list")) || isRowsByLabelRead(args)
+      || (args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/\d+(\/comments)?(\?|$)/.test(args[1] ?? "")));
     if (!isRowRead) return run(cmd, args);
     const key = JSON.stringify(args);
     const known = answers.get(key);
@@ -377,7 +379,10 @@ function createdTogether(argvs: string[][], batch: typeof runBatch): boolean {
 function ghSaid(cause: unknown): string {
   const stderr = String((cause as { stderr?: unknown })?.stderr ?? "");
   const line = stderr.split("\n").map((text) => text.trim()).find((text) => text !== "");
-  return line === undefined ? "" : ` (gh said: ${line.slice(0, 200)})`;
+  if (line === undefined) return "";
+  // agent-org#1302: a rate limit names its cause, so every refusal of one exhausted pool reads as one cause on the ledger line.
+  const pool = /rate limit/i.test(line) ? "api-pool-exhausted; " : "";
+  return ` (${pool}gh said: ${line.slice(0, 200)})`;
 }
 
 /**
@@ -397,8 +402,8 @@ function ghSaid(cause: unknown): string {
 export function fetchLabels(issueNumber: number, { run = defaultRun, repo = REPO }: { run?: typeof defaultRun; repo?: string; } = {}): IssueClaim {
   let raw: string;
   try {
-    raw = run("gh", ["issue", "view", String(issueNumber), "--repo", repo,
-      "--json", "number,title,labels,state"]);
+    // agent-org#1302: REST, not `gh issue view` (GraphQL). An exhausted GraphQL pool refused every claim it read; REST is another pool (#1113).
+    raw = run("gh", ["api", `repos/${repo}/issues/${issueNumber}`]);
   } catch (cause) {
     throw new Error(`row-claim: could not read issue #${issueNumber} from ${repo} -- refusing to guess `
       + `whether it is claimed${ghSaid(cause)}. ${(cause as Error).message}`, { cause });
@@ -423,11 +428,11 @@ export function fetchLabels(issueNumber: number, { run = defaultRun, repo = REPO
     }
     return name;
   });
-  // #752: OPTIONAL, DELIBERATELY -- every existing caller/test that mocks a `gh issue view` response
-  // without a `state` field must keep behaving exactly as it did (the open case), so an absent or
-  // unrecognised value is treated as "not verified closed" rather than refused outright. `declineRow`
-  // is the one place this actually changes behaviour, and only when `state` is the literal `"CLOSED"`.
-  const state = obj.state === "OPEN" || obj.state === "CLOSED" ? obj.state : undefined;
+  // #752: OPTIONAL, DELIBERATELY -- every existing caller/test that mocks a read without a `state` field must keep behaving exactly as it did
+  // (the open case), so an absent or unrecognised value is treated as "not verified closed" rather than refused outright. `declineRow`
+  // is the one place this actually changes behaviour, and only when `state` is the literal `"CLOSED"`. REST answers `open`/`closed`
+  // in lower case, which is mapped to the upper case every caller reads (agent-org#1302).
+  const state = obj.state === "open" ? "OPEN" : obj.state === "closed" ? "CLOSED" : undefined;
   return { number: obj.number, title: obj.title, labels: names, state };
 }
 
@@ -446,7 +451,9 @@ export function fetchLabels(issueNumber: number, { run = defaultRun, repo = REPO
 export function fetchClaimComments(issueNumber: number, { run = defaultRun, repo = REPO }: { run?: typeof defaultRun; repo?: string; } = {}): string[] {
   let raw: string;
   try {
-    raw = run("gh", ["issue", "view", String(issueNumber), "--repo", repo, "--json", "comments"]);
+    // agent-org#1302: REST, as `fetchLabels` is. `--paginate --slurp` joins the pages into one array of pages (`--paginate` alone prints one
+    // array per page back to back, which is not JSON past the first page), and the last 100 are kept, as GraphQL's `comments(last: 100)` gave them.
+    raw = run("gh", ["api", `repos/${repo}/issues/${issueNumber}/comments?per_page=100`, "--paginate", "--slurp"]);
   } catch (cause) {
     throw new Error(`row-claim: could not read issue #${issueNumber}'s comments from ${repo} -- refusing `
       + `to guess what branch or worktree its claim recorded${ghSaid(cause)}. ${(cause as Error).message}`,
@@ -459,11 +466,12 @@ export function fetchClaimComments(issueNumber: number, { run = defaultRun, repo
     throw new Error(`row-claim: gh's comment response for issue #${issueNumber} was not JSON -- refusing `
       + `to guess. First 200 chars: ${raw.slice(0, 200)}`, { cause });
   }
-  const comments = (parsed as { comments?: unknown })?.comments;
-  if (!Array.isArray(comments)) {
-    throw new Error(`row-claim: gh's response for issue #${issueNumber} carried no comments array -- `
+  const pages = Array.isArray(parsed) && parsed.every(Array.isArray) ? parsed : null;
+  if (pages === null) {
+    throw new Error(`row-claim: gh's response for issue #${issueNumber}'s comments was not a list of pages -- `
       + `refusing to guess. Got: ${JSON.stringify(parsed).slice(0, 300)}`);
   }
+  const comments = pages.flat().slice(-100);
   return comments.map((c: unknown) => {
     const body = (c as { body?: unknown })?.body;
     return typeof body === "string" ? body : "";

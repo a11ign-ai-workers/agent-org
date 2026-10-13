@@ -89,6 +89,8 @@ function fakeGh(world: World, calls: string[][] = []) {
     if (byLabel?.label === "in-progress") {
       return connectionOf((world.claimed ?? []).map((row) => ({ number: row.number, labels: [{ name: "in-progress" }], body: bodyOf(...row.files), blockedBy: { nodes: [] } })));
     }
+    // agent-org#1302: the asker's labels and state are read over REST
+    if (args[0] === "api" && args[1] === `repos/${TRACKER}/issues/${ASKER}`) return JSON.stringify({ number: ASKER, title: "A row", labels: [{ name: "ready" }], state: "open" });
     if (args[0] === "api") return apiAnswer(world, args);
     if (args[0] === "pr" && args[1] === "list") {
       return JSON.stringify(args.includes(AGENT_ORG.repo) ? (world.prs ?? []).map((pr) => ({ number: pr.number, changedFiles: 1, files: [{ path: pr.path }],

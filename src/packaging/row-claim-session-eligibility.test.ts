@@ -56,6 +56,15 @@ function writesLabels(args: string[]): boolean {
     || (args[0] === "api" && args[1] === "--method" && args[2] === "PUT" && /\/labels$/.test(args[3]));
 }
 
+/** agent-org#1302: `fetchLabels` reads the claimed row over REST, `gh api repos/<repo>/issues/<n>`, whose state is lower case. */
+function isRowLabelRead(args: string[]): boolean {
+  return args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/\d+$/.test(args[1] ?? "");
+}
+
+function restRowAnswer(args: string[], labels: { name: string }[] = []): string {
+  return JSON.stringify({ number: Number((args[1] ?? "").split("/").pop()), title: "A row", labels, state: "open" });
+}
+
 /** #989's two reads for a held row: does its Region name files, and does it have sub-issues. */
 function heldRowRoute(routes: Routes, args: string[]): string | null {
   if (args[0] === "api" && /\/sub_issues$/.test(args[1] ?? "")) return routes.subIssues ?? "[]";
@@ -89,6 +98,7 @@ function routedRun(routes: Routes) {
   return (_cmd: string, args: string[]): string => {
     const held = heldRowRoute(routes, args);
     if (held !== null) return held;
+    if (isRowLabelRead(args)) return restRowAnswer(args);
     if (readsRowsByLabel(args) !== null) return claimedRowsAnswer(routes.issueList, routes.session ?? "worker-judge");
     if (args[0] === "issue" && args[1] === "list") return "[]";
     if (args[0] === "api" && args[1] === "graphql") {
@@ -217,6 +227,7 @@ test("MUTATION TARGET: --blocked-by=#N must not silently release a blockedBy-edg
   // A custom `run`, not `routedRun`: `claimRow` also calls `fetchLabels` (`--json number,title,labels,state`)
   // ahead of `sessionEligibilityReason`, which `routedRun` (built for that function alone) does not answer.
   const run = (cmd: string, args: string[]): string => {
+    if (isRowLabelRead(args)) return restRowAnswer(args);
     if (args[0] === "issue" && args[1] === "view") {
       const fields = args[args.indexOf("--json") + 1];
       if (fields === "blockedBy") {
@@ -267,6 +278,7 @@ test("a failed lookup anywhere fails OPEN, never blocking a claim on a network e
 test("claimRow refuses a genuinely new claim when the session holds a row IN BUILD", () => {
   let editCalled = false;
   const run = (cmd: string, args: string[]) => {
+    if (isRowLabelRead(args)) return restRowAnswer(args);
     if (args[0] === "issue" && args[1] === "view") {
       // #989 reads the HELD row's body (does its Region name files); `decideClaim` reads the CLAIMED row's.
       return args.includes("472")
@@ -294,6 +306,7 @@ test("claimRow refuses a genuinely new claim when the session holds a row IN BUI
 test("claimRow proceeds normally when eligibility is silent -- unchanged from before B2/B4", () => {
   let editCalled = false;
   const run = (cmd: string, args: string[]) => {
+    if (isRowLabelRead(args)) return restRowAnswer(args);
     if (args[0] === "issue" && args[1] === "view") {
       return JSON.stringify({ number: 461, title: "A row", labels: [] });
     }
@@ -309,6 +322,7 @@ test("claimRow proceeds normally when eligibility is silent -- unchanged from be
 test("RESUMING a row this session already holds skips eligibility entirely -- not a new front", () => {
   let listAsked = false;
   const run = (cmd: string, args: string[]) => {
+    if (isRowLabelRead(args)) return restRowAnswer(args, [{ name: CLAIM_LABEL }, { name: "session:worker-judge" }]);
     if (readsRowsByLabel(args) !== null || (args[0] === "issue" && args[1] === "list")) { listAsked = true; }
     if (args[0] === "issue" && args[1] === "view") {
       return JSON.stringify({ number: 461, title: "A row",
@@ -331,6 +345,7 @@ test("RESUMING a row this session already holds still refuses on the row's own o
   let listAsked = false;
   let editCalled = false;
   const run = (cmd: string, args: string[]) => {
+    if (isRowLabelRead(args)) return restRowAnswer(args, [{ name: CLAIM_LABEL }, { name: "session:worker-judge" }]);
     if (readsRowsByLabel(args) !== null) { listAsked = true; return connectionOf([]); }
     if (args[0] === "issue" && args[1] === "list") { listAsked = true; return "[]"; }
     if (writesLabels(args)) { editCalled = true; return ""; }
@@ -378,6 +393,7 @@ function blockedByRun(routes: { rowLabels?: string, blockerState?: string, comme
   onEdit?: () => void, onComment?: (body: string) => void }) {
   return (cmd: string, args: string[]): string => {
     const shape = args.slice(0, 2).join(" ");
+    if (isRowLabelRead(args)) return restRowAnswer(args);
     if (writesLabels(args)) { routes.onEdit?.(); return ""; }
     if (shape === "issue comment") { routes.onComment?.(args[args.length - 1]); return ""; }
     if (readsRowsByLabel(args) !== null) return heldRows("worker-audit", 472);
@@ -417,6 +433,7 @@ test("#989: --blocked-by cannot excuse a row IN BUILD, and says why rather than 
   // was never given produce the same output, which is the shape this repo has the longest record of.
   const run = (cmd: string, args: string[]): string => {
     const shape = args.slice(0, 2).join(" ");
+    if (isRowLabelRead(args)) return restRowAnswer(args);
     if (readsRowsByLabel(args) !== null) return heldRows("worker-audit", 472);
     if (shape === "api graphql") {
       return JSON.stringify({ data: { repository: { issue: {
@@ -446,6 +463,7 @@ test("MUTATION TARGET: --blocked-by given while the refusal is B4 (file overlap)
   const body = "## Region\n\n`packages/agent-org/src/merge-guard.ts`.\n\n## Acceptance\n\nSomething checkable.\n\n"
     + "## Open-check\n\nSomething runnable.\n";
   const run = (cmd: string, args: string[]): string => {
+    if (isRowLabelRead(args)) return restRowAnswer(args);
     // `issue view` is asked for two different `--json` shapes here (labels, then `body` for both #707's
     // template check and B4's own region lookup) -- routed by the requested field, since answering both
     // with the same object is what silently skipped B4 entirely the first time this test was written.
@@ -654,11 +672,7 @@ test("#2769 sessionEligibilityReason: the `Closes: none` PR from the adopted bra
 function splitClaimRun() {
   const routed = routedRun(splitRoutes);
   return (cmd: string, args: string[]): string => {
-    const fields = args[args.indexOf("--json") + 1] ?? "";
-    // #732: the row's body is asked as `body,labels`, so "mentions labels" no longer says "this is the claim's own label read".
-    if (args[0] === "issue" && args[1] === "view" && /labels/.test(fields) && !fields.split(",").includes("body")) {
-      return JSON.stringify({ number: 2760, title: "A row", labels: [] });
-    }
+    if (isRowLabelRead(args)) return restRowAnswer(args);
     return routed(cmd, args);
   };
 }
