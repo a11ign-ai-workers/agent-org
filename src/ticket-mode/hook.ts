@@ -9,13 +9,15 @@
 //
 // PRE-TOOL-USE: WHAT ONLY A PERSON DOES. A worker opens a DRAFT pull request and stops. Marking it ready, requesting a review, merging, force-pushing,
 // running a workflow and posting to Slack are the person's, and so is every connector: the worker has its ticket in its brief and needs none.
-// A refusal is exit 2 with the reason on stderr, which Claude Code hands back to the model.
+// The host file's `tickets.deny` adds this machine's own refusals, which the pool copies beside the outcome file. A refusal is exit 2 with the
+// reason on stderr, which Claude Code hands back to the model.
 //
 // IT FAILS OPEN, OUT LOUD, for a payload or a count it cannot read: a hook that refused on what it could not read would stop every worker.
 import { existsSync, readFileSync, realpathSync, writeFileSync } from "node:fs";
 import { join } from "node:path";
 import { pathToFileURL } from "node:url";
-import { OUTCOME_FILE, STOP_COUNT_FILE } from "./worker-files.ts";
+import type { DenyRule } from "./settings.ts";
+import { DENY_FILE, OUTCOME_FILE, STOP_COUNT_FILE } from "./worker-files.ts";
 
 export type HookResult = Readonly<{ code: 0 | 2; say: readonly string[] }>;
 
@@ -24,8 +26,10 @@ export const MAX_STOP_REFUSALS = 2;
 const ALLOW: HookResult = { code: 0, say: [] };
 const refuse = (reason: string): HookResult => ({ code: 2, say: [`ticket-mode: ${reason}`] });
 
+type Refusal = Readonly<{ pattern: RegExp; why: string }>;
+
 /** Each command a ticket-mode worker may not run, and why. Matched against the Bash tool's whole command line. */
-const BASH_REFUSALS: readonly Readonly<{ pattern: RegExp; why: string }>[] = [
+const BASH_REFUSALS: readonly Refusal[] = [
   { pattern: /\bgh\s+pr\s+(ready|merge|review)\b/, why: "marking ready, merging and reviewing are the person's" },
   { pattern: /--add-reviewer\b|--reviewer\b/, why: "requesting a review is the person's" },
   { pattern: /\bgh\s+workflow\s+run\b/, why: "running a workflow is the person's" },
@@ -33,13 +37,13 @@ const BASH_REFUSALS: readonly Readonly<{ pattern: RegExp; why: string }>[] = [
   { pattern: /\bassumego\b/, why: "it prints credentials into the session" },
 ];
 
-const SKILL_REFUSALS: readonly Readonly<{ pattern: RegExp; why: string }>[] = [
+const SKILL_REFUSALS: readonly Refusal[] = [
   { pattern: /tool-screenshot-app/, why: "it kills whatever holds a fixed port, which is another worker's server" },
   { pattern: /post-pr-to-slack/, why: "announcing a pull request is the person's" },
 ];
 
-/** The PreToolUse verdict for one tool call. PURE. */
-export function toolVerdict(toolName: string, input: Record<string, unknown>): HookResult {
+/** The PreToolUse verdict for one tool call. `machine` holds this machine's own Bash refusals, after the built-in ones. PURE. */
+export function toolVerdict(toolName: string, input: Record<string, unknown>, machine: readonly Refusal[] = []): HookResult {
   if (toolName.startsWith("mcp__")) return refuse(`${toolName} is a connector; a ticket-mode worker has its ticket in its brief and uses none`);
   if (toolName === "Skill") {
     const skill = String(input.skill ?? input.name ?? "");
@@ -49,8 +53,23 @@ export function toolVerdict(toolName: string, input: Record<string, unknown>): H
   if (toolName !== "Bash") return ALLOW;
   const command = String(input.command ?? "");
   if (/\bgh\s+pr\s+create\b/.test(command) && !/--draft\b/.test(command)) return refuse("open the pull request as a draft: `gh pr create --draft`");
-  const hit = BASH_REFUSALS.find(({ pattern }) => pattern.test(command));
+  const hit = [...BASH_REFUSALS, ...machine].find(({ pattern }) => pattern.test(command));
   return hit ? refuse(`refused, because ${hit.why}: ${command.split("\n")[0].slice(0, 120)}`) : ALLOW;
+}
+
+/**
+ * This machine's refusals, from the copy of `tickets.deny` beside the outcome file. None when there is no copy. A copy it cannot read is
+ * reported and skipped, so the built-in refusals still apply.
+ */
+export function machineRefusals(ticketDir: string, read: (path: string) => string = (p) => readFileSync(p, "utf8")): { refusals: readonly Refusal[]; note?: string } {
+  const file = join(ticketDir, DENY_FILE);
+  try {
+    const rules = JSON.parse(read(file)) as DenyRule[];
+    return { refusals: rules.map(({ pattern, reason }) => ({ pattern: new RegExp(pattern), why: reason })) };
+  } catch (err) {
+    if ((err as NodeJS.ErrnoException)?.code === "ENOENT") return { refusals: [] };
+    return { refusals: [], note: `ticket:hook: could not read ${file}, so only the built-in refusals apply.` };
+  }
 }
 
 /** The Stop verdict: allowed once the outcome file is there, refused with its path otherwise, up to {@link MAX_STOP_REFUSALS} in a row. */
@@ -77,7 +96,9 @@ export function main(stdin: string, argv: string[]): HookResult {
   try {
     if (event === "stop") return stopVerdict(ticketDir);
     const payload = JSON.parse(stdin) as { tool_name?: string; tool_input?: Record<string, unknown> };
-    return toolVerdict(String(payload.tool_name ?? ""), payload.tool_input ?? {});
+    const { refusals, note } = machineRefusals(ticketDir);
+    const verdict = toolVerdict(String(payload.tool_name ?? ""), payload.tool_input ?? {}, refusals);
+    return note === undefined ? verdict : { ...verdict, say: [note, ...verdict.say] };
   } catch (err) {
     return { code: 0, say: [`ticket:hook: could not read the ${event} payload (${String((err as Error)?.message ?? err).split("\n")[0]}), so it is ALLOWED.`] };
   }
