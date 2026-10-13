@@ -32,12 +32,13 @@ const FOUR = ["in-progress", "session:worker-3566", "started", "was-ready"];
 const fieldsOf = (args: string[]) => args[args.indexOf("--json") + 1] ?? "";
 const isCreate = (args: string[]) => args[0] === "label" && args[1] === "create";
 const isPut = (args: string[]) => args[0] === "api" && args.includes("--method") && args.includes("PUT");
-const isLabelRead = (args: string[]) => args[0] === "issue" && args[1] === "view" && fieldsOf(args) === "number,title,labels,state";
+const isLabelRead = (args: string[]) => args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/\d+$/.test(args[1] ?? ""); // agent-org#1302: REST, not `issue view`
 
 /** What `gh` answers, by argv: a ready row nothing stands in the way of. `refuse` throws for a call naming one of the words. */
 function ghAnswer(args: string[], refuse: string[] = []): string {
   if (refuse.some((word) => args.includes(word))) throw Object.assign(new Error("Command failed: gh"), { status: 1, stderr: "HTTP 502", stdout: "" });
   if (readsRowsByLabel(args) !== null) return connectionOf([]);
+  if (isLabelRead(args)) return JSON.stringify({ number: 3566, title: "A row", labels: [{ name: "ready" }], state: "open" });
   if (args[0] === "issue" && args[1] === "view") {
     if (fieldsOf(args) === "blockedBy") return JSON.stringify({ blockedBy: { nodes: [] } });
     if (fieldsOf(args) === "body") return JSON.stringify({ body: BODY });
@@ -155,12 +156,15 @@ function twoRepos() {
   const repoOf = (args: string[]) => {
     const flag = args.indexOf("--repo");
     if (flag >= 0) return args[flag + 1];
-    return /^repos\/([^/]+\/[^/]+)\//.exec(args[args.indexOf("PUT") + 1] ?? "")?.[1];
+    return /^repos\/([^/]+\/[^/]+)\//.exec(args[args.indexOf("PUT") + 1] ?? "")?.[1] ?? /^repos\/([^/]+\/[^/]+)\//.exec(args[1] ?? "")?.[1];
   };
   const answer = (args: string[]): string => {
     const repo = repoOf(args);
     calls.push({ args, repo });
     if (readsRowsByLabel(args) !== null) return connectionOf([]);
+    // agent-org#1302: the row's labels and comments are read over REST
+    if (isLabelRead(args)) return JSON.stringify({ number: 481, title: "A row", labels: (labels.get(`${repo}#481`) ?? []).map((name) => ({ name })), state: "open" });
+    if (args[0] === "api" && args[1]?.endsWith("/comments?per_page=100")) return JSON.stringify([(comments.get(`${repo}#481`) ?? []).map((body) => ({ body }))]);
     if (args[0] === "issue" && args[1] === "view") {
       if (fieldsOf(args) === "blockedBy") return JSON.stringify({ blockedBy: { nodes: [] } });
       if (fieldsOf(args) === "body") return JSON.stringify({ body: BODY });

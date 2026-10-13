@@ -161,12 +161,14 @@ describe("the seat is never offered a row, and cannot claim one", () => {
     const calls = ([] as string[][]);
     const run = (cmd: string, args: string[]) => {
       calls.push([cmd, ...args]);
-      return JSON.stringify({ number: 3415, title: "t", state: "OPEN", labels: [{ name: "ready" }] });
+      // agent-org#1302: the row is read over REST, which answers its state in lower case
+      return JSON.stringify({ number: 3415, title: "t", state: "open", labels: [{ name: "ready" }] });
     };
     const got = claimRow(3415, SEAT, { run, persistent: true });
     assert.equal(got.claimed, false);
     assert.match(String((got as any).reason), /persistent/);
-    assert.deepEqual(calls.map((c) => c[1]), ["issue"], "one read of the row and nothing written");
+    assert.deepEqual(calls.map((c) => c[1]), ["api"], "one read of the row and nothing written");
+    assert.match(calls[0][2], /^repos\/[^/]+\/[^/]+\/issues\/3415$/, "the read is REST, not `issue view`");
   });
 
   test("(4) CONTROL: the refusal is the fact's, not every session's", () => {

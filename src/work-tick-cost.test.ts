@@ -411,6 +411,9 @@ test("#3566: liveClaudeTurns does not read a transcript no write has touched wit
   }
 });
 
+/** agent-org#1302: the row's labels and state are read over REST, `gh api repos/<repo>/issues/<n>`, not `gh issue view`. */
+const isLabelRead = (args: string[]) => args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/\d+$/.test(args[1] ?? "");
+
 /** A `gh` for one `ready` row whose body states its template fields and whose `blockedBy` is empty; every call it is asked is kept, in order. */
 function claimReads({ failBody = false } = {}) {
   const calls: string[][] = [];
@@ -418,10 +421,11 @@ function claimReads({ failBody = false } = {}) {
   const run = (_cmd: string, args: string[]): string => {
     calls.push(args);
     const json = args[args.indexOf("--json") + 1];
-    if (args[1] === "view" && json === "number,title,labels,state") {
+    // agent-org#1302: the row's labels and state are read over REST, `gh api repos/<repo>/issues/<n>`, whose state is lower case
+    if (isLabelRead(args)) {
       labelReads += 1;
       const labels = labelReads === 1 ? ["ready"] : ["in-progress", "session:worker-9", "started", "was-ready"];
-      return JSON.stringify({ number: 77, title: "A row", state: "OPEN", labels: labels.map((name) => ({ name })) });
+      return JSON.stringify({ number: 77, title: "A row", state: "open", labels: labels.map((name) => ({ name })) });
     }
     // #732: the body is asked as `body,labels` (one argv for the template check's read and B4's Region lookup), so match on the field, not the string.
     if (args[1] === "view" && json.split(",").includes("body")) {
@@ -445,7 +449,7 @@ test("#3566: one claim reads the row's body and its blockedBy edge ONCE each, an
   assert.equal(got.claimed, true, JSON.stringify(got));
   assert.equal(rowReads(calls, "body"), 1, "the template check and B4's Region lookup both ask for the body");
   assert.equal(rowReads(calls, "blockedBy"), 1, "the claim's own check and B2/B4's both ask for the edge");
-  assert.equal(rowReads(calls, "number,title,labels,state"), 3, "the labels are NOT remembered: before the checks, before the write, after it");
+  assert.equal(calls.filter(isLabelRead).length, 3, "the labels are NOT remembered: before the checks, before the write, after it");
 });
 
 test("#3566 CONTROL: a read that FAILED is retried, not remembered, so a failed body read still reaches the second check", () => {

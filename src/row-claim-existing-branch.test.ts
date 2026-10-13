@@ -56,12 +56,12 @@ function seedBranch(fx: ReturnType<typeof repository>, name: string, { push }: {
 }
 
 /**
- * The real `git` of the scratch checkout, and `gh` answering the claim records in `records`, oldest first, as `gh issue view --json comments`
- * does. Nothing else is faked: the branch, the worktree and the origin are the real ones.
+ * The real `git` of the scratch checkout, and `gh` answering the claim records in `records`, oldest first, as `gh api .../comments` does, one page
+ * of them (agent-org#1302: the comments are read over REST now). Nothing else is faked: the branch, the worktree and the origin are the real ones.
  */
 function runWith(records: string[]) {
   return (cmd: string, args: string[]): string => {
-    if (cmd === "gh") return JSON.stringify({ comments: records.map((body) => ({ body })) });
+    if (cmd === "gh") return JSON.stringify([records.map((body) => ({ body }))]);
     return execFileSync(cmd, args, { encoding: "utf8", env: sandboxGitEnv(), stdio: ["ignore", "pipe", "pipe"] });
   };
 }

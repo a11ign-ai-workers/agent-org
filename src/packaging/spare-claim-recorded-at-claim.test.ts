@@ -34,8 +34,8 @@ fs.appendFileSync(process.env.GH_STATE + ".log", args.join(" ") + "\\n");
 const state = process.env.GH_STATE;
 const read = () => (fs.existsSync(state) ? JSON.parse(fs.readFileSync(state, "utf8")) : {});
 const labelsOf = (number) => read()[number] ?? ["ready"];
-if (args[0] === "issue" && args[1] === "view" && args.join(" ").includes("number,title,labels,state")) {
-  process.stdout.write(JSON.stringify({ number: Number(args[2]), title: "A row", state: "OPEN", labels: labelsOf(args[2]).map((name) => ({ name })) }));
+if (args[0] === "api" && /\\/issues\\/[0-9]+$/.test(args[1] ?? "")) {
+  process.stdout.write(JSON.stringify({ number: Number(args[1].split("/").pop()), title: "A row", state: "open", labels: labelsOf(args[1].split("/").pop()).map((name) => ({ name })) }));
 } else if (args[0] === "issue" && args[1] === "list") {
   const session = args[args.indexOf("--label") + 1];
   const held = Object.entries(read()).filter(([, labels]) => labels.includes(session)).map(([number]) => ({ number: Number(number) }));

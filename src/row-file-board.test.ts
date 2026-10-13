@@ -264,6 +264,11 @@ function fakeGitHub(options: { itemAddLandsOn?: { owner: string; number: number 
     if (args[0] === "label" && args[1] === "create") { gh.ensured.push(`${flag("--repo")}:${args[2]}`); return ""; }
     if (args[0] === "issue" && args[1] === "edit") { gh.edits.push(args); return ""; }
     if (args[0] === "api" && args[1] === "graphql") return graphql(args[args.length - 1]);
+    // agent-org#1302: the read-back of a row's labels and state is REST, `gh api repos/<repo>/issues/<n>`, whose state is lower case
+    if (args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/\d+$/.test(args[1] ?? "")) {
+      const [, owner, repoName] = args[1].split("/");
+      return JSON.stringify({ number: 900, title: "t", state: "open", labels: labelsIn(`${owner}/${repoName}`).map((label) => ({ name: label })) });
+    }
     if (args[0] === "issue" && args[1] === "view" && args.includes("body")) return "## Region\n\nFiled-by: worker-4078\n";
     if (args[0] === "issue" && args[1] === "view" && args.includes("milestone")) return milestoneIn.get(flag("--repo")) ?? "";
     if (args[0] === "issue" && args[1] === "view") {

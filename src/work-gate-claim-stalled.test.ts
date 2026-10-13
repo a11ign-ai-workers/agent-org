@@ -354,10 +354,11 @@ test("#3407 (1) `claimRow` with no branch and no worktree POSTS the nothing-clai
     let reads = 0;
     const run = (_cmd: string, args: string[]): string => {
       if (args[1] === "comment") bodies.push(args[args.indexOf("--body") + 1]);
-      if (args[1] === "view" && args.includes("number,title,labels,state")) {
+      // agent-org#1302: the row's labels and state are read over REST, `gh api repos/<repo>/issues/<n>`, whose state is lower case
+      if (args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/\d+$/.test(args[1] ?? "")) {
         reads += 1;
         const labels = reads === 1 ? ["ready"] : ["session:worker-3407", "in-progress", "started", "was-ready"];
-        return JSON.stringify({ number: 3407, title: "A row", state: "OPEN", labels: labels.map((name) => ({ name })) });
+        return JSON.stringify({ number: 3407, title: "A row", state: "open", labels: labels.map((name) => ({ name })) });
       }
       if (args[1] === "view") throw new Error("simulated: no body and no blockedBy");
       return "[]";
@@ -810,7 +811,9 @@ function releaseBoard(labels: string[] = ["in-progress", "session:worker-7", "st
       board.labels = [...board.labels.filter((l) => !changed("--remove-label").includes(l)), ...changed("--add-label")];
       return "";
     }
-    return args[1] === "view" ? JSON.stringify({ number: 2416, title: "A row", state: "OPEN", labels: board.labels.map((name) => ({ name })) }) : "";
+    // agent-org#1302: the row's labels and state are read over REST, `gh api repos/<repo>/issues/<n>`, whose state is lower case
+    return args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/\d+$/.test(args[1] ?? "")
+      ? JSON.stringify({ number: 2416, title: "A row", state: "open", labels: board.labels.map((name) => ({ name })) }) : "";
   };
   const edits = () => calls.filter((a) => a[1] === "edit").map((a) => ({
     removed: a.flatMap((x, i) => (x === "--remove-label" ? [a[i + 1]] : [])), added: a.flatMap((x, i) => (x === "--add-label" ? [a[i + 1]] : [])) }));

@@ -50,14 +50,17 @@ test("#2407 (3) POSITIVE CONTROLS: the same fixture is not refused with no other
 // --- THROUGH `claimRow`: NOTHING IS WRITTEN ON A REFUSAL, AND RESUMING IS NOT A NEW ROW ---
 
 /** A `gh` for one row that is `ready`, and (once written to) carries the claiming session's labels. */
+// agent-org#1302: the row's labels and state are read over REST, `gh api repos/<repo>/issues/<n>`, not `gh issue view`
+const isLabelRead = (args: string[]) => args[0] === "api" && /^repos\/[^/]+\/[^/]+\/issues\/\d+$/.test(args[1] ?? "");
+
 function claimStub(session: string, { alreadyMine = false } = {}) {
   let labelReads = 0;
   return (_cmd: string, args: string[]): string => {
-    if (args[1] === "view" && args.includes("number,title,labels,state")) {
+    if (isLabelRead(args)) {
       labelReads += 1;
       const mine = [`session:${session}`, "in-progress"];
       const labels = labelReads === 1 ? ["ready", ...(alreadyMine ? mine : [])] : [...mine, "started", "was-ready"];
-      return JSON.stringify({ number: ROW, title: "A row", state: "OPEN", labels: labels.map((name) => ({ name })) });
+      return JSON.stringify({ number: ROW, title: "A row", state: "open", labels: labels.map((name) => ({ name })) });
     }
     // Body and `blockedBy` reads fail: those lookups return null and the claim's checks fail OPEN, which is what lets
     // this fixture reach the one check under test without a canned answer for each.
@@ -98,8 +101,9 @@ const SESSIONS_JSON = ".agent-org/roles/sessions.json";
 // the rows the instance holds NOW, each carrying its `session:<me>` label, which the claim tells from other instances' rows by itself.
 const GH_READY_ROW = `#!/bin/sh
 case "$*" in
-  *number,title,labels,state*) printf '%s' '{"number":${ROW},"title":"A row","state":"OPEN","labels":[{"name":"ready"}]}' ;;
   *"api graphql"*"label=in-progress"*) printf '%s' "\${HELD_ROWS}" ;;
+  *"api repos/"*"/issues/"*"/"*) exit 1 ;;
+  *"api repos/"*"/issues/"*) printf '%s' '{"number":${ROW},"title":"A row","state":"open","labels":[{"name":"ready"}]}' ;;
   *) exit 1 ;;
 esac
 `;
