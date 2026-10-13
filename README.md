@@ -75,7 +75,9 @@ The org (the gate, rows, the board, the reviewer) decides its own work. Ticket m
 takes them one each. `agent-org ticket:serve` starts a board on `127.0.0.1` and prints its URL, which carries a one-time token.
 
 - **Pick.** Your assigned Linear tickets that are not done or canceled, grouped by status the way Linear shows them, with Select All per
-  group and for the page. Choose the repositories each ticket goes to (one or several), the model and the effort, then Queue.
+  group and for the page. Filter by Linear project (several at once) or by search, and fold any status group; both are remembered in the
+  browser. Under **Work in**, tick the repositories the selected tickets are worked in: each gets a worktree in every one, and its worker
+  can change only those. Choose the model and the effort, then Queue.
 - **Board.** Queued, Running, Draft PR, Needs human and Failed. A card can be removed while queued, stopped while running, and retried
   once it has failed. The number of workers at once can be changed live.
 - **Paused until you start it.** A new queue is paused, so queueing a ticket never also starts it: queue what you want, then press

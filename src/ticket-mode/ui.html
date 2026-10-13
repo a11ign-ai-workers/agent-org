@@ -18,6 +18,16 @@
   input[type="search"] { width: 320px; max-width: 100%; padding: 6px 10px; border: 1px solid var(--line); border-radius: 6px; background: var(--panel); color: var(--text); }
   .group { background: var(--panel); border: 1px solid var(--line); border-radius: 8px; margin: 12px 0; }
   .group > h2 { font-size: 13px; margin: 0; padding: 8px 12px; border-bottom: 1px solid var(--line); display: flex; gap: 8px; align-items: center; }
+  .group.collapsed > h2 { border-bottom: 0; }
+  .group.collapsed > .row { display: none; }
+  .fold { background: none; border: 0; padding: 0 2px; color: var(--muted); cursor: pointer; font: inherit; width: 16px; }
+  .group > h2 .name { cursor: pointer; }
+  .projects { display: flex; gap: 6px; flex-wrap: wrap; align-items: center; margin: 4px 0 8px; }
+  .projects .label { color: var(--muted); margin-right: 4px; }
+  .chip { font: inherit; font-size: 12px; padding: 3px 10px; border-radius: 999px; border: 1px solid var(--line); background: var(--panel); color: var(--text); cursor: pointer; }
+  .chip[aria-pressed="true"] { background: var(--accent); border-color: var(--accent); color: #fff; }
+  .chip .n { opacity: .7; margin-left: 4px; }
+  .hint { color: var(--muted); font-size: 12px; }
   .group > h2 .count { color: var(--muted); font-weight: 400; }
   .row { display: grid; grid-template-columns: 24px 96px 1fr auto auto; gap: 10px; align-items: center; padding: 6px 12px; border-top: 1px solid var(--line); }
   .row:first-of-type { border-top: 0; }
@@ -63,6 +73,7 @@
       <label><input id="all" type="checkbox"> Select all shown</label>
       <span id="loaded" class="pill"></span>
     </div>
+    <div class="projects" id="projects"></div>
     <div id="paused-note" class="notice" hidden>Workers are paused. Tickets you queue wait on the Board until you start workers there.</div>
     <div id="groups"></div>
   </section>
@@ -76,7 +87,11 @@
   </section>
 </main>
 <footer id="queue-bar">
-  <fieldset><legend>Repos</legend><span id="repos"></span></fieldset>
+  <fieldset>
+    <legend title="Each queued ticket gets its own worktree in every repo ticked here, and its worker can change only those repos.">Work in</legend>
+    <span id="repos"></span>
+    <span class="hint">Each ticket gets a worktree in every repo ticked here; its worker can change only those.</span>
+  </fieldset>
   <label>Model <select id="model"></select></label>
   <label>Effort <select id="effort"></select></label>
   <button class="primary" id="queue">Queue 0 tickets</button>
@@ -90,6 +105,37 @@ const el = (tag, props = {}, ...children) => {
 };
 const $ = (id) => document.getElementById(id);
 const state = { tickets: [], queue: { entries: [], max: 3 }, config: null, selected: new Set() };
+
+/** Per-viewer conveniences: which status groups are folded and which projects are filtered on. Lost storage just means the defaults. */
+const remembered = (name) => { try { return new Set(JSON.parse(localStorage.getItem(name) || "[]")); } catch { return new Set(); } };
+const remember = (name, set) => { try { localStorage.setItem(name, JSON.stringify([...set])); } catch { /* storage refused: the view still works */ } };
+const folded = remembered("ticket-mode.folded");
+const projectFilter = remembered("ticket-mode.projects");
+const NO_PROJECT = "(no project)";
+const projectOf = (t) => t.project || NO_PROJECT;
+
+/** The tickets the Pick tab shows: in a chosen project (any, when none is chosen) and matching the search. */
+function visibleTickets() {
+  const words = $("filter").value.trim().toLowerCase();
+  return state.tickets.filter((t) => (projectFilter.size === 0 || projectFilter.has(projectOf(t)))
+    && (!words || `${t.key} ${t.title} ${t.project || ""}`.toLowerCase().includes(words)));
+}
+
+function renderProjects() {
+  const counts = new Map();
+  for (const t of state.tickets) counts.set(projectOf(t), (counts.get(projectOf(t)) || 0) + 1);
+  for (const name of [...projectFilter]) if (!counts.has(name)) projectFilter.delete(name);
+  const chips = [...counts].sort((a, b) => b[1] - a[1] || a[0].localeCompare(b[0])).map(([name, n]) => {
+    const chip = el("button", { className: "chip", type: "button" }, name, el("span", { className: "n" }, String(n)));
+    chip.setAttribute("aria-pressed", String(projectFilter.has(name)));
+    chip.addEventListener("click", () => { projectFilter.has(name) ? projectFilter.delete(name) : projectFilter.add(name); remember("ticket-mode.projects", projectFilter); render(); });
+    return chip;
+  });
+  const all = el("button", { className: "chip", type: "button", textContent: "All projects" });
+  all.setAttribute("aria-pressed", String(projectFilter.size === 0));
+  all.addEventListener("click", () => { projectFilter.clear(); remember("ticket-mode.projects", projectFilter); render(); });
+  $("projects").replaceChildren(el("span", { className: "label" }, "Projects"), all, ...chips);
+}
 
 async function call(method, path, body) {
   const response = await fetch(path, { method, headers: { "Content-Type": "application/json" }, body: body === undefined ? undefined : JSON.stringify(body) });
@@ -110,8 +156,8 @@ const PRIORITY = ["", "Urgent", "High", "Medium", "Low"];
 const entryFor = (key) => state.queue.entries.find((e) => e.ticket.key === key);
 
 function renderPick() {
-  const words = $("filter").value.trim().toLowerCase();
-  const shown = state.tickets.filter((t) => !words || `${t.key} ${t.title} ${t.project || ""}`.toLowerCase().includes(words));
+  renderProjects();
+  const shown = visibleTickets();
   const groups = new Map();
   for (const t of [...shown].sort((a, b) => a.statusOrder - b.statusOrder || a.priority - b.priority)) {
     if (!groups.has(t.status)) groups.set(t.status, []);
@@ -124,7 +170,16 @@ function renderPick() {
     const selectable = tickets.filter(free);
     const groupBox = el("input", { type: "checkbox", checked: selectable.length > 0 && selectable.every((t) => state.selected.has(t.key)), disabled: selectable.length === 0 });
     groupBox.addEventListener("change", () => { for (const t of selectable) groupBox.checked ? state.selected.add(t.key) : state.selected.delete(t.key); render(); });
-    const group = el("div", { className: "group" }, el("h2", {}, groupBox, status, el("span", { className: "count" }, ` ${tickets.length}`)));
+    const isFolded = folded.has(status);
+    const toggle = () => { folded.has(status) ? folded.delete(status) : folded.add(status); remember("ticket-mode.folded", folded); renderPick(); };
+    const fold = el("button", { className: "fold", type: "button", textContent: isFolded ? "▸" : "▾", title: isFolded ? "Expand" : "Collapse" });
+    fold.setAttribute("aria-expanded", String(!isFolded));
+    fold.addEventListener("click", toggle);
+    const name = el("span", { className: "name", textContent: status });
+    name.addEventListener("click", toggle);
+    const picked = tickets.filter((t) => state.selected.has(t.key)).length;
+    const group = el("div", { className: `group${isFolded ? " collapsed" : ""}` },
+      el("h2", {}, fold, groupBox, name, el("span", { className: "count" }, ` ${tickets.length}${picked ? ` · ${picked} selected` : ""}`)));
     for (const t of tickets) {
       const taken = entryFor(t.key);
       const box = el("input", { type: "checkbox", checked: state.selected.has(t.key), disabled: Boolean(taken) });
@@ -138,7 +193,7 @@ function renderPick() {
   }
   const shownFree = shown.filter(free);
   $("all").checked = shownFree.length > 0 && shownFree.every((t) => state.selected.has(t.key));
-  $("loaded").textContent = `${state.tickets.length} assigned to you, ${state.selected.size} selected`;
+  $("loaded").textContent = `${shown.length} of ${state.tickets.length} assigned to you shown, ${state.selected.size} selected`;
 }
 
 function since(ms) {
@@ -183,7 +238,9 @@ function renderBoard() {
 function renderFooter() {
   const count = state.selected.size;
   const repos = [...document.querySelectorAll("#repos input:checked")].map((b) => b.value);
-  $("queue").textContent = `Queue ${count} ticket${count === 1 ? "" : "s"}`;
+  $("queue").textContent = count === 0 ? "Select tickets to queue"
+    : repos.length === 0 ? "Tick a repo to work in"
+    : `Queue ${count} ticket${count === 1 ? "" : "s"} in ${repos.join(", ")}`;
   $("queue").disabled = count === 0 || repos.length === 0;
 }
 
@@ -210,9 +267,8 @@ for (const tab of document.querySelectorAll(".tab")) {
 }
 $("filter").addEventListener("input", render);
 $("all").addEventListener("change", () => {
-  const words = $("filter").value.trim().toLowerCase();
-  for (const t of state.tickets) {
-    if ((words && !`${t.key} ${t.title} ${t.project || ""}`.toLowerCase().includes(words)) || entryFor(t.key)) continue;
+  for (const t of visibleTickets()) {
+    if (entryFor(t.key)) continue;
     $("all").checked ? state.selected.add(t.key) : state.selected.delete(t.key);
   }
   render();
