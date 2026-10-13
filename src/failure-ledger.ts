@@ -56,6 +56,13 @@ export const EMERGENCY_PRIORITY_NOT_HONOURED_KIND = "emergency-priority-not-hono
 export const CLAIM_REFUSED_KIND = "claim-refused";
 
 /**
+ * The event kind for ONE REFUSAL THAT IS THE CLAIM GUARD WORKING (agent-org#1262, a11ign/a11ign#5282): the worktree cap, a B4 overlap, a tree or branch that already exists, and a
+ * rate-limited read (one outage, not N repeats). Same line shape as `CLAIM_REFUSED_KIND`, so `readClaimRefusals` reads both and signal 26 still counts every refusal. It is no class
+ * and no repeat: `class-repeat.ts` leaves it out of `groupByClass`, for the reason `UNCLASSIFIED_KIND` is left out.
+ */
+export const CLAIM_GUARD_HELD_KIND = "claim-guard-held";
+
+/**
  * The event kind of ONE SPEC-LINT REFUSAL, one line per finding: `<kind>\t<ts ms>\t#<row> <field> <rule>` (agent-org#1017), so a count of lines is a count of
  * refused findings. Not seeded in `FAILURE_KINDS`, for the reason `CLAIM_REFUSED_KIND` gives. Written by `row-file.ts`'s `recordSpecLintRefusals` and read by the
  * retro's "Rows refused by the spec lint (24h)" line (`org-retro.ts`): it lives here so both can name it without the other.

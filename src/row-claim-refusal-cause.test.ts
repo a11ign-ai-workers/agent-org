@@ -54,7 +54,7 @@ test("POSITIVE CONTROL: the failure ledger line carries the cause", () => {
   recordClaimRefusal(refusalOf(ghThatRefuses(RATE)), { logPath, now: NOW });
   const lines = readFileSync(logPath, "utf8").split("\n").filter((line) => line !== "");
   assert.equal(lines.length, 1, "one refusal, one ledger line");
-  assert.match(lines[0], /claim-refused/);
+  assert.match(lines[0], /claim-guard-held/, "a rate-limited read is one outage, the guard working (agent-org#1262)");
   assert.match(lines[0], /rate limit/, lines[0]);
 });
 
