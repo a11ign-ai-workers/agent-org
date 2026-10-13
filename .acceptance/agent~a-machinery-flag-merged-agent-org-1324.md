@@ -2,4 +2,4 @@ A machinery flag that is merged and absent from `machinery-canary.json` for more
 
 Acceptance: `node --test src/packaging/flag-switch-ledger.test.ts src/packaging/org-health.test.ts`
 
-Measured: `node --test src/packaging/flag-switch-ledger.test.ts` reports 19 pass, 0 fail, including the seven `(7) agent-org#1324` cases (positive control, the named-row cases, the two-hour window, and the unknown cases). `node --test src/packaging/org-health.test.ts` reports 34 pass, 0 fail. `pnpm run typecheck` is clean.
+Measured: `node --test src/packaging/flag-switch-ledger.test.ts` reports 21 pass, 0 fail, including the nine `(7) agent-org#1324` cases (positive control, the named-row cases, the exact two-hour line, the gate's read through `readFlagSwitchesFor`, and the unknown cases). `node --test src/packaging/org-health.test.ts` reports 34 pass, 0 fail. `pnpm run typecheck` is clean. Two mutants were run by hand and restored: `>` to `>=` on the two-hour line, and `readFlagSwitchesFor` dropping `openRows`; each takes the ledger file to 20 pass, 1 fail.

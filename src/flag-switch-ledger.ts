@@ -233,3 +233,9 @@ export function readFlagLedger({ toolRoot = TOOL_ROOT, projectRoot = HOME_CHECKO
   if ("unknown" in canaryAbsent) return canaryAbsent;
   return { shipped: shipped.length, unset: unsetFlags({ shipped, declarations }).map((flag) => ({ ...flag, ...merge(flag) })), canaryAbsent };
 }
+
+/**
+ * THE GATE'S READ OF THE LEDGER, named so a test can run it (agent-org#1324): the gate hands `orgHealthNow` this thunk with the open rows it read, so the canary half can
+ * tell an owed row from a missing one. The gate passes no `deps`; a test passes the reads `readFlagLedger` takes, and the thunk runs them the way the gate does.
+ */
+export const readFlagSwitchesFor = (openRows: readonly OpenRow[] | null, deps: Omit<Parameters<typeof readFlagLedger>[0] & object, "openRows"> = {}): (() => FlagLedger) => () => readFlagLedger({ ...deps, openRows });

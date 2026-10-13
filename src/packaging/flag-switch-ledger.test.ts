@@ -45,7 +45,7 @@ writeFileSync(HOST_FILE, JSON.stringify({ schema: 1, home: SCRATCH, binDir: join
 process.env.AGENT_ORG_HOST = HOST_FILE;
 
 const ledger = await import("../flag-switch-ledger.ts");
-const { discoverFlags, declaresKey, unsetFlags, mergeOf, readFlagLedger, readCanaryState, canaryAbsentFlags, CANARY_ABSENT_MS, FLAGS_WITH_ANOTHER_HOME } = ledger;
+const { discoverFlags, declaresKey, unsetFlags, mergeOf, readFlagLedger, readFlagSwitchesFor, readCanaryState, canaryAbsentFlags, CANARY_ABSENT_MS, FLAGS_WITH_ANOTHER_HOME } = ledger;
 const { SIGNALS, CANARY_STATE_FILE, emptyCanaryState, withMachineryFlag, flagSwitchReading, orgHealthOrders, orgHealthReadings } = await import("../org-health.ts");
 const { FLAG_REGISTRY } = await import("../machinery-flag.ts");
 const { buildReport, renderReport } = await import("../org-retro.ts");
@@ -282,8 +282,8 @@ test("(6) through the gate's `orgHealthNow`: a reader that finds unset flags yie
 
 test("(6) WIRING: the gate's call site hands `orgHealthNow` the real reader, so the signal is not dead for want of a fact (#2980's lesson)", () => {
   const gate = workGateSource();
-  assert.match(gate, /readFlagSwitches: \(\) => readFlagLedger\(\{ openRows: openRowsRead \}\)/, "agent-org#1324: the open rows reach the canary half");
-  assert.match(gate, /import \{ readFlagLedger \} from "\.\/flag-switch-ledger\.ts"/);
+  assert.match(gate, /readFlagSwitches: readFlagSwitchesFor\(openRowsRead\),/, "agent-org#1324: the gate hands the open rows it read to the canary half, through the helper the next test runs");
+  assert.match(gate, /import \{ readFlagSwitchesFor \} from "\.\/flag-switch-ledger\.ts"/);
 });
 
 // agent-org#1324: THE CANARY HALF. A flag whose home is the canary state is counted by its absence from `machinery-canary.json` two hours after its merge, not by a declaration.
@@ -325,6 +325,24 @@ test("(7) agent-org#1324: a flag merged less than two hours before the read is n
   assert.equal(absent({ state: off, hours: 3 }), 0, "present as off is a decision");
   const on = withMachineryFlag(emptyCanaryState(), { name: "gate.graphqlPacing", on: true });
   assert.equal(absent({ state: on, hours: 3 }), 0, "present as on is a decision");
+});
+
+test("(7) agent-org#1324: the two-hour line is exact, so a flag merged exactly two hours before the read is not yet past it, and a second more is (break: `>` to `>=` -- the first case goes red)", () => {
+  const ageMs = (ago: number) => readFlagLedger({ toolRoot: PACING_TREE, ...project("canary-boundary", { "project.json": "{}", "host.json": "{}" }), canary: () => emptyCanaryState(), openRows: [], now: NOW, merge: () => ({ mergedAt: new Date(NOW - ago).toISOString(), pr: 1240 }) });
+  const count = (answer: ReturnType<typeof ageMs>) => { if ("unknown" in answer) throw new Error(answer.unknown); return answer.canaryAbsent?.length; };
+  assert.equal(count(ageMs(CANARY_ABSENT_MS)), 0, "exactly two hours: not more than two hours, so not yet owed");
+  assert.equal(count(ageMs(CANARY_ABSENT_MS + 1000)), 1, "CONTROL: one second past the line is counted");
+});
+
+test("(7) agent-org#1324: the gate's read hands the ledger the open rows it read, so an owed row it names is not counted and a row set that was not read is UNKNOWN (break: the helper drops `openRows` -- the first case goes red)", () => {
+  const read = (openRows: Row[] | null) => readFlagSwitchesFor(openRows, { toolRoot: PACING_TREE, ...project("canary-thunk", { "project.json": "{}", "host.json": "{}" }), canary: () => emptyCanaryState(), now: NOW, merge: pacingMergedHoursAgo(3) })();
+  const owed = read([named(["ready"], "gate.graphqlPacing: switch it")]);
+  assert.ok(!("unknown" in owed), "the owed row is read");
+  assert.equal(owed.canaryAbsent?.length, 0, "a named owed row is not counted");
+  const bare = read([]);
+  assert.ok(!("unknown" in bare), "no rows is a read");
+  assert.equal(bare.canaryAbsent?.length, 1, "CONTROL: with no row naming the flag, it is counted");
+  assert.ok("unknown" in read(null), "a row set that was not read is UNKNOWN for a flag past its window");
 });
 
 test("(7) agent-org#1324: an unreadable canary state is UNKNOWN, a missing one is empty, and a read of the open rows that did not happen is UNKNOWN when a flag is past its window", () => {
