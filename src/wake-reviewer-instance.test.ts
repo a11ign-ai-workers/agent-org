@@ -667,15 +667,19 @@ test("#2498 (2a): `A11Y_REVIEWER_SESSION` reaches the pane by EVERY path the tic
 });
 
 test("#2498 (2b): the tick has exactly ONE way to open a reviewer's pane and ONE to start its agent -- and neither is a resume", () => {
-  const source = readFileSync(fileURLToPath(new URL("./wake.ts", import.meta.url)), "utf8");
+  const wake = readFileSync(fileURLToPath(new URL("./wake.ts", import.meta.url)), "utf8");
+  // The two spellings moved to `herdr-agents.ts` (with a `session` that defaults to the org's), so the tick reaches them only through it: the count
+  // is taken there, and `wake.ts` must hold neither, or a second spelling has appeared beside the shared one.
+  const source = readFileSync(fileURLToPath(new URL("./herdr-agents.ts", import.meta.url)), "utf8");
+  assert.doesNotMatch(wake, /"workspace",\s*"create"|"agent",\s*"start"/, "the tick opens a pane and starts an agent only through herdr-agents.ts");
   // Measured 2026-09-25: `herdr.service` restarted at 12:01:57Z and `reviewer-2485`'s live codex was `codex resume <uuid>` from 12:01:58Z, with four
   // `claude --resume` in the same two seconds: herdr's own restore, which keeps none of the `--env` given to `workspace create`. This file has no
   // path that resumes a PROCESS (its `resume` is a plain PROMPT to a pane that exists, #2470), so a pane with no `A11Y_REVIEWER_SESSION` is one
   // this file did not start. A NEW site that opens or starts one must carry `reviewerEnvironment`, and this count is where that is decided:
   // change it deliberately, and pin the new site's environment in (2a).
   assert.equal((source.match(/"workspace",\s*"create"/g) ?? []).length, 1, "the one `workspace create`, in openPane");
-  assert.equal((source.match(/"agent",\s*"start"/g) ?? []).length, 1, "the one `agent start`, in spawnInvocation");
-  assert.doesNotMatch(source, /["'`]codex["'`]\s*,\s*["'`]resume["'`]|--resume/, "and no codex/claude process is resumed from here");
+  assert.equal((source.match(/"agent",\s*"start"/g) ?? []).length, 1, "the one `agent start`, in agentStartArgs");
+  assert.doesNotMatch(wake + source, /["'`]codex["'`]\s*,\s*["'`]resume["'`]|--resume/, "and no codex/claude process is resumed from here");
 });
 
 test("#2498 (2c): the order names the dependencies, the cache and the session for ANY pane, on the first head and on every later one", () => {

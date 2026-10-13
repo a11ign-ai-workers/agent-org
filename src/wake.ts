@@ -101,7 +101,7 @@ import { holderWorkAtRisk, workAtRisk, cloneOfKey, gitRun, pathExists, statMtime
 // THE WORKSPACE LISTING, SHARED WITH THE LEAF (#2747): moved here from this file so `claim-stall.ts` can read it
 // too, without importing this file (which already imports `claim-stall.ts` and would cycle). Re-exported below so
 // every existing importer of `readAgents`/`listingIsComplete` from "./wake.ts" is unchanged.
-import { readAgents, listingIsComplete, absentSeats } from "./herdr-agents.ts";
+import { readAgents, listingIsComplete, absentSeats, REFUSAL_EXCERPT, firstLine, herdrReason, agentStartArgs, openPane, closedNote } from "./herdr-agents.ts";
 import { persistentRoles, persistentEntries, type PersistentEntry } from "./project-roles.ts";
 import { liveToolVersion } from "./lib/tool-version.ts";
 import { readState as readSelftestState, selftestPaths, worthAChild } from "./messaging/selftest.ts"; // #3540: the question of whether to start the self-test at all
@@ -319,37 +319,6 @@ export function unavailableReason(label: string, deps?: Parameters<typeof sessio
 }
 
 const defaultRun = (args: string[]) => execFileSync("herdr", args, { encoding: "utf8", timeout: 30_000 });
-
-/** How much of a thrown thing's first line a refusal quotes -- enough to name the failure, not a stack. */
-const REFUSAL_EXCERPT = 120;
-
-/**
- * The first line of whatever was thrown, bounded.
- *
- * herdr's failures arrive as a multi-line `execFileSync` error whose first line is the only part that says
- * what went wrong; the rest is a stack and the command's own stderr. Extracted because three refusal paths
- * quoted it with the same expression written out three times, and a fourth would have been written the
- * same way.
- */
-function firstLine(err: unknown, max: number = REFUSAL_EXCERPT) {
-  return String((err as any)?.message ?? err).split("\n")[0].slice(0, max);
-}
-
-/**
- * WHY a failed `herdr` command failed (#3032): its own stderr's first non-empty line, bounded, else {@link firstLine}.
- *
- * `execFileSync` puts `Command failed: <argv>` on the first line of `err.message` and the child's stderr on
- * `err.stderr`, so {@link firstLine} alone quoted the command we had just sent -- and a reviewer start herdr refused
- * repeated for an hour (28 `UNDELIVERED` lines, 2026-10-02) without one of them saying whether herdr was down, the
- * flag was bad or the model was rejected. An error with no stderr (a timeout, a spawn failure, a test's plain
- * `Error`) falls back to its first message line, which for those IS the reason.
- */
-function herdrReason(err: unknown, max: number = REFUSAL_EXCERPT) {
-  const stderr = (err as any)?.stderr;
-  const line = (typeof stderr === "string" || Buffer.isBuffer(stderr) ? String(stderr) : "")
-    .split("\n").map((l) => l.trim()).find((l) => l !== "");
-  return line === undefined ? firstLine(err, max) : line.slice(0, max);
-}
 
 /** `gh`, for the escalation half -- a different binary from `herdr`, so a different runner. */
 const defaultGh = (args: string[]) =>
@@ -623,15 +592,6 @@ export function spawnInvocation(order: { cause: string; }, name: string, pane: s
 }
 
 /**
- * THE ONE `agent start` the tick has: an agent of `kind` named `name` in an existing pane, everything after herdr's `--` reaching the agent.
- * A persistent seat's start ({@link startSeat}) and a spawned engineer's ({@link spawnInvocation}) both go through it, so there is one spelling to
- * keep right and `wake-reviewer-instance.test.ts` (2b) still counts one.
- */
-function agentStartArgs(name: string, kind: string, pane: string, agentTail: string[]): string[] {
-  return ["--session", "org", "agent", "start", name, "--kind", kind, "--pane", pane, "--", ...agentTail];
-}
-
-/**
  * THE CAUSES A TICK MAY START A PROCESS FOR -- the pilot `ceo` ruled on #1950, 2026-09-22.
  *
  * ONE CAUSE, AND THE NUMBER IS THE PILOT RATHER THAN A LIMIT OF THE MECHANISM. Until this, `spawnInvocation`
@@ -901,85 +861,6 @@ export function withSpareInstances(roster: string[], agents: { label: string; }[
   return [...roster, ...ordered.map((a) => a.label)];
 }
 
-
-/**
- * A new workspace for `label`, and the pane to start an agent in -- or a refusal.
- *
- * MEASURED AGAINST THE LIVE ORG, 2026-09-23: `herdr --session org workspace create --label X --no-focus`
- * answers with `result.root_pane.pane_id` and `result.workspace.workspace_id`, and `workspace close <id>`
- * answers `{"type":"ok"}`.
- *
- * THE PANE STARTS IN A NAMED DIRECTORY WHEN THE CALLER HAS ONE (#2405, #2401). Without `--cwd` herdr's default is
- * `/home/agent/repos/a11y-witness`, the PRIMARY checkout, which is the one directory `launchGate` (#1352) refuses
- * every policy script from -- so a spawned engineer began in the place it was forbidden to work, and its order
- * then named a directory that usually did not exist. The spawner has claimed the row by now (`spawnWorker`), so
- * the worktree exists and the agent's cwd is its unit of work; it never touches the primary and never borrows a
- * peer's tree. A REVIEWER passes its verified checkout (#2401: its whole task is one pull request's tree, prepared before the
- * pane opens). A `cwd` of `undefined` is the old default, kept for a caller that has claimed nothing.
- *
- * `--no-focus` because a tick must not steal the display from whoever is watching it.
- *
- * `--env` IS HOW THE SPAWN DECIDES WHO IT ACTS AS (#2323). herdr's server starts the pane's shell, so the
- * ticking process's own environment never reaches it -- measured 2026-09-24: `workspace create --env
- * GH_CONFIG_DIR=...` and `echo $GH_CONFIG_DIR` in that pane answers the value. See {@link spawnEnvironment}.
- *
- *
- *
- *
- * @param [cwd] the directory the pane's shell starts in
- */
-function openPane(run: (args: string[]) => string, label: string, env: Record<string, string>, cwd?: string): { pane: string; workspace: string; } | { refusal: string; } {
-  let created;
-  try {
-    created = JSON.parse(run(["--session", "org", "workspace", "create", "--label", label, "--no-focus",
-      ...(cwd === undefined ? [] : ["--cwd", cwd]),
-      ...Object.entries(env).flatMap(([key, value]) => ["--env", `${key}=${value}`])]));
-  } catch (err) {
-    return { refusal: `herdr could not open a pane for "${label}" (${herdrReason(err)})` };
-  }
-  const pane = created?.result?.root_pane?.pane_id;
-  const workspace = created?.result?.workspace?.workspace_id;
-  // A WORKSPACE WITH NO PANE ID IS STILL A WORKSPACE, so it is closed rather than left behind: an
-  // unreadable answer is the one case where the thing to clean up is the thing we cannot describe.
-  if (typeof pane !== "string" || typeof workspace !== "string") {
-    return { refusal: `herdr's workspace for "${label}" named no pane`
-      + `${workspace ? closedNote(run, String(workspace)) : ""}` };
-  }
-  return { pane, workspace };
-}
-
-/**
- * Close a workspace this tick opened, and say so in the same breath as whatever failed.
- *
- * THIS TEARDOWN IS FOR A HALF-STARTED SPAWN; A FINISHED INSTANCE IS ENDED BY `endFinishedSpares` (#2323). A
- * workspace whose agent started IS the role's workspace while its row is open -- its label is the role's own
- * name, so `route` finds it and follow-up causes reach it. Only the window between `workspace create` and a
- * successful `agent start` leaves a pane nobody will ever use, and that is what this closes. Once the row
- * that instance claimed has closed (or been released) the tick ends it, on a rule read from `sessions.json`'s
- * `spare` mark and not from this comment -- the old bound ("nothing orphaned to collect") was true of the
- * pane and false of the ROLE: a spawned engineer that was never ended became a standing seat the first time
- * it claimed, and #1950's clean-cycle count could not count it.
- *
- * AND LEAVING ONE IS NOT A TIDINESS PROBLEM. A workspace with no agent reports `agent_status: "unknown"`,
- * which `WAKEABLE` excludes and `spawnableRole` refuses -- so an abandoned pane carrying a role's label
- * makes that role permanently unwakeable and unspawnable. It would silently remove an engineer from the
- * org, which is the 2026-09-08 shape this whole file exists to prevent.
- *
- * NEVER THROWS: it is called from the failure path, and a teardown that can fail the way its caller just
- * did would replace a reported refusal with an unreported one.
- *
- *
- * @returns a clause to append to the refusal being reported
- */
-function closedNote(run: (args: string[]) => string, workspace: string): string {
-  try {
-    run(["--session", "org", "workspace", "close", workspace]);
-    return ` -- the workspace it opened (${workspace}) was closed`;
-  } catch (err) {
-    return ` -- AND the workspace it opened (${workspace}) could NOT be closed (${herdrReason(err)}): close `
-      + "it by hand, or that role reads `unknown` to every tick and is never woken again";
-  }
-}
 
 /**
  * Why a NEW engineer process must not start for this order, or `null`: the host's memory first (#2508), then the claim's
