@@ -8,7 +8,7 @@
 // NINE QUESTIONS, EACH A PURE FUNCTION OF ROWS THE CALLER ALREADY READ, so the rule is testable without a tracker and the reader that
 // fetches them (`readBoardFacts`, below) is the only part that spends a call:
 //   epic-all-closed       an open `epic` whose sub-issues are all closed, and no `Waiting-for:`/`Not-before:` line of its body still unmet (a11ign/agent-org#840)  -> product-manager (close it)
-//   closing-pr-merged     an open row a merged PR names in `Closes #n`                        -> product-manager (close it)
+//   closing-pr-merged     an open row a merged PR names in `Closes #n` or `Closes owner/name#n` (the tracker's own repository, #1280)  -> product-manager (close it)
 //   no-live-claimant      `in-progress` with no live `session:` holder and no fresh claim record, or a claim-only label
 //                         (`started`, `session:*`, `no-code-left`) on a row that is not `in-progress`          -> the row's owner
 //   wait-already-true     a `parked`/`backlog` row whose `Waiting-for:`/`Not-before:` is already true -> product-manager (lift it)
@@ -85,8 +85,8 @@ export const HANDOFF_GRACE_MS = 15 * 60 * 1000;
 export type BoardRow = { number: number, title?: string, body?: string, state?: string, stateReason?: string, labels?: (string | { name?: string })[], comments?: RowComment[], subIssuesSummary?: { total: number, completed: number } | null, createdAt?: string };
 /** `mergedAt` is absent when a read omitted it */
 export type MergedPr = { number: number, body?: string, mergedAt?: string | null };
-/** `others` (#4080) is what each KEYED tracker answered; absent with one declared tracker */
-export type BoardFacts = { now: number, openRows: BoardRow[], closedRows: BoardRow[] | null, mergedPrs: MergedPr[] | null, liveSessions: string[] | null, waitFacts: import("./wait-condition.ts").WaitFacts | null, others?: OtherTracker[], proseEvidence?: ProseEvidence | null, roadmaps?: RowRoadmaps | null, epicChildren?: EpicChildren | null };
+/** `repo` (#1280) is the tracker's `owner/name`, the repository a qualified `Closes owner/name#n` must name to close one of its rows. `others` (#4080) is what each KEYED tracker answered; absent with one declared tracker */
+export type BoardFacts = { now: number, repo?: string, openRows: BoardRow[], closedRows: BoardRow[] | null, mergedPrs: MergedPr[] | null, liveSessions: string[] | null, waitFacts: import("./wait-condition.ts").WaitFacts | null, others?: OtherTracker[], proseEvidence?: ProseEvidence | null, roadmaps?: RowRoadmaps | null, epicChildren?: EpicChildren | null };
 /**
  * The closed children of each open epic whose children are all closed (a11ign/agent-org#881), `byEpic` by the epic's number, each with its body. `rulings` is the login that posted each
  * `Chairman-ruling:` URL a non-build child carries, `null` for a URL that is not a comment's own, so a ruling that cannot be verified does not count.
@@ -220,7 +220,8 @@ const CHILD_READERS: [string, (f: BoardFacts) => Finding[], (f: BoardFacts) => b
 /**
  * THE ROWS A PULL REQUEST BODY CLOSES: `close-rows-for-merged-pr.ts`'s `declaredRowsFromBody`, COPIED because that module's graph reaches `wake.ts`, which imports
  * `org-health.ts`, which imports this: a cycle that left 51 test files unable to load (`Cannot access 'ORDER_STALL_MINUTES' before initialization`). The test pins the
- * two equal on the same fixtures. @param {string | null | undefined} body @returns {number[]}
+ * two equal on the same fixtures. It stays unqualified-only for that reason: `closedRefsOf` reads the qualified form too (#1280).
+ * @param {string | null | undefined} body @returns {number[]}
  */
 export function closesOf(body: string | null | undefined): number[] {
   const numbers = (body ?? "").split(/\r?\n/).flatMap((line) => {
@@ -229,6 +230,19 @@ export function closesOf(body: string | null | undefined): number[] {
     return [...match[1].matchAll(/#(\d+)/g)].map((m) => Number(m[1]));
   });
   return [...new Set(numbers)];
+}
+
+/**
+ * THE ROWS A PULL REQUEST BODY CLOSES, each with the repository it names (a11ign/agent-org#1280): `Closes #n` names `repo` null (the tracker the pull request is read for), and
+ * `Closes owner/name#n` names that repository. A line may mix the two in one list, as `closesOf`'s grammar does for the unqualified form. The name is lower-cased, since GitHub reads it so.
+ * @param {string | null | undefined} body @returns {{ repo: string | null, number: number }[]}
+ */
+export function closedRefsOf(body: string | null | undefined): { repo: string | null; number: number; }[] {
+  return (body ?? "").split(/\r?\n/).flatMap((line) => {
+    const match = /^\s*closes:?\s*((?:[\w.-]+\/[\w.-]+)?#\d+(?:\s*(?:,|and)\s*(?:[\w.-]+\/[\w.-]+)?#\d+)*)(.*)$/i.exec(line);
+    if (!match || /^\s*(?:,|and)\s*[A-Za-z0-9_./-]*#/i.test(match[2])) return [];
+    return [...match[1].matchAll(/([\w.-]+\/[\w.-]+)?#(\d+)/g)].map((m) => ({ repo: m[1]?.toLowerCase() ?? null, number: Number(m[2]) }));
+  });
 }
 
 /**
@@ -241,17 +255,22 @@ function justMerged(pr: MergedPr, now: number) {
   return Number.isFinite(merged) && Math.abs(now - merged) < MERGE_GRACE_MS;
 }
 
-/** @param {MergedPr[]} prs @returns {Map<number, number>} row number to the PR that says it closes it */
-const closersOf = (prs: MergedPr[]): Map<number, number> => new Map(prs.flatMap((pr) => closesOf(pr.body).map((n) => [n, pr.number])));
+/**
+ * @param {MergedPr[]} prs @param {string | undefined} repo the tracker's `owner/name` (#1280)
+ * @returns {Map<number, number>} row number to the PR that says it closes it: an unqualified `Closes #n` always, a qualified one only when it names `repo`
+ */
+const closersOf = (prs: MergedPr[], repo: string | undefined): Map<number, number> => new Map(prs.flatMap((pr) => closedRefsOf(pr.body)
+  .filter((ref) => ref.repo === null || ref.repo === repo?.toLowerCase())
+  .map((ref) => [ref.number, pr.number])));
 
 /**
  * The open rows a merged PR closes, split by how long ago it merged: a row ANY settled PR closes is a disagreement, and one only a just-merged PR closes is `merging`.
  * @param {BoardFacts} facts @returns {{ settled: Map<number, number>, merging: BoardRow[] }}
  */
-function mergedClosers({ openRows, mergedPrs, now }: BoardFacts): { settled: Map<number, number>; merging: BoardRow[]; } {
+function mergedClosers({ openRows, mergedPrs, now, repo }: BoardFacts): { settled: Map<number, number>; merging: BoardRow[]; } {
   const prs = mergedPrs ?? [];
-  const settled = closersOf(prs.filter((pr) => !justMerged(pr, now)));
-  const recent = closersOf(prs.filter((pr) => justMerged(pr, now)));
+  const settled = closersOf(prs.filter((pr) => !justMerged(pr, now)), repo);
+  const recent = closersOf(prs.filter((pr) => justMerged(pr, now)), repo);
   return { settled, merging: openRows.filter((row) => !settled.has(row.number) && recent.has(row.number)) };
 }
 
@@ -680,7 +699,7 @@ export function readBoardFacts(repo: string, { run = gh, agents = readAgents, no
   const roadmaps = readRoadmaps(repo, openRows, run);
   const epicChildren = readEpicChildren(repo, openRows, run);
   const others = trackers.filter((tracker) => tracker.key !== "").map((tracker) => readOtherTracker(tracker, { run, now, liveSessions }));
-  return { now, openRows, closedRows, mergedPrs, liveSessions, waitFacts, roadmaps, epicChildren, ...(others.length > 0 && { others }) };
+  return { now, repo, openRows, closedRows, mergedPrs, liveSessions, waitFacts, roadmaps, epicChildren, ...(others.length > 0 && { others }) };
 }
 
 /**
@@ -741,7 +760,7 @@ function readOtherTracker({ key, repo, codeRepo }: DeclaredTracker, { run, now, 
   }
   const closedRows = orUnread(repo, ["issue", "list", "--state", "closed", "--limit", "500", "--json", "number,title,state,stateReason"]);
   const mergedPrs = codeRepo === undefined ? null : orUnread(codeRepo, ["pr", "list", "--state", "merged", "--limit", "200", "--json", "number,body,mergedAt"]);
-  return { key, repo, facts: { now, openRows, closedRows, mergedPrs, liveSessions, waitFacts: null, roadmaps: readRoadmaps(repo, openRows, run) } };
+  return { key, repo, facts: { now, repo, openRows, closedRows, mergedPrs, liveSessions, waitFacts: null, roadmaps: readRoadmaps(repo, openRows, run) } };
 }
 
 const ROADMAP_FIELD = "Roadmap";
