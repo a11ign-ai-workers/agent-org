@@ -222,6 +222,15 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
     }
   }
 
+  /**
+   * The ticket as the tracker has it now, so an edit made after it was queued reaches the worker. Its branch stays the one it was queued with,
+   * which a retry's worktree is already on. A ticket the tracker no longer has is briefed as it was queued.
+   */
+  async function current(queued: Ticket): Promise<Ticket> {
+    const fresh = await source.read(queued.key);
+    return fresh === null ? queued : { ...fresh, branch: queued.branch };
+  }
+
   /** The ticket this one is part of, with its files in `<dir>/parent`, or `null`. A child's binding decisions are often in its parent's plan. */
   async function parentOf(ticket: Ticket, dir: string): Promise<ParentTicket | null> {
     // A run queued before tickets carried a parent has none recorded.
@@ -239,7 +248,7 @@ export function createPool(store: QueueStore, deps: PoolDeps) {
    * its worktrees inside it with `ticket:worktree` once it has decided where the work lands. Throws, with the reason, when any of it cannot be made.
    */
   async function prepare(entry: Entry): Promise<{ folder: string; dir: string }> {
-    const { ticket } = entry;
+    const ticket = await current(entry.ticket);
     const dir = ticketDir(settings, ticket.key);
     const folder = ticketFolder(settings, ticket.key);
     mkdirSync(dir, { recursive: true });

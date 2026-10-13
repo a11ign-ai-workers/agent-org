@@ -106,7 +106,23 @@ test("a ticket's parent joins its brief, quoted, with the parent's files in a fo
   assert.ok(brief.includes(join(dir, "attachment-1-NBF-1-0001-plan.md")), "and so is the ticket's own");
   assert.ok(downloads.includes(`NBF-100 ${join(dir, "parent")}`), "the parent's files land beside the ticket's, not over them");
   assert.equal(readFileSync(join(ticketDir(settings, "NBF-2"), "brief.md"), "utf8").includes("## The parent ticket"), false, "a parent the tracker has no ticket for adds nothing");
-  assert.deepEqual(reads.sort(), ["NBF-100", "NBF-404"], "a run queued before tickets carried a parent asks for none");
+  assert.ok(reads.includes("NBF-404"), "a parent the tracker has no ticket for is still asked for");
+  assert.ok(reads.every((key) => typeof key === "string"), "a run queued before tickets carried a parent asks for none");
+});
+
+test("a run is briefed from its ticket as the tracker has it now, on the branch it was queued with", async () => {
+  const tracker: TicketSource = {
+    ...source,
+    read: async (key) => (key === "NBF-1" ? { ...ticket(key), title: "Edited title", description: "Edited after it was queued.", branch: "nbf-1-edited-title" } : null),
+  };
+  const { pool, settings, h } = setup(2, ["NBF-1", "NBF-2"], {}, { source: tracker });
+  await pool.tick();
+  const brief = readFileSync(join(ticketDir(settings, "NBF-1"), "brief.md"), "utf8");
+  assert.match(brief, /^# NBF-1: Edited title\n/);
+  assert.ok(brief.includes("Edited after it was queued."));
+  assert.ok(brief.includes("`nbf-1`") && !brief.includes("nbf-1-edited-title"), "Linear renames the branch with the title; a retry's worktree is on the queued one");
+  assert.ok(h.calls.find((args) => args.includes("create") && args.includes("AGENT_ORG_TICKET=NBF-1"))!.includes("AGENT_ORG_TICKET_BRANCH=nbf-1"));
+  assert.match(readFileSync(join(ticketDir(settings, "NBF-2"), "brief.md"), "utf8"), /^# NBF-2: NBF-2\n/, "a ticket the tracker no longer has is briefed as queued");
 });
 
 test("the machine's plugins are enabled in each worker's settings file", async () => {

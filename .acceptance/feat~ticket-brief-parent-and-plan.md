@@ -1,4 +1,4 @@
-A ticket-mode worker's brief carries the files attached to its ticket (`attachedUploads`, `downloadName` and `download` in `src/ticket-mode/linear.ts`), its parent ticket's quoted description and files (`parent` on `Ticket` in `source.ts`, `parentOf` in `pool.ts`, `parentText` in `worker-files.ts`), and a check of the diff against the ticket's criteria and binding decisions before the commit (`briefText`).
+A ticket-mode worker's brief carries the files attached to its ticket (`attachedUploads`, `downloadName` and `download` in `src/ticket-mode/linear.ts`), its parent ticket's quoted description and files (`parent` on `Ticket` in `source.ts`, `parentOf` in `pool.ts`, `parentText` in `worker-files.ts`), the ticket as Linear has it at the start rather than as queued (`current` in `pool.ts`), and a check of the diff against the ticket's criteria and binding decisions before the commit (`briefText`).
 
 Acceptance:
 ```bash
