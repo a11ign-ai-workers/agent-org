@@ -61,6 +61,7 @@
     "src",
     "!src/**/*.test.ts",
     "host",
+    "skills",
     "LICENSE",
     "README.md"
   ]

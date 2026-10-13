@@ -22,7 +22,7 @@ import { readTrunkRed, trunkOfCodeRepository, trunkRedOrders } from "../trunk-re
 import { recordIgnoredChairmanLabels, recordTickFailures as recordFailuresOf } from "../failure-recorders.ts";
 import { readJsonObject, writeJsonObject } from "../claim-stall.ts";
 import { requiredWhenNeeded, perPullRequestOrders, greenUnarmedOrders, type UnarmedFacts, reviewBlockedOrders, stalledPrOrders,
-  STALL_REASONS_WITHOUT_A_CAUSE, ownerOfPr } from "./pr-orders.ts";
+  STALL_REASONS_WITHOUT_A_CAUSE, ownerOfPr, ROW_REVIEW_SKILL_FLAG } from "./pr-orders.ts";
 import { labJobFinishedOrders, readLabJobRecords, readDispatchedLabJobs } from "./lab-job-orders.ts";
 import { classAndKeyOf as orgHealthClassAndKey } from "./org-health-suppression.ts";
 import { TABLE_ROW as STANDING_ROW } from "../board-truth-audit.ts";
@@ -257,13 +257,14 @@ export function blockerClearedReading(rows: any[], today: string = todayIso(), n
  *        `nowMs` is the clock `chairmanOrders` windows on (#2989); omitted is `Date.now()`, so only a test passes it.
  *        `recheck` is `RECHECK_FLAG`'s reading (agent-org#1187): OMITTED READS THE FLAG (`recheckFlagOn`), and a test or a replay passes it so the answer does not depend on the host's state directory.
  *        It carries no `= ...` default for `rowBranches`'s reason.
+ *        `rowReviewSkill` is `ROW_REVIEW_SKILL_FLAG`'s reading (agent-org#1268), read the same way (`rowReviewSkillFlagOn`): OMITTED READS THE FLAG, and a test passes it.
  *        `claimFacts` is the claim-stall tick's reading of every claimed row (#3451) -- what `blockerClearedOrders` drops an order on. OMITTED MEANS NOT ASKED, so no drop;
  *        `null` is a tick that read no claim. It carries no `= undefined` default for `rowBranches`'s reason.
  */
 export function decide({ prs, readyRows, promotableRows = [], chairmanBlocked = [], prFiles = [],
   drain = false, required = null, epics = [], answerOwed = [], openRows = [], unarmed = null,
-  claimedComments = [], rowBranches, branchPrs, hostDrift, primaryDrift, closings, claimFacts, trunkRed, baseTip, claimStalls, offBoard, key, repo, callCountSignals, bareAnswerLabels, labJobs, claimRefusals, nowMs, recheck, answerGiven, engineerStarts, projectDeclaration, shareLog, shareMemory, offerHierarchy, waitFacts }: {
-        prs: any[]; readyRows: any[]; promotableRows?: any[]; chairmanBlocked?: any[]; nowMs?: number; recheck?: boolean;
+  claimedComments = [], rowBranches, branchPrs, hostDrift, primaryDrift, closings, claimFacts, trunkRed, baseTip, claimStalls, offBoard, key, repo, callCountSignals, bareAnswerLabels, labJobs, claimRefusals, nowMs, recheck, rowReviewSkill, answerGiven, engineerStarts, projectDeclaration, shareLog, shareMemory, offerHierarchy, waitFacts }: {
+        prs: any[]; readyRows: any[]; promotableRows?: any[]; chairmanBlocked?: any[]; nowMs?: number; recheck?: boolean; rowReviewSkill?: boolean;
         prFiles?: { number: number; files: string[]; changedFiles: number; }[];
         drain?: boolean; required?: string[] | null; epics?: any[]; answerOwed?: any[];
         key?: string; repo?: string; openRows?: any[]; unarmed?: number[] | UnarmedFacts | null;
@@ -304,7 +305,7 @@ export function decide({ prs, readyRows, promotableRows = [], chairmanBlocked = 
   // #2470/#2711/#2729: A CLAIM THAT DOES NOT MOVE, A BARE `answer:` LABEL ON IT, OR A LAB JOB IT DISPATCHED THAT HAS ENDED -- all address the row's own holder, so all outrank every cause offering NEW work.
   orders.push(...stallOrdersOrNone(claimStalls), ...bareAnswerOrdersOrNone(bareAnswerLabels), ...answerGivenOrdersOrNone(answerGiven), ...labJobFinishedOrders(openRows, labJobs, Date.now()));
 
-  orders.push(...perPullRequestOrders(prs, required, baseTip, { nowMs, recheck: recheckFlagOn(recheck) }), ...closesUnresolvedOrders(prs)); // #2823 beside them; #3092 the checkless
+  orders.push(...perPullRequestOrders(prs, required, baseTip, { nowMs, recheck: recheckFlagOn(recheck), rowReviewSkill: rowReviewSkillFlagOn(rowReviewSkill) }), ...closesUnresolvedOrders(prs)); // #2823 beside them; #3092 the checkless
   // #2031: AHEAD OF THE OFFER, AND IT IS THE SAME READING THAT WITHHELD IT. `partitionUnclaimed` shelves
   // the row on `rowBranches` and this emits the cause that names the branch -- one condition, one read,
   // said once as a withholding and once as a question. Ahead of `rowOrders` for the ordering reason the
@@ -414,6 +415,16 @@ export function decide({ prs, readyRows, promotableRows = [], chairmanBlocked = 
  */
 export function recheckFlagOn(asked?: boolean, read: () => CanaryState = () => readReenqueueState(REVIEWER_STATE_DIR, () => undefined)): boolean {
   return asked ?? machineryFlagOn(read(), RECHECK_FLAG);
+}
+
+/**
+ * agent-org#1268: `ROW_REVIEW_SKILL_FLAG` (`review.rowReviewSkill`), READ WHERE THE ORDERS ARE DECIDED, for `recheckFlagOn`'s reason: `decide` ends every scope's tick, so one read covers
+ * the primary and the other scopes. Absent, unreadable or malformed is OFF, which is the reviewer's order as it was.
+ * @param [asked] the reading a caller already has; a test or a replay passes it so the answer does not move with the host's state directory
+ * @param [read] the flag's state, as `recheckFlagOn` reads it
+ */
+export function rowReviewSkillFlagOn(asked?: boolean, read: () => CanaryState = () => readReenqueueState(REVIEWER_STATE_DIR, () => undefined)): boolean {
+  return asked ?? machineryFlagOn(read(), ROW_REVIEW_SKILL_FLAG);
 }
 
 export function readHostDrift(): { unit: string; problem: string; detail: string; }[] | null {

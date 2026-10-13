@@ -1239,6 +1239,12 @@ function settledVerdictOrder(pr: any, found: {
 }
 
 /**
+ * agent-org#1268: the machinery flag behind which `draft-awaiting-verdict` names the `row-review` skill. Its switch is `machinery:flag`; `decide` reads it (`rowReviewSkillFlagOn`, in
+ * `tick.ts`) and passes the reading in, so this file stays pure of the state directory. OFF is today's order with the "leave one comment" contradiction removed.
+ */
+export const ROW_REVIEW_SKILL_FLAG = "review.rowReviewSkill";
+
+/**
  * `head8` is the head a reviewer would be reading; `key` is what the ORDER is keyed on -- the first eight characters of the PATCH id
  * (#3045), so an update-branch, a rebase or an amend, which make a new head with the same work, keep the key. It is `head8` only when
  * the patch could not be read. `all` is every full head whose patch equals the current head's, current first (`equivalentHeads`). `wait` is
@@ -1260,7 +1266,7 @@ function reviewHeadsOf(pr: any, head: string, wait: "settled" | "running"): Revi
  * say "Draft" unconditionally, which is a false statement to a reviewer about the ready pull request this
  * cause now reaches.
  */
-function awaitingVerdictPrompt(pr: any, { head8, key, all, wait }: ReviewHeads) {
+function awaitingVerdictPrompt(pr: any, { head8, key, all, wait }: ReviewHeads, rowReviewSkill = false) {
   const state = pr.isDraft ? "Draft" : "Ready (not a draft)";
   const checks = wait === "settled" ? "has settled green checks and no verdict at that head"
     : "has no verdict at that head, and its checks are re-running on a head that adds no work to the one before it";
@@ -1268,8 +1274,13 @@ function awaitingVerdictPrompt(pr: any, { head8, key, all, wait }: ReviewHeads) 
     ? ` Its patch (\`${key}\`) is the same at ${all.length} heads: a verdict at any of them stands, `
       + "so write yours at the head you actually read and do not re-review work you have already answered."
     : "";
+  // agent-org#1268: THE ORDER NO LONGER SAYS "leave one comment", which the role file forbids ("post no comment": the verdict is the review `pr-review-verdict` posts), and that is
+  // true whatever the flag says. BEHIND `ROW_REVIEW_SKILL_FLAG` the sentence names the skill, by name, because Codex runs one only when the prompt says so and a
+  // `~/.codex/skills/.system/review-agent` also exists. Off, the sentence is the old one with the contradiction removed and nothing else.
+  const role = reviewerRoleFile(pr);
   return `${state} ${subjectMention(pr)} at \`${head8}\` ${checks}.${same} `
-    + `Review it per ${reviewerRoleFile(pr)} and leave one comment carrying your verdict.`;
+    + (rowReviewSkill ? `Review it with the \`row-review\` skill, then post the verdict per ${role}.`
+      : `Review it per ${role} and post the verdict as it says.`);
 }
 
 /**
@@ -1316,7 +1327,7 @@ function unchangedRunningHead(pr: any, wait: "settled" | "running" | null): stri
  * the minutes CI takes is what wrote a `RESET` and re-armed it after each of #3033's four merges. Only `draft-awaiting-verdict` is
  * emitted from that state -- a settled verdict's follow-ups, `draft-convinced-not-ready`'s ready-flip above all, wait for settled checks.
  */
-function draftOrder(pr: any, required: string[] | null = null, baseTip: { sha: string; date: string; } | null = null) {
+function draftOrder(pr: any, required: string[] | null = null, baseTip: { sha: string; date: string; } | null = null, rowReviewSkill = false) {
   // RED FIRST, and before the green check: a red PR is work whether or not it is a draft, and it can
   // never reach the reviewer lane below, which requires green.
   const red = failingChecksOrder(pr, required, baseTip);
@@ -1360,7 +1371,7 @@ function draftOrder(pr: any, required: string[] | null = null, baseTip: { sha: s
     cause: "draft-awaiting-verdict",
     subject: `pr-${subjectRef(pr.repoKey, pr.number)}`,
     discriminator: heads.key,
-    prompt: awaitingVerdictPrompt(pr, heads),
+    prompt: awaitingVerdictPrompt(pr, heads, rowReviewSkill),
     causeKey: `${session}/draft-awaiting-verdict/pr-${subjectRef(pr.repoKey, pr.number)}/${heads.key}`,
   };
 }
@@ -1369,12 +1380,12 @@ function draftOrder(pr: any, required: string[] | null = null, baseTip: { sha: s
  * Every order the open pull requests earn: each one's own (`draftOrder`), the checkless ones (#3092), the ones GitHub holds for review that
  * NO order reached (#4002), the later one of each pair that changes one file (#3480), then the set-wide one for labelled pull requests nobody
  * has explained (#2416).
- * @param [now] the clock, omitted is `Date.now()`; or `{ nowMs, recheck }` (agent-org#1187), which is how `RECHECK_FLAG`'s reading reaches `sharedFileOrders` without a 5th
+ * @param [now] the clock, omitted is `Date.now()`; or `{ nowMs, recheck, rowReviewSkill }` (agent-org#1187, #1268), which is how `RECHECK_FLAG`'s and `ROW_REVIEW_SKILL_FLAG`'s readings reach the orders without a 5th
  *   positional parameter (`max-params`). `recheck` omitted is OFF, so a caller that passes a bare clock, as every caller did before, gets the ordering it always got.
  */
-export function perPullRequestOrders(prs: any[], required: string[] | null, baseTip?: any, now: number | { nowMs?: number; recheck?: boolean; } = Date.now()) {
-  const { nowMs = Date.now(), recheck = false } = typeof now === "number" ? { nowMs: now } : now;
-  const asked = prs.map((pr) => ({ pr, order: draftOrder(pr, required, baseTip) }));
+export function perPullRequestOrders(prs: any[], required: string[] | null, baseTip?: any, now: number | { nowMs?: number; recheck?: boolean; rowReviewSkill?: boolean; } = Date.now()) {
+  const { nowMs = Date.now(), recheck = false, rowReviewSkill = false } = typeof now === "number" ? { nowMs: now } : now;
+  const asked = prs.map((pr) => ({ pr, order: draftOrder(pr, required, baseTip, rowReviewSkill) }));
   const unreached = asked.filter(({ pr, order }) => order === null && !isCheckless(pr, nowMs)).map(({ pr }) => pr);
   return [...asked.flatMap(({ order }) => order ?? []), ...checklessPrOrders(prs, nowMs), ...unorderedPrOrders(unreached, required, nowMs),
     ...sharedFileOrders(prs, undefined, { recheck }), ...awaitingEvidenceStaleOrders(prs)];

@@ -2355,6 +2355,84 @@ export function reviewerDoorInstall(deps: Parameters<typeof reviewerDoorPath>[0]
   return target;
 }
 
+// --- agent-org#1268: THE SKILL THE REVIEWER REVIEWS WITH ---------------------------------------------------------------------------------
+//
+// The reviewer is a Codex session, and Codex loads a skill from `~/.codex/skills/<name>/` and runs one when the prompt NAMES it. The skill is shipped in
+// this repository (`skills/row-review/`) and `host:install` copies it there, so the order's sentence and the file it names cannot be two things: `host:check`
+// reports a copy that is missing or differs from the shipped one, the way it reports the reviewers' door. The ORDER names it only behind `review.rowReviewSkill`
+// (`pr-orders.ts`); installing it changes nothing a reviewer reads until that flag is on.
+
+/** The skill as the repository ships it: a directory, copied whole. `LICENSE` is upstream's MIT text, which the adaptation must carry. */
+export const ROW_REVIEW_SKILL_SOURCE = fileURLToPath(new URL("../skills/row-review/", import.meta.url));
+/** The files of the skill, by name: a file there that is not listed is not the skill's and is neither compared nor written. */
+export const ROW_REVIEW_SKILL_FILES: readonly string[] = Object.freeze(["SKILL.md", "LICENSE"]);
+
+/** Where Codex reads the skill from: `<home>/.codex/skills/row-review`, under the host's home as `codexTrustDrift` reads `~/.codex/config.toml`. `skillDir` places it elsewhere (a test's). @param {ShippedDeps & { skillDir?: string }} [deps] */
+export function rowReviewSkillPath(deps: ShippedDeps & { skillDir?: string; } = {}): string {
+  return deps.skillDir ?? join((deps.host ?? homeHostConfig()).home, ".codex", "skills", "row-review");
+}
+
+export type RowReviewSkillState = {
+  state: "CURRENT" | "STALE" | "NOT INSTALLED" | "SOURCE UNREADABLE";
+  target: string;
+  /** The files of the skill that are missing from the host or differ from the shipped ones. */
+  differing: string[];
+};
+
+/**
+ * Is the installed skill the shipped one. `SOURCE UNREADABLE` is not `STALE`: two unreadable files must not compare equal (the door's rule). `NOT INSTALLED` is every
+ * file absent; some absent and some present is `STALE`, because a half-installed skill is one Codex loads without its licence or without its body.
+ * @param {ShippedDeps & { read?: typeof readFileSync, source?: string, skillDir?: string }} [deps]
+ */
+export function rowReviewSkillState(deps: ShippedDeps & { read?: typeof readFileSync; source?: string; skillDir?: string; } = {}): RowReviewSkillState {
+  const { read = readFileSync, source = ROW_REVIEW_SKILL_SOURCE } = deps;
+  const target = rowReviewSkillPath(deps);
+  const shipped = ROW_REVIEW_SKILL_FILES.map((name) => ({ name, shipped: textOf(join(source, name), read), installed: textOf(join(target, name), read) }));
+  const unreadable = shipped.filter((file) => file.shipped === null).map((file) => file.name);
+  if (unreadable.length > 0) return { state: "SOURCE UNREADABLE", target, differing: unreadable };
+  const differing = shipped.filter((file) => file.installed !== file.shipped).map((file) => file.name);
+  const state = differing.length === 0 ? "CURRENT" : shipped.every((file) => file.installed === null) ? "NOT INSTALLED" : "STALE";
+  return { state, target, differing };
+}
+
+/**
+ * The skill against the repository's: nothing when CURRENT. `host:install` copies it, so the remedy line is honest here.
+ * @param {Parameters<typeof rowReviewSkillState>[0]} [deps]
+ * @returns {Finding[]}
+ */
+export function rowReviewSkillDrift(deps: Parameters<typeof rowReviewSkillState>[0] = {}): Finding[] {
+  const { state, target, differing } = rowReviewSkillState(deps);
+  if (state === "CURRENT") return [];
+  const detail = {
+    "SOURCE UNREADABLE": `the repository's skills/row-review/ file(s) ${differing.join(", ")} could not be read, so the installed skill cannot be compared to it.`,
+    "NOT INSTALLED": `the repository ships the reviewer's row-review skill and this host has none at ${target}: an order that names it cannot run it. \`host:install\` copies it.`,
+    STALE: `${differing.join(", ")} at ${target} is missing or is not the shipped copy: the reviewer reviews with a skill that was not the one reviewed and tested. \`host:install\` copies it.`,
+  }[state];
+  return [{ unit: target, problem: `row-review skill ${state}`, detail }];
+}
+
+/**
+ * Install the skill: each file written ATOMICALLY (a temp file, then a rename, as every owned file is) into the directory THIS file decided, so the check and the
+ * install cannot name two places. Refuses rather than writing an unreadable source. IDEMPOTENT: a file already equal is rewritten with the same bytes.
+ * @param {Parameters<typeof rowReviewSkillState>[0] & { mkdir?: typeof mkdirSync, write?: typeof writeFileSync, chmod?: typeof chmodSync, rename?: typeof renameSync, out?: (line: string) => void }} [deps]
+ * @returns {string[]} the paths it wrote
+ */
+export function rowReviewSkillInstall({ mkdir = mkdirSync, write = writeFileSync, chmod = chmodSync, rename = renameSync, out = (l) => process.stdout.write(l), ...where }: Parameters<typeof rowReviewSkillState>[0] & {
+  mkdir?: typeof mkdirSync; write?: typeof writeFileSync; chmod?: typeof chmodSync; rename?: typeof renameSync; out?: (line: string) => void;
+} = {}): string[] {
+  const { read = readFileSync, source = ROW_REVIEW_SKILL_SOURCE } = where;
+  const target = rowReviewSkillPath(where);
+  const texts = ROW_REVIEW_SKILL_FILES.map((name) => ({ name, text: textOf(join(source, name), read) }));
+  const unreadable = texts.filter((file) => file.text === null).map((file) => file.name);
+  if (unreadable.length > 0) throw new Error(`cannot install the row-review skill: ${unreadable.join(", ")} of ${source} could not be read`);
+  return texts.map(({ name, text }) => {
+    const path = join(target, name);
+    writeOwnedFile({ target: path, mode: 0o644, text: text as string, mkdir, write, chmod, rename });
+    out(`installed ${path}\n`);
+    return path;
+  });
+}
+
 export type OrphanOrigin = { state: "retired" | "never" | "unreadable" } | { state: "unmerged", sha: string };
 
 /**
@@ -2869,7 +2947,7 @@ Parameters<typeof hostIdentityDrift>[0] & Parameters<typeof identityDrift>[0] & 
     readCodexConfig: deps.readCodexConfig, ...deps.codexDrift });
   return [...unclassifiedInLiveTree(deps), ...unitDrift(shippedUnitNames(deps).map((u) => unitState(u, deps))),
     ...orphanedUnits(deps), ...supersededHostScripts(deps), ...missingUnitPrograms(deps), ...hostInstallPending(deps), ...unitsWithoutHostVariable(deps),
-    ...hostIdentityDrift(deps), ...reviewerDoorDrift(deps), ...identityDrift(deps), ...humanLoginOnHost(deps), ...codexTrustDrift(deps),
+    ...hostIdentityDrift(deps), ...reviewerDoorDrift(deps), ...rowReviewSkillDrift(deps), ...identityDrift(deps), ...humanLoginOnHost(deps), ...codexTrustDrift(deps),
     ...codexDaemonDisagreement, ...permissionModeDrift(deps), ...modelEffortDrift(deps), ...pnpmDrift({ repoRoot: REPO_ROOT, ...deps.pnpm })];
 }
 
@@ -3519,6 +3597,7 @@ function main() {
     hostUnitsInstall();
     hostIdentityInstall();
     reviewerDoorInstall();
+    rowReviewSkillInstall();
     process.stdout.write(driftReport(hostFindings(), asked, asked ? hostNotes() : []));
     return;
   }

@@ -34,7 +34,7 @@ import { shippedUnits, unitState, unitDrift, driftReport, hostUnitsInstall, syst
   entriesFromCommand, ghSpawnReachedFrom, identityDrift, unitsSpendingGh, opaqueCommands, humanLoginOnHost, HUMAN_LOGIN_ON_HOST,
   retiredHere, addedOnSomeRef, orphanOrigin, shellCommandWords, shellSpawnsGh, shippedHostScripts,
   supersededHostScripts, unitEntryPoints, missingUnitPrograms, workingDirectoryOf,
-  programCandidates, hostIdentityDrift, hostIdentityNotes, hostIdentityInstall, ownedIdentityFiles, reviewerDoorInstall, compileCacheNotes,
+  programCandidates, hostIdentityDrift, hostIdentityNotes, hostIdentityInstall, ownedIdentityFiles, reviewerDoorInstall, rowReviewSkillInstall, compileCacheNotes,
   WORKERS_README, HUMAN_ACCOUNT_ALLOWED, compileCacheDrift, declaredCompileCache, PROJECT_UNITS_DIR, shippedUnitText,
   shippedScriptText, leadsListText, modelEffortDrift, sessionModelDrift, sessionModelNotes, lastModelIn,
   liveClaudeSessions, codexTrustDrift, codexTrustedProjects, OPTIONAL_UNITS, HOST_OPTIONAL_UNITS, TOOL_ENTRIES, toolForm, LONG_RUNNING_TEMPLATES, unclassifiedEntries, declaredProjectKeys, windowEnd, windowEndNotes, workTickToolForm,
@@ -1824,9 +1824,12 @@ const identityHost = (where: { shippedDir: string, scriptDir: string, workersDir
   // PINNED SATISFIED TOO (#3316): `hostUnitDrift` now compares the reviewers' door, and an unpinned one reads the real host's.
   const reviewerBin = join(dirname(where.scriptDir), "reviewer-bin");
   reviewerDoorInstall({ reviewerBin, out: () => {} });
+  // AND THE REVIEWER'S SKILL (agent-org#1268): `hostUnitDrift` compares `~/.codex/skills/row-review` too, and an unpinned one reads the real host's.
+  const skillDir = join(dirname(where.scriptDir), "row-review-skill");
+  rowReviewSkillInstall({ skillDir, out: () => {} });
   writeFileSync(where.gitConfigPath, `[credential "https://github.com"]\n\thelper = \n`
     + `\thelper = !${where.scriptDir}/gh auth git-credential\n`);
-  return { ...where, reviewerBin };
+  return { ...where, reviewerBin, skillDir };
 };
 
 const UNIT_BODY = (workingDir: string) => "[Unit]\nDescription=board report\n[Service]\n"
