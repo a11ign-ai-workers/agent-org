@@ -127,6 +127,33 @@ test("a remembered list older than the reconcile is read whole", () => {
   assert.deepEqual(prs?.map((entry) => entry.number), [7, 4]);
 });
 
+/** What `readPrs` wrote to stderr while it ran. */
+function stderrOf(read: () => unknown): string {
+  const write = process.stderr.write;
+  let said = "";
+  process.stderr.write = ((chunk: string | Uint8Array) => { said += String(chunk); return true; }) as typeof process.stderr.write;
+  try {
+    read();
+  } finally {
+    process.stderr.write = write;
+  }
+  return said;
+}
+
+test("a repository with no open pull requests says nothing about reading whole: an empty list is never remembered, so its old entry ages for as long as it stays empty", () => {
+  const root = dir();
+  const memoryPath = seeded(root, [pr(7)], NOW - MAX_AGE_MS - 1);
+  const tickScopesPath = scopesFile(root, [{ repo: REPO, kind: "pr", number: 7 }]);
+  const empty = recorder({ list: [], views: {} });
+  const said = stderrOf(() => readPrs(empty.run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW }));
+  // Mutation: the line is written before the read, as it was -> it repeats each tick for the whole empty stretch (60 ticks on 2026-10-13) and the test is red.
+  assert.equal(said, "");
+  // POSITIVE CONTROL: the same stale memory with a list that is not empty still says why it read whole.
+  const full = recorder({ list: [pr(7)], views: {} });
+  const spoke = stderrOf(() => readPrs(full.run, null, { home: true, tickScopesPath, memoryPath, nowMs: NOW }));
+  assert.match(spoke, /the open list is read whole \(too-old: /);
+});
+
 test("a commit scope names no remembered pull request, so the list is read whole", () => {
   const root = dir();
   const memoryPath = seeded(root, [pr(7)]);
