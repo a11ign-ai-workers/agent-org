@@ -39,15 +39,15 @@ Measured: `src/review-eval.test.ts` printed `VERDICT pass: 23 tests in 1 file` a
 
 Mutation (each restored from a copy and compared byte-identical): `hostUnitDrift` without `...rowReviewSkillDrift(deps)` failed the wiring test (1 of 182); `host:install` without `rowReviewSkillInstall()` failed its test (1 of 182); `decide` handing `rowReviewSkill: false` failed the order test (1 of 7); the flag always on failed 2 of 7; the flag ignoring the canary state failed 1 of 7; `verdictOf` reading `not convinced` as `convinced` failed 7 of 23; `score` forgetting that every `not convinced` must agree failed 2 of 23.
 
-Outside-Region: `src/work-gate/tick.ts`: `decide` reads the flag where orders are decided and hands it to `perPullRequestOrders` (`rowReviewSkillFlagOn`), which the row's `pr-orders.ts` alone cannot do.
-Outside-Region: `src/machinery-flag.ts`: `review.rowReviewSkill` must be in `FLAG_REGISTRY` or `machinery:flag on` refuses it.
-Outside-Region: `src/flag-switch-ledger.ts`: its ledger test requires every registered flag to have a declared switch, and this one's is a11ign/a11ign#5325.
-Outside-Region: `package.json`: the `files` list ships `skills/`, which `host:install` copies from.
-Outside-Region: `src/packaging/host-units.test.ts`: the install and check tests for the skill, and `identityHost` pins the skill's directory as it pins the door's, so two #2184 tests do not read the real host's `~/.codex`.
-Outside-Region: `src/packaging/row-review-skill-order.test.ts`: the flag-off and flag-on orders and `decide`'s reading, kept out of the host-units file because its fixture project declares no `roles` for the order module to read.
-Outside-Region: `src/packaging/machinery-flag-switch.test.ts`: the recorded registry now has ten flags.
-Outside-Region: `src/packaging/multi-board-gate.test.ts`: the recorded prompt hashes of the three reviewer orders change by exactly the removed sentence (166 to 154 and 180 to 168 bytes).
-Outside-Region: `src/packaging/project-config.test.ts`: `review-eval.ts` is declared as a file that names the repositories, because the labelled set is recorded pull requests of two named repositories.
+Outside-Region: src/work-gate/tick.ts — `decide` reads the flag where orders are decided and hands it to `perPullRequestOrders` (`rowReviewSkillFlagOn`), which the row's `pr-orders.ts` alone cannot do.
+Outside-Region: src/machinery-flag.ts — `review.rowReviewSkill` must be in `FLAG_REGISTRY` or `machinery:flag on` refuses it.
+Outside-Region: src/flag-switch-ledger.ts — its ledger test requires every registered flag to have a declared switch, and this one's is a11ign/a11ign#5325.
+Outside-Region: package.json — the `files` list ships `skills/`, which `host:install` copies from.
+Outside-Region: src/packaging/host-units.test.ts — the install and check tests for the skill, and `identityHost` pins the skill's directory as it pins the door's, so two #2184 tests do not read the real host's `~/.codex`.
+Outside-Region: src/packaging/row-review-skill-order.test.ts — the flag-off and flag-on orders and `decide`'s reading, kept out of the host-units file because its fixture project declares no `roles` for the order module to read.
+Outside-Region: src/packaging/machinery-flag-switch.test.ts — the recorded registry now has ten flags.
+Outside-Region: src/packaging/multi-board-gate.test.ts — the recorded prompt hashes of the three reviewer orders change by exactly the removed sentence (166 to 154 and 180 to 168 bytes).
+Outside-Region: src/packaging/project-config.test.ts — `review-eval.ts` is declared as a file that names the repositories, because the labelled set is recorded pull requests of two named repositories.
 
 Not done, and why:
 (a) The flag is not turned on. The switch is a11ign/a11ign#5325, and the row's Done-when 4 is "merged flag-off".
