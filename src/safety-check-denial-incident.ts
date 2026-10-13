@@ -26,7 +26,7 @@ export type SafetyCheckDenialIncident = { cwdDir: string, session: string, day: 
 
 // `rm` as a command word: not `--rm` (a docker flag), not `rmSync`, not `form`.
 const RM = /(?<![\w-])rm(?![\w-])/;
-const SHELL_C = /(?<![\w-])(?:ba|z|da)?sh\s+-[A-Za-z]*c\b/;
+const SHELL_C = /(?<![\w-])(?:ba|z|da|k)?sh\s+(?:-[A-Za-z]+\s+)*-[A-Za-z]*c\b/;
 const INTERPRETER_E = /(?<![\w-])(?:node(?:js)?|python3?)\s+(?:[^\s'"]+\s+)*?(?:-e|--eval|-p|--print|-c)\s/;
 const SCRIPT_REMOVAL = /(?<![\w-])(?:rm|rmSync|rmdirSync|unlink|unlinkSync|rmtree)(?![\w-])/;
 
@@ -39,14 +39,17 @@ function hasVariableTarget(command: string): boolean {
 }
 
 /**
- * THE SHAPE OF A DENIED COMMAND. Most specific first: a `bash -c`/`sh -c` whose script holds an `rm` is `nested-shell-c` even when the script then runs `node -e` (the quoting that nests
- * is what the check cannot read); then `node -e`/`python -c` with a removal in the script; then an `rm` whose target is a `$VAR` or a glob; anything else, and a command nobody could
- * find (`null`), is `other`: a denial is never dropped for want of a shape.
+ * THE SHAPE OF A DENIED COMMAND. Most specific first: a `bash|sh|zsh|dash|ksh -c` whose script holds an `rm`, or a `$` or a backtick, is `nested-shell-c` even when the script then
+ * runs `node -e` (the quoting that nests is what the check cannot read; the set matches `refuse-unreadable-command.ts`, which refuses the same shapes); then `node -e`/`python -c` with a
+ * removal in the script; then an `rm` whose target is a `$VAR` or a glob; anything else, and a command nobody could find (`null`), is `other`: a denial is never dropped for want of a shape.
  */
 export function denialShape(command: string | null): DenialShape {
   if (command === null) return "other";
   const shell = SHELL_C.exec(command);
-  if (shell !== null && RM.test(command.slice(shell.index))) return "nested-shell-c";
+  if (shell !== null) {
+    const script = command.slice(shell.index + shell[0].length);
+    if (RM.test(script) || /[$`]/.test(script)) return "nested-shell-c";
+  }
   const interpreter = INTERPRETER_E.exec(command);
   if (interpreter !== null && SCRIPT_REMOVAL.test(command.slice(interpreter.index))) return "node-e-rm";
   if (hasVariableTarget(command)) return "variable-target";
