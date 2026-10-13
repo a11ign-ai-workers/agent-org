@@ -109,6 +109,8 @@ function fakeGh({ jobs = {}, changed = {}, rows = [] }: { jobs?: Record<number, 
     const files = /pulls\/(\d+)\/files/.exec(path);
     if (files !== null) return JSON.stringify((changed[Number(files[1])] ?? ["README.md"]).map((filename) => ({ filename })));
     if (/pulls\/\d+$/.test(path)) return JSON.stringify({ state: "open", head: { sha: "abc" }, base: { ref: "main" } });
+    // #5405: the Project-membership read a board write makes first. No fixture issue is on the board, so each boarding adds it.
+    if (args.includes("graphql") && args.some((a) => a.includes("projectItems"))) return JSON.stringify({ data: { repository: { issue: { projectItems: { pageInfo: { hasNextPage: false, endCursor: null }, nodes: [] } } } } });
     writes.push(args);
     if (args[0] === "issue" && args[1] === "create") {
       store.push({ number: 900 + store.length, state: "OPEN", createdAt: at(0), body: args[args.indexOf("--body") + 1], labels: ["ci-shared-failure"] });
